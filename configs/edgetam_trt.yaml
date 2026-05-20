@@ -1,0 +1,17 @@
+# EdgeTAM with a TensorRT image-encoder engine. Use on Orin AGX after
+# building the engine (see tools/build_trt_engine.sh).
+#
+# Build steps:
+#   1) python tools/export_image_encoder_onnx.py \
+#        --output models/edgetam_image_encoder.onnx
+#   2) tools/build_trt_engine.sh \
+#        models/edgetam_image_encoder.onnx \
+#        models/edgetam_image_encoder.engine
+#   3) python cli.py --tracker edgetam_trt ... (this config)
+engine_path: models/edgetam_image_encoder.engine
+model_cfg: configs/edgetam.yaml
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+device: cuda
+fp16: true
+mask_threshold: 0.0
+strict: false   # set true to refuse silent fallback to PyTorch

@@ -1,7 +1,10 @@
 # EdgeTAM backend configuration.
-# Paths are resolved relative to the project root unless absolute.
-model_cfg: third_party/EdgeTAM/sam2/configs/edgetam.yaml
+# `model_cfg` is a Hydra config name resolved by the `sam2` package
+# (EdgeTAM registers the `sam2` config module, so `configs/edgetam.yaml`
+# points at sam2/configs/edgetam.yaml inside the installed package).
+# `checkpoint` is resolved relative to the project root.
+model_cfg: configs/edgetam.yaml
 checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
 device: cuda            # cuda | cpu  (Orin AGX -> cuda)
-fp16: true              # autocast bfloat16/float16 inference
+fp16: true              # autocast fp16 inference
 mask_threshold: 0.0     # logits > threshold => foreground

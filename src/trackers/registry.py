@@ -18,6 +18,7 @@ def register(name: str):
 def available_trackers() -> list[str]:
     # Force import so decorators run.
     from . import edgetam_tracker  # noqa: F401
+    from . import edgetam_trt_tracker  # noqa: F401
     from . import efficientsam3_tracker  # noqa: F401
     return sorted(_BUILDERS.keys())
 

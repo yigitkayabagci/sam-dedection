@@ -85,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
-    backend_cfg = _resolve_paths(backend_cfg, keys=("model_cfg", "checkpoint"))
+    # Resolve filesystem paths; model_cfg is a Hydra config name, not a path.
+    backend_cfg = _resolve_paths(backend_cfg, keys=("checkpoint",))
     tracker = build_tracker(args.tracker, **backend_cfg)
 
     prompts = _collect_prompts(args)

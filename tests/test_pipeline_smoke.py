@@ -40,12 +40,30 @@ class TestRegistry(unittest.TestCase):
     def test_known_trackers_registered(self):
         names = available_trackers()
         self.assertIn("edgetam", names)
+        self.assertIn("edgetam_trt", names)
         self.assertIn("efficientsam3", names)
 
     def test_efficientsam3_stub_raises(self):
         t = build_tracker("efficientsam3")
         with self.assertRaises(NotImplementedError):
             t.prepare("/tmp/whatever")
+
+    def test_edgetam_trt_constructs_without_engine(self):
+        # Non-strict mode must not raise at construction time even if the engine
+        # file is missing — only the runtime fallback message should fire later.
+        t = build_tracker(
+            "edgetam_trt",
+            engine_path="/tmp/does_not_exist.engine",
+            model_cfg="configs/edgetam.yaml",
+            checkpoint="/tmp/does_not_exist.pt",
+            device="cpu",
+            fp16=False,
+            strict=False,
+        )
+        self.assertEqual(t.engine_path, "/tmp/does_not_exist.engine")
+        self.assertFalse(t.strict)
+        # _try_load_engine returns False when the file is absent.
+        self.assertFalse(t._try_load_engine())
 
 
 class TestVisualize(unittest.TestCase):
