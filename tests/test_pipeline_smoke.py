@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from src.pipeline import PipelineConfig, _resolve_video_mode
 from src.prompts import BoxPrompt, PointPrompt, PromptSet
 from src.prompts.file_source import load_prompts
 from src.trackers import available_trackers, build_tracker
@@ -78,6 +79,27 @@ class TestVisualize(unittest.TestCase):
         mask[2:8, 4:16] = True
         out = overlay_masks(frame, {1: mask}, draw_bbox=False)
         self.assertTrue((out[mask] != 0).any())
+
+
+class TestVideoModeResolution(unittest.TestCase):
+    def _cfg(self, path, mode):
+        return PipelineConfig(video_path=Path(path), output_path=Path("/tmp/out.mp4"), video_mode=mode)
+
+    def test_jpg_mode_is_forced(self):
+        self.assertEqual(_resolve_video_mode(self._cfg("foo.mp4", "jpg")), "jpg")
+
+    def test_mp4_mode_rejects_non_mp4(self):
+        with self.assertRaises(ValueError):
+            _resolve_video_mode(self._cfg("foo.avi", "mp4"))
+
+    def test_auto_mode_falls_back_when_decord_missing(self):
+        # In this environment decord is not installed, so auto -> jpg.
+        try:
+            import decord  # noqa: F401
+            self.skipTest("decord IS installed; can't test fallback path here.")
+        except ImportError:
+            pass
+        self.assertEqual(_resolve_video_mode(self._cfg("foo.mp4", "auto")), "jpg")
 
 
 if __name__ == "__main__":
