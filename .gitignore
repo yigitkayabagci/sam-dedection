@@ -6,12 +6,16 @@ __pycache__/
 venv/
 .env
 
-# Model weights / third-party
+# Model weights / third-party / build artifacts
 third_party/
 checkpoints/
+models/
 *.pt
 *.pth
 *.onnx
+*.onnx.data
+*.engine
+*.plan
 
 # Outputs & temp frames
 outputs/
