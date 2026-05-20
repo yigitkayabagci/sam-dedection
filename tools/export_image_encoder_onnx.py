@@ -72,7 +72,10 @@ def main() -> int:
                    help="Hydra config name resolved by the sam2 package.")
     p.add_argument("--output", default="models/edgetam_image_encoder.onnx")
     p.add_argument("--input-size", type=int, default=1024)
-    p.add_argument("--opset", type=int, default=17)
+    p.add_argument("--opset", type=int, default=18,
+                   help="ONNX opset. 18 is the lowest version torch's exporter "
+                        "natively emits; lower values trigger a version-converter "
+                        "round-trip with noisy warnings. TRT 10 supports >=11.")
     p.add_argument("--verify", action="store_true",
                    help="Run onnxruntime CPU and assert numerical parity with PyTorch.")
     args = p.parse_args()

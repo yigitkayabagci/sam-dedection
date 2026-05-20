@@ -66,12 +66,19 @@ class EdgeTAMTracker(VideoTracker):
         if self._predictor is not None:
             return
         try:
-            import torch  # noqa: F401
+            import torch
             from sam2.build_sam import build_sam2_video_predictor
         except ImportError as exc:
             raise ImportError(
                 "EdgeTAM is not installed. Run scripts/setup_edgetam.sh first."
             ) from exc
+        if self.device == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "device=cuda requested but torch reports cuda.is_available()=False. "
+                "On Jetson Orin AGX install the JetPack-matched torch wheel "
+                "(see scripts/setup_edgetam.sh comments). For dev machines without "
+                "CUDA, pass --config configs/edgetam_cpu.yaml."
+            )
         self._predictor = build_sam2_video_predictor(
             self.model_cfg, self.checkpoint, device=self.device
         )
