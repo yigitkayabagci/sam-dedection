@@ -1,0 +1,13 @@
+# Core deps. On Jetson Orin AGX install torch/torchvision from the NVIDIA
+# JetPack-specific wheels BEFORE running pip install -r requirements.txt:
+#   https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/
+# Do not install torch/torchvision from PyPI on Jetson.
+
+numpy>=1.24
+opencv-python>=4.8
+Pillow>=10.0
+pyyaml>=6.0
+tqdm>=4.66
+
+# EdgeTAM itself is installed from source via scripts/setup_edgetam.sh
+# (it pulls in hydra-core, iopath, etc.).

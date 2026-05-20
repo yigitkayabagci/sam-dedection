@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Model weights / third-party
+third_party/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Outputs & temp frames
+outputs/
+runs/
+tmp/
+frames_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Test artifacts
+.pytest_cache/
+.coverage

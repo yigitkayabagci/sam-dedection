@@ -1,0 +1,7 @@
+# EdgeTAM backend configuration.
+# Paths are resolved relative to the project root unless absolute.
+model_cfg: third_party/EdgeTAM/sam2/configs/edgetam.yaml
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+device: cuda            # cuda | cpu  (Orin AGX -> cuda)
+fp16: true              # autocast bfloat16/float16 inference
+mask_threshold: 0.0     # logits > threshold => foreground
