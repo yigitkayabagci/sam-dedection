@@ -58,13 +58,31 @@ class TestRegistry(unittest.TestCase):
             model_cfg="configs/edgetam.yaml",
             checkpoint="/tmp/does_not_exist.pt",
             device="cpu",
-            fp16=False,
+            precision="float32",
             strict=False,
         )
         self.assertEqual(t.engine_path, "/tmp/does_not_exist.engine")
         self.assertFalse(t.strict)
         # _try_load_engine returns False when the file is absent.
         self.assertFalse(t._try_load_engine())
+
+    def test_precision_aliases(self):
+        t = build_tracker(
+            "edgetam",
+            model_cfg="configs/edgetam.yaml",
+            checkpoint="/tmp/x.pt",
+            device="cpu",
+            precision="bf16",
+        )
+        self.assertEqual(t.precision, "bfloat16")
+        with self.assertRaises(ValueError):
+            build_tracker(
+                "edgetam",
+                model_cfg="configs/edgetam.yaml",
+                checkpoint="/tmp/x.pt",
+                device="cpu",
+                precision="int8",
+            )
 
 
 class TestVisualize(unittest.TestCase):

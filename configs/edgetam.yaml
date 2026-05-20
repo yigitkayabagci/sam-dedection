@@ -1,10 +1,12 @@
-# EdgeTAM backend configuration.
-# `model_cfg` is a Hydra config name resolved by the `sam2` package
-# (EdgeTAM registers the `sam2` config module, so `configs/edgetam.yaml`
-# points at sam2/configs/edgetam.yaml inside the installed package).
-# `checkpoint` is resolved relative to the project root.
-model_cfg: configs/edgetam.yaml
+# EdgeTAM backend configuration (Orin AGX default).
+# Matches the reference inference recipe in
+# third_party/EdgeTAM/tools/vos_inference.py:
+#   @torch.inference_mode()
+#   @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+model_cfg: configs/edgetam.yaml          # Hydra config name (sam2 package)
 checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
-device: cuda            # cuda | cpu  (Orin AGX -> cuda)
-fp16: true              # autocast fp16 inference
-mask_threshold: 0.0     # logits > threshold => foreground
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

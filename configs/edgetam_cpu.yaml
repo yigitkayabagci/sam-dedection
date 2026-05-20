@@ -1,7 +1,8 @@
-# EdgeTAM CPU testing config — slower; for development on a machine without
-# CUDA. On Orin AGX use configs/edgetam.yaml (the default).
+# EdgeTAM CPU testing config. CPU autocast is skipped via precision=float32.
 model_cfg: configs/edgetam.yaml
 checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
 device: cpu
-fp16: false
+precision: float32
 mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false

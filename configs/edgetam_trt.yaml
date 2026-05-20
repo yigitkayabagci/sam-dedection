@@ -7,11 +7,13 @@
 #   2) tools/build_trt_engine.sh \
 #        models/edgetam_image_encoder.onnx \
 #        models/edgetam_image_encoder.engine
-#   3) python cli.py --tracker edgetam_trt ... (this config)
+#   3) python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml ...
 engine_path: models/edgetam_image_encoder.engine
 model_cfg: configs/edgetam.yaml
 checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
 device: cuda
-fp16: true
+precision: bfloat16
 mask_threshold: 0.0
-strict: false   # set true to refuse silent fallback to PyTorch
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+strict: false                             # true = refuse silent fallback

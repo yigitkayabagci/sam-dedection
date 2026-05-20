@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Iterator
 
@@ -11,13 +11,31 @@ from .base import TrackingResult, VideoTracker
 from .registry import register
 
 
+# Aliases accepted on the YAML side ("fp16", "bf16", "fp32").
+_PRECISION_ALIASES = {
+    "bf16": "bfloat16",
+    "fp16": "float16",
+    "fp32": "float32",
+}
+
+
 @register("edgetam")
 class EdgeTAMTracker(VideoTracker):
     """EdgeTAM (SAM 2 variant) video tracker.
 
-    Loads `build_sam2_video_predictor` from the EdgeTAM package that ships in
-    third_party/EdgeTAM. The import is deferred so the rest of the pipeline
-    is usable for development / tests without EdgeTAM installed.
+    Mirrors the canonical inference pattern from
+    third_party/EdgeTAM/tools/vos_inference.py:
+
+        @torch.inference_mode()
+        @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        def run(...):
+            state = predictor.init_state(...)
+            predictor.add_new_points_or_box(...)
+            for f, ids, logits in predictor.propagate_in_video(...):
+                ...
+
+    Each public method enters both `inference_mode` and `autocast` contexts
+    so callers get the same behaviour regardless of call order.
     """
 
     def __init__(
@@ -25,14 +43,22 @@ class EdgeTAMTracker(VideoTracker):
         model_cfg: str,
         checkpoint: str,
         device: str = "cuda",
-        fp16: bool = True,
+        precision: str = "bfloat16",
         mask_threshold: float = 0.0,
+        offload_video_to_cpu: bool = False,
+        offload_state_to_cpu: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
         self.device = device
-        self.fp16 = fp16
+        self.precision = _PRECISION_ALIASES.get(precision, precision)
+        if self.precision not in ("bfloat16", "float16", "float32"):
+            raise ValueError(
+                f"precision must be one of bfloat16|float16|float32 (got {precision})"
+            )
         self.mask_threshold = mask_threshold
+        self.offload_video_to_cpu = offload_video_to_cpu
+        self.offload_state_to_cpu = offload_state_to_cpu
         self._predictor = None
         self._state = None
 
@@ -50,17 +76,27 @@ class EdgeTAMTracker(VideoTracker):
             self.model_cfg, self.checkpoint, device=self.device
         )
 
-    def _autocast(self):
-        if not self.fp16 or self.device == "cpu":
-            return nullcontext()
+    def _inference_ctx(self):
+        """Enter inference_mode + autocast together, mirroring vos_inference.py."""
         import torch
-        # Orin AGX has good fp16 throughput; bfloat16 also works but fp16 is safer.
-        return torch.autocast(device_type="cuda", dtype=torch.float16)
+
+        stack = ExitStack()
+        stack.enter_context(torch.inference_mode())
+        if self.precision == "float32" or self.device == "cpu":
+            stack.enter_context(nullcontext())
+        else:
+            dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[self.precision]
+            stack.enter_context(torch.autocast(device_type=self.device, dtype=dtype))
+        return stack
 
     def prepare(self, frames_dir: str | Path) -> None:
         self._ensure_predictor()
-        with self._autocast():
-            self._state = self._predictor.init_state(video_path=str(frames_dir))
+        with self._inference_ctx():
+            self._state = self._predictor.init_state(
+                video_path=str(frames_dir),
+                offload_video_to_cpu=self.offload_video_to_cpu,
+                offload_state_to_cpu=self.offload_state_to_cpu,
+            )
 
     def set_prompts(self, prompts: PromptSet) -> None:
         if self._state is None:
@@ -68,24 +104,24 @@ class EdgeTAMTracker(VideoTracker):
         if prompts.is_empty():
             raise ValueError("PromptSet is empty.")
 
-        import numpy as _np
-
-        # Group point prompts per (frame_idx, obj_id) so we can pass them in one call.
+        # Group point prompts per (frame_idx, obj_id); EdgeTAM's
+        # add_new_points_or_box clears prior points on each call, so all
+        # points for a (frame, obj) must be sent in one shot.
         point_groups: dict[tuple[int, int], list] = {}
         for p in prompts.points:
             point_groups.setdefault((p.frame_idx, p.obj_id), []).append(p)
 
-        with self._autocast():
+        with self._inference_ctx():
             for box in prompts.boxes:
                 self._predictor.add_new_points_or_box(
                     inference_state=self._state,
                     frame_idx=box.frame_idx,
                     obj_id=box.obj_id,
-                    box=_np.array(box.xyxy, dtype=_np.float32),
+                    box=np.array(box.xyxy, dtype=np.float32),
                 )
             for (frame_idx, obj_id), group in point_groups.items():
-                coords = _np.array([p.xy for p in group], dtype=_np.float32)
-                labels = _np.array([p.label for p in group], dtype=_np.int32)
+                coords = np.array([p.xy for p in group], dtype=np.float32)
+                labels = np.array([p.label for p in group], dtype=np.int32)
                 self._predictor.add_new_points_or_box(
                     inference_state=self._state,
                     frame_idx=frame_idx,
@@ -97,13 +133,15 @@ class EdgeTAMTracker(VideoTracker):
     def propagate(self) -> Iterator[TrackingResult]:
         if self._state is None:
             raise RuntimeError("Call prepare() and set_prompts() before propagate().")
-        with self._autocast():
+        with self._inference_ctx():
             for frame_idx, obj_ids, mask_logits in self._predictor.propagate_in_video(self._state):
-                masks: dict[int, np.ndarray] = {}
-                # mask_logits: [N, 1, H, W] tensor on device
+                # mask_logits: [N, 1, H, W] on the model's device.
+                # .float() is important when autocast returned bf16/fp16 logits.
                 logits_np = mask_logits.detach().float().cpu().numpy()
-                for i, obj_id in enumerate(obj_ids):
-                    masks[int(obj_id)] = logits_np[i, 0] > self.mask_threshold
+                masks: dict[int, np.ndarray] = {
+                    int(obj_id): logits_np[i, 0] > self.mask_threshold
+                    for i, obj_id in enumerate(obj_ids)
+                }
                 yield TrackingResult(frame_idx=int(frame_idx), masks=masks)
 
     def reset(self) -> None:

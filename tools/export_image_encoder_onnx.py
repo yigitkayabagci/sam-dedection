@@ -35,21 +35,25 @@ import torch.nn as nn
 class ImageEncoderWrapper(nn.Module):
     """Wrap EdgeTAM's image encoder so it returns a tuple instead of a dict.
 
-    ONNX export does not support dict outputs, and we only need the FPN
-    feature maps anyway.
+    ONNX export does not support dict outputs. The wrapper calls the
+    image_encoder (which already applies the configured `scalp` discard
+    inside its forward) and returns the post-scalp backbone_fpn levels as
+    a tuple. We expect exactly 3 levels — that is what the SAM2 base
+    consumes downstream.
     """
 
-    def __init__(self, image_encoder: nn.Module, scalp: int) -> None:
+    def __init__(self, image_encoder: nn.Module) -> None:
         super().__init__()
         self.image_encoder = image_encoder
-        self.scalp = scalp
 
     def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         out = self.image_encoder(image)
         feats = out["backbone_fpn"]
-        # feats is in coarse->fine order (lowest-res first). The SAM2 base
-        # expects 3 levels after scalp discard; pick the last 3.
-        feats = feats[-3:]
+        if len(feats) != 3:
+            raise RuntimeError(
+                f"Expected 3 post-scalp FPN levels, got {len(feats)}. "
+                "Adjust the wrapper if you use a non-default scalp."
+            )
         return feats[0], feats[1], feats[2]
 
 
@@ -58,8 +62,7 @@ def build(checkpoint: str, model_cfg: str = "configs/edgetam.yaml") -> nn.Module
 
     predictor = build_sam2_video_predictor(model_cfg, checkpoint, device="cpu")
     predictor.eval()
-    scalp = getattr(predictor.image_encoder, "scalp", 1)
-    return ImageEncoderWrapper(predictor.image_encoder, scalp=scalp)
+    return ImageEncoderWrapper(predictor.image_encoder)
 
 
 def main() -> int:
