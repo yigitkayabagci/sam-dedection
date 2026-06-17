@@ -17,6 +17,11 @@ Headless: load prompts from JSON (e.g. on Orin AGX without a display):
 
     python cli.py --video samples/road.mp4 --output outputs/road_tracked.mp4 \
         --prompt file --prompt-file prompts/car_box.json
+
+Frame sequence input (no video file; e.g. frame_000000.tiff, ...):
+
+    python cli.py --frames-dir frames/ --frame-pattern 'frame_*.tiff' \
+        --output outputs/tracked.mp4 --fps 30 --prompt box
 """
 from __future__ import annotations
 
@@ -26,7 +31,12 @@ from pathlib import Path
 
 import yaml
 
-from src.pipeline import PipelineConfig, grab_first_frame, run
+from src.pipeline import (
+    PipelineConfig,
+    grab_first_frame,
+    grab_first_frame_dir,
+    run,
+)
 from src.prompts import PromptSet
 from src.prompts.file_source import load_prompts
 from src.trackers import available_trackers, build_tracker
@@ -60,7 +70,10 @@ def _collect_prompts(args: argparse.Namespace) -> PromptSet:
             raise SystemExit("--prompt file requires --prompt-file <path>")
         return load_prompts(args.prompt_file)
 
-    first = grab_first_frame(args.video)
+    if args.frames_dir:
+        first = grab_first_frame_dir(args.frames_dir, args.frame_pattern)
+    else:
+        first = grab_first_frame(args.video)
     if args.prompt == "box":
         from src.prompts.interactive import pick_box
         return pick_box(first, obj_id=args.obj_id)
@@ -72,7 +85,14 @@ def _collect_prompts(args: argparse.Namespace) -> PromptSet:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Modular SAM-style video tracking pipeline.")
-    p.add_argument("--video", required=True, help="Input video path.")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--video", help="Input video path.")
+    src.add_argument("--frames-dir", help="Directory of pre-extracted frames "
+                                          "(e.g. frame_000000.tiff, frame_000001.tiff, ...).")
+    p.add_argument("--frame-pattern", default="*.tif*",
+                   help="Glob for frames inside --frames-dir (default: *.tif*).")
+    p.add_argument("--fps", type=float, default=30.0,
+                   help="Output FPS for --frames-dir mode (image sequences have no inherent fps).")
     p.add_argument("--output", required=True, help="Output video (.mp4) path.")
     p.add_argument("--tracker", default="edgetam", help=f"Backend (one of {available_trackers()}).")
     p.add_argument("--config", default=None, help="Optional backend YAML override.")
@@ -94,8 +114,11 @@ def main(argv: list[str] | None = None) -> int:
     prompts = _collect_prompts(args)
 
     cfg = PipelineConfig(
-        video_path=Path(args.video),
         output_path=Path(args.output),
+        video_path=Path(args.video) if args.video else None,
+        frames_dir=Path(args.frames_dir) if args.frames_dir else None,
+        frame_pattern=args.frame_pattern,
+        fps=args.fps,
         video_mode=args.video_mode,
         keep_frames=args.keep_frames,
         draw_bbox=not args.no_bbox,

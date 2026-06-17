@@ -120,5 +120,44 @@ class TestVideoModeResolution(unittest.TestCase):
         self.assertEqual(_resolve_video_mode(self._cfg("foo.mp4", "auto")), "jpg")
 
 
+class TestFrameSequence(unittest.TestCase):
+    def _write_tiff_seq(self, d: Path, n: int = 3) -> None:
+        import cv2
+        for i in range(n):
+            # 16-bit single-channel TIFF, like raw thermal/scientific frames.
+            img = np.full((8, 12), i * 1000 + 100, dtype=np.uint16)
+            cv2.imwrite(str(d / f"frame_{i:06d}.tiff"), img)
+
+    def test_list_and_load_16bit_grayscale_tiff(self):
+        from src.io_utils import list_frame_files, load_frame_rgb8
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write_tiff_seq(d, n=3)
+            files = list_frame_files(d, "*.tif*")
+            self.assertEqual([f.name for f in files],
+                             ["frame_000000.tiff", "frame_000001.tiff", "frame_000002.tiff"])
+            rgb = load_frame_rgb8(files[1])
+            self.assertEqual(rgb.shape, (8, 12, 3))
+            self.assertEqual(rgb.dtype, np.uint8)
+
+    def test_frames_metadata(self):
+        from src.io_utils import frames_metadata
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write_tiff_seq(d, n=4)
+            meta = frames_metadata(d, "*.tif*", fps=24.0)
+            self.assertEqual((meta.width, meta.height, meta.frame_count), (12, 8, 4))
+            self.assertEqual(meta.fps, 24.0)
+
+    def test_missing_frames_raises(self):
+        from src.io_utils import list_frame_files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                list_frame_files(tmp, "*.tif*")
+
+
 if __name__ == "__main__":
     unittest.main()
