@@ -11,6 +11,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY="${ROOT}/third_party"
 EDGETAM_DIR="${THIRD_PARTY}/EdgeTAM"
 
+# Resolve a working pip. Many systems (incl. Jetson) expose pip only as
+# `python3 -m pip`, not a bare `pip` on PATH. Override with PIP=... if needed.
+detect_pip() {
+  if [[ -n "${PIP:-}" ]]; then echo "${PIP}"; return; fi
+  for c in "python3 -m pip" "python -m pip" "pip3" "pip"; do
+    if ${c} --version >/dev/null 2>&1; then echo "${c}"; return; fi
+  done
+  echo ""
+}
+PIP="$(detect_pip)"
+if [[ -z "${PIP}" ]]; then
+  echo "ERROR: no working pip found. Install pip (e.g. 'sudo apt install python3-pip')" >&2
+  echo "       or set PIP, e.g.  PIP='python3 -m pip' bash scripts/setup_edgetam.sh" >&2
+  exit 1
+fi
+echo ">> Using pip: ${PIP}"
+
 mkdir -p "${THIRD_PARTY}"
 
 if [[ ! -d "${EDGETAM_DIR}" ]]; then
@@ -21,7 +38,7 @@ else
 fi
 
 echo ">> Installing EdgeTAM (editable)"
-pip install -e "${EDGETAM_DIR}"
+${PIP} install -e "${EDGETAM_DIR}"
 
 CKPT="${EDGETAM_DIR}/checkpoints/edgetam.pt"
 if [[ ! -f "${CKPT}" ]]; then
