@@ -53,6 +53,19 @@ if [[ -f "${TIMM_BACKBONE}" ]]; then
   fi
 fi
 
+# Multi-object bug: the 2D Spatial Perceiver does
+# `self.latents_2d...expand(B, -1, -1).view(-1, 1, C)`. With more than one
+# tracked object B>1, expand() makes the tensor non-contiguous and .view()
+# raises. .reshape() is the documented fix (copies only when needed). Single
+# object (B==1) is unaffected.
+PERCEIVER="${EDGETAM_DIR}/sam2/modeling/perceiver.py"
+if [[ -f "${PERCEIVER}" ]]; then
+  if grep -q "expand(B, -1, -1).view(" "${PERCEIVER}"; then
+    echo ">> Patching multi-object .view->.reshape in ${PERCEIVER}"
+    sed -i 's/\.expand(B, -1, -1)\.view(/.expand(B, -1, -1).reshape(/' "${PERCEIVER}"
+  fi
+fi
+
 CKPT="${EDGETAM_DIR}/checkpoints/edgetam.pt"
 if [[ ! -f "${CKPT}" ]]; then
   echo ">> Checkpoint ${CKPT} not present."
