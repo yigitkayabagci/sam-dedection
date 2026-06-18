@@ -75,9 +75,15 @@ def _collect_prompts(args: argparse.Namespace) -> PromptSet:
     else:
         first = grab_first_frame(args.video)
     if args.prompt == "box":
+        if args.multi:
+            from src.prompts.interactive import pick_boxes
+            return pick_boxes(first, start_obj_id=args.obj_id)
         from src.prompts.interactive import pick_box
         return pick_box(first, obj_id=args.obj_id)
     if args.prompt == "point":
+        if args.multi:
+            from src.prompts.interactive import pick_points_multi
+            return pick_points_multi(first, start_obj_id=args.obj_id)
         from src.prompts.interactive import pick_points
         return pick_points(first, obj_id=args.obj_id)
     raise SystemExit(f"Unknown prompt mode: {args.prompt}")
@@ -98,7 +104,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", default=None, help="Optional backend YAML override.")
     p.add_argument("--prompt", choices=("box", "point", "file"), default="box")
     p.add_argument("--prompt-file", default=None, help="JSON prompt file (used with --prompt file).")
-    p.add_argument("--obj-id", type=int, default=1, help="Object id for interactive prompts.")
+    p.add_argument("--multi", action="store_true",
+                   help="Multi-target interactive selection. With --prompt box: draw several "
+                        "boxes (each a new object). With --prompt point: left=fg, right=bg, "
+                        "'n'=next object, 1-9=pick object id, ENTER=done.")
+    p.add_argument("--obj-id", type=int, default=1,
+                   help="Object id for interactive prompts (start id in --multi mode).")
     p.add_argument("--video-mode", choices=("auto", "mp4", "jpg"), default="auto",
                    help="auto = use mp4 directly if decord is available, else fall back to jpg.")
     p.add_argument("--keep-frames", action="store_true", help="Do not delete extracted frames (jpg mode).")
