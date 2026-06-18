@@ -8,6 +8,11 @@ opencv-python>=4.8
 Pillow>=10.0
 pyyaml>=6.0
 tqdm>=4.66
+matplotlib>=3.7        # --fps-chart per-frame FPS plot
+
+# EdgeTAM's image encoder trunk (RepViT) is a timm model; required for the
+# backbone to instantiate.
+timm>=1.0
 
 # EdgeTAM itself is installed from source via scripts/setup_edgetam.sh
 # (it pulls in hydra-core, iopath, etc.).

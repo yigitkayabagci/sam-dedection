@@ -40,6 +40,19 @@ fi
 echo ">> Installing EdgeTAM (editable)"
 ${PIP} install -e "${EDGETAM_DIR}"
 
+# EdgeTAM's RepViT trunk hardcodes pretrained=True, which forces a download of
+# the ImageNet RepViT weights from HuggingFace at model-build time. Those
+# weights are immediately overwritten by edgetam.pt, so the download is dead
+# weight -- and it breaks on offline / SSL-intercepting (proxy) networks.
+# Flip it to False so the model builds with no network access.
+TIMM_BACKBONE="${EDGETAM_DIR}/sam2/modeling/backbones/timm.py"
+if [[ -f "${TIMM_BACKBONE}" ]]; then
+  if grep -q "pretrained=True" "${TIMM_BACKBONE}"; then
+    echo ">> Disabling RepViT pretrained download in ${TIMM_BACKBONE}"
+    sed -i 's/pretrained=True/pretrained=False/' "${TIMM_BACKBONE}"
+  fi
+fi
+
 CKPT="${EDGETAM_DIR}/checkpoints/edgetam.pt"
 if [[ ! -f "${CKPT}" ]]; then
   echo ">> Checkpoint ${CKPT} not present."

@@ -104,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep-frames", action="store_true", help="Do not delete extracted frames (jpg mode).")
     p.add_argument("--no-bbox", action="store_true", help="Disable bounding-box overlay.")
     p.add_argument("--alpha", type=float, default=0.5, help="Mask overlay alpha.")
+    p.add_argument("--fps-warmup", type=int, default=0,
+                   help="Exclude the first N frames (model load / CUDA warm-up) from the "
+                        "average FPS report.")
+    p.add_argument("--fps-chart", default=None,
+                   help="Save a per-frame FPS line chart to this PNG path (needs matplotlib).")
     args = p.parse_args(argv)
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
@@ -123,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         keep_frames=args.keep_frames,
         draw_bbox=not args.no_bbox,
         mask_alpha=args.alpha,
+        fps_warmup=args.fps_warmup,
+        fps_chart=Path(args.fps_chart) if args.fps_chart else None,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}")

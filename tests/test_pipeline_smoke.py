@@ -159,5 +159,32 @@ class TestFrameSequence(unittest.TestCase):
                 list_frame_files(tmp, "*.tif*")
 
 
+class TestFpsMetrics(unittest.TestCase):
+    def test_warmup_excluded_from_average(self):
+        from src.metrics import fps_summary
+
+        # First frame slow (warm-up), rest fast.
+        dt = [1.0, 0.1, 0.1, 0.1, 0.1]
+        s = fps_summary(dt, warmup=1)
+        self.assertEqual(s["frames"], 5)
+        self.assertEqual(s["warmup"], 1)
+        self.assertEqual(s["kept_frames"], 4)
+        self.assertAlmostEqual(s["avg_fps_post_warmup"], 10.0, places=6)  # 4 / 0.4
+        self.assertLess(s["avg_fps_all"], s["avg_fps_post_warmup"])
+
+    def test_warmup_clamped_and_zero(self):
+        from src.metrics import fps_summary
+
+        dt = [0.1, 0.1, 0.1]
+        # warmup of 0 -> post-warmup avg equals all-frames avg
+        s0 = fps_summary(dt, warmup=0)
+        self.assertEqual(s0["warmup"], 0)
+        self.assertAlmostEqual(s0["avg_fps_post_warmup"], s0["avg_fps_all"])
+        # warmup larger than frames is clamped to n-1 (keeps at least 1 frame)
+        s = fps_summary(dt, warmup=99)
+        self.assertEqual(s["warmup"], 2)
+        self.assertEqual(s["kept_frames"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

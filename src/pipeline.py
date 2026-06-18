@@ -20,6 +20,7 @@ from .io_utils import (
     write_video,
 )
 from .io_utils.video import read_metadata
+from .metrics import fps_summary, write_fps_chart
 from .prompts import PromptSet
 from .trackers import VideoTracker
 from .visualize import overlay_masks
@@ -45,6 +46,26 @@ class PipelineConfig:
     keep_frames: bool = False
     draw_bbox: bool = True
     mask_alpha: float = 0.5
+    # FPS reporting: drop the first `fps_warmup` frames (model load / CUDA
+    # warm-up) from the average, and optionally save a per-frame FPS chart.
+    fps_warmup: int = 0
+    fps_chart: Path | None = None
+
+
+def _report_fps(cfg: PipelineConfig, per_frame_dt: list[float]) -> None:
+    """Print FPS stats (with warm-up exclusion) and optionally write a chart."""
+    if not per_frame_dt:
+        return
+    stats = fps_summary(per_frame_dt, warmup=cfg.fps_warmup)
+    print(f"[pipeline] tracked {stats['frames']} frames in {stats['total_s']:.2f}s "
+          f"({stats['avg_fps_all']:.1f} FPS all)")
+    if stats["warmup"] > 0:
+        print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
+              f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
+    if cfg.fps_chart is not None:
+        out = write_fps_chart(per_frame_dt, cfg.fps_chart, warmup=cfg.fps_warmup)
+        if out:
+            print(f"[pipeline] wrote FPS chart -> {out}")
 
 
 def _decord_available() -> bool:
@@ -123,19 +144,20 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         tracker.set_prompts(prompts)
 
         rendered: list[np.ndarray] = []
+        per_frame_dt: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
-        t0 = time.perf_counter()
+        t_prev = time.perf_counter()
         for result in tracker.propagate():
             rgb = load_frame_rgb8(frame_files[result.frame_idx])
             rendered.append(
                 overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
             )
+            now = time.perf_counter()
+            per_frame_dt.append(now - t_prev)
+            t_prev = now
             progress.update(1)
         progress.close()
-        elapsed = time.perf_counter() - t0
-        n = len(rendered)
-        if n:
-            print(f"[pipeline] tracked {n} frames in {elapsed:.2f}s ({n/elapsed:.1f} FPS)")
+        _report_fps(cfg, per_frame_dt)
         write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
         return Path(cfg.output_path).resolve()
     finally:
@@ -154,9 +176,10 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
         raise RuntimeError(f"Could not open video for overlay: {video_path}")
 
     rendered: list[np.ndarray] = []
+    per_frame_dt: list[float] = []
     cursor = 0
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
-    t0 = time.perf_counter()
+    t_prev = time.perf_counter()
     try:
         for result in tracker.propagate():
             # Sequential read; propagate yields frames in chronological order.
@@ -171,16 +194,16 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
             rendered.append(
                 overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
             )
+            now = time.perf_counter()
+            per_frame_dt.append(now - t_prev)
+            t_prev = now
             progress.update(1)
     finally:
         progress.close()
         cap.release()
         tracker.reset()
 
-    elapsed = time.perf_counter() - t0
-    n = len(rendered)
-    if n:
-        print(f"[pipeline] tracked {n} frames in {elapsed:.2f}s ({n/elapsed:.1f} FPS)")
+    _report_fps(cfg, per_frame_dt)
     write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
     return Path(cfg.output_path).resolve()
 
@@ -196,20 +219,21 @@ def _run_jpg(tracker, prompts, cfg, video_path):
 
         frame_files = sorted(cache_root.glob("*.jpg"))
         rendered: list[np.ndarray] = []
+        per_frame_dt: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
-        t0 = time.perf_counter()
+        t_prev = time.perf_counter()
         for result in tracker.propagate():
             bgr = cv2.imread(str(frame_files[result.frame_idx]))
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             rendered.append(
                 overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
             )
+            now = time.perf_counter()
+            per_frame_dt.append(now - t_prev)
+            t_prev = now
             progress.update(1)
         progress.close()
-        elapsed = time.perf_counter() - t0
-        n = len(rendered)
-        if n:
-            print(f"[pipeline] tracked {n} frames in {elapsed:.2f}s ({n/elapsed:.1f} FPS)")
+        _report_fps(cfg, per_frame_dt)
         write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
         return Path(cfg.output_path).resolve()
     finally:
