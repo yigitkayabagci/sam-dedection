@@ -90,6 +90,62 @@ def variant_runnable(tracker: str, kwargs: dict) -> tuple[bool, str]:
 # Frame cache
 # --------------------------------------------------------------------------
 
+def build_synthetic_cache(cache_dir: Path, frames: int, width: int, height: int,
+                          box: int) -> tuple[Path, "PromptSet"]:
+    """Generate a clip for throughput measurement, plus the prompt to track it.
+
+    Legitimate for speed work because none of the per-frame cost depends on
+    content: the encoder resizes every frame to 1024x1024 and does identical
+    work, and a box prompt is two tokens whatever it contains. It is NOT
+    legitimate for accuracy work -- IoU needs a real scene.
+
+    Every frame is unique on purpose. Duplicating one frame N times lets the
+    page cache serve the same JPEG bytes over and over, which flatters the
+    preprocess measurement, and gives the tracker a stationary target that
+    exercises the memory bank far less than real motion does.
+    """
+    import cv2
+    import numpy as np
+
+    from src.prompts import BoxPrompt, PromptSet
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+    backdrop = np.stack([
+        120 + 60 * (xx / max(1, width - 1)),
+        90 + 70 * (yy / max(1, height - 1)),
+        150 - 50 * (xx / max(1, width - 1)),
+    ], axis=-1)
+
+    rng = np.random.default_rng(0)
+    margin = box + 8
+    cx0, cy0 = None, None
+    for i in range(frames):
+        t = i / max(1, frames - 1)
+        # A Lissajous path keeps the target moving in both axes without ever
+        # leaving the frame, so the memory bank sees genuine displacement.
+        cx = int(margin + (width - 2 * margin) * (0.5 + 0.5 * np.sin(2 * np.pi * 1.0 * t)))
+        cy = int(margin + (height - 2 * margin) * (0.5 + 0.5 * np.sin(2 * np.pi * 1.7 * t + 1.1)))
+        if cx0 is None:
+            cx0, cy0 = cx, cy
+        frame = backdrop + rng.normal(0, 4.0, size=(height, width, 3))
+        img = np.clip(frame, 0, 255).astype(np.uint8)
+        half = box // 2
+        cv2.rectangle(img, (cx - half, cy - half), (cx + half, cy + half),
+                      (40, 220, 250), thickness=-1)
+        cv2.circle(img, (cx, cy), max(3, half // 3), (20, 40, 60), thickness=-1)
+        cv2.imwrite(str(cache_dir / f"{i:05d}.jpg"), img)
+
+    half = box // 2
+    prompts = PromptSet(boxes=[BoxPrompt(
+        obj_id=1, frame_idx=0,
+        xyxy=(float(cx0 - half), float(cy0 - half), float(cx0 + half), float(cy0 + half)),
+    )])
+    print(f"[bench] synthetic cache {cache_dir}: {frames} unique frames "
+          f"{width}x{height}, {box}x{box} target")
+    return cache_dir, prompts
+
+
 def build_frame_cache(video: str | None, frames_dir: str | None,
                       pattern: str, cache_dir: Path, max_frames: int | None) -> Path:
     """Produce a 00000.jpg... directory once; every variant reuses it."""
@@ -149,44 +205,33 @@ PROFILE_BLOCKS = (
 )
 
 
-class ModuleTimer:
-    """Time submodule forwards with CUDA events (no per-call host sync).
+class AttrTimer:
+    """Time every call to `owner.attr`, then put the original back.
 
-    Events are recorded on the stream and only read back in `stop()`, so the
-    measurement perturbs the run by a couple of microseconds per call rather
-    than serialising it the way a `torch.cuda.synchronize()` per block would.
+    GPU work is timed with CUDA events recorded on the stream and read back
+    only in `stop()`, so the measurement costs microseconds instead of
+    serialising the run the way a per-call `synchronize()` would. CPU work
+    (image decode, resize) is timed with perf_counter, where events would
+    measure nothing.
     """
 
-    def __init__(self, predictor, device: str, names=PROFILE_BLOCKS) -> None:
-        # torch is only needed for the CUDA event path, so import it there —
-        # that keeps the timer usable (and testable) on a plain CPU box.
-        self._torch = None
-        self._cuda = False
-        if device == "cuda":
-            import torch
+    def __init__(self, owner, attr: str, torch_mod=None, label: str | None = None) -> None:
+        self.label = label or attr
+        self._owner, self._attr = owner, attr
+        self._orig = getattr(owner, attr)
+        self._torch = torch_mod
+        self._cuda = torch_mod is not None
+        self._events: list = []
+        self._cpu_ms: list[float] = []
+        self._mark = 0
+        # Restoring a class-level method by assignment would leave a permanent
+        # instance attribute shadowing it; remember which case this was.
+        self._was_own_attr = attr in getattr(owner, "__dict__", {})
 
-            self._torch = torch
-            self._cuda = torch.cuda.is_available()
-        self._orig: dict[str, tuple] = {}
-        self._events: dict[str, list] = {}
-        self._cpu_ms: dict[str, list[float]] = {}
-        self._mark: dict[str, int] = {}
-
-        for name in names:
-            module = getattr(predictor, name, None)
-            if module is None or not hasattr(module, "forward"):
-                continue
-            self._install(name, module)
-
-    def _install(self, name: str, module) -> None:
-        torch = self._torch
-        original = module.forward
-        self._orig[name] = (module, original)
-        self._events[name] = []
-        self._cpu_ms[name] = []
-        events, cpu_ms = self._events[name], self._cpu_ms[name]
-
+        original, events, cpu_ms = self._orig, self._events, self._cpu_ms
         if self._cuda:
+            torch = torch_mod
+
             def timed(*args, **kwargs):
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
@@ -202,28 +247,52 @@ class ModuleTimer:
                 cpu_ms.append((time.perf_counter() - t0) * 1000.0)
                 return out
 
-        module.forward = timed
+        setattr(owner, attr, timed)
 
     def mark(self) -> None:
         """Warm-up boundary: only calls after this point are reported."""
-        for name in self._orig:
-            done = self._events[name] if self._cuda else self._cpu_ms[name]
-            self._mark[name] = len(done)
+        self._mark = len(self._events if self._cuda else self._cpu_ms)
+
+    def stop(self) -> list[float]:
+        if self._was_own_attr:
+            setattr(self._owner, self._attr, self._orig)
+        else:
+            try:
+                delattr(self._owner, self._attr)
+            except AttributeError:
+                setattr(self._owner, self._attr, self._orig)
+        if self._cuda:
+            if self._events:
+                self._torch.cuda.synchronize()
+            return [s.elapsed_time(e) for s, e in self._events[self._mark:]]
+        return self._cpu_ms[self._mark:]
+
+
+class ModuleTimer:
+    """AttrTimer over `forward` of each submodule the predictor exposes."""
+
+    def __init__(self, predictor, device: str, names=PROFILE_BLOCKS) -> None:
+        # torch is only needed for the CUDA event path, so import it there —
+        # that keeps the timer usable (and testable) on a plain CPU box.
+        torch_mod = None
+        if device == "cuda":
+            import torch
+
+            if torch.cuda.is_available():
+                torch_mod = torch
+        self._timers: list[AttrTimer] = []
+        for name in names:
+            module = getattr(predictor, name, None)
+            if module is None or not hasattr(module, "forward"):
+                continue
+            self._timers.append(AttrTimer(module, "forward", torch_mod, label=name))
+
+    def mark(self) -> None:
+        for timer in self._timers:
+            timer.mark()
 
     def stop(self) -> dict[str, list[float]]:
-        """Restore the original forwards and return post-mark call times (ms)."""
-        for module, original in self._orig.values():
-            module.forward = original
-        if self._cuda and any(self._events.values()):
-            self._torch.cuda.synchronize()
-        out: dict[str, list[float]] = {}
-        for name in self._orig:
-            start = self._mark.get(name, 0)
-            if self._cuda:
-                out[name] = [s.elapsed_time(e) for s, e in self._events[name][start:]]
-            else:
-                out[name] = self._cpu_ms[name][start:]
-        return out
+        return {timer.label: timer.stop() for timer in self._timers}
 
 
 class TegrastatsSampler:
@@ -312,9 +381,23 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         free_before, total = torch.cuda.mem_get_info()
 
     tracker = build_tracker(tracker_name, **kwargs)
+
+    # Preprocess happens inside init_state, not in the propagate loop: SAM2
+    # decodes, resizes to 1024x1024 and normalises every frame up front
+    # (async_loading_frames defaults to False, so this is synchronous and
+    # measurable). It is pure CPU work, so perf_counter, not CUDA events.
+    pre_timer = None
+    try:
+        import sam2.utils.misc as sam2_misc
+
+        pre_timer = AttrTimer(sam2_misc, "_load_img_as_tensor", label="preprocess")
+    except (ImportError, AttributeError):
+        pass
+
     t_load = time.perf_counter()
     tracker.prepare(frames_dir)
     load_s = time.perf_counter() - t_load
+    preprocess_calls = pre_timer.stop() if pre_timer is not None else []
 
     if tracker_name == "edgetam_trt" and not getattr(tracker, "trt_active", False):
         raise RuntimeError(
@@ -324,6 +407,10 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         )
 
     timer = ModuleTimer(tracker._predictor, device)
+    # Postprocess: bilinear upsample of the 256x256 mask logits to the original
+    # video resolution. This is the one stage that scales with OUTPUT size.
+    post_timer = AttrTimer(tracker._predictor, "_get_orig_video_res_output",
+                           torch if cuda else None, label="postprocess")
     tracker.set_prompts(prompts)
 
     per_frame_dt: list[float] = []
@@ -339,7 +426,9 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
             per_frame_dt.append(now - t_prev)
             t_prev = now
             if len(per_frame_dt) == warmup:
-                timer.mark()  # block timings start counting after warm-up too
+                # Stage timings drop the same warm-up window as the FPS average.
+                timer.mark()
+                post_timer.mark()
             if dump_masks is not None and result.masks:
                 ids = sorted(result.masks)
                 if not obj_ids:
@@ -353,6 +442,7 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
                 break
 
     block_calls = timer.stop()
+    postprocess_calls = post_timer.stop()
     tracker.reset()
 
     peak_mb = device_mb = None
@@ -385,6 +475,7 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
     latencies_ms = sorted(dt * 1000 for dt in kept)
     frame_mean_ms = statistics.fmean(latencies_ms) if latencies_ms else 0.0
     n_measured = max(1, len(kept))
+    per_frame_fps = sorted((1.0 / dt) if dt > 0 else 0.0 for dt in kept)
 
     # Per-block cost is reported per FRAME, not per call: a block invoked twice
     # a frame costs the frame both invocations.
@@ -393,16 +484,29 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
     # None rather than 0.0 when the hook never fired (e.g. a wrapper we could
     # not intercept) — a zero would read as "the encoder costs nothing".
     enc_mean = blocks_ms.get("image_encoder")
-    accounted = sum(blocks_ms.values())
+    inference_ms = sum(blocks_ms.values()) or None
+    postprocess_ms = (sum(postprocess_calls) / n_measured) if postprocess_calls else None
+    # Preprocess is amortised over the whole clip by init_state, so it is a
+    # per-frame cost of the run even though it does not happen in the loop.
+    preprocess_ms = (statistics.fmean(preprocess_calls) if preprocess_calls else None)
+    accounted = sum(v for v in (inference_ms, postprocess_ms) if v)
 
     return {
         "frames_total": len(per_frame_dt),
         "frames_measured": len(kept),
         "warmup": warmup,
         "fps": (len(kept) / total_s) if total_s > 0 else 0.0,
+        "fps_min": per_frame_fps[0] if per_frame_fps else 0.0,
+        "fps_max": per_frame_fps[-1] if per_frame_fps else 0.0,
+        "fps_mean": statistics.fmean(per_frame_fps) if per_frame_fps else 0.0,
+        "fps_stdev": statistics.stdev(per_frame_fps) if len(per_frame_fps) > 1 else 0.0,
         "latency_p50_ms": _percentile(latencies_ms, 50),
         "latency_p95_ms": _percentile(latencies_ms, 95),
         "frame_mean_ms": frame_mean_ms,
+        # --- the three stages, separately ---
+        "preprocess_ms": preprocess_ms,     # CPU: decode + resize to 1024 + normalise
+        "inference_ms": inference_ms,       # GPU: encoder + memory + decoder
+        "postprocess_ms": postprocess_ms,   # GPU: upsample to video resolution
         "encoder_ms": enc_mean,
         # What TensorRT does NOT cover today — the Amdahl ceiling in one number.
         "rest_ms": None if enc_mean is None else max(0.0, frame_mean_ms - enc_mean),
@@ -412,9 +516,9 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         "mem_enc_ms": blocks_ms.get("memory_encoder"),
         "mask_dec_ms": blocks_ms.get("sam_mask_decoder"),
         "prompt_enc_ms": blocks_ms.get("sam_prompt_encoder"),
-        # Everything no timed block explains: the mask device->host copy, the
-        # Python loop, and EdgeTAM's state bookkeeping.
-        "unaccounted_ms": max(0.0, frame_mean_ms - accounted) if blocks_ms else None,
+        # Everything no timed stage explains: the mask threshold and its
+        # device->host copy, the Python loop, EdgeTAM's state bookkeeping.
+        "unaccounted_ms": max(0.0, frame_mean_ms - accounted) if accounted else None,
         "blocks_ms": {k: round(v, 3) for k, v in blocks_ms.items()},
         "peak_torch_mb": peak_mb,
         "device_used_mb": device_mb,
@@ -449,8 +553,14 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
 _COLUMNS = [
     ("variant", "variant", "{}"),
     ("fps", "fps_median", "{:.2f}"),
+    ("fps min", "fps_min", "{:.2f}"),
+    ("fps max", "fps_max", "{:.2f}"),
+    ("fps sd", "fps_stdev", "{:.2f}"),
     ("p50 ms", "latency_p50_ms", "{:.2f}"),
     ("p95 ms", "latency_p95_ms", "{:.2f}"),
+    ("pre ms", "preprocess_ms", "{:.2f}"),
+    ("infer ms", "inference_ms", "{:.2f}"),
+    ("post ms", "postprocess_ms", "{:.2f}"),
     ("enc ms", "encoder_ms", "{:.2f}"),
     ("memattn ms", "mem_attn_ms", "{:.2f}"),
     ("memenc ms", "mem_enc_ms", "{:.2f}"),
@@ -569,6 +679,18 @@ def main() -> int:
     src = p.add_mutually_exclusive_group()
     src.add_argument("--video", help="Input video.")
     src.add_argument("--frames-dir", help="Directory of frames.")
+    src.add_argument("--synthetic-frames", type=int, metavar="N",
+                     help="Generate N unique frames with a moving target instead of "
+                          "reading a clip. Valid for throughput (per-frame cost does "
+                          "not depend on content) but NOT for accuracy -- IoU needs a "
+                          "real scene. Supplies its own prompt.")
+    p.add_argument("--synthetic-size", default="1920x1080", metavar="WxH",
+                   help="Frame size for --synthetic-frames. Changing it moves "
+                        "preprocess and postprocess cost; inference is unaffected.")
+    p.add_argument("--synthetic-box", type=int, default=96, metavar="PX",
+                   help="Target size for --synthetic-frames. Expected to leave FPS "
+                        "unchanged (a box is two tokens whatever its size) -- useful "
+                        "as a control experiment on the measurement rig itself.")
     p.add_argument("--frame-pattern", default="*.tif*")
     p.add_argument("--prompt-file", help="JSON prompts (headless; see examples/).")
     p.add_argument("--matrix", default=str(DEFAULT_MATRIX))
@@ -601,14 +723,16 @@ def main() -> int:
         write_report(rows, out)
         return 0
 
-    if not (args.video or args.frames_dir):
-        raise SystemExit("Pass --video or --frames-dir (or --report DIR).")
-    if not args.prompt_file:
+    if not (args.video or args.frames_dir or args.synthetic_frames):
+        raise SystemExit("Pass --video, --frames-dir or --synthetic-frames "
+                         "(or --report DIR).")
+    if not args.prompt_file and not args.synthetic_frames:
         raise SystemExit(
             "--prompt-file is required: benchmarks must be headless and every "
             "variant must get identical prompts. Create one with "
             "`python3 cli.py --prompt box ...` on a machine with a display, or "
-            "copy examples/car_box_example.json.")
+            "copy examples/car_box_example.json. (--synthetic-frames supplies "
+            "its own prompt.)")
 
     from src.prompts.file_source import load_prompts
 
@@ -625,9 +749,19 @@ def main() -> int:
         if unknown:
             raise SystemExit(f"Unknown variant(s): {unknown}. Available: {list(matrix)}")
 
-    prompts = load_prompts(args.prompt_file)
-    frames_dir = build_frame_cache(args.video, args.frames_dir, args.frame_pattern,
-                                   cache_dir, args.max_frames)
+    if args.synthetic_frames:
+        try:
+            width, height = (int(v) for v in args.synthetic_size.lower().split("x"))
+        except ValueError:
+            raise SystemExit(f"--synthetic-size must look like 1920x1080, "
+                             f"got {args.synthetic_size!r}")
+        frames_dir, synthetic_prompts = build_synthetic_cache(
+            cache_dir, args.synthetic_frames, width, height, args.synthetic_box)
+        prompts = load_prompts(args.prompt_file) if args.prompt_file else synthetic_prompts
+    else:
+        prompts = load_prompts(args.prompt_file)
+        frames_dir = build_frame_cache(args.video, args.frames_dir, args.frame_pattern,
+                                       cache_dir, args.max_frames)
 
     rows: list[dict] = []
     for name in names:

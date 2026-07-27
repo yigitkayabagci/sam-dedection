@@ -20,8 +20,10 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.jetson_doctor import _version_tuple, run_probe  # noqa: E402
 from tools.benchmark import (  # noqa: E402
+    AttrTimer,
     ModuleTimer,
     build_frame_cache,
+    build_synthetic_cache,
     csv_table,
     latex_table,
     load_matrix,
@@ -246,6 +248,90 @@ class TestModuleTimer(unittest.TestCase):
         result, _ = self._run()
         self.assertGreater(sum(result["image_encoder"]),
                            sum(result["memory_attention"]))
+
+
+class TestAttrTimer(unittest.TestCase):
+    def test_restores_a_class_method_without_leaving_a_shadow(self):
+        class Thing:
+            def work(self):
+                return "done"
+
+        thing = Thing()
+        self.assertNotIn("work", thing.__dict__)
+        timer = AttrTimer(thing, "work")
+        thing.work()
+        calls = timer.stop()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(thing.work(), "done")
+        # The instance must be left exactly as found, not carrying a bound copy.
+        self.assertNotIn("work", thing.__dict__)
+
+    def test_restores_a_module_level_function(self):
+        import types
+
+        module = types.ModuleType("fake_mod")
+        module.load = lambda x: x * 2
+        original = module.load
+        timer = AttrTimer(module, "load")
+        self.assertEqual(module.load(3), 6)
+        self.assertEqual(len(timer.stop()), 1)
+        self.assertIs(module.load, original)
+
+    def test_mark_drops_earlier_calls(self):
+        class Thing:
+            def work(self):
+                return 1
+
+        thing = Thing()
+        timer = AttrTimer(thing, "work")
+        for _ in range(3):
+            thing.work()
+        timer.mark()
+        for _ in range(5):
+            thing.work()
+        self.assertEqual(len(timer.stop()), 5)
+
+
+class TestSyntheticFrames(unittest.TestCase):
+    def test_frames_are_unique_and_prompt_lands_on_the_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, prompts = build_synthetic_cache(
+                Path(tmp) / "syn", frames=10, width=320, height=240, box=48)
+            files = sorted(out.glob("*.jpg"))
+            self.assertEqual(len(files), 10)
+
+            # Duplicated frames would let the page cache serve the same JPEG
+            # bytes repeatedly and flatter the preprocess measurement.
+            prefixes = {cv2.imread(str(f)).tobytes()[:4096] for f in files}
+            self.assertEqual(len(prefixes), len(files))
+
+            self.assertEqual(len(prompts.boxes), 1)
+            box = prompts.boxes[0]
+            self.assertEqual(box.frame_idx, 0)
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy)
+            frame = cv2.imread(str(files[0]))
+            patch = frame[y1:y2, x1:x2]
+            self.assertGreater(patch.size, 0)
+            # The target is drawn bright green-yellow against a muted backdrop.
+            self.assertGreater(patch[:, :, 1].mean(), frame[:, :, 1].mean() + 40)
+
+    def test_target_actually_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _ = build_synthetic_cache(
+                Path(tmp) / "syn", frames=12, width=320, height=240, box=40)
+            files = sorted(out.glob("*.jpg"))
+
+            def centroid(path):
+                img = cv2.imread(str(path))
+                # The target is the brightest green region.
+                mask = img[:, :, 1] > 180
+                ys, xs = np.nonzero(mask)
+                return (xs.mean(), ys.mean()) if xs.size else (0.0, 0.0)
+
+            first, last = centroid(files[0]), centroid(files[-1])
+            moved = abs(first[0] - last[0]) + abs(first[1] - last[1])
+            self.assertGreater(moved, 20, "a stationary target barely exercises "
+                                          "the memory bank")
 
 
 class TestFrameCache(unittest.TestCase):
