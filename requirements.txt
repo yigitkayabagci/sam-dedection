@@ -5,8 +5,13 @@
 # is CPU-only, so torch.cuda.is_available() comes back False.
 # Run `python3 scripts/jetson_doctor.py` to check all of this at once.
 
-numpy>=1.24            # pin to <2 if the Jetson torch wheel was built against 1.x
-opencv-python>=4.8
+# Both upper bounds are load-bearing, do not relax them casually:
+#   numpy<2  -- Jetson torch wheels are built against the numpy 1.x C ABI.
+#   opencv<5 -- OpenCV 5 moved/renamed API this repo calls (VideoWriter_fourcc).
+# Install numpy with --ignore-installed inside a --system-site-packages venv,
+# otherwise pip sees the old apt numpy and considers the requirement met.
+numpy>=1.24,<2
+opencv-python>=4.8,<5
 Pillow>=10.0
 pyyaml>=6.0
 tqdm>=4.66

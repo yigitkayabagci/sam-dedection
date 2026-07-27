@@ -12,9 +12,10 @@ on JetPack 5.
 Two execution modes:
 
   default        Bind the caller's input tensor, allocate fresh output
-                 tensors per call, enqueue. Output tensors are owned by the
-                 caller — no aliasing hazards. Torch's caching allocator
-                 makes the per-call allocation ~free after warm-up.
+                 tensors per call, enqueue on a dedicated (non-default)
+                 stream. Output tensors are owned by the caller — no
+                 aliasing hazards. Torch's caching allocator makes the
+                 per-call allocation ~free after warm-up.
 
   CUDA graph     Persistent input/output buffers at fixed addresses, the
                  enqueue captured once and replayed. Removes TensorRT's
@@ -94,6 +95,10 @@ class TRTImageEncoder:
             )
 
         self._context = self._engine.create_execution_context()
+        # TensorRT warns that enqueueV3 on the default (legacy) stream forces it
+        # to insert extra cudaStreamSynchronize calls. Give it a dedicated
+        # stream and hand off with wait_stream on both sides instead.
+        self._stream = torch.cuda.Stream()
         self._synchronize = synchronize
         self._use_cuda_graph = use_cuda_graph
         self._graph = None
@@ -226,12 +231,23 @@ class TRTImageEncoder:
         outputs = self._alloc_outputs()
         self._bind(image, outputs)
 
-        stream = torch.cuda.current_stream().cuda_stream
-        self._enqueue(stream)
+        # Run on our own stream: TensorRT explicitly warns that enqueueV3 on the
+        # default stream costs extra internal synchronization. wait_stream on
+        # both sides gives the same ordering guarantee without that cost.
+        current = torch.cuda.current_stream()
+        self._stream.wait_stream(current)
+        self._enqueue(self._stream.cuda_stream)
+        current.wait_stream(self._stream)
+        # These buffers were allocated on `current` but consumed on our stream;
+        # tell the caching allocator so it cannot hand them out again too early.
+        image.record_stream(self._stream)
+        for tensor in outputs:
+            tensor.record_stream(self._stream)
+
         if self._synchronize:
-            # Not strictly required — TensorRT enqueues on the caller's stream, so
-            # later torch ops on that stream are already ordered after it. Kept on
-            # by default so a stray cross-stream read cannot produce silently wrong
-            # masks; set synchronize=False to measure without it.
-            torch.cuda.current_stream().synchronize()
+            # Redundant now that the streams are explicitly ordered — kept as an
+            # opt-out safety net. Set synchronize=False to measure without it
+            # (the trt_fp16_nosync row in configs/bench_matrix.yaml does exactly
+            # that, and compare_masks confirms the IoU is unchanged).
+            current.synchronize()
         return outputs
