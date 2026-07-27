@@ -408,6 +408,16 @@ def check_torch(r: Report) -> None:
               "against the installed torch, or use the matching Jetson wheel.")
 
 
+def _version_tuple(text: str) -> tuple:
+    parts = []
+    for chunk in re.split(r"[.\-+]", text):
+        if chunk.isdigit():
+            parts.append(int(chunk))
+        else:
+            break
+    return tuple(parts)
+
+
 def check_python_deps(r: Report) -> None:
     r.start("python-deps")
     required = {
@@ -422,12 +432,38 @@ def check_python_deps(r: Report) -> None:
         "onnxruntime": WARN,
         "decord": INFO,
     }
+    # Minimums from requirements.txt. In a --system-site-packages venv these are
+    # easy to miss: pip accepts an ancient apt-installed package as satisfying
+    # the requirement and never puts a current one in the venv.
+    minimums = {
+        "numpy": ("1.24", "numpy"),
+        "cv2": ("4.8", "opencv-python"),
+        "yaml": ("6.0", "pyyaml"),
+        "tqdm": ("4.66", "tqdm"),
+        "PIL": ("10.0", "Pillow"),
+        "timm": ("1.0", "timm"),
+        "matplotlib": ("3.7", "matplotlib"),
+    }
     for mod, level in required.items():
         rc, out = run([sys.executable, "-c",
-                       f"import {mod}; print(getattr({mod}, '__version__', '?'))"],
+                       f"import {mod}; print(getattr({mod}, '__version__', '?'));"
+                       f"print({mod}.__file__)"],
                       timeout=90)
         if rc == 0:
-            r.add(OK, mod, out.splitlines()[-1])
+            lines = out.splitlines()
+            version = lines[-2] if len(lines) >= 2 else lines[-1]
+            path = lines[-1] if len(lines) >= 2 else ""
+            from_system = "dist-packages" in path
+            r.add(OK, mod, f"{version}{'  (system dist-packages)' if from_system else ''}")
+
+            floor, pip_name = minimums.get(mod, (None, None))
+            if floor and _version_tuple(version) < _version_tuple(floor):
+                where = ("It is being picked up from the system dist-packages, so pip "
+                         "considered the requirement already met and never installed a "
+                         "current one into the venv. " if from_system else "")
+                r.add(WARN, f"{mod}-too-old",
+                      f"{version} < {floor} required by requirements.txt",
+                      f"{where}pip install --force-reinstall '{pip_name}>={floor}'")
             continue
         if mod == "decord":
             r.add(INFO, "decord",
@@ -435,8 +471,12 @@ def check_python_deps(r: Report) -> None:
                   "(no aarch64 wheel upstream).")
         elif mod == "onnxruntime":
             r.add(WARN, "onnxruntime", "absent",
-                  "Only needed for `export_image_encoder_onnx.py --verify`. "
-                  "On Jetson use NVIDIA's onnxruntime-gpu wheel, not the PyPI one.")
+                  "Needed for `export_image_encoder_onnx.py --verify`, which is the "
+                  "gate that proves the exported graph still matches PyTorch before "
+                  "you spend build time on TensorRT.\n"
+                  "     pip install onnxruntime   <- the CPU wheel, which is all the "
+                  "parity check uses and which PyPI does ship for aarch64.\n"
+                  "     Only onnxruntime-GPU needs NVIDIA's Jetson-specific build.")
         else:
             hint = {"cv2": "pip install opencv-python  (or sudo apt install python3-opencv)",
                     "PIL": "pip install Pillow",
@@ -529,9 +569,16 @@ def check_resources(r: Report) -> None:
         usage = shutil.disk_usage(str(Path(__file__).resolve().parent.parent))
         free_gb = usage.free / 1e9
         r.add(INFO, "disk-free", f"{free_gb:.1f} GB")
-        if free_gb < 5:
+        # Rough budget for the remaining phases: ONNX ~0.1 GB, ~10 engines at
+        # 30-60 MB each plus their build scratch, and a JPG frame cache that
+        # scales with clip length (a few hundred 1080p frames is ~0.2 GB).
+        # Running out mid-build wastes a long TensorRT run, so warn early.
+        if free_gb < 10:
             r.add(WARN, "disk-low", f"{free_gb:.1f} GB free",
-                  "ONNX + several engines + frame caches need room.")
+                  "The remaining phases want ~3-4 GB (ONNX, ~10 engines, frame "
+                  "caches, mask dumps). Reclaim some first: pip cache purge, "
+                  "delete old frame caches under runs/, or drop an unused conda "
+                  "install.")
     except OSError:
         pass
 

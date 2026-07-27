@@ -480,6 +480,32 @@ def markdown_table(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def latex_table(rows: list[dict]) -> str:
+    """A booktabs tabular fragment for docs/report/report.tex to \\input.
+
+    Emitted as a fragment rather than a full table environment so the report
+    owns the caption, label and placement.
+    """
+    active = [c for c in _COLUMNS if any(r.get(c[1]) is not None for r in rows)]
+    escape = lambda s: str(s).replace("_", r"\_").replace("%", r"\%")  # noqa: E731
+    header = " & ".join(escape(c[0]) for c in active) + r" \\"
+    lines = [r"\begin{tabular}{l" + "r" * (len(active) - 1) + "}",
+             r"\toprule", header, r"\midrule"]
+    for row in sorted(rows, key=lambda r: -(r.get("fps_median") or 0)):
+        cells = []
+        for _, key, fmt in active:
+            value = row.get(key)
+            if value is None:
+                cells.append("--")
+            elif isinstance(value, str):
+                cells.append(escape(value))
+            else:
+                cells.append(fmt.format(value))
+        lines.append(" & ".join(cells) + r" \\")
+    lines += [r"\bottomrule", r"\end{tabular}"]
+    return "\n".join(lines)
+
+
 def csv_table(rows: list[dict]) -> str:
     keys = sorted({k for r in rows for k in r if not isinstance(r.get(k), (dict, list))})
     keys = ["variant"] + [k for k in keys if k != "variant"]
@@ -523,9 +549,12 @@ def write_report(rows: list[dict], out: Path) -> None:
     out.write_text(header + table + "\n")
     csv_path = out.with_suffix(".csv")
     csv_path.write_text(csv_table(rows) + "\n")
+    tex_path = out.with_suffix(".tex")
+    tex_path.write_text(latex_table(rows) + "\n")
     print(f"\n{table}\n")
     print(f"[bench] report -> {out}")
     print(f"[bench] csv    -> {csv_path}")
+    print(f"[bench] latex  -> {tex_path}  (\\input this from docs/report/report.tex)")
 
 
 # --------------------------------------------------------------------------

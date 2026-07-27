@@ -18,10 +18,12 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from scripts.jetson_doctor import _version_tuple  # noqa: E402
 from tools.benchmark import (  # noqa: E402
     ModuleTimer,
     build_frame_cache,
     csv_table,
+    latex_table,
     load_matrix,
     markdown_table,
     variant_kwargs,
@@ -107,9 +109,9 @@ class TestBenchMatrix(unittest.TestCase):
 class TestReportRendering(unittest.TestCase):
     ROWS = [
         {"variant": "trt_fp16", "fps_median": 41.2, "encoder_ms": 9.0,
-         "rest_ms": 15.0, "peak_torch_mb": 1800.0},
+         "rest_ms": 15.0, "encoder_share_pct": 37.5, "peak_torch_mb": 1800.0},
         {"variant": "pytorch_bf16", "fps_median": 22.0, "encoder_ms": None,
-         "rest_ms": None, "peak_torch_mb": 2100.0},
+         "rest_ms": None, "encoder_share_pct": None, "peak_torch_mb": 2100.0},
         {"variant": "trt_int8", "error": "engine build failed"},
     ]
 
@@ -129,6 +131,34 @@ class TestReportRendering(unittest.TestCase):
         self.assertAlmostEqual(_percentile(vals, 50), 50.5)
         self.assertAlmostEqual(_percentile(vals, 100), 100.0)
         self.assertEqual(_percentile([], 95), 0.0)
+
+    def test_latex_escapes_and_renders_missing_values(self):
+        tex = latex_table(self.ROWS)
+        self.assertIn(r"\begin{tabular}", tex)
+        self.assertIn(r"\toprule", tex)
+        self.assertIn(r"trt\_fp16", tex)        # underscore escaped
+        self.assertIn(r"enc \%", tex)           # percent escaped
+        self.assertIn("--", tex)                # None rendered as an em-dash cell
+        # One column spec letter per column, left-aligned label then numbers.
+        self.assertRegex(tex, r"\\begin\{tabular\}\{lr+\}")
+
+
+class TestVersionComparison(unittest.TestCase):
+    """jetson_doctor compares dependency versions against requirements.txt.
+    String comparison gets 4.11 vs 4.8 backwards, which would fire a bogus
+    'too old' warning on a perfectly current OpenCV."""
+
+    def test_numeric_not_lexical(self):
+        self.assertLess(_version_tuple("4.8"), _version_tuple("4.11.0"))
+        self.assertLess(_version_tuple("3.5.1"), _version_tuple("3.7"))
+        self.assertLess(_version_tuple("5.4.1"), _version_tuple("6.0"))
+        self.assertGreater(_version_tuple("1.26.4"), _version_tuple("1.24"))
+
+    def test_stops_at_the_first_non_numeric_chunk(self):
+        # Real versions seen on Jetson: "10.3.0.30-1+cuda12.5", "2.8.0a0+git1234"
+        self.assertEqual(_version_tuple("10.3.0.30-1+cuda12.5"), (10, 3, 0, 30, 1))
+        self.assertEqual(_version_tuple("2.8.0a0"), (2, 8))
+        self.assertEqual(_version_tuple("?"), ())
 
 
 class _FakeBlock:
