@@ -123,45 +123,64 @@ def check_platform(r: Report) -> None:
 
 
 def check_power_mode(r: Report) -> None:
+    """Read the power mode and GPU clocks WITHOUT root.
+
+    `nvpmodel -q` and `jetson_clocks --show` both want root on most JetPack
+    images, but everything they report is also exposed through sysfs, which is
+    world-readable. Diagnosis should never need sudo — only *changing* the
+    power mode does.
+    """
     r.start("power")
-    if not shutil.which("nvpmodel"):
+    if not shutil.which("nvpmodel") and not Path("/var/lib/nvpmodel").exists():
         r.add(INFO, "nvpmodel", "not present (not a Jetson?)")
         return
-    rc, out = run(["nvpmodel", "-q"])
-    if rc != 0:
-        r.add(WARN, "nvpmodel", out or "query failed",
-              "sudo nvpmodel -q  (query may need root)")
-    else:
-        mode = None
-        m = re.search(r"NV Power Mode:\s*(\S+)", out)
-        num = re.search(r"^\s*(\d+)\s*$", out, re.MULTILINE)
-        if m:
-            mode = m.group(1)
-        r.add(INFO, "power-mode", f"{mode or '?'} (id={num.group(1) if num else '?'})")
-        if num and num.group(1) != "0":
-            r.add(
-                WARN, "power-mode-not-maxn",
-                f"nvpmodel id={num.group(1)}; benchmarks will be inconsistent.",
-                "sudo nvpmodel -m 0 && sudo jetson_clocks",
-            )
 
-    if shutil.which("jetson_clocks"):
-        rc, out = run(["jetson_clocks", "--show"])
-        if rc == 0 and out:
-            gpu = [l for l in out.splitlines() if "GPU" in l and "MinFreq" in l]
-            r.add(INFO, "jetson_clocks", gpu[0] if gpu else "queried")
-            for line in gpu:
-                mn = re.search(r"MinFreq=(\d+)", line)
-                mx = re.search(r"MaxFreq=(\d+)", line)
-                cur = re.search(r"CurrentFreq=(\d+)", line)
-                if mn and mx and cur and cur.group(1) != mx.group(1):
-                    r.add(
-                        WARN, "clocks-not-locked",
-                        f"GPU CurrentFreq={cur.group(1)} < MaxFreq={mx.group(1)}",
-                        "sudo jetson_clocks   (lock clocks before benchmarking)",
-                    )
-        else:
-            r.add(INFO, "jetson_clocks", "present (query needs root)")
+    # /var/lib/nvpmodel/status holds e.g. "pmode:0000 fmode:fan_mode_quiet".
+    status = read_text("/var/lib/nvpmodel/status")
+    mode_id = None
+    if (m := re.search(r"pmode:\s*(\d+)", status)):
+        mode_id = int(m.group(1))
+    elif status:
+        r.add(INFO, "nvpmodel-status", status[:80])
+    if mode_id is None:
+        rc, out = run(["nvpmodel", "-q"])  # last resort; usually needs root
+        if rc == 0 and (m := re.search(r"^\s*(\d+)\s*$", out, re.MULTILINE)):
+            mode_id = int(m.group(1))
+
+    if mode_id is None:
+        r.add(WARN, "power-mode", "could not determine nvpmodel mode",
+              "sudo nvpmodel -q   (and set MAXN with: sudo nvpmodel -m 0)")
+    else:
+        names = {}
+        for line in read_text("/etc/nvpmodel.conf").splitlines():
+            if (m := re.match(r"<\s*POWER_MODEL\s+ID=(\d+)\s+NAME=(\S+)\s*>", line.strip())):
+                names[int(m.group(1))] = m.group(2)
+        label = names.get(mode_id, "?")
+        r.add(INFO, "power-mode", f"id={mode_id} ({label})")
+        # Mode 0 is MAXN on every Orin SKU; anything else caps clocks/cores.
+        if mode_id != 0:
+            r.add(WARN, "power-mode-not-maxn",
+                  f"nvpmodel id={mode_id} ({label}); benchmarks will not be comparable.",
+                  "sudo nvpmodel -m 0 && sudo jetson_clocks")
+
+    # GPU devfreq: current vs max frequency tells us whether clocks are locked.
+    for node in sorted(Path("/sys/class/devfreq").glob("*")) if \
+            Path("/sys/class/devfreq").is_dir() else []:
+        name = node.name
+        if "gpu" not in name and "gv11b" not in name and "ga10b" not in name:
+            continue
+        cur = read_text(str(node / "cur_freq"))
+        mx = read_text(str(node / "max_freq"))
+        if not (cur.isdigit() and mx.isdigit()):
+            continue
+        r.add(INFO, "gpu-clock", f"{name}: {int(cur) / 1e6:.0f}/{int(mx) / 1e6:.0f} MHz")
+        # Idle GPUs legitimately clock down, so this is a hint, not a verdict.
+        if int(cur) < int(mx):
+            r.add(WARN, "clocks-not-locked",
+                  f"GPU at {int(cur) / 1e6:.0f} MHz of {int(mx) / 1e6:.0f} MHz max",
+                  "sudo jetson_clocks   (lock clocks before benchmarking; an idle "
+                  "GPU also reads low, so re-check while a run is in flight)")
+        break
 
 
 def check_cuda(r: Report) -> None:
