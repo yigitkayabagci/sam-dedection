@@ -270,6 +270,77 @@ def check_tensorrt(r: Report) -> None:
         r.add(INFO, "libnvinfer", out)
 
 
+# A missing CUDA shared library -> how to supply it. JetPack installs CUDA as
+# ~15 separate apt packages, and a partial flash routinely leaves the math
+# libraries out. torch links ALL of them into one libtorch_cuda.so whether it
+# calls them or not, so the dynamic linker refuses to load it and `import torch`
+# dies on line one — long before you would ever call torch.linalg or cuRAND.
+_CUDA_LIB_FIX = {
+    "libcurand": ("libcurand-12-6", "nvidia-curand-cu12"),
+    "libcusolver": ("libcusolver-12-6", "nvidia-cusolver-cu12"),
+    "libcusparse": ("libcusparse-12-6", "nvidia-cusparse-cu12"),
+    "libcublas": ("libcublas-12-6", "nvidia-cublas-cu12"),
+    "libcufft": ("libcufft-12-6", "nvidia-cufft-cu12"),
+    "libnvrtc": ("cuda-nvrtc-12-6", "nvidia-cuda-nvrtc-cu12"),
+    "libcupti": ("cuda-cupti-12-6", "nvidia-cuda-cupti-cu12"),
+    "libcufile": ("libcufile-12-6", "nvidia-cufile-cu12"),
+    "libnvjitlink": ("libnvjitlink-12-6", "nvidia-nvjitlink-cu12"),
+    "libcudart": ("cuda-cudart-12-6", "nvidia-cuda-runtime-cu12"),
+    "libcudnn": ("libcudnn9-cuda-12", None),
+    "libcusparseLt": ("libcusparselt0", None),
+    "libcudss": ("libcudss0-cuda-12", None),
+}
+
+
+def _find_torch_lib_dir() -> Path | None:
+    """Locate torch/lib WITHOUT importing torch — the whole point is that the
+    import is what's broken."""
+    for base in sys.path:
+        candidate = Path(base) / "torch" / "lib"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def check_torch_shared_libs(r: Report) -> None:
+    r.start("pytorch-libs")
+    lib_dir = _find_torch_lib_dir()
+    if lib_dir is None:
+        r.add(INFO, "torch-libs", "torch not installed yet")
+        return
+    if not shutil.which("ldd"):
+        r.add(INFO, "torch-libs", "ldd not available; skipping")
+        return
+
+    missing: set[str] = set()
+    for so in sorted(lib_dir.glob("*.so")):
+        rc, out = run(["ldd", str(so)], timeout=60)
+        for line in out.splitlines():
+            if "not found" in line:
+                missing.add(line.split("=>")[0].strip())
+    if not missing:
+        r.add(OK, "shared-libs", f"all resolved ({lib_dir})")
+        return
+
+    apt, pip = [], []
+    for soname in sorted(missing):
+        stem = soname.split(".so")[0]
+        apt_pkg, pip_pkg = _CUDA_LIB_FIX.get(stem, (None, None))
+        if apt_pkg:
+            apt.append(apt_pkg)
+        if pip_pkg:
+            pip.append(pip_pkg)
+    fix = f"sudo apt install -y {' '.join(sorted(set(apt)))}" if apt else \
+        "identify the providing CUDA package and install it"
+    if pip:
+        fix += ("\nor, without root, into the venv:\n"
+                f"pip install {' '.join(sorted(set(pip)))}\n"
+                "then prepend those site-packages/nvidia/*/lib dirs to "
+                "LD_LIBRARY_PATH (keep /usr/local/cuda/targets/aarch64-linux/lib "
+                "FIRST so JetPack's Tegra builds still win).")
+    r.add(BLOCK, "shared-libs", f"unresolved: {', '.join(sorted(missing))}", fix)
+
+
 def check_torch(r: Report) -> None:
     r.start("pytorch")
     code = (
@@ -515,8 +586,8 @@ def main() -> int:
 
     r = Report()
     for check in (check_platform, check_power_mode, check_cuda, check_tensorrt,
-                  check_venv, check_torch, check_python_deps, check_project,
-                  check_resources):
+                  check_venv, check_torch_shared_libs, check_torch,
+                  check_python_deps, check_project, check_resources):
         try:
             check(r)
         except Exception as exc:  # a broken check must not hide the others
