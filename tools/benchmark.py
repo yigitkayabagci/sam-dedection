@@ -39,6 +39,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -295,6 +296,76 @@ class ModuleTimer:
         return {timer.label: timer.stop() for timer in self._timers}
 
 
+class ClockSampler:
+    """Sample the GPU frequency during a run, straight from sysfs.
+
+    Needs no root and no tegrastats. It exists so "were the clocks stable?"
+    becomes a number in the results instead of an assumption -- which is what
+    actually settles whether `jetson_clocks` was needed. Under a sustained
+    load the governor reaches max on its own within the warm-up window, so a
+    tight min/mean/max here means locking would have bought nothing.
+    """
+
+    _HINTS = ("gpu", "ga10b", "gv11b")
+
+    def __init__(self, interval: float = 0.1) -> None:
+        self._interval = interval
+        self._samples: list[int] = []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._node = self._find_node()
+        self.max_khz = self._read(self._node / "max_freq") if self._node else None
+
+    @classmethod
+    def _find_node(cls) -> Path | None:
+        root = Path("/sys/class/devfreq")
+        if not root.is_dir():
+            return None
+        for node in sorted(root.glob("*")):
+            if any(h in node.name for h in cls._HINTS) and (node / "cur_freq").exists():
+                return node
+        return None
+
+    @staticmethod
+    def _read(path: Path) -> int | None:
+        try:
+            return int(path.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _loop(self) -> None:
+        cur = self._node / "cur_freq"
+        while not self._stop.wait(self._interval):
+            value = self._read(cur)
+            if value:
+                self._samples.append(value)
+
+    def __enter__(self):
+        if self._node is not None:
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def summary(self) -> dict:
+        if not self._samples:
+            return {}
+        mhz = [s / 1e6 for s in self._samples]
+        out = {
+            "gpu_mhz_min": round(min(mhz), 1),
+            "gpu_mhz_mean": round(statistics.fmean(mhz), 1),
+            "gpu_mhz_max": round(max(mhz), 1),
+        }
+        if self.max_khz:
+            out["gpu_clock_pct_of_max"] = round(100 * statistics.fmean(mhz)
+                                                / (self.max_khz / 1e6), 1)
+        return out
+
+
 class TegrastatsSampler:
     """Sample tegrastats in the background: GPU utilisation, temps, power."""
 
@@ -419,7 +490,8 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
     obj_ids: list[int] = []
     height = width = 0
 
-    with TegrastatsSampler() if use_tegrastats else _NullCtx() as tegra:
+    clocks = ClockSampler()
+    with clocks, TegrastatsSampler() if use_tegrastats else _NullCtx() as tegra:
         t_prev = time.perf_counter()
         for result in tracker.propagate():
             now = time.perf_counter()
@@ -523,6 +595,7 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         "peak_torch_mb": peak_mb,
         "device_used_mb": device_mb,
         "load_seconds": load_s,
+        **clocks.summary(),
         **(tegra.summary() if use_tegrastats else {}),
     }
 
@@ -570,6 +643,8 @@ _COLUMNS = [
     ("enc %", "encoder_share_pct", "{:.0f}"),
     ("torch MB", "peak_torch_mb", "{:.0f}"),
     ("dev MB", "device_used_mb", "{:.0f}"),
+    ("gpu MHz", "gpu_mhz_mean", "{:.0f}"),
+    ("clk %max", "gpu_clock_pct_of_max", "{:.0f}"),
     ("GPU %", "gpu_util_pct_mean", "{:.0f}"),
     ("mW", "power_mw_mean", "{:.0f}"),
     ("engine MB", "engine_mb", "{:.1f}"),
