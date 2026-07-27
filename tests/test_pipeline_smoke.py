@@ -185,6 +185,23 @@ class TestFpsMetrics(unittest.TestCase):
         self.assertEqual(s["warmup"], 2)
         self.assertEqual(s["kept_frames"], 1)
 
+    def test_chart_is_written_and_scales_past_the_warmup_spike(self):
+        from src.metrics import write_fps_chart
+
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib not installed")
+
+        # Frame 0 is a 3-second model load; the rest run at a steady ~25 FPS.
+        # Letting that outlier set the y-range would flatten everything else.
+        dt = [3.0, 0.5, 0.2] + [0.04] * 20
+        with tempfile.TemporaryDirectory() as tmp:
+            out = write_fps_chart(dt, Path(tmp) / "sub" / "fps.png", warmup=3)
+            self.assertIsNotNone(out)
+            self.assertTrue(Path(out).exists())          # parent dir auto-created
+            self.assertGreater(Path(out).stat().st_size, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,6 +51,15 @@ def write_fps_chart(per_frame_dt: list[float], out_path: str | Path, warmup: int
     if w > 0:
         plt.axvspan(-0.5, w - 0.5, color="orange", alpha=0.15,
                     label=f"warmup (first {w}, excluded)")
+        # Scale the y-axis to the post-warmup data. Model load and cuDNN
+        # algorithm selection make the first frames extreme outliers, and
+        # letting them set the range flattens the part you actually came to
+        # read. Warm-up frames stay plotted, just possibly off-scale.
+        kept_fps = fps[w:]
+        if kept_fps:
+            lo, hi = min(kept_fps), max(kept_fps)
+            pad = max(1.0, (hi - lo) * 0.15)
+            plt.ylim(max(0.0, lo - pad), hi + pad)
     if avg > 0:
         plt.axhline(avg, color="red", linestyle="--", linewidth=1.2,
                     label=f"avg (post-warmup) = {avg:.1f} FPS")
