@@ -38,7 +38,18 @@ else
 fi
 
 echo ">> Installing EdgeTAM (editable)"
-${PIP} install -e "${EDGETAM_DIR}"
+# --no-build-isolation is not optional on Jetson. With isolation, pip builds in
+# a fresh environment and resolves EdgeTAM's build requirements from PyPI --
+# including torch, whose aarch64 PyPI wheel is CPU-only and would either waste a
+# multi-GB download or shadow the JetPack-matched wheel you just installed.
+# Without isolation the build sees the already-installed, correct torch.
+#
+# SAM2_BUILD_CUDA=0 skips compiling the optional sam2._C extension (nvcc, slow,
+# and prone to failing on Jetson). It only backs fill_holes_in_mask_scores,
+# which this pipeline never calls -- fill_hole_area defaults to 0. Override with
+# SAM2_BUILD_CUDA=1 if you need it.
+${PIP} install -q setuptools wheel
+SAM2_BUILD_CUDA="${SAM2_BUILD_CUDA:-0}" ${PIP} install -e "${EDGETAM_DIR}" --no-build-isolation
 
 # EdgeTAM's RepViT trunk hardcodes pretrained=True, which forces a download of
 # the ImageNet RepViT weights from HuggingFace at model-build time. Those
