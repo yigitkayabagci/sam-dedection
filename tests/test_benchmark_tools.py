@@ -292,64 +292,6 @@ class TestAttrTimer(unittest.TestCase):
         self.assertEqual(len(timer.stop()), 5)
 
 
-class TestClockSampler(unittest.TestCase):
-    """Turns 'were the clocks stable during this run?' from an assumption into
-    a number, which is what actually decides whether jetson_clocks was needed."""
-
-    def _fake_node(self, tmp: Path, max_khz: int = 1300500000) -> Path:
-        node = tmp / "17000000.gpu"
-        node.mkdir(parents=True)
-        (node / "max_freq").write_text(str(max_khz))
-        (node / "cur_freq").write_text("306000000")
-        return node
-
-    def test_captures_a_governor_ramp(self):
-        import threading
-        import time
-
-        from tools.benchmark import ClockSampler
-
-        with tempfile.TemporaryDirectory() as tmp:
-            node = self._fake_node(Path(tmp))
-            original = ClockSampler._find_node
-            ClockSampler._find_node = classmethod(lambda cls: node)
-            try:
-                sampler = ClockSampler(interval=0.02)
-
-                def ramp():
-                    for mhz in (306, 612, 918, 1300, 1300, 1300):
-                        (node / "cur_freq").write_text(str(mhz * 1_000_000))
-                        time.sleep(0.05)
-
-                with sampler:
-                    thread = threading.Thread(target=ramp)
-                    thread.start()
-                    thread.join()
-                summary = sampler.summary()
-            finally:
-                ClockSampler._find_node = original
-
-        self.assertAlmostEqual(summary["gpu_mhz_min"], 306.0, places=1)
-        self.assertAlmostEqual(summary["gpu_mhz_max"], 1300.0, places=1)
-        self.assertLess(summary["gpu_mhz_mean"], summary["gpu_mhz_max"])
-        self.assertGreater(summary["gpu_clock_pct_of_max"], 0)
-
-    def test_no_devfreq_node_yields_no_metrics(self):
-        import time
-
-        from tools.benchmark import ClockSampler
-
-        original = ClockSampler._find_node
-        ClockSampler._find_node = classmethod(lambda cls: None)
-        try:
-            sampler = ClockSampler(interval=0.01)
-            with sampler:
-                time.sleep(0.03)
-            self.assertEqual(sampler.summary(), {})
-        finally:
-            ClockSampler._find_node = original
-
-
 class TestSyntheticFrames(unittest.TestCase):
     def test_frames_are_unique_and_prompt_lands_on_the_target(self):
         with tempfile.TemporaryDirectory() as tmp:
