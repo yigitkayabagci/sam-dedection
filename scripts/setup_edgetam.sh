@@ -48,7 +48,12 @@ echo ">> Installing EdgeTAM (editable)"
 # and prone to failing on Jetson). It only backs fill_holes_in_mask_scores,
 # which this pipeline never calls -- fill_hole_area defaults to 0. Override with
 # SAM2_BUILD_CUDA=1 if you need it.
-${PIP} install -q setuptools wheel
+# -U matters: a venv created by ensurepip on Ubuntu 22.04 ships setuptools
+# 59.6, which predates PEP 660. Without an upgrade the editable install fails
+# with "build backend is missing the 'build_editable' hook", and a plain
+# (non-editable) install would silently copy the sources -- leaving the two
+# patches applied below with no effect on what actually gets imported.
+${PIP} install -q -U setuptools wheel
 SAM2_BUILD_CUDA="${SAM2_BUILD_CUDA:-0}" ${PIP} install -e "${EDGETAM_DIR}" --no-build-isolation
 
 # EdgeTAM's RepViT trunk hardcodes pretrained=True, which forces a download of
