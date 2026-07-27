@@ -47,6 +47,8 @@ class EdgeTAMTracker(VideoTracker):
         mask_threshold: float = 0.0,
         offload_video_to_cpu: bool = False,
         offload_state_to_cpu: bool = False,
+        compile_image_encoder: bool = False,
+        compile_mode: str = "default",
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -59,6 +61,9 @@ class EdgeTAMTracker(VideoTracker):
         self.mask_threshold = mask_threshold
         self.offload_video_to_cpu = offload_video_to_cpu
         self.offload_state_to_cpu = offload_state_to_cpu
+        self.compile_image_encoder = compile_image_encoder
+        self.compile_mode = compile_mode
+        self.compiled = False
         self._predictor = None
         self._state = None
 
@@ -82,6 +87,19 @@ class EdgeTAMTracker(VideoTracker):
         self._predictor = build_sam2_video_predictor(
             self.model_cfg, self.checkpoint, device=self.device
         )
+        if self.compile_image_encoder:
+            # A TensorRT-free speed knob for the same block TRT targets, so the
+            # two are directly comparable. Note that torch.compile is lazy: if
+            # inductor/triton is broken on this aarch64 build the error surfaces
+            # on the first forward, not here. That is on purpose — a benchmark
+            # variant should fail loudly rather than quietly run eager.
+            try:
+                self._predictor.image_encoder = torch.compile(
+                    self._predictor.image_encoder, mode=self.compile_mode
+                )
+                self.compiled = True
+            except Exception as exc:
+                print(f"[edgetam] torch.compile setup failed ({exc}); running eager.")
 
     def _inference_ctx(self):
         """Enter inference_mode + autocast together, mirroring vos_inference.py."""

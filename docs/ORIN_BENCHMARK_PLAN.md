@@ -1,0 +1,414 @@
+# Jetson Orin AGX — EdgeTAM Benchmark & Quantization Planı
+
+Hedef: EdgeTAM video tracking pipeline'ını Orin AGX üzerinde **çalışır hale
+getirmek**, sonra **kademeli olarak hızlandırmak**, ve her adımda **hız +
+doğruluk** ölçümünü yan yana koyan tek bir benchmark tablosu üretmek.
+
+Sıra bilinçli olarak "önce doğru, sonra hızlı":
+
+```
+Faz 0  Ortam sağlığı        -> scripts/jetson_doctor.py
+Faz 1  PyTorch baseline     -> referans FPS + referans maske (altın standart)
+Faz 2  ONNX export          -> sayısal parite kontrolü
+Faz 3  TRT float            -> fp32 / tf32 / fp16 / bf16
+Faz 4  TRT INT8 (PTQ)       -> kalibrasyonlu, doğruluk kaybı ölçülü
+Faz 5  İleri knob'lar       -> best / sparsity / DLA / CUDA graph
+Faz 6  Kapsam genişletme    -> encoder dışı bloklar (opsiyonel)
+Faz 7  Rapor                -> tek tablo, karar
+```
+
+Her fazın çıktısı bir sonraki fazın girdisidir. Bir faz yeşile dönmeden
+sonrakine geçilmez — aksi halde hata kaynağını izole edemeyiz.
+
+---
+
+## 1. Donanım gerçekleri: Orin AGX'de ne mümkün, ne değil
+
+Orin AGX GPU'su **Ampere, compute capability 8.7 (sm_87)**. Bu, quantization
+matrisini doğrudan belirliyor. Var olmayan bir modu denemek için zaman
+harcamayalım:
+
+| Mod | Orin AGX (sm_87) | Not |
+|---|---|---|
+| FP32 | ✅ | Referans; en yavaş |
+| TF32 | ✅ | Ampere'de TRT varsayılan olarak **açık**. "FP32 baseline" ölçerken `--noTF32` ile kapatmazsan aslında TF32 ölçersin |
+| FP16 | ✅ | Tensor Core; ana kazanç burada |
+| BF16 | ✅ | TRT ≥ 8.6. FP16'dan genelde **daha hızlı değil**, sadece daha geniş dinamik aralık |
+| INT8 | ✅ | Tensor Core. Kalibrasyon **zorunlu** |
+| INT8 + FP16 mixed | ✅ | TRT katman bazında seçer (`best`) |
+| 2:4 Structured Sparsity | ✅ | Ancak ağırlıklar sparsity-aware eğitilmediyse kazanç ~0 |
+| FP8 | ❌ | Ada (sm_89) / Hopper+ gerektirir. TRT build hata verir |
+| INT4 / NVFP4 | ❌ | Blackwell sınıfı. Orin'de yok |
+| DLA v2 (2 çekirdek) | ✅ | Sadece FP16/INT8. Desteklenmeyen katman → GPU fallback şart |
+
+**Sonuç:** gerçek quantization matrisimiz `fp32 → tf32 → fp16 → bf16 → int8 →
+int8+fp16(best)`, artı ortogonal knob'lar (sparsity, DLA, CUDA graph).
+FP8/INT4 planın dışında — donanım desteklemiyor.
+
+### Neyi quantize ediyoruz?
+
+Şu an TRT'ye taşınan tek blok **image encoder** (RepViT trunk + FPN neck).
+Sebep: per-frame maliyetin baskın kısmı orada ve statik shape'li
+(`1x3x1024x1024`) — export'u temiz. Memory attention (2D Perceiver) ve mask
+decoder PyTorch'ta kalıyor; dinamik shape'li ve object sayısına bağlılar.
+
+Bu, **Amdahl tavanı** demek: encoder toplam sürenin %X'i ise, encoder'ı
+sonsuz hızlandırsan bile toplam hızlanma `1/(1-X)` ile sınırlı. Bu yüzden
+Faz 1'de encoder/geri-kalan ayrımını ölçüyoruz (`tools/benchmark.py`
+`encoder_ms` / `rest_ms` kolonları) — o oran, INT8'e ne kadar emek vermeye
+değeceğini söyler. Faz 6 bu tavanı kaldırmakla ilgili.
+
+---
+
+## 2. Ölçüm metodolojisi (bunu atlarsak tüm sayılar çöp)
+
+Jetson'da ölçüm hijyeni, optimizasyonun kendisi kadar önemli. Kurallar:
+
+1. **Güç modu sabit.** Her ölçümden önce:
+   ```bash
+   sudo nvpmodel -m 0        # MAXN
+   sudo jetson_clocks         # saatleri tavana kilitle
+   sudo nvpmodel -q           # doğrula
+   ```
+   Bunu yapmadan alınan iki ölçüm arasında %30-50 fark çıkabilir.
+2. **Termal denge.** Arka arkaya build + benchmark koşarsan ikinci koşu
+   throttle yiyebilir. Benchmark öncesi ~30 sn boşta bekle; `tegrastats`
+   ile sıcaklığı kaydet (`--tegrastats` bayrağı bunu otomatik yapıyor).
+3. **Warm-up hariç.** İlk 10-20 kare model yükleme + CUDA context + cuDNN
+   algoritma seçimi içerir. `--warmup 10` varsayılanı bunu atar.
+4. **Render ve disk I/O hariç.** `tools/benchmark.py` maske çizmez, video
+   yazmaz. `cli.py --fps-chart` ile alınan FPS *uçtan uca* FPS'tir ve
+   benchmark FPS'inden düşüktür — ikisini karıştırma.
+5. **Kareler bir kez açılır.** Tüm varyantlar aynı JPG cache dizinini
+   kullanır; decode maliyeti sabitlenir.
+6. **Tekrar + medyan.** `--repeat 3`, medyan raporlanır. Tek koşuya bakma.
+7. **Sessiz fallback yasak.** `configs/*_trt*.yaml` içinde benchmark için
+   **`strict: true`**. Aksi halde engine yüklenemediğinde tracker sessizce
+   PyTorch'a düşer ve "TRT sonucu" diye PyTorch sayısı raporlarsın. Bu, bu
+   tür çalışmalarda en sık yapılan ölçüm hatasıdır.
+8. **Doğruluk her zaman hızla birlikte.** Her varyant `--dump-masks` ile
+   maskelerini kaydeder; `tools/compare_masks.py` FP32 PyTorch baseline'a
+   karşı IoU verir. IoU'suz FPS tablosu karar aldırmaz.
+
+### Raporlanan metrikler
+
+| Metrik | Anlamı |
+|---|---|
+| `fps_median` | Warm-up sonrası, render hariç propagate FPS (medyan) |
+| `latency_p50/p95_ms` | Kare başına gecikme dağılımı; p95 jitter'ı gösterir |
+| `encoder_ms` | Image encoder'da geçen süre (CUDA-senkron ölçülür) |
+| `rest_ms` | Memory attention + mask decoder + kalan |
+| `peak_torch_mb` | `torch.cuda.max_memory_allocated` |
+| `device_used_mb` | `cuda.mem_get_info` deltası (TRT arena dahil) |
+| `mean_iou` | FP32 PyTorch baseline'a karşı ortalama maske IoU |
+| `iou_below_0.9_pct` | IoU < 0.9 olan karelerin yüzdesi (drift yakalar) |
+| `engine_mb`, `build_s` | Engine boyutu ve derleme süresi |
+
+---
+
+## 3. Fazlar
+
+### Faz 0 — Ortam sağlığı
+
+```bash
+python3 scripts/jetson_doctor.py            # insan-okur rapor
+python3 scripts/jetson_doctor.py --json > env.json
+```
+
+Doctor şunları doğrular: L4T/JetPack sürümü, güç modu, CUDA, cuDNN,
+TensorRT (hem python modülü hem `trtexec`), PyTorch'un **Jetson wheel'i mi
+yoksa PyPI x86/CPU wheel'i mi** olduğu, venv'in `--system-site-packages` ile
+açılıp açılmadığı, onnx/onnxruntime, sam2 (EdgeTAM) importu ve checkpoint.
+
+Her başarısız kontrol için ekrana somut bir `FIX:` satırı basar. Doctor
+`BLOCKER` ile çıkarsa Faz 1'e geçme.
+
+**Çıkış kriteri:** `torch.cuda.is_available() == True`, cihaz `sm_87`,
+`import tensorrt` çalışıyor, `trtexec` bulunuyor, `import sam2` çalışıyor.
+
+### Faz 1 — PyTorch baseline (altın standart)
+
+Amaç: TRT'yi hiç karıştırmadan modelin doğru çalıştığını görmek ve
+karşılaştıracağımız referans maskeleri üretmek.
+
+```bash
+# 1) Doğruluk referansı: fp32, deterministik
+python3 tools/benchmark.py \
+  --video samples/synthetic_car.mp4 \
+  --prompt-file samples/synthetic_car_box.json \
+  --variants pytorch_fp32 \
+  --dump-masks runs/baseline_fp32.npz \
+  --out runs/phase1
+
+# 2) Hız referansları
+python3 tools/benchmark.py ... --variants pytorch_fp32,pytorch_fp16,pytorch_bf16
+```
+
+Burada `encoder_ms / rest_ms` oranını not al — Faz 3-4'ün beklenen kazanç
+tavanı bu.
+
+**Çıkış kriteri:** üç precision da çöküyor değil, maskeler görsel olarak
+doğru (`cli.py` ile bir çıktı videosu üretip bak), `baseline_fp32.npz` var.
+
+### Faz 2 — ONNX export + parite
+
+```bash
+python3 tools/export_image_encoder_onnx.py \
+  --checkpoint third_party/EdgeTAM/checkpoints/edgetam.pt \
+  --output models/edgetam_image_encoder.onnx \
+  --verify        # onnxruntime CPU ile FP32 parite (< 1e-3)
+```
+
+Notlar:
+- Export **CPU'da ve FP32** yapılır. ONNX'i fp16'a çevirmeye çalışma —
+  precision kararını TRT'ye bırak; QDQ olmayan bir fp16 ONNX, TRT'nin
+  katman bazında karar verme yeteneğini elinden alır.
+- ONNX **donanımdan bağımsız**. İstersen x86 makinede export edip `.onnx`
+  dosyasını Orin'e kopyalayabilirsin. **`.engine` ise donanıma özgüdür**,
+  mutlaka Orin'de üretilmeli.
+- Statik shape (`dynamic_axes=None`) bilinçli: TRT statik shape'te daha
+  agresif optimize ediyor ve CUDA graph'ı mümkün kılıyor.
+
+**Çıkış kriteri:** `--verify` max abs diff < 1e-3.
+
+### Faz 3 — TensorRT float varyantları
+
+```bash
+# FP16 (asıl beklenen kazanç)
+python3 tools/build_trt_engine.py \
+  --onnx models/edgetam_image_encoder.onnx \
+  --engine models/enc_fp16.engine --precision fp16
+
+# Dürüst FP32 baseline (TF32 kapalı!)
+python3 tools/build_trt_engine.py ... --engine models/enc_fp32.engine --precision fp32
+
+# TF32 (Ampere varsayılanı) ve BF16
+python3 tools/build_trt_engine.py ... --precision tf32
+python3 tools/build_trt_engine.py ... --precision bf16
+```
+
+Builder her engine'in yanına `<engine>.json` yazar: TRT sürümü, bayraklar,
+build süresi, engine boyutu. Bu, sonradan "bu engine neyle üretilmişti"
+sorusunu ortadan kaldırır.
+
+Sonra benchmark:
+```bash
+python3 tools/benchmark.py ... --variants trt_fp32,trt_tf32,trt_fp16,trt_bf16 \
+  --dump-masks-dir runs/phase3
+python3 tools/compare_masks.py runs/baseline_fp32.npz runs/phase3/trt_fp16.npz
+```
+
+**Çıkış kriteri:** `trt_fp16` çalışıyor, `mean_iou > 0.98`, FPS > PyTorch fp16.
+IoU beklenenden düşükse Faz 3'ün hata tablosuna bak (NaN/overflow bölümü).
+
+### Faz 4 — INT8 post-training quantization
+
+INT8'in tek kritik noktası **kalibrasyon**: TRT her tensöre bir dinamik
+aralık atamalı. Kalibrasyonsuz `--int8` verirsen TRT tüm aralıkları 1.0
+kabul eder ve çıktı çöp olur (boş maske / rastgele maske). Bu, "INT8
+çalışmıyor" diye rapor edilen vakaların çoğunun sebebidir.
+
+Kalibrasyon verisi **gerçek sahne kareleri** olmalı ve modele girenle
+**bit-bit aynı preprocessing**'den geçmeli (1024x1024 PIL resize, /255,
+SAM2 mean/std). `tools/calibration.py` bunu EdgeTAM'in kendi
+`_load_img_as_tensor` akışını taklit ederek yapıyor.
+
+```bash
+python3 tools/build_trt_engine.py \
+  --onnx models/edgetam_image_encoder.onnx \
+  --engine models/enc_int8.engine \
+  --precision int8 \
+  --calib-video samples/synthetic_car.mp4 \
+  --calib-num 200 \
+  --calib-cache models/enc_int8.calib
+
+# INT8 + FP16 karışık: TRT hangi katmanın INT8 kaldırdığına kendi karar verir
+python3 tools/build_trt_engine.py ... --precision int8-fp16 --calib-cache models/enc_int8.calib
+```
+
+Kalibrasyon seti kuralları:
+- 100-500 kare yeter; daha fazlası nadiren yardım eder.
+- **Benchmark videosundan farklı** kareler kullan (kendi test setine
+  kalibre etme). Aynı sahnenin başka bölümü ya da başka bir çekim ideal.
+- Sahne çeşitliliği önemli: aydınlık/karanlık, farklı ölçek.
+- `--calib-cache` üretildikten sonra tekrar build'lerde veri gerekmez,
+  cache yeter (build çok hızlanır). Model/ONNX değişirse cache'i sil.
+
+**Çıkış kriteri:** `trt_int8` çalışıyor ve `mean_iou` raporlandı. IoU düşükse
+(< 0.95) bu bir başarısızlık değil, bir **bulgu**: kalibrasyon setini
+büyüt/çeşitlendir, sonra `int8-fp16` karışık moda geç, sonra hassas
+katmanları FP16'ya sabitle (Faz 5).
+
+### Faz 5 — İleri knob'lar
+
+| Knob | Komut | Beklenti |
+|---|---|---|
+| `best` (TRT hepsini dener) | `--precision best --calib-cache ...` | int8-fp16'ya yakın |
+| 2:4 sparsity | `--sparsity` | Ağırlıklar sparse eğitilmediyse ~%0. Ölç ve geç |
+| DLA | `--dla-core 0 --allow-gpu-fallback` | GPU'yu boşaltır, tek başına daha yavaş olabilir; çok-akışlı senaryoda değerli |
+| CUDA graph | `configs/*.yaml: use_cuda_graph: true` | Küçük/statik grafta launch overhead'i siler, %5-15 |
+| Katman hassasiyeti | `--fp16-layers <regex>` | INT8'te IoU'yu kurtarmak için ilk/son katmanları FP16'da tut |
+| `builderOptimizationLevel` | `--opt-level 5` | Daha uzun build, biraz daha hızlı engine |
+
+CUDA graph, statik shape'li encoder için ucuz bir kazanç: engine tek bir
+graph olarak yakalanıp replay ediliyor, per-launch CPU overhead'i kalkıyor.
+Orin'in CPU'su nispeten zayıf olduğu için Jetson'da x86'dan daha çok fark
+eder.
+
+### Faz 6 — Kapsam genişletme (opsiyonel, "başka case'ler")
+
+Encoder'ı hızlandırdıktan sonra `rest_ms` baskın hale gelirse sıradaki
+hedefler:
+
+1. **Mask decoder** → ONNX/TRT. Statik'e yakın; prompt embedding + iki
+   ufak transformer bloğu. Orta zorluk.
+2. **Memory attention (2D Perceiver)** → en zoru. Memory bank uzunluğu
+   kare sayısıyla değişiyor → dinamik shape profili (`min/opt/max`)
+   gerekiyor. Sabit pencere (`num_maskmem`) varsayımıyla statikleştirmek
+   pratik bir kaçamak.
+3. **PyTorch tarafı ucuz kazançlar** (TRT'siz): `channels_last`,
+   `torch.compile(mode="max-autotune")`, `sdpa` backend seçimi. Bunlar
+   `rest_ms` için TRT'den daha az emekle kazanç verebilir — matrise
+   `pytorch_compile` varyantı olarak eklendi.
+4. **Girdi çözünürlüğü.** 1024 → 512 encoder maliyetini ~4x düşürür ama
+   doğruluğu ciddi etkiler. Quantization değil ama aynı hız/doğruluk
+   eğrisinde bir nokta; tabloya koymaya değer.
+
+### Faz 7 — Rapor
+
+```bash
+python3 tools/benchmark.py --report runs/ --out runs/final_report.md
+```
+
+Tüm varyant JSON'larını tarayıp tek markdown tablo + CSV üretir. Karar
+kuralı: **`mean_iou ≥ 0.98` kısıtı altında en yüksek `fps_median`.**
+
+---
+
+## 4. Hedef benchmark matrisi
+
+| # | Varyant | Encoder | Precision | Not |
+|---|---|---|---|---|
+| 1 | `pytorch_fp32` | PyTorch | fp32 | Altın standart (IoU referansı) |
+| 2 | `pytorch_fp16` | PyTorch | autocast fp16 | |
+| 3 | `pytorch_bf16` | PyTorch | autocast bf16 | Repo'nun mevcut varsayılanı |
+| 4 | `pytorch_compile` | PyTorch | bf16 + `torch.compile` | Faz 6 |
+| 5 | `trt_fp32` | TensorRT | fp32 (TF32 kapalı) | Dürüst TRT tabanı |
+| 6 | `trt_tf32` | TensorRT | tf32 | Ampere varsayılanı |
+| 7 | `trt_fp16` | TensorRT | fp16 | Ana aday |
+| 8 | `trt_bf16` | TensorRT | bf16 | |
+| 9 | `trt_int8` | TensorRT | int8 (PTQ) | Kalibrasyonlu |
+| 10 | `trt_int8_fp16` | TensorRT | int8+fp16 | Karışık |
+| 11 | `trt_best` | TensorRT | best | TRT seçsin |
+| 12 | `trt_fp16_sparse` | TensorRT | fp16 + 2:4 | Ölç ve muhtemelen ele |
+| 13 | `trt_fp16_graph` | TensorRT | fp16 + CUDA graph | Launch overhead testi |
+| 14 | `trt_int8_dla` | DLA | int8 + GPU fallback | Opsiyonel |
+
+---
+
+## 5. Bilinen sorunlar → çözüm
+
+Orin'de bu pipeline'ı ayağa kaldırırken en sık çarpılan duvarlar. Doctor
+scripti bunların çoğunu önden yakalar.
+
+### 5.1 Kurulum / CUDA
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| `torch.cuda.is_available() == False` | PyPI'dan `pip install torch` yapılmış — o wheel aarch64'te CPU-only | JetPack'e eşleşen NVIDIA wheel'i kur (`https://developer.download.nvidia.com/compute/redist/jp/` ya da jetson-ai-lab pip index). PyPI torch'u **önce kaldır** |
+| `OSError: libcudart.so.12: cannot open shared object file` | CUDA runtime yolda değil / sürüm uyuşmuyor | `export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH`; `ls -l /usr/local/cuda` ile symlink'in doğru sürüme baktığını doğrula |
+| `RuntimeError: operator torchvision::nms does not exist` | torch ↔ torchvision sürüm çifti uyumsuz | torchvision'ı **o torch sürümüyle** kaynaktan derle ya da eşleşen Jetson wheel'ini al |
+| `numpy.core.multiarray failed to import` / ABI hataları | Jetson torch wheel'i numpy 1.x'e derlenmiş, ortamda numpy 2.x var | `pip install "numpy<2"` |
+| venv içinde `ModuleNotFoundError: No module named 'tensorrt'` | JetPack TRT'yi apt ile `/usr/lib/python3.X/dist-packages` altına kurar; normal venv bunu görmez | venv'i `python3 -m venv --system-site-packages .venv` ile yeniden oluştur (en temiz yol). Alternatif: `tensorrt*` ve `libnvinfer*` dizinlerini venv'in `site-packages`'ına symlink'le |
+| `import sam2` çalışmıyor | EdgeTAM editable kurulmamış | `bash scripts/setup_edgetam.sh` |
+| Hydra: `Cannot find primary config 'configs/edgetam.yaml'` | `model_cfg` bir **dosya yolu değil**, sam2 paketi içindeki Hydra config adı | Değeri olduğu gibi bırak; `cli.py` bilinçli olarak bu anahtarı path'e çevirmiyor. EdgeTAM'in editable kurulu olduğunu doğrula |
+| RepViT ağırlıkları indirilmeye çalışılıyor / SSL hatası | timm trunk `pretrained=True` | `setup_edgetam.sh` bunu `False`'a çeviriyor; script'i çalıştır |
+| Multi-object'te `view size is not compatible...` | Perceiver'da `expand().view()` | `setup_edgetam.sh` `.reshape()`'e patch'liyor |
+| `decord` kurulamıyor | aarch64 wheel'i yok | Sorun değil: `--video-mode jpg` (auto zaten ona düşüyor). İstersen `eva-decord` kaynaktan |
+| Rastgele `CUDA error: an illegal memory access` | GPU bellek baskısı / uzun video | `offload_state_to_cpu: true`, `offload_video_to_cpu: true`; `CUDA_LAUNCH_BLOCKING=1` ile gerçek satırı bul |
+
+### 5.2 ONNX export
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| `Exporting the operator ... is not supported` | Opset düşük | `--opset 18` (varsayılan). TRT 10 opset 11+ okur |
+| `Expected 3 post-scalp FPN levels, got N` | Model config'inde farklı `scalp` | Wrapper'daki beklentiyi ayarla ya da config'i düzelt |
+| Parite testi > 1e-3 | Model `eval()` değil / tracing sapması | `build()` zaten `eval()` çağırıyor; dropout/BN'yi doğrula, tracer uyarılarını oku |
+| Export sırasında OOM | 1024x1024 tam grafik CPU'da izleniyor | Export'u x86 makinede yap, `.onnx`'i kopyala (donanımdan bağımsız) |
+
+### 5.3 TensorRT build
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| `trtexec: command not found` | Jetson'da PATH'te değil | `/usr/src/tensorrt/bin/trtexec` (build script'i bunu zaten deniyor) |
+| `Unsupported ONNX data type` / parser hatası | TRT sürümü ONNX opset'ten eski | TRT sürümünü doctor ile gör, gerekirse `--opset 17` ile yeniden export et |
+| `Error Code 2: OutOfMemory (no further information)` | Workspace veya sistem RAM'i yetmedi | `--workspace 2048` düşür; build sırasında başka iş çalıştırma; swap ekle |
+| Build 30+ dakika sürüyor | Her build'de taktik araması sıfırdan | `--timing-cache models/timing.cache` (builder varsayılan olarak yazıyor); `--opt-level 3` |
+| `The engine plan file is not compatible with this version of TensorRT` | Engine başka cihazda/TRT sürümünde üretilmiş | Engine'i **Orin'de** yeniden üret. JetPack yükseltmesinden sonra tüm engine'leri sil |
+| FP16'da NaN / tamamen boş maske | Bir katmanda overflow | `--fp16-layers` ile o katmanları FP32'de tut; ya da `--precision bf16` (daha geniş aralık) |
+| INT8 çıktısı çöp | Kalibratör verilmemiş → tüm dinamik aralıklar 1.0 | `--calib-video`/`--calib-dir` ile gerçek kalibrasyon çalıştır. `--int8`'i tek başına asla kullanma |
+| INT8 build'i kalibrasyonu atlıyor | Eski/uyumsuz `--calib-cache` var | Cache'i sil, yeniden kalibre et |
+| DLA'da `Layer ... is not supported on DLA` | DLA katman kümesi sınırlı | `--allow-gpu-fallback` şart; yine de karma yürütme yavaş olabilir |
+| FP8 denemesi hata veriyor | sm_87'de FP8 yok | Matristen çıkar (bkz. §1) |
+
+### 5.4 Runtime
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| "TRT çalışıyor" ama FPS PyTorch ile aynı | `strict: false` iken engine yüklenemedi, sessizce PyTorch'a düşüldü | Benchmark configlerinde **`strict: true`**. Log'da `[edgetam_trt] falling back` satırını ara |
+| `TRT execute_async_v3 failed` | Input shape set edilmemiş / adres bağlanmamış | Runtime bunu yapıyor; engine'in gerçekten tek girişli olduğunu `--inspect` ile doğrula |
+| dtype mismatch / bozuk çıktı | Engine girişi fp16 beklerken fp32 tensor bağlanmış | Runtime artık girişi engine'in beklediği dtype'a çeviriyor. Engine'i `--inputIOFormats` olmadan kur (I/O fp32 kalsın) |
+| `conv_s0` çağrısında dtype hatası | TRT fp16 çıktı + autocast kapalı (precision fp32) | `trt_output_dtype: float32` (varsayılan `auto` bunu zaten yapıyor) |
+| CUDA graph capture başarısız | Yakalama sırasında dinamik allocation | Runtime kalıcı buffer kullanıyor; yine de olursa `use_cuda_graph: false` ile devam eder (fail-soft) |
+
+### 5.5 Ölçüm
+
+| Belirti | Sebep | Çözüm |
+|---|---|---|
+| Aynı komut iki farklı FPS veriyor | Güç modu / throttle | `nvpmodel -m 0` + `jetson_clocks`; `--repeat 3` medyan |
+| FPS beklenenden çok düşük | JPG decode ve overlay ölçüme dahil | `tools/benchmark.py` kullan (render yok); `cli.py` uçtan uca ölçer |
+| İlk koşu hep yavaş | Warm-up | `--warmup 10` |
+| TRT hızlandı ama toplam FPS az arttı | Amdahl: encoder toplamın küçük parçası | `encoder_ms`/`rest_ms` oranına bak, Faz 6'ya geç |
+
+---
+
+## 6. Komut referansı
+
+```bash
+# --- Faz 0
+python3 scripts/jetson_doctor.py
+sudo nvpmodel -m 0 && sudo jetson_clocks
+
+# --- Faz 1
+python3 tools/benchmark.py --video samples/synthetic_car.mp4 \
+    --prompt-file samples/synthetic_car_box.json \
+    --variants pytorch_fp32,pytorch_fp16,pytorch_bf16 \
+    --dump-masks-dir runs/phase1 --out runs/phase1
+
+# --- Faz 2
+python3 tools/export_image_encoder_onnx.py --verify \
+    --output models/edgetam_image_encoder.onnx
+
+# --- Faz 3
+for p in fp32 tf32 fp16 bf16; do
+  python3 tools/build_trt_engine.py --onnx models/edgetam_image_encoder.onnx \
+      --engine models/enc_$p.engine --precision $p
+done
+
+# --- Faz 4
+python3 tools/build_trt_engine.py --onnx models/edgetam_image_encoder.onnx \
+    --engine models/enc_int8.engine --precision int8 \
+    --calib-video samples/synthetic_car.mp4 --calib-num 200 \
+    --calib-cache models/enc_int8.calib
+
+# --- Faz 3-5 ölçüm
+python3 tools/benchmark.py --video samples/synthetic_car.mp4 \
+    --prompt-file samples/synthetic_car_box.json \
+    --variants all --dump-masks-dir runs/all --out runs/all
+
+# --- Doğruluk
+python3 tools/compare_masks.py runs/phase1/pytorch_fp32.npz runs/all/trt_int8.npz
+
+# --- Rapor
+python3 tools/benchmark.py --report runs/ --out runs/final_report.md
+```

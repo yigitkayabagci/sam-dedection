@@ -1,0 +1,137 @@
+# Benchmark matrix consumed by tools/benchmark.py.
+#
+#   python3 tools/benchmark.py --video ... --prompt-file ... --variants all
+#
+# `defaults` is merged into every variant; the variant wins on conflicts.
+# `tracker` selects the registry backend, everything else is passed to its
+# constructor verbatim. Variants whose engine/checkpoint is missing are
+# skipped with a reason instead of failing the whole run.
+#
+# IMPORTANT — what `precision` means per row:
+#   pytorch_* : the autocast dtype for the WHOLE model.
+#   trt_*     : the autocast dtype for the parts still running in PyTorch
+#               (memory attention + mask decoder). The image encoder's
+#               precision is baked into the .engine file. It is deliberately
+#               held at bfloat16 across every trt_* row so the only variable
+#               between them is the engine — otherwise you cannot attribute a
+#               speed change to the quantization.
+#
+# Orin AGX is Ampere (sm_87): there is no FP8 and no INT4 row, that hardware
+# does not exist on this board.
+
+defaults:
+  model_cfg: configs/edgetam.yaml       # Hydra config NAME resolved by sam2, not a path
+  checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+  device: cuda
+  mask_threshold: 0.0
+  offload_video_to_cpu: false
+  offload_state_to_cpu: false
+
+variants:
+
+  # ---- Phase 1: PyTorch ------------------------------------------------
+  pytorch_fp32:
+    tracker: edgetam
+    precision: float32
+    note: "Gold standard. Use its mask dump as the IoU reference for everything else."
+
+  pytorch_fp16:
+    tracker: edgetam
+    precision: float16
+
+  pytorch_bf16:
+    tracker: edgetam
+    precision: bfloat16
+    note: "The repo's default recipe (matches EdgeTAM's vos_inference.py)."
+
+  pytorch_compile:
+    tracker: edgetam
+    precision: bfloat16
+    compile_image_encoder: true
+    note: "torch.compile on the encoder. Needs a working inductor/triton on aarch64;
+           fails soft back to eager if unavailable."
+
+  # ---- Phase 3: TensorRT, float ---------------------------------------
+  # Build:  tools/build_trt_engine.py --precision <p> --engine models/enc_<p>.engine
+  trt_fp32:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp32.engine
+    strict: true
+    note: "TF32 disabled at build time — the honest FP32 TensorRT baseline."
+
+  trt_tf32:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_tf32.engine
+    strict: true
+
+  trt_fp16:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16.engine
+    strict: true
+    note: "Primary candidate."
+
+  trt_bf16:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_bf16.engine
+    strict: true
+
+  # ---- Phase 4: TensorRT, INT8 ----------------------------------------
+  # Build with a calibrator, never with a bare --int8:
+  #   tools/build_trt_engine.py --precision int8 --calib-video <clip.mp4> \
+  #       --calib-num 200 --calib-cache models/enc_int8.calib
+  trt_int8:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_int8.engine
+    strict: true
+
+  trt_int8_fp16:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_int8_fp16.engine
+    strict: true
+
+  trt_best:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_best.engine
+    strict: true
+
+  # ---- Phase 5: orthogonal knobs --------------------------------------
+  trt_fp16_sparse:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16_sparse.engine
+    strict: true
+    note: "2:4 structured sparsity. Expect ~0 gain unless the weights were
+           trained sparse — the point is to confirm that and move on."
+
+  trt_fp16_graph:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16.engine     # same engine as trt_fp16
+    strict: true
+    use_cuda_graph: true
+    note: "Isolates TensorRT's kernel-launch overhead. Same engine as trt_fp16,
+           so any delta is pure launch cost (Orin's CPU makes this visible)."
+
+  trt_fp16_nosync:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16.engine
+    strict: true
+    trt_synchronize: false
+    note: "Drops the defensive per-frame stream sync. Verify the IoU is
+           unchanged before believing the speedup."
+
+  trt_int8_dla:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_int8_dla.engine
+    strict: true
+    note: "Build with --dla-core 0 --allow-gpu-fallback. Often slower alone;
+           the value is freeing GPU for other work."

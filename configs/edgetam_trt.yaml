@@ -1,19 +1,45 @@
 # EdgeTAM with a TensorRT image-encoder engine. Use on Orin AGX after
-# building the engine (see tools/build_trt_engine.sh).
+# building the engine.
 #
 # Build steps:
-#   1) python tools/export_image_encoder_onnx.py \
-#        --output models/edgetam_image_encoder.onnx
-#   2) tools/build_trt_engine.sh \
-#        models/edgetam_image_encoder.onnx \
-#        models/edgetam_image_encoder.engine
-#   3) python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml ...
-engine_path: models/edgetam_image_encoder.engine
+#   1) python3 tools/export_image_encoder_onnx.py \
+#        --output models/edgetam_image_encoder.onnx --verify
+#   2) python3 tools/build_trt_engine.py \
+#        --onnx models/edgetam_image_encoder.onnx \
+#        --engine models/enc_fp16.engine --precision fp16
+#   3) python3 cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml ...
+#
+# For the full precision/quantization matrix use configs/bench_matrix.yaml
+# with tools/benchmark.py — see docs/ORIN_BENCHMARK_PLAN.md.
+engine_path: models/enc_fp16.engine
 model_cfg: configs/edgetam.yaml
 checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
 device: cuda
+
+# Autocast dtype for the parts NOT covered by the engine (memory attention,
+# mask decoder). The encoder's precision lives inside the .engine file.
 precision: bfloat16
 mask_threshold: 0.0
 offload_video_to_cpu: false
 offload_state_to_cpu: false
-strict: false                             # true = refuse silent fallback
+
+# true = refuse to silently fall back to PyTorch when the engine is missing or
+# fails to load. Always true when benchmarking: a silent fallback reports
+# PyTorch numbers under a TensorRT label.
+strict: true
+
+# Capture the engine execution into a CUDA graph. Removes TensorRT's
+# per-kernel launch overhead (noticeable on Orin's CPU) at the cost of one
+# device-to-device copy of the output features per frame. Measure both.
+use_cuda_graph: false
+
+# Defensive per-frame stream sync. Not strictly required — TensorRT enqueues on
+# the caller's stream — but it keeps a stray cross-stream read from producing
+# silently wrong masks. Set false only after confirming the IoU is unchanged.
+trt_synchronize: true
+
+# auto | keep | float32 | float16 | bfloat16
+# auto keeps the engine's native output dtype under autocast, and promotes to
+# float32 when precision: float32 (an fp16 engine feeding fp32 conv weights
+# outside autocast raises in sam_mask_decoder.conv_s0).
+trt_output_dtype: auto

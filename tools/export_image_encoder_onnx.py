@@ -17,14 +17,21 @@ Output: a single ONNX graph
 Positional encodings are NOT exported — they are deterministic functions
 of spatial size and re-generated in PyTorch on the consumer side.
 
+The export runs on CPU in FP32 on purpose. Do NOT convert the ONNX to fp16
+here — precision is TensorRT's decision to make per layer at build time, and
+a pre-cast graph takes that choice away. The resulting .onnx is hardware
+independent (export it on an x86 box and copy it over if that is faster);
+only the .engine is tied to the specific GPU and TensorRT version.
+
 Usage:
-    python tools/export_image_encoder_onnx.py \\
+    python3 tools/export_image_encoder_onnx.py \\
         --checkpoint third_party/EdgeTAM/checkpoints/edgetam.pt \\
-        --output     models/edgetam_image_encoder.onnx
+        --output     models/edgetam_image_encoder.onnx --verify
 """
 from __future__ import annotations
 
 import argparse
+import inspect
 from pathlib import Path
 from typing import Tuple
 
@@ -92,10 +99,7 @@ def main() -> int:
     for i, t in enumerate(sample):
         print(f"output[{i}] shape={tuple(t.shape)} dtype={t.dtype}")
 
-    torch.onnx.export(
-        model,
-        dummy,
-        args.output,
+    export_kwargs = dict(
         input_names=["image"],
         output_names=["backbone_fpn_0", "backbone_fpn_1", "backbone_fpn_2"],
         opset_version=args.opset,
@@ -103,6 +107,14 @@ def main() -> int:
         # Static shape; TensorRT builds a faster engine without dynamic axes.
         dynamic_axes=None,
     )
+    # Newer torch releases flipped torch.onnx.export's default to the dynamo
+    # exporter, which emits a different op set and carries dynamic-shape
+    # metadata. Pin the TorchScript tracer so the graph TensorRT sees does not
+    # change under us when the Jetson torch wheel is upgraded.
+    if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+        export_kwargs["dynamo"] = False
+
+    torch.onnx.export(model, dummy, args.output, **export_kwargs)
     print(f"wrote {args.output}  ({Path(args.output).stat().st_size / 1e6:.1f} MB)")
 
     if args.verify:

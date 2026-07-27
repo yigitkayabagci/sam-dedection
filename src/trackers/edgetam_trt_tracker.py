@@ -17,7 +17,8 @@ How:
        PositionEmbeddingSine on each level (deterministic, cheap).
 
 Falls back to plain EdgeTAM if `engine_path` is missing or `tensorrt` is
-not importable.
+not importable — set `strict: true` to forbid that. Benchmarks MUST use
+strict mode: a silent fallback reports PyTorch numbers under a TRT label.
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ from pathlib import Path
 
 from .edgetam_tracker import EdgeTAMTracker
 from .registry import register
+
+_OUTPUT_DTYPES = ("auto", "keep", "float32", "float16", "bfloat16")
 
 
 @register("edgetam_trt")
@@ -40,6 +43,9 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         offload_video_to_cpu: bool = False,
         offload_state_to_cpu: bool = False,
         strict: bool = False,
+        use_cuda_graph: bool = False,
+        trt_synchronize: bool = True,
+        trt_output_dtype: str = "auto",
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -50,9 +56,17 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             offload_video_to_cpu=offload_video_to_cpu,
             offload_state_to_cpu=offload_state_to_cpu,
         )
+        if trt_output_dtype not in _OUTPUT_DTYPES:
+            raise ValueError(
+                f"trt_output_dtype must be one of {_OUTPUT_DTYPES} (got {trt_output_dtype})"
+            )
         self.engine_path = engine_path
         self.strict = strict
+        self.use_cuda_graph = use_cuda_graph
+        self.trt_synchronize = trt_synchronize
+        self.trt_output_dtype = trt_output_dtype
         self._trt_engine = None
+        self.trt_active = False
 
     def _try_load_engine(self) -> bool:
         try:
@@ -69,7 +83,11 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             print(f"[edgetam_trt] engine not found at {engine_path}; falling back to PyTorch.")
             return False
         try:
-            self._trt_engine = TRTImageEncoder(engine_path)
+            self._trt_engine = TRTImageEncoder(
+                engine_path,
+                use_cuda_graph=self.use_cuda_graph,
+                synchronize=self.trt_synchronize,
+            )
             return True
         except Exception as e:
             if self.strict:
@@ -77,18 +95,38 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             print(f"[edgetam_trt] engine load failed ({e}); falling back to PyTorch.")
             return False
 
+    def _resolved_output_dtype(self):
+        """Which dtype the TRT features should be handed back as.
+
+        `auto` keeps the engine's native dtype when autocast is active (the
+        downstream convs will cast anyway) but promotes to float32 when it is
+        not — an fp16 engine feeding fp32 conv weights outside autocast raises
+        a dtype mismatch in `sam_mask_decoder.conv_s0`.
+        """
+        import torch
+
+        if self.trt_output_dtype == "keep":
+            return None
+        if self.trt_output_dtype == "auto":
+            return torch.float32 if self.precision == "float32" else None
+        return {"float32": torch.float32,
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16}[self.trt_output_dtype]
+
     def _patch_image_encoder(self) -> None:
         if self._trt_engine is None:
             return
         encoder = self._predictor.image_encoder
         neck_pos = encoder.neck.position_encoding
         trt_engine = self._trt_engine
+        cast_to = self._resolved_output_dtype()
 
         def trt_forward(image):
             # TRT engine outputs the same tensors the wrapper returned at
             # export time: post-scalp FPN levels. No scalp re-application.
-            f0, f1, f2 = trt_engine.infer(image)
-            features = [f0, f1, f2]
+            features = list(trt_engine.infer(image))
+            if cast_to is not None:
+                features = [f.to(cast_to) for f in features]
             # Recompute positional encodings in PyTorch (deterministic, cheap).
             pos = [neck_pos(f).to(f.dtype) for f in features]
             return {
@@ -98,6 +136,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             }
 
         encoder.forward = trt_forward  # type: ignore[assignment]
+        self.trt_active = True
 
     def prepare(self, frames_dir: str | Path) -> None:
         self._ensure_predictor()

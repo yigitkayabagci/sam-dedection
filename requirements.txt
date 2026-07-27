@@ -1,14 +1,16 @@
 # Core deps. On Jetson Orin AGX install torch/torchvision from the NVIDIA
 # JetPack-specific wheels BEFORE running pip install -r requirements.txt:
 #   https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/
-# Do not install torch/torchvision from PyPI on Jetson.
+# Do not install torch/torchvision from PyPI on Jetson: the aarch64 wheel there
+# is CPU-only, so torch.cuda.is_available() comes back False.
+# Run `python3 scripts/jetson_doctor.py` to check all of this at once.
 
-numpy>=1.24
+numpy>=1.24            # pin to <2 if the Jetson torch wheel was built against 1.x
 opencv-python>=4.8
 Pillow>=10.0
 pyyaml>=6.0
 tqdm>=4.66
-matplotlib>=3.7        # --fps-chart per-frame FPS plot
+matplotlib>=3.7        # --fps-chart, and tools/compare_masks.py --chart
 
 # EdgeTAM's image encoder trunk (RepViT) is a timm model; required for the
 # backbone to instantiate.
@@ -16,3 +18,12 @@ timm>=1.0
 
 # EdgeTAM itself is installed from source via scripts/setup_edgetam.sh
 # (it pulls in hydra-core, iopath, etc.).
+
+# --- Optimization path (docs/ORIN_BENCHMARK_PLAN.md) ---------------------
+# onnx        : needed by tools/export_image_encoder_onnx.py (Phase 2)
+# onnxruntime : only for that script's --verify parity check. On Jetson use
+#               NVIDIA's onnxruntime-gpu build, not the PyPI wheel.
+# tensorrt    : do NOT pip install on Jetson — it comes from JetPack via apt.
+#               A plain venv cannot see it; create the venv with
+#               `python3 -m venv --system-site-packages .venv`.
+onnx>=1.15
