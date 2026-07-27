@@ -372,7 +372,87 @@ scripti bunların çoğunu önden yakalar.
 
 ---
 
-## 6. Komut referansı
+## 6. TensorRT çıktısı repoyla uyuşmuyorsa: hangi dosya?
+
+Engine'in gerçekte ne ürettiği ile repodaki tüketici kodun beklediği şey
+ayrıştığında, düzeltilecek yer neredeyse her zaman şu dört dosyadan biri.
+`python3 tools/build_trt_engine.py --inspect models/enc_fp16.engine` çıktısı
+(giriş/çıkış adları, shape'ler, dtype'lar) bu tabloya girmek için yeterli.
+
+| Belirti | Kök sebep | Düzeltilecek yer |
+|---|---|---|
+| `Expected exactly one input` | Engine'in birden fazla girişi var (export sırasında fazladan tensör kaçmış) | `tools/export_image_encoder_onnx.py` → `ImageEncoderWrapper.forward` tek tensör grubu döndürmeli |
+| Çıkış sayısı 3 değil | `scalp` farklı ya da FPN seviye sayısı değişmiş | Önce `export_image_encoder_onnx.py` → `ImageEncoderWrapper.forward` (`len(feats) != 3` kontrolü), sonra `src/trackers/edgetam_trt_tracker.py` → `trt_forward` içindeki `features[-1]` / `backbone_fpn` sözlüğü |
+| Çıkış **sırası** ters (en yüksek çözünürlük sonda) | ONNX output_names sırası | `export_image_encoder_onnx.py` → `output_names`; runtime sırayı isimden değil indeksten alıyor (`_trt_runtime._output_names`) |
+| `Engine tensor 'x' has TensorRT dtype ... no torch equivalent` | Engine I/O formatı standart dışı (ör. `--inputIOFormats=fp16:chw`) | Engine'i standart FP32 I/O ile yeniden kur. Gerçekten gerekiyorsa `src/trackers/_trt_runtime.py` → `_build_dtype_map` |
+| Maskeler boş/gürültü ama build başarılı | INT8 kalibrasyonsuz, ya da giriş dtype'ı yanlış bağlanmış | Kalibrasyon: `tools/build_trt_engine.py --calib-video ...`. Bağlama: `_trt_runtime.infer` girişi zaten çeviriyor, `--inspect` ile giriş dtype'ını doğrula |
+| `conv_s0` / `conv_s1` dtype hatası | Engine fp16 çıkarıyor, autocast kapalı | `configs/*.yaml` → `trt_output_dtype: float32` (veya `precision`'ı bfloat16 yap) |
+| `AttributeError: set_input_shape` / `execute_async_v3` | TensorRT 8.x API'si (JetPack 5) | `src/trackers/_trt_runtime.py` → `set_binding_shape` / `execute_async_v2` karşılıklarına çevir |
+| `create_builder_config` / `set_memory_pool_limit` yok | Aynı: TRT 8.x builder API'si | `tools/build_trt_engine.py` → `build()` |
+| Pozisyonel encoding shape'i tutmuyor | Neck'in `position_encoding`'i FPN seviyeleriyle eşleşmiyor | `edgetam_trt_tracker.py` → `trt_forward` içindeki `neck_pos(f)` döngüsü |
+| `--inspect` "not compatible with this version" | Engine başka TRT/GPU'da üretilmiş | Engine'i cihazda yeniden kur; kod değişikliği değil |
+
+Uyuşmazlığı bana getirirken en faydalı üç çıktı:
+`build_trt_engine.py --inspect <engine>`, `--dry-run` ile ONNX katman listesi,
+ve hatanın tam traceback'i.
+
+---
+
+## 7. Encoder tavanını kırmak
+
+TensorRT bugün sadece image encoder'ı kapsıyor. Faz 1 çıktısındaki
+`encoder_ms / rest_ms` bölünmesi, geri kalanı kovalamanın değip
+değmeyeceğini söyler:
+
+```
+Toplam hızlanma tavanı = 1 / (1 - encoder_payı)
+```
+
+`encoder_share_pct` %50 ise, encoder'ı sonsuz hızlandırsan bile uçtan uca
+en fazla 2x alırsın. `tools/benchmark.py` artık her bloğu ayrı ölçüyor
+(`enc / memattn / memenc / dec / other` kolonları), yani tavanı hangi
+bloğun tuttuğunu tahmin etmiyoruz — okuyoruz.
+
+Sıra, (kazanç / emek) oranına göre:
+
+**1. Bedava olanlar (kod zaten yazıldı ya da tek satır)**
+- Maske eşiği GPU'da alınıp `bool` transfer ediliyor (eskiden fp32 idi):
+  kare başına cihaz→host trafiği 4x azaldı. `other_ms` kolonunda görünür.
+- `use_cuda_graph: true` — TRT'nin kernel launch overhead'i. Orin'in CPU'su
+  görece zayıf olduğu için burada x86'dan daha çok kazanç var.
+- `offload_state_to_cpu: false` (64 GB unified memory'de gerek yok).
+
+**2. TensorRT'siz, orta emek**
+- `compile_image_encoder: true` (matriste `pytorch_compile`): aynı bloğu
+  TRT'siz hızlandırma denemesi, karşılaştırma noktası olarak değerli.
+- Aynı knob'u `memory_attention` ve `sam_mask_decoder` için de aç —
+  `torch.compile` orada launch overhead'ini eritir. `src/trackers/
+  edgetam_tracker.py` içinde `compile_image_encoder` ile aynı desende.
+- Girdi çözünürlüğü 1024 → 512: encoder FLOP'u ~4x düşer. Quantization
+  değil ama aynı hız/doğruluk eğrisinde bir nokta; IoU ile ölçüp tabloya koy.
+
+**3. Daha fazla bloğu TensorRT'ye taşımak (asıl tavan kırma)**
+Zorluk sırasına göre, çünkü hepsi aynı değil:
+
+| Blok | Zorluk | Neden |
+|---|---|---|
+| `memory_encoder` | Kolay | Girdileri sabit shape'li (pix_feat + mask), tek yönlü |
+| `sam_mask_decoder` | Orta | Batch = nesne sayısı → dinamik batch profili (`min=1, opt=1, max=8`) gerekir |
+| `memory_attention` (2D Perceiver) | Zor | Memory bank uzunluğu kare indeksiyle büyüyor. Ya `min/opt/max` dinamik profil, ya da `num_maskmem` penceresini sabitleyip statikleştirmek |
+
+Pratik yol: `memory_encoder` → `sam_mask_decoder` → `memory_attention`.
+Her biri `tools/export_image_encoder_onnx.py`'nin aynı desenini izler
+(dict yerine tuple döndüren bir wrapper + statik/profilli export), ve
+`edgetam_trt_tracker.py`'deki `_patch_image_encoder` ile aynı şekilde
+monkey-patch'lenir. Yani altyapı hazır; iş her bloğun gerçek imzasını
+çıkarmakta.
+
+Bunlara girmeden önce **Faz 1 ölçümünü görmek şart**: eğer `memattn_ms`
+zaten küçükse, en zor bloğu export etmek boşa emek olur.
+
+---
+
+## 8. Komut referansı
 
 ```bash
 # --- Faz 0

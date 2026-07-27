@@ -135,47 +135,95 @@ def build_frame_cache(video: str | None, frames_dir: str | None,
 # Instrumentation
 # --------------------------------------------------------------------------
 
-class EncoderTimer:
-    """Time image_encoder.forward with CUDA events (no per-call host sync)."""
+# The blocks worth attributing time to. `image_encoder` is the one already
+# moved to TensorRT; everything after it is what sets the Amdahl ceiling, so
+# knowing which of them is expensive is what decides whether exporting more
+# modules is worth the effort. Names that a given build does not have are
+# skipped, so this survives EdgeTAM/SAM2 structure differences.
+PROFILE_BLOCKS = (
+    "image_encoder",
+    "memory_attention",
+    "memory_encoder",
+    "sam_prompt_encoder",
+    "sam_mask_decoder",
+)
 
-    def __init__(self, predictor, device: str) -> None:
-        import torch
 
-        self._torch = torch
-        self._encoder = predictor.image_encoder
-        self._orig = self._encoder.forward
-        self._cuda = device == "cuda" and torch.cuda.is_available()
-        self._events: list[tuple] = []
-        self._cpu_seconds = 0.0
-        self.calls = 0
+class ModuleTimer:
+    """Time submodule forwards with CUDA events (no per-call host sync).
+
+    Events are recorded on the stream and only read back in `stop()`, so the
+    measurement perturbs the run by a couple of microseconds per call rather
+    than serialising it the way a `torch.cuda.synchronize()` per block would.
+    """
+
+    def __init__(self, predictor, device: str, names=PROFILE_BLOCKS) -> None:
+        # torch is only needed for the CUDA event path, so import it there —
+        # that keeps the timer usable (and testable) on a plain CPU box.
+        self._torch = None
+        self._cuda = False
+        if device == "cuda":
+            import torch
+
+            self._torch = torch
+            self._cuda = torch.cuda.is_available()
+        self._orig: dict[str, tuple] = {}
+        self._events: dict[str, list] = {}
+        self._cpu_ms: dict[str, list[float]] = {}
+        self._mark: dict[str, int] = {}
+
+        for name in names:
+            module = getattr(predictor, name, None)
+            if module is None or not hasattr(module, "forward"):
+                continue
+            self._install(name, module)
+
+    def _install(self, name: str, module) -> None:
+        torch = self._torch
+        original = module.forward
+        self._orig[name] = (module, original)
+        self._events[name] = []
+        self._cpu_ms[name] = []
+        events, cpu_ms = self._events[name], self._cpu_ms[name]
 
         if self._cuda:
-            def timed(image):
+            def timed(*args, **kwargs):
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
                 start.record()
-                out = self._orig(image)
+                out = original(*args, **kwargs)
                 end.record()
-                self._events.append((start, end))
-                self.calls += 1
+                events.append((start, end))
                 return out
         else:
-            def timed(image):
+            def timed(*args, **kwargs):
                 t0 = time.perf_counter()
-                out = self._orig(image)
-                self._cpu_seconds += time.perf_counter() - t0
-                self.calls += 1
+                out = original(*args, **kwargs)
+                cpu_ms.append((time.perf_counter() - t0) * 1000.0)
                 return out
 
-        self._encoder.forward = timed
+        module.forward = timed
 
-    def stop(self) -> list[float]:
-        """Restore the original forward and return per-call milliseconds."""
-        self._encoder.forward = self._orig
-        if not self._cuda:
-            return [self._cpu_seconds * 1000.0 / self.calls] * self.calls if self.calls else []
-        self._torch.cuda.synchronize()
-        return [s.elapsed_time(e) for s, e in self._events]
+    def mark(self) -> None:
+        """Warm-up boundary: only calls after this point are reported."""
+        for name in self._orig:
+            done = self._events[name] if self._cuda else self._cpu_ms[name]
+            self._mark[name] = len(done)
+
+    def stop(self) -> dict[str, list[float]]:
+        """Restore the original forwards and return post-mark call times (ms)."""
+        for module, original in self._orig.values():
+            module.forward = original
+        if self._cuda and any(self._events.values()):
+            self._torch.cuda.synchronize()
+        out: dict[str, list[float]] = {}
+        for name in self._orig:
+            start = self._mark.get(name, 0)
+            if self._cuda:
+                out[name] = [s.elapsed_time(e) for s, e in self._events[name][start:]]
+            else:
+                out[name] = self._cpu_ms[name][start:]
+        return out
 
 
 class TegrastatsSampler:
@@ -275,7 +323,7 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
             "silently reporting PyTorch numbers under a TRT label."
         )
 
-    timer = EncoderTimer(tracker._predictor, device)
+    timer = ModuleTimer(tracker._predictor, device)
     tracker.set_prompts(prompts)
 
     per_frame_dt: list[float] = []
@@ -290,6 +338,8 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
             now = time.perf_counter()
             per_frame_dt.append(now - t_prev)
             t_prev = now
+            if len(per_frame_dt) == warmup:
+                timer.mark()  # block timings start counting after warm-up too
             if dump_masks is not None and result.masks:
                 ids = sorted(result.masks)
                 if not obj_ids:
@@ -302,7 +352,7 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
             if max_frames is not None and len(per_frame_dt) >= max_frames:
                 break
 
-    encoder_ms = timer.stop()
+    block_calls = timer.stop()
     tracker.reset()
 
     peak_mb = device_mb = None
@@ -331,13 +381,19 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         print(f"[bench] masks -> {dump_masks} ({dump_masks.stat().st_size / 1e6:.1f} MB)")
 
     kept = per_frame_dt[warmup:] if len(per_frame_dt) > warmup else per_frame_dt
-    kept_enc = encoder_ms[warmup:] if len(encoder_ms) > warmup else encoder_ms
     total_s = sum(kept)
     latencies_ms = sorted(dt * 1000 for dt in kept)
     frame_mean_ms = statistics.fmean(latencies_ms) if latencies_ms else 0.0
-    # None rather than 0.0 when the encoder hook never fired (e.g. a wrapper we
-    # could not intercept) — a zero would read as "the encoder costs nothing".
-    enc_mean = statistics.fmean(kept_enc) if kept_enc else None
+    n_measured = max(1, len(kept))
+
+    # Per-block cost is reported per FRAME, not per call: a block invoked twice
+    # a frame costs the frame both invocations.
+    blocks_ms = {name: sum(calls) / n_measured
+                 for name, calls in block_calls.items() if calls}
+    # None rather than 0.0 when the hook never fired (e.g. a wrapper we could
+    # not intercept) — a zero would read as "the encoder costs nothing".
+    enc_mean = blocks_ms.get("image_encoder")
+    accounted = sum(blocks_ms.values())
 
     return {
         "frames_total": len(per_frame_dt),
@@ -346,10 +402,20 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         "fps": (len(kept) / total_s) if total_s > 0 else 0.0,
         "latency_p50_ms": _percentile(latencies_ms, 50),
         "latency_p95_ms": _percentile(latencies_ms, 95),
+        "frame_mean_ms": frame_mean_ms,
         "encoder_ms": enc_mean,
+        # What TensorRT does NOT cover today — the Amdahl ceiling in one number.
         "rest_ms": None if enc_mean is None else max(0.0, frame_mean_ms - enc_mean),
         "encoder_share_pct": (None if enc_mean is None or not frame_mean_ms
                               else 100 * enc_mean / frame_mean_ms),
+        "mem_attn_ms": blocks_ms.get("memory_attention"),
+        "mem_enc_ms": blocks_ms.get("memory_encoder"),
+        "mask_dec_ms": blocks_ms.get("sam_mask_decoder"),
+        "prompt_enc_ms": blocks_ms.get("sam_prompt_encoder"),
+        # Everything no timed block explains: the mask device->host copy, the
+        # Python loop, and EdgeTAM's state bookkeeping.
+        "unaccounted_ms": max(0.0, frame_mean_ms - accounted) if blocks_ms else None,
+        "blocks_ms": {k: round(v, 3) for k, v in blocks_ms.items()},
         "peak_torch_mb": peak_mb,
         "device_used_mb": device_mb,
         "load_seconds": load_s,
@@ -386,6 +452,10 @@ _COLUMNS = [
     ("p50 ms", "latency_p50_ms", "{:.2f}"),
     ("p95 ms", "latency_p95_ms", "{:.2f}"),
     ("enc ms", "encoder_ms", "{:.2f}"),
+    ("memattn ms", "mem_attn_ms", "{:.2f}"),
+    ("memenc ms", "mem_enc_ms", "{:.2f}"),
+    ("dec ms", "mask_dec_ms", "{:.2f}"),
+    ("other ms", "unaccounted_ms", "{:.2f}"),
     ("rest ms", "rest_ms", "{:.2f}"),
     ("enc %", "encoder_share_pct", "{:.0f}"),
     ("torch MB", "peak_torch_mb", "{:.0f}"),
@@ -569,6 +639,9 @@ def main() -> int:
                 if vals:
                     row[f"{key}_median" if key == "fps" else key] = round(
                         statistics.median(vals), 4)
+            # Kept verbatim from the first run: the full per-block breakdown is
+            # a dict, so the numeric median pass above skips it.
+            row["blocks_ms"] = runs[0].get("blocks_ms")
             attach_engine_metadata(row, kwargs)
         rows.append(row)
         (out_dir / f"{name}.result.json").write_text(json.dumps(row, indent=2))

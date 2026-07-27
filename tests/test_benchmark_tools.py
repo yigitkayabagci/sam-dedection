@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from tools.benchmark import (  # noqa: E402
+    ModuleTimer,
     build_frame_cache,
     csv_table,
     load_matrix,
@@ -128,6 +129,69 @@ class TestReportRendering(unittest.TestCase):
         self.assertAlmostEqual(_percentile(vals, 50), 50.5)
         self.assertAlmostEqual(_percentile(vals, 100), 100.0)
         self.assertEqual(_percentile([], 95), 0.0)
+
+
+class _FakeBlock:
+    def __init__(self, ms: float) -> None:
+        self.ms = ms
+
+    def forward(self, *args, **kwargs):
+        import time
+        time.sleep(self.ms / 1000.0)
+        return "out"
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+class _FakePredictor:
+    def __init__(self) -> None:
+        self.image_encoder = _FakeBlock(4.0)
+        self.memory_attention = _FakeBlock(2.0)
+        self.sam_mask_decoder = _FakeBlock(1.0)
+        # memory_encoder / sam_prompt_encoder absent on purpose: the timer must
+        # tolerate a predictor that does not expose every block.
+
+
+class TestModuleTimer(unittest.TestCase):
+    def _run(self, frames: int = 8, warmup: int = 3) -> tuple[dict, _FakePredictor]:
+        predictor = _FakePredictor()
+        timer = ModuleTimer(predictor, device="cpu")
+        for i in range(frames):
+            if i == warmup:
+                timer.mark()
+            predictor.image_encoder(1)
+            predictor.memory_attention(1)
+            predictor.sam_mask_decoder(1)
+            if i % 2 == 0:
+                predictor.sam_mask_decoder(1)  # some frames decode twice
+        return timer.stop(), predictor
+
+    def test_only_post_warmup_calls_are_reported(self):
+        result, _ = self._run(frames=8, warmup=3)
+        self.assertEqual(len(result["image_encoder"]), 5)
+        self.assertEqual(len(result["memory_attention"]), 5)
+
+    def test_blocks_called_twice_a_frame_are_all_counted(self):
+        result, _ = self._run(frames=8, warmup=3)
+        self.assertEqual(len(result["sam_mask_decoder"]), 7)
+
+    def test_absent_blocks_are_skipped(self):
+        result, _ = self._run()
+        self.assertNotIn("sam_prompt_encoder", result)
+        self.assertNotIn("memory_encoder", result)
+
+    def test_forwards_are_restored(self):
+        _, predictor = self._run()
+        for name in ("image_encoder", "memory_attention", "sam_mask_decoder"):
+            forward = getattr(predictor, name).forward
+            self.assertTrue(forward.__qualname__.startswith("_FakeBlock.forward"),
+                            f"{name}.forward was not restored: {forward}")
+
+    def test_relative_costs_are_preserved(self):
+        result, _ = self._run()
+        self.assertGreater(sum(result["image_encoder"]),
+                           sum(result["memory_attention"]))
 
 
 class TestFrameCache(unittest.TestCase):

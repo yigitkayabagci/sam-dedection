@@ -160,12 +160,14 @@ class EdgeTAMTracker(VideoTracker):
             raise RuntimeError("Call prepare() and set_prompts() before propagate().")
         with self._inference_ctx():
             for frame_idx, obj_ids, mask_logits in self._predictor.propagate_in_video(self._state):
-                # mask_logits: [N, 1, H, W] on the model's device.
-                # .float() is important when autocast returned bf16/fp16 logits.
-                logits_np = mask_logits.detach().float().cpu().numpy()
+                # mask_logits: [N, 1, H, W] at *video* resolution, on the model's
+                # device. Threshold on the GPU and copy bytes rather than floats —
+                # the comparison works directly on bf16/fp16 logits, and it makes
+                # the per-frame device->host transfer 4x smaller.
+                binary = mask_logits.detach() > self.mask_threshold
+                masks_np = binary[:, 0].cpu().numpy()
                 masks: dict[int, np.ndarray] = {
-                    int(obj_id): logits_np[i, 0] > self.mask_threshold
-                    for i, obj_id in enumerate(obj_ids)
+                    int(obj_id): masks_np[i] for i, obj_id in enumerate(obj_ids)
                 }
                 yield TrackingResult(frame_idx=int(frame_idx), masks=masks)
 
