@@ -78,6 +78,30 @@ def read_text(path: str) -> str:
         return ""
 
 
+# Importing torch or timm routinely prints warnings to stdout AND stderr --
+# NumPy ABI complaints, CUDA notices, deprecation notes. Picking the probe's
+# answer out by line index therefore reads a warning instead of the value, so
+# every probe tags its one real line with this sentinel.
+_PROBE = "__DOCTOR_JSON__"
+
+
+def run_probe(code: str, timeout: int = 120) -> dict | None:
+    """Run a Python snippet that emits `print(_PROBE + json.dumps(...))`.
+
+    Returns the decoded object, or None if the snippet failed or printed
+    nothing recognisable.
+    """
+    preamble = f"import json\ndef emit(d): print({_PROBE!r} + json.dumps(d))\n"
+    rc, out = run([sys.executable, "-c", preamble + code], timeout=timeout)
+    for line in out.splitlines():
+        if line.startswith(_PROBE):
+            try:
+                return json.loads(line[len(_PROBE):])
+            except ValueError:
+                return None
+    return None
+
+
 # --------------------------------------------------------------------------
 # Checks
 # --------------------------------------------------------------------------
@@ -343,27 +367,22 @@ def check_torch_shared_libs(r: Report) -> None:
 
 def check_torch(r: Report) -> None:
     r.start("pytorch")
-    code = (
-        "import json, torch;"
+    d = run_probe(
+        "import torch\n"
         "d=dict(version=torch.__version__, cuda=torch.version.cuda,"
-        "avail=torch.cuda.is_available(), file=torch.__file__,"
-        "archs=torch.cuda.get_arch_list());"
-        "d['name']=torch.cuda.get_device_name(0) if d['avail'] else None;"
-        "d['cap']=list(torch.cuda.get_device_capability(0)) if d['avail'] else None;"
-        "print(json.dumps(d))"
+        " avail=torch.cuda.is_available(), file=torch.__file__,"
+        " archs=torch.cuda.get_arch_list())\n"
+        "d['name']=torch.cuda.get_device_name(0) if d['avail'] else None\n"
+        "d['cap']=list(torch.cuda.get_device_capability(0)) if d['avail'] else None\n"
+        "emit(d)\n"
     )
-    rc, out = run([sys.executable, "-c", code], timeout=120)
-    if rc != 0:
-        r.add(BLOCK, "import", f"import torch failed: {out.splitlines()[-1] if out else ''}",
+    if d is None:
+        rc, out = run([sys.executable, "-c", "import torch"], timeout=120)
+        tail = out.splitlines()[-1] if out else ""
+        r.add(BLOCK, "import", f"import torch failed: {tail}",
               "Install the JetPack-matched wheel from "
               "https://developer.download.nvidia.com/compute/redist/jp/ "
               "(NOT `pip install torch` — the PyPI aarch64 wheel is CPU-only).")
-        return
-
-    try:
-        d = json.loads(out.splitlines()[-1])
-    except (ValueError, IndexError):
-        r.add(WARN, "probe", f"unexpected output: {out[:200]}")
         return
 
     r.add(INFO, "version", f"{d['version']} (built with CUDA {d['cuda']})")
@@ -396,12 +415,14 @@ def check_torch(r: Report) -> None:
             "at launch. Install the NVIDIA Jetson wheel.",
         )
 
-    rc, out = run([sys.executable, "-c",
-                   "import torchvision, torch; print(torchvision.__version__); "
-                   "import torchvision.ops as o; print(bool(o.nms))"], timeout=120)
-    if rc == 0:
-        r.add(OK, "torchvision", out.splitlines()[0])
+    tv = run_probe(
+        "import torchvision, torchvision.ops as o\n"
+        "emit(dict(version=torchvision.__version__, nms=bool(o.nms)))\n"
+    )
+    if tv is not None:
+        r.add(OK, "torchvision", tv["version"])
     else:
+        rc, out = run([sys.executable, "-c", "import torchvision"], timeout=120)
         tail = out.splitlines()[-1] if out else ""
         r.add(WARN, "torchvision", tail,
               "torchvision must match the torch version exactly. Build from source "
@@ -445,14 +466,15 @@ def check_python_deps(r: Report) -> None:
         "matplotlib": ("3.7", "matplotlib"),
     }
     for mod, level in required.items():
-        rc, out = run([sys.executable, "-c",
-                       f"import {mod}; print(getattr({mod}, '__version__', '?'));"
-                       f"print({mod}.__file__)"],
-                      timeout=90)
-        if rc == 0:
-            lines = out.splitlines()
-            version = lines[-2] if len(lines) >= 2 else lines[-1]
-            path = lines[-1] if len(lines) >= 2 else ""
+        probe = run_probe(
+            f"import {mod}\n"
+            f"emit(dict(version=str(getattr({mod}, '__version__', '?')),"
+            f" file=str(getattr({mod}, '__file__', ''))))\n",
+            timeout=90,
+        )
+        if probe is not None:
+            version = probe["version"]
+            path = probe["file"]
             from_system = "dist-packages" in path
             r.add(OK, mod, f"{version}{'  (system dist-packages)' if from_system else ''}")
 
@@ -461,9 +483,13 @@ def check_python_deps(r: Report) -> None:
                 where = ("It is being picked up from the system dist-packages, so pip "
                          "considered the requirement already met and never installed a "
                          "current one into the venv. " if from_system else "")
+                # PIP_CONSTRAINT is not decoration: --force-reinstall reinstalls
+                # the package's DEPENDENCIES too, which is how a numpy upgrade
+                # sneaks in behind an unrelated `matplotlib>=3.7`.
                 r.add(WARN, f"{mod}-too-old",
                       f"{version} < {floor} required by requirements.txt",
-                      f"{where}pip install --force-reinstall '{pip_name}>={floor}'")
+                      f"{where}PIP_CONSTRAINT=constraints.txt pip install "
+                      f"--force-reinstall '{pip_name}>={floor}'")
             continue
         if mod == "decord":
             r.add(INFO, "decord",
@@ -483,12 +509,33 @@ def check_python_deps(r: Report) -> None:
                     "yaml": "pip install pyyaml"}.get(mod, f"pip install {mod}")
             r.add(level, mod, "not importable", hint)
 
-    # numpy 2.x vs Jetson torch wheels compiled against numpy 1.x
-    rc, out = run([sys.executable, "-c", "import numpy; print(numpy.__version__)"])
-    if rc == 0 and out.startswith("2."):
-        r.add(WARN, "numpy-2x", f"numpy {out}",
-              "Jetson torch wheels are usually built against numpy 1.x. If you see "
-              "'_ARRAY_API not found' or ABI errors: pip install 'numpy<2'")
+    # numpy 2.x against a Jetson torch wheel compiled for the 1.x C ABI. Don't
+    # guess from the version number -- exercise the bridge that actually breaks.
+    # A mismatch makes torch print "Failed to initialize NumPy" at import and
+    # raise on from_numpy(), which then surfaces far away, mid-run, as a
+    # confusing numpy.core internals error.
+    bridge = run_probe(
+        "import numpy, torch\n"
+        "ok, err = True, ''\n"
+        "try:\n"
+        "    torch.from_numpy(numpy.zeros(2, dtype=numpy.float32)).sum()\n"
+        "except Exception as e:\n"
+        "    ok, err = False, f'{type(e).__name__}: {e}'\n"
+        "emit(dict(ok=ok, err=err, numpy=numpy.__version__))\n"
+    )
+    if bridge is not None:
+        if not bridge["ok"]:
+            r.add(BLOCK, "torch-numpy-abi",
+                  f"numpy {bridge['numpy']} cannot talk to torch ({bridge['err']})",
+                  "The Jetson torch wheel is built against the numpy 1.x C ABI:\n"
+                  "     pip install --force-reinstall 'numpy>=1.24,<2'\n"
+                  "     Then keep it pinned, or an unrelated `pip install` pulls 2.x "
+                  "back in as a dependency: put `numpy<2` in constraints.txt and "
+                  "export PIP_CONSTRAINT=constraints.txt")
+        elif bridge["numpy"].startswith("2."):
+            r.add(WARN, "numpy-2x", f"numpy {bridge['numpy']}",
+                  "The torch<->numpy bridge works, so this build tolerates numpy 2. "
+                  "requirements.txt still pins <2 because most Jetson wheels do not.")
 
 
 def check_venv(r: Report) -> None:

@@ -1,0 +1,18 @@
+# pip constraints for the Jetson environment.
+#
+#   export PIP_CONSTRAINT=$PWD/constraints.txt
+#
+# Set this once and every `pip install` in the shell respects it. Without it,
+# a bound gets undone as collateral damage: `pip install --force-reinstall
+# 'matplotlib>=3.7'` also reinstalls matplotlib's DEPENDENCIES, which silently
+# upgrades numpy to 2.x and breaks the torch C ABI. The failure then shows up
+# frames later inside a tracking run, nowhere near the pip command that caused
+# it.
+#
+# Constraints only cap versions -- they never install anything by themselves.
+
+# Jetson torch wheels are built against the numpy 1.x C ABI.
+numpy<2
+
+# OpenCV 5 moved API this repo calls (cv2.VideoWriter_fourcc).
+opencv-python<5

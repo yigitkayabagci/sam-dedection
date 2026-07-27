@@ -18,7 +18,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.jetson_doctor import _version_tuple  # noqa: E402
+from scripts.jetson_doctor import _version_tuple, run_probe  # noqa: E402
 from tools.benchmark import (  # noqa: E402
     ModuleTimer,
     build_frame_cache,
@@ -159,6 +159,30 @@ class TestVersionComparison(unittest.TestCase):
         self.assertEqual(_version_tuple("10.3.0.30-1+cuda12.5"), (10, 3, 0, 30, 1))
         self.assertEqual(_version_tuple("2.8.0a0"), (2, 8))
         self.assertEqual(_version_tuple("?"), ())
+
+
+class TestDoctorProbe(unittest.TestCase):
+    """Importing torch or timm prints warnings on both streams, before and
+    after whatever the probe wanted to say. Reading the answer by line index
+    picked up a warning instead -- on a real Orin the doctor reported timm's
+    version as '(Triggered internally at .../tensor_numpy.cpp:82.)'."""
+
+    def test_answer_survives_noise_on_both_streams(self):
+        result = run_probe(
+            "import sys\n"
+            "print('UserWarning: Failed to initialize NumPy: _ARRAY_API not found')\n"
+            "sys.stderr.write('a warning on stderr\\n')\n"
+            "emit(dict(version='1.0.28', file='/x/timm/__init__.py'))\n"
+            "print('(Triggered internally at tensor_numpy.cpp:82.)')\n"
+            "sys.stderr.write('trailing stderr noise\\n')\n"
+        )
+        self.assertEqual(result, {"version": "1.0.28", "file": "/x/timm/__init__.py"})
+
+    def test_returns_none_when_the_snippet_raises(self):
+        self.assertIsNone(run_probe("import definitely_not_a_real_module\n"))
+
+    def test_returns_none_when_nothing_is_emitted(self):
+        self.assertIsNone(run_probe("print('chatty but useless')\n"))
 
 
 class _FakeBlock:
