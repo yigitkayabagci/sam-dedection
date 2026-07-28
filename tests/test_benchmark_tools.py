@@ -361,11 +361,49 @@ class TestSweepReporting(unittest.TestCase):
             self.assertIsNotNone(out)
             self.assertGreater(Path(out).stat().st_size, 0)
 
+    def test_fps_chart_renders_and_ignores_empty_series(self):
+        from tools.sweep import fps_chart
+
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib not installed")
+        series = {
+            "1 object": [83.0] * 50 + [220.0] + [83.0] * 49,   # one stall
+            "2 objects": [100.0] * 100,
+            "failed": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out = fps_chart(series, Path(tmp) / "fps.png", "objects")
+            self.assertIsNotNone(out)
+            self.assertGreater(Path(out).stat().st_size, 0)
+
+    def test_fps_chart_returns_none_when_nothing_ran(self):
+        from tools.sweep import fps_chart
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(fps_chart({"a": [], "b": []},
+                                        Path(tmp) / "fps.png", "objects"))
+
+    def test_objects_axis_maps_to_the_object_count(self):
+        from tools.sweep import AXES, condition_settings
+
+        class Args:
+            width, height, box, frames, objects = 1920, 1080, 96, 500, 1
+
+        self.assertIn("objects", AXES)
+        cfg = condition_settings("objects", "3", Args)
+        self.assertEqual(cfg["objects"], 3)
+        self.assertEqual(cfg["label"], "3 objects")
+        # Everything else is held fixed: object count is the only variable.
+        self.assertEqual((cfg["width"], cfg["height"], cfg["box"]), (1920, 1080, 96))
+        self.assertEqual(condition_settings("objects", "1", Args)["label"], "1 object")
+
     def test_condition_settings_map_each_axis_to_the_right_knob(self):
         from tools.sweep import condition_settings
 
         class Args:
-            width, height, box, frames = 1920, 1080, 96, 300
+            width, height, box, frames, objects = 1920, 1080, 96, 300, 1
 
         res = condition_settings("resolution", "640x480", Args)
         self.assertEqual((res["width"], res["height"]), (640, 480))
@@ -407,6 +445,30 @@ class TestSyntheticFrames(unittest.TestCase):
             self.assertGreater(patch.size, 0)
             # The target is drawn bright green-yellow against a muted backdrop.
             self.assertGreater(patch[:, :, 1].mean(), frame[:, :, 1].mean() + 40)
+
+    def test_multi_object_gives_one_prompt_per_target_in_its_own_band(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, prompts = build_synthetic_cache(
+                Path(tmp) / "syn", frames=6, width=640, height=480, box=48,
+                objects=4)
+            self.assertEqual([b.obj_id for b in prompts.boxes], [1, 2, 3, 4])
+
+            # Targets live in disjoint horizontal bands so they can never
+            # cross. This measures the cost of N objects, not the tracker's
+            # ability to keep them apart.
+            spans = sorted((b.xyxy[1], b.xyxy[3]) for b in prompts.boxes)
+            for (_, lower), (upper, _) in zip(spans, spans[1:]):
+                self.assertLessEqual(lower, upper)
+
+            # Each prompt must sit on a target, and the targets are drawn in
+            # different colours so none of them is the backdrop.
+            frame = cv2.imread(str(sorted(out.glob("*.jpg"))[0]))
+            for box in prompts.boxes:
+                x1, y1, x2, y2 = (int(v) for v in box.xyxy)
+                patch = frame[y1:y2, x1:x2].reshape(-1, 3).mean(0)
+                backdrop = frame.reshape(-1, 3).mean(0)
+                self.assertGreater(float(np.abs(patch - backdrop).max()), 40,
+                                   f"obj {box.obj_id} prompt is on the backdrop")
 
     def test_target_actually_moves(self):
         with tempfile.TemporaryDirectory() as tmp:

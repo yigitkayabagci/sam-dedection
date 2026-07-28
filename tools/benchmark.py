@@ -91,7 +91,7 @@ def variant_runnable(tracker: str, kwargs: dict) -> tuple[bool, str]:
 # --------------------------------------------------------------------------
 
 def build_synthetic_cache(cache_dir: Path, frames: int, width: int, height: int,
-                          box: int) -> tuple[Path, "PromptSet"]:
+                          box: int, objects: int = 1) -> tuple[Path, "PromptSet"]:
     """Generate a clip for throughput measurement, plus the prompt to track it.
 
     Legitimate for speed work because none of the per-frame cost depends on
@@ -129,32 +129,55 @@ def build_synthetic_cache(cache_dir: Path, frames: int, width: int, height: int,
                    0, 255).astype(np.uint8)
     del backdrop, yy, xx
 
-    margin = box + 8
+    objects = max(1, objects)
     half = box // 2
-    cx0, cy0 = None, None
+    margin = box + 8
+    # Distinct colours so a human can tell the targets apart in the JPGs.
+    palette = [(40, 220, 250), (240, 120, 60), (90, 230, 130),
+               (230, 110, 230), (250, 220, 80), (110, 160, 250)]
+
+    # One horizontal band per object. Bands never overlap, so the targets
+    # cannot cross and create an ambiguous association -- this measures the
+    # cost of tracking N objects, not the tracker's ability to disambiguate.
+    band = height / objects
+    tracks = []
+    for k in range(objects):
+        y_lo = k * band + margin / 2
+        y_hi = (k + 1) * band - margin / 2
+        if y_hi <= y_lo:  # too many objects for the frame height
+            y_lo, y_hi = k * band, (k + 1) * band
+        tracks.append({"y_lo": y_lo, "y_hi": y_hi,
+                       "fx": 1.0 + 0.35 * k, "fy": 1.7 + 0.4 * k, "phase": 1.1 * k,
+                       "color": palette[k % len(palette)]})
+
+    first_centres: list[tuple[int, int]] = []
     progress = tqdm(range(frames), desc="synth frames", unit="frame", leave=False)
     for i in progress:
         t = i / max(1, frames - 1)
-        # A Lissajous path keeps the target moving in both axes without ever
-        # leaving the frame, so the memory bank sees genuine displacement.
-        cx = int(margin + (width - 2 * margin) * (0.5 + 0.5 * np.sin(2 * np.pi * 1.0 * t)))
-        cy = int(margin + (height - 2 * margin) * (0.5 + 0.5 * np.sin(2 * np.pi * 1.7 * t + 1.1)))
-        if cx0 is None:
-            cx0, cy0 = cx, cy
         img = base.copy()
-        cv2.rectangle(img, (cx - half, cy - half), (cx + half, cy + half),
-                      (40, 220, 250), thickness=-1)
-        cv2.circle(img, (cx, cy), max(3, half // 3), (20, 40, 60), thickness=-1)
+        for k, tr in enumerate(tracks):
+            # A Lissajous path keeps each target moving in both axes without
+            # ever leaving its band, so the memory bank sees real displacement.
+            cx = int(margin + (width - 2 * margin)
+                     * (0.5 + 0.5 * np.sin(2 * np.pi * tr["fx"] * t + tr["phase"])))
+            cy = int(tr["y_lo"] + (tr["y_hi"] - tr["y_lo"])
+                     * (0.5 + 0.5 * np.sin(2 * np.pi * tr["fy"] * t + tr["phase"])))
+            if i == 0:
+                first_centres.append((cx, cy))
+            cv2.rectangle(img, (cx - half, cy - half), (cx + half, cy + half),
+                          tr["color"], thickness=-1)
+            cv2.circle(img, (cx, cy), max(3, half // 3), (20, 40, 60), thickness=-1)
         cv2.imwrite(str(cache_dir / f"{i:05d}.jpg"), img)
     progress.close()
 
-    half = box // 2
-    prompts = PromptSet(boxes=[BoxPrompt(
-        obj_id=1, frame_idx=0,
-        xyxy=(float(cx0 - half), float(cy0 - half), float(cx0 + half), float(cy0 + half)),
-    )])
+    prompts = PromptSet(boxes=[
+        BoxPrompt(obj_id=k + 1, frame_idx=0,
+                  xyxy=(float(cx - half), float(cy - half),
+                        float(cx + half), float(cy + half)))
+        for k, (cx, cy) in enumerate(first_centres)
+    ])
     print(f"[bench] synthetic cache {cache_dir}: {frames} unique frames "
-          f"{width}x{height}, {box}x{box} target")
+          f"{width}x{height}, {objects} target(s) of {box}x{box}")
     return cache_dir, prompts
 
 
@@ -542,6 +565,10 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         # device->host copy, the Python loop, EdgeTAM's state bookkeeping.
         "unaccounted_ms": max(0.0, frame_mean_ms - accounted) if accounted else None,
         "blocks_ms": {k: round(v, 3) for k, v in blocks_ms.items()},
+        # Underscore-prefixed: the per-frame series is for charting spikes, not
+        # for the results table. The numeric aggregation skips lists, so it
+        # never reaches the report or the JSON.
+        "_per_frame_ms": [round(dt * 1000.0, 4) for dt in kept],
         "peak_torch_mb": peak_mb,
         "device_used_mb": device_mb,
         "load_seconds": load_s,

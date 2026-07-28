@@ -14,14 +14,22 @@ and is what the Phase 1 baseline is for:
                  tokens whatever it contains.) A control experiment: a
                  variable theory says cannot matter, so a difference here
                  means the measurement rig is wrong, not the model.
+    objects      The prompt-side knob that does cost: each target adds a row
+                 to the mask decoder and memory attention batch. Targets run
+                 in disjoint bands so they never cross, which keeps this a
+                 cost measurement rather than a tracking-quality one.
     frames       How many frames before the average stops moving.
 
 Every run uses generated frames, which is valid here because no per-frame
 cost depends on content. Do not use this for accuracy -- IoU needs a real
 scene.
 
+Each run writes report.md/.csv/.tex, stages.png (per-frame time by stage)
+and fps.png (the per-frame trace, where a stall the median hides is visible).
+
     python3 tools/sweep.py --axis resolution --out runs/sweep_res
     python3 tools/sweep.py --axis box        --out runs/sweep_box
+    python3 tools/sweep.py --axis objects    --out runs/sweep_obj
     python3 tools/sweep.py --axis image-size --out runs/sweep_img
     python3 tools/sweep.py --axis frames     --out runs/sweep_n
 """
@@ -52,6 +60,7 @@ AXES = {
     "image-size": ["1024", "768", "512"],
     "box": ["20", "96", "400"],
     "frames": ["50", "100", "300", "500", "1000"],
+    "objects": ["1", "2", "3", "4"],
 }
 
 # The stages a stacked bar is built from, in pipeline order.
@@ -70,6 +79,7 @@ def condition_settings(axis: str, value: str, args) -> dict:
         "height": args.height,
         "box": args.box,
         "frames": args.frames,
+        "objects": args.objects,
         "image_size": None,
         "label": f"{axis}={value}",
     }
@@ -85,10 +95,13 @@ def condition_settings(axis: str, value: str, args) -> dict:
     elif axis == "frames":
         settings["frames"] = int(value)
         settings["label"] = f"{value} frames"
+    elif axis == "objects":
+        settings["objects"] = int(value)
+        settings["label"] = f"{value} object" + ("s" if int(value) > 1 else "")
     return settings
 
 
-def sweep(axis: str, values: list[str], args) -> list[dict]:
+def sweep(axis: str, values: list[str], args) -> tuple[list[dict], dict]:
     defaults, matrix = load_matrix(Path(args.matrix))
     if args.variant not in matrix:
         raise SystemExit(f"Unknown variant {args.variant!r}. Available: {list(matrix)}")
@@ -100,6 +113,7 @@ def sweep(axis: str, values: list[str], args) -> list[dict]:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict] = []
+    series: dict[str, list[float]] = {}
 
     for value in values:
         cfg = condition_settings(axis, value, args)
@@ -110,11 +124,12 @@ def sweep(axis: str, values: list[str], args) -> list[dict]:
         cache = out_dir / f"cache_{value.replace('x', '_')}"
         shutil.rmtree(cache, ignore_errors=True)
         frames_dir, prompts = build_synthetic_cache(
-            cache, cfg["frames"], cfg["width"], cfg["height"], cfg["box"])
+            cache, cfg["frames"], cfg["width"], cfg["height"], cfg["box"],
+            objects=cfg["objects"])
 
         warmup = min(args.warmup, max(1, cfg["frames"] // 4))
         print(f"\n[sweep] {cfg['label']}  ({cfg['width']}x{cfg['height']}, "
-              f"{cfg['frames']} frames, warmup {warmup})")
+              f"{cfg['frames']} frames, {cfg['objects']} obj, warmup {warmup})")
 
         runs, error = [], None
         for i in range(args.repeat):
@@ -130,10 +145,15 @@ def sweep(axis: str, values: list[str], args) -> list[dict]:
         row = {"condition": cfg["label"], "axis": axis, "value": value,
                "width": cfg["width"], "height": cfg["height"],
                "frames": cfg["frames"], "box": cfg["box"],
+               "objects": cfg["objects"],
                "image_size": cfg["image_size"] or 1024}
         if error:
             row["error"] = error
         if runs:
+            # The per-frame series drives the spike chart; it is a list, so the
+            # numeric aggregation below leaves it alone and it never reaches
+            # the JSON or the table.
+            series[cfg["label"]] = runs[0].get("_per_frame_ms") or []
             keys = {k for r in runs for k, v in r.items() if isinstance(v, (int, float))}
             for key in keys:
                 vals = [r[key] for r in runs if isinstance(r.get(key), (int, float))]
@@ -149,7 +169,7 @@ def sweep(axis: str, values: list[str], args) -> list[dict]:
 
         if not args.keep_cache:
             shutil.rmtree(cache, ignore_errors=True)
-    return rows
+    return rows, series
 
 
 # --------------------------------------------------------------------------
@@ -232,31 +252,81 @@ def stage_chart(rows: list[dict], out_path: Path, axis: str):
 
     fig, ax = plt.subplots(figsize=(9.5, 1.9 + 0.62 * len(usable)))
     left = [0.0] * len(usable)
+    total = max(float(r["total_ms"]) for r in usable)
     for key, name, color in STAGES:
         widths = [float(r.get(key) or 0.0) for r in usable]
         ax.barh(list(ypos), widths, left=left, height=0.62, label=name,
                 color=color, edgecolor="white", linewidth=0.6)
+        for i, (start, width) in enumerate(zip(left, widths)):
+            # Label inside the segment. Skip slivers, where the text would
+            # overflow into its neighbours and read as belonging to them.
+            if width >= total * 0.055:
+                ax.text(start + width / 2, i, f"{width:.1f}", ha="center",
+                        va="center", fontsize=8.5, color="white")
         left = [a + b for a, b in zip(left, widths)]
 
     for i, row in enumerate(usable):
         # End-to-end, matching what the bar actually stacks. The loop-only FPS
         # would contradict the picture, since preprocess sits in the bar but
         # happens before the loop.
-        ax.text(left[i] + max(left) * 0.012, i,
+        ax.text(left[i] + total * 0.012, i,
                 f"{row.get('fps_end_to_end', 0):.1f} FPS", va="center",
                 fontsize=9, color="#333")
 
     ax.set_yticks(list(ypos))
     ax.set_yticklabels(labels)
     ax.invert_yaxis()
-    ax.set_xlabel("per-frame time (ms) — preprocess is paid up front in init_state")
-    ax.set_title(f"Where the frame budget goes — sweeping {axis}")
-    ax.set_xlim(0, max(left) * 1.16)
+    ax.set_xlabel("per-frame time (ms)")
+    ax.set_title(f"Per-frame time by stage, varying {axis}")
+    ax.set_xlim(0, total * 1.16)
     ax.grid(axis="x", alpha=0.25)
     # Outside the axes: an inside legend lands on top of the longest bar, which
     # is always the condition the chart most needs to show.
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18 - 0.02 * len(usable)),
               fontsize=9, ncol=4, frameon=False)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return out_path.resolve()
+
+
+def fps_chart(series: dict[str, list[float]], out_path: Path, axis: str):
+    """Per-frame FPS trace for each condition, so spikes stay visible.
+
+    A median hides a stall; a run that drops to 3 FPS for ten frames and a run
+    that never leaves 11 can report the same average. One panel per condition
+    rather than overlaid lines: comparing shapes matters more here than
+    comparing levels, and four traces on one axes is unreadable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except ImportError:
+        return None
+
+    panels = [(label, [1000.0 / ms for ms in vals if ms > 0])
+              for label, vals in series.items() if vals]
+    if not panels:
+        return None
+
+    fig, axes = plt.subplots(len(panels), 1, sharex=True, squeeze=False,
+                             figsize=(10, 1.0 + 1.55 * len(panels)))
+    for ax, (label, fps) in zip(axes[:, 0], panels):
+        arr = np.asarray(fps)
+        lo, hi, mean = float(arr.min()), float(arr.max()), float(arr.mean())
+        ax.axhspan(lo, hi, color="#2E6F8E", alpha=0.07)
+        ax.plot(arr, linewidth=0.9, color="#2E6F8E")
+        ax.axhline(mean, color="#C0392B", linestyle="--", linewidth=1.1)
+        ax.axhline(lo, color="#5B6B7A", linestyle=":", linewidth=0.9)
+        ax.axhline(hi, color="#5B6B7A", linestyle=":", linewidth=0.9)
+        ax.set_ylabel(label, fontsize=9)
+        ax.grid(alpha=0.2)
+        ax.text(0.995, 0.06, f"min {lo:.1f}   mean {mean:.1f}   max {hi:.1f}",
+                transform=ax.transAxes, ha="right", fontsize=8.5, color="#333")
+    axes[-1, 0].set_xlabel("frame index")
+    axes[0, 0].set_title(f"Per-frame FPS, varying {axis}")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
@@ -280,6 +350,10 @@ def main() -> int:
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--box", type=int, default=96)
+    p.add_argument("--objects", type=int, default=1,
+                   help="Targets to track. Each one adds a row to the mask "
+                        "decoder and memory attention batch, so this is the "
+                        "prompt-side knob that does change cost.")
     p.add_argument("--warmup", type=int, default=25)
     p.add_argument("--repeat", type=int, default=1)
     p.add_argument("--out", default="runs/sweep")
@@ -288,20 +362,23 @@ def main() -> int:
 
     values = ([v.strip() for v in args.values.split(",") if v.strip()]
               if args.values else AXES[args.axis])
-    rows = sweep(args.axis, values, args)
+    rows, series = sweep(args.axis, values, args)
 
     out_dir = Path(args.out)
     table = markdown(rows)
     (out_dir / "report.md").write_text(
-        f"# Input sweep — {args.axis}\n\nvariant: `{args.variant}`\n\n{table}\n")
+        f"# Input sweep: {args.axis}\n\nvariant: `{args.variant}`\n\n{table}\n")
     (out_dir / "report.csv").write_text(csv(rows) + "\n")
     (out_dir / "report.tex").write_text(latex(rows) + "\n")
-    chart = stage_chart(rows, out_dir / "stages.png", args.axis)
+    stages = stage_chart(rows, out_dir / "stages.png", args.axis)
+    fps = fps_chart(series, out_dir / "fps.png", args.axis)
 
     print(f"\n{table}\n")
     print(f"[sweep] report -> {out_dir / 'report.md'} (+ .csv, .tex)")
-    if chart:
-        print(f"[sweep] chart  -> {chart}")
+    if stages:
+        print(f"[sweep] stages -> {stages}")
+    if fps:
+        print(f"[sweep] fps    -> {fps}")
     return 0
 
 
