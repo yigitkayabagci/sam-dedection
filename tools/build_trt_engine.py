@@ -60,6 +60,22 @@ def _sha256(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()[:16]
 
 
+def _has_explicit_quantization(trt, network) -> bool:
+    """Does the parsed graph already carry QuantizeLinear/DequantizeLinear?
+
+    An ONNX produced by NVIDIA Model Optimizer (or any QDQ quantizer) states
+    its scales in the graph itself. TensorRT then honours those instead of
+    calibrating, so asking for a calibrator on top would be both unnecessary
+    and ignored. Detected from the parsed network rather than by reading the
+    ONNX, which keeps this independent of the onnx package.
+    """
+    quantize = getattr(trt.LayerType, "QUANTIZE", None)
+    if quantize is None:
+        return False
+    return any(network.get_layer(i).type == quantize
+               for i in range(network.num_layers))
+
+
 def _set_flag(trt, config, name: str) -> bool:
     """Set a BuilderFlag if this TensorRT version has it. Returns success."""
     flag = getattr(trt.BuilderFlag, name, None)
@@ -235,9 +251,19 @@ def build(args) -> int:
 
     calibrator = None
     if "int8" in args.precision or args.precision == "best":
-        calibrator = _make_calibrator(trt, args, input_shape, report)
-        if calibrator is not None:
-            config.int8_calibrator = calibrator
+        if _has_explicit_quantization(trt, network):
+            # Explicit quantization: the graph carries its own scales, so
+            # TensorRT uses them and never calls a calibrator. This is the
+            # path TensorRT 10.1+ wants -- IInt8EntropyCalibrator2 implicit
+            # quantization is deprecated in favour of it.
+            report["calibration"] = {"source": "explicit QDQ in the ONNX graph",
+                                     "algorithm": "none (scales are in the graph)"}
+            print("[build] ONNX carries QuantizeLinear nodes: using explicit "
+                  "quantization, skipping calibration.")
+        else:
+            calibrator = _make_calibrator(trt, args, input_shape, report)
+            if calibrator is not None:
+                config.int8_calibrator = calibrator
 
     timing_cache = _load_timing_cache(
         trt, config, Path(args.timing_cache) if args.timing_cache else None)

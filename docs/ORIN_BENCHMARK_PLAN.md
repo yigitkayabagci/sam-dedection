@@ -239,6 +239,41 @@ Kalibrasyon seti kuralları:
 büyüt/çeşitlendir, sonra `int8-fp16` karışık moda geç, sonra hassas
 katmanları FP16'ya sabitle (Faz 5).
 
+### Faz 4b — NVIDIA Model Optimizer (explicit QDQ) — koşullu
+
+TensorRT'nin `IInt8EntropyCalibrator2` ile yaptığı **implicit quantization**,
+TensorRT 10.1'den itibaren **deprecated**. Yerini **explicit quantization**
+alıyor: ölçekler grafiğin içine QDQ (QuantizeLinear/DequantizeLinear)
+düğümleri olarak gömülüyor, TensorRT tahmin yürütmüyor. NVIDIA Model
+Optimizer (`nvidia-modelopt`) bu QDQ'lu ONNX'i üreten araç.
+
+**Orin'de doğrudan çalışmıyor:** ModelOpt'un resmî sistem gereksinimi
+x86_64. Ama ürettiği ONNX donanımdan bağımsız olduğu için iki makineli bir
+akış kurulabilir:
+
+```
+x86 makine:   edgetam_image_encoder.onnx  --ModelOpt PTQ-->  ..._int8_qdq.onnx
+   ↓ scp
+Orin:         tools/build_trt_engine.py --precision int8 --onnx ..._int8_qdq.onnx
+```
+
+Builder QDQ düğümlerini otomatik algılıyor ve kalibratörü atlıyor — ek
+bayrak gerekmiyor.
+
+**Orin AGX'te ModelOpt'un hangi formatları işe yarar:** sadece **INT8**.
+FP8 Hopper+, NVFP4 Blackwell gerektiriyor; sm_87'de ikisi de yok. Yani
+ModelOpt'un tanıtım materyalindeki FP4/FP8 kazanımları bu donanımda geçerli
+değil.
+
+**Ne zaman değer:** ModelOpt doğruluk aracı, hız aracı değil. INT8'in
+zaten hız kazandırdığı doğrulandıktan sonra, kaybedilen IoU'yu geri almak
+için anlamlı. Faz 4'te basit kalibratörle INT8 hız kazancı çıkmazsa
+(bkz. aşağıdaki launch-bound notu), ModelOpt kurulumuna girmek boşa emek.
+
+**Root'suz alternatif (Orin üzerinde):** `onnxruntime.quantization` ile
+`QuantFormat.QDQ` kullanarak aarch64'te de QDQ üretilebilir. ModelOpt kadar
+TensorRT-dostu düğüm yerleşimi vermez ama x86 makine gerektirmez.
+
 ### Faz 5 — İleri knob'lar
 
 | Knob | Komut | Beklenti |
