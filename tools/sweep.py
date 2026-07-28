@@ -20,10 +20,10 @@ Every run uses generated frames, which is valid here because no per-frame
 cost depends on content. Do not use this for accuracy -- IoU needs a real
 scene.
 
-    python3 tools/sweep.py --axis resolution --frames 300 --out runs/sweep_res
-    python3 tools/sweep.py --axis box        --frames 200 --out runs/sweep_box
-    python3 tools/sweep.py --axis image-size --frames 200 --out runs/sweep_img
-    python3 tools/sweep.py --axis frames                  --out runs/sweep_n
+    python3 tools/sweep.py --axis resolution --out runs/sweep_res
+    python3 tools/sweep.py --axis box        --out runs/sweep_box
+    python3 tools/sweep.py --axis image-size --out runs/sweep_img
+    python3 tools/sweep.py --axis frames     --out runs/sweep_n
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ AXES = {
     "resolution": ["640x480", "1280x720", "1920x1080", "3840x2160"],
     "image-size": ["1024", "768", "512"],
     "box": ["20", "96", "400"],
-    "frames": ["50", "100", "300", "600"],
+    "frames": ["50", "100", "300", "500", "1000"],
 }
 
 # The stages a stacked bar is built from, in pipeline order.
@@ -268,7 +268,10 @@ def main() -> int:
     p.add_argument("--variant", default="pytorch_bf16",
                    help="Model variant from the matrix, held fixed across the sweep.")
     p.add_argument("--matrix", default=str(DEFAULT_MATRIX))
-    p.add_argument("--frames", type=int, default=300, help="Frames per run.")
+    p.add_argument("--frames", type=int, default=500,
+                   help="Frames per run. 500 keeps the run-to-run spread near "
+                        "1-2%%, tight enough that a real 5%% difference between "
+                        "conditions is still visible.")
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--box", type=int, default=96)
