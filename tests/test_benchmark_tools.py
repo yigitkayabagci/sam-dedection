@@ -298,15 +298,34 @@ class TestSweepReporting(unittest.TestCase):
     is that inference stays flat while preprocess/postprocess grow, so the
     rendering has to survive a failed condition without dropping the rest."""
 
+    # Shaped like run_variant's real output. total_ms is what the stacked bar
+    # sums to, and it includes preprocess -- which frame_mean_ms does not,
+    # because SAM2 pays it up front in init_state.
     ROWS = [
-        {"condition": "640x480", "fps": 14.8, "frame_mean_ms": 67.6,
-         "preprocess_ms": 3.1, "inference_ms": 58.0, "postprocess_ms": 1.2,
-         "unaccounted_ms": 5.3, "encoder_ms": 31.0, "frames_measured": 275},
-        {"condition": "3840x2160", "fps": 7.2, "frame_mean_ms": 138.9,
-         "preprocess_ms": 48.0, "inference_ms": 58.3, "postprocess_ms": 21.4,
-         "unaccounted_ms": 11.2, "encoder_ms": 31.2, "frames_measured": 275},
+        {"condition": "640x480", "fps": 14.8, "fps_end_to_end": 13.4,
+         "frame_mean_ms": 67.6, "total_ms": 74.5, "preprocess_ms": 6.9,
+         "inference_ms": 58.0, "postprocess_ms": 1.2, "unaccounted_ms": 8.4,
+         "encoder_ms": 31.0, "frames_measured": 275},
+        {"condition": "3840x2160", "fps": 7.2, "fps_end_to_end": 4.3,
+         "frame_mean_ms": 138.9, "total_ms": 231.3, "preprocess_ms": 92.4,
+         "inference_ms": 58.3, "postprocess_ms": 21.4, "unaccounted_ms": 59.2,
+         "encoder_ms": 31.2, "frames_measured": 275},
         {"condition": "broken", "error": "CUDA out of memory"},
     ]
+
+    def test_the_stacked_bar_actually_sums_to_the_total(self):
+        """A stacked bar that does not add up to the number beside it is a lie.
+        preprocess belongs in the stack (it is per-frame work) but not in
+        frame_mean_ms (it happens before the loop), so total_ms is the only
+        quantity the segments may be checked against."""
+        from tools.sweep import STAGES
+
+        for row in self.ROWS:
+            if "total_ms" not in row:
+                continue
+            with self.subTest(condition=row["condition"]):
+                stacked = sum(row[key] for key, _, _ in STAGES)
+                self.assertAlmostEqual(stacked, row["total_ms"], places=1)
 
     def test_markdown_keeps_a_failed_condition_visible(self):
         from tools.sweep import markdown

@@ -516,9 +516,19 @@ def run_variant(name: str, tracker_name: str, kwargs: dict, frames_dir: Path,
         "latency_p95_ms": _percentile(latencies_ms, 95),
         "frame_mean_ms": frame_mean_ms,
         # --- the three stages, separately ---
+        # preprocess is NOT part of frame_mean_ms: SAM2 decodes and normalises
+        # the whole clip up front in init_state, so it is a per-frame cost of
+        # the job paid before the propagate loop starts. Adding the stages
+        # together therefore requires total_ms, not frame_mean_ms.
         "preprocess_ms": preprocess_ms,     # CPU: decode + resize to 1024 + normalise
         "inference_ms": inference_ms,       # GPU: encoder + memory + decoder
         "postprocess_ms": postprocess_ms,   # GPU: upsample to video resolution
+        "total_ms": frame_mean_ms + (preprocess_ms or 0.0),
+        # What the clip actually costs end to end. `fps` above is the propagate
+        # loop alone and is the number to compare model variants with; this is
+        # the one a user of the pipeline experiences.
+        "fps_end_to_end": (1000.0 / (frame_mean_ms + (preprocess_ms or 0.0))
+                           if frame_mean_ms else 0.0),
         "encoder_ms": enc_mean,
         # What TensorRT does NOT cover today — the Amdahl ceiling in one number.
         "rest_ms": None if enc_mean is None else max(0.0, frame_mean_ms - enc_mean),

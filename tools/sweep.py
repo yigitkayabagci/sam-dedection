@@ -158,15 +158,16 @@ def sweep(axis: str, values: list[str], args) -> list[dict]:
 
 _COLUMNS = [
     ("condition", "condition", "{}"),
-    ("fps", "fps", "{:.2f}"),
-    ("fps min", "fps_min", "{:.2f}"),
-    ("fps max", "fps_max", "{:.2f}"),
-    ("frame ms", "frame_mean_ms", "{:.2f}"),
+    ("fps loop", "fps", "{:.2f}"),
+    ("fps e2e", "fps_end_to_end", "{:.2f}"),
+    ("total ms", "total_ms", "{:.2f}"),
     ("pre ms", "preprocess_ms", "{:.2f}"),
     ("infer ms", "inference_ms", "{:.2f}"),
     ("post ms", "postprocess_ms", "{:.2f}"),
     ("other ms", "unaccounted_ms", "{:.2f}"),
     ("enc ms", "encoder_ms", "{:.2f}"),
+    ("fps min", "fps_min", "{:.2f}"),
+    ("fps max", "fps_max", "{:.2f}"),
     ("frames", "frames_measured", "{:.0f}"),
 ]
 
@@ -223,7 +224,7 @@ def stage_chart(rows: list[dict], out_path: Path, axis: str):
         print("[sweep] matplotlib missing; skipping chart")
         return None
 
-    usable = [r for r in rows if r.get("frame_mean_ms")]
+    usable = [r for r in rows if r.get("total_ms")]
     if not usable:
         return None
     labels = [r["condition"] for r in usable]
@@ -238,13 +239,17 @@ def stage_chart(rows: list[dict], out_path: Path, axis: str):
         left = [a + b for a, b in zip(left, widths)]
 
     for i, row in enumerate(usable):
-        ax.text(left[i] + max(left) * 0.012, i, f"{row.get('fps', 0):.1f} FPS",
-                va="center", fontsize=9, color="#333")
+        # End-to-end, matching what the bar actually stacks. The loop-only FPS
+        # would contradict the picture, since preprocess sits in the bar but
+        # happens before the loop.
+        ax.text(left[i] + max(left) * 0.012, i,
+                f"{row.get('fps_end_to_end', 0):.1f} FPS", va="center",
+                fontsize=9, color="#333")
 
     ax.set_yticks(list(ypos))
     ax.set_yticklabels(labels)
     ax.invert_yaxis()
-    ax.set_xlabel("per-frame time (ms)")
+    ax.set_xlabel("per-frame time (ms) — preprocess is paid up front in init_state")
     ax.set_title(f"Where the frame budget goes — sweeping {axis}")
     ax.set_xlim(0, max(left) * 1.16)
     ax.grid(axis="x", alpha=0.25)

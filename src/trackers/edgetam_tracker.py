@@ -80,6 +80,23 @@ class EdgeTAMTracker(VideoTracker):
         overrides: list[str] = []
         if self.image_size is not None:
             overrides.append(f"++model.image_size={self.image_size}")
+            # image_size alone is not enough. EdgeTAM's RoPEAttentionv2
+            # precomputes its rotary frequency table from the config's
+            # q_sizes, which is the stride-16 feature grid (64x64 for the
+            # stock 1024). Unlike SAM2's v1 attention it does NOT recompute
+            # on a size mismatch, so a different image_size reaches it with
+            # the wrong number of tokens and dies on a bare assert. The
+            # memory-side k_sizes stays put: those keys are the Perceiver's
+            # fixed 256 (16x16) latents, which do not scale with input size.
+            grid = self.image_size // 16
+            overrides.append(
+                "++model.memory_attention.layer.cross_attention.q_sizes="
+                f"[{grid},{grid}]"
+            )
+            print(f"[edgetam] image_size={self.image_size} -> RoPE q_sizes "
+                  f"[{grid},{grid}]. Note the rotary embeddings were trained at "
+                  "64x64, so expect accuracy loss beyond what the lower "
+                  "resolution alone costs — measure IoU before trusting it.")
 
         if self.fill_hole_area is not None:
             overrides.append(f"++model.fill_hole_area={self.fill_hole_area}")
