@@ -49,6 +49,8 @@ class EdgeTAMTracker(VideoTracker):
         offload_state_to_cpu: bool = False,
         compile_image_encoder: bool = False,
         compile_mode: str = "default",
+        image_size: int | None = None,
+        fill_hole_area: int | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -64,8 +66,37 @@ class EdgeTAMTracker(VideoTracker):
         self.compile_image_encoder = compile_image_encoder
         self.compile_mode = compile_mode
         self.compiled = False
+        # Model-side input resolution. Distinct from the source video's
+        # resolution: every frame is squashed to image_size x image_size before
+        # the encoder, so this drives inference cost while the source resolution
+        # drives preprocess and postprocess cost.
+        self.image_size = image_size
+        self.fill_hole_area = fill_hole_area
         self._predictor = None
         self._state = None
+
+    def _hydra_overrides(self) -> list[str]:
+        """Config overrides passed to build_sam2_video_predictor."""
+        overrides: list[str] = []
+        if self.image_size is not None:
+            overrides.append(f"++model.image_size={self.image_size}")
+
+        if self.fill_hole_area is not None:
+            overrides.append(f"++model.fill_hole_area={self.fill_hole_area}")
+        else:
+            # build_sam2_video_predictor's apply_postprocessing default sets
+            # fill_hole_area=8, and filling holes needs the compiled sam2._C
+            # extension. When that extension was not built the code path is
+            # still entered on EVERY frame, throws ImportError, and is caught
+            # and skipped -- paying the cost of failing without ever doing the
+            # work. Turning it off is strictly cheaper for identical output.
+            try:
+                from sam2 import _C  # noqa: F401
+            except ImportError:
+                overrides.append("++model.fill_hole_area=0")
+                print("[edgetam] sam2._C is not built; disabling fill_hole_area "
+                      "(the hole filling was being skipped every frame anyway).")
+        return overrides
 
     def _ensure_predictor(self) -> None:
         if self._predictor is not None:
@@ -85,7 +116,8 @@ class EdgeTAMTracker(VideoTracker):
                 "CUDA, pass --config configs/edgetam_cpu.yaml."
             )
         self._predictor = build_sam2_video_predictor(
-            self.model_cfg, self.checkpoint, device=self.device
+            self.model_cfg, self.checkpoint, device=self.device,
+            hydra_overrides_extra=self._hydra_overrides(),
         )
         if self.compile_image_encoder:
             # A TensorRT-free speed knob for the same block TRT targets, so the

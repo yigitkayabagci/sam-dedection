@@ -292,6 +292,76 @@ class TestAttrTimer(unittest.TestCase):
         self.assertEqual(len(timer.stop()), 5)
 
 
+class TestSweepReporting(unittest.TestCase):
+    """The sweep varies the INPUT with the model held fixed. Its headline claim
+    is that inference stays flat while preprocess/postprocess grow, so the
+    rendering has to survive a failed condition without dropping the rest."""
+
+    ROWS = [
+        {"condition": "640x480", "fps": 14.8, "frame_mean_ms": 67.6,
+         "preprocess_ms": 3.1, "inference_ms": 58.0, "postprocess_ms": 1.2,
+         "unaccounted_ms": 5.3, "encoder_ms": 31.0, "frames_measured": 275},
+        {"condition": "3840x2160", "fps": 7.2, "frame_mean_ms": 138.9,
+         "preprocess_ms": 48.0, "inference_ms": 58.3, "postprocess_ms": 21.4,
+         "unaccounted_ms": 11.2, "encoder_ms": 31.2, "frames_measured": 275},
+        {"condition": "broken", "error": "CUDA out of memory"},
+    ]
+
+    def test_markdown_keeps_a_failed_condition_visible(self):
+        from tools.sweep import markdown
+
+        lines = markdown(self.ROWS).splitlines()
+        self.assertTrue(lines[2].startswith("| 640x480 |"))
+        self.assertTrue(lines[-1].startswith("| broken |"))
+        self.assertIn("| - |", lines[-1])
+
+    def test_latex_uses_em_dash_and_escapes_only_the_label(self):
+        from tools.sweep import latex
+
+        tex = latex(self.ROWS)
+        self.assertIn(r"\begin{tabular}", tex)
+        self.assertRegex(tex, r"\\begin\{tabular\}\{lr+\}")
+        self.assertIn("--", tex)                       # missing cells
+        self.assertIn("fps min", tex)
+
+    def test_csv_leads_with_condition(self):
+        from tools.sweep import csv
+
+        self.assertTrue(csv(self.ROWS).splitlines()[0].startswith("condition,"))
+
+    def test_chart_skips_conditions_with_no_timing(self):
+        from tools.sweep import stage_chart
+
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            out = stage_chart(self.ROWS, Path(tmp) / "stages.png", "resolution")
+            self.assertIsNotNone(out)
+            self.assertGreater(Path(out).stat().st_size, 0)
+
+    def test_condition_settings_map_each_axis_to_the_right_knob(self):
+        from tools.sweep import condition_settings
+
+        class Args:
+            width, height, box, frames = 1920, 1080, 96, 300
+
+        res = condition_settings("resolution", "640x480", Args)
+        self.assertEqual((res["width"], res["height"]), (640, 480))
+        self.assertIsNone(res["image_size"])
+
+        img = condition_settings("image-size", "512", Args)
+        self.assertEqual(img["image_size"], 512)
+        # image_size must not disturb the source resolution: they are separate
+        # knobs driving separate stages.
+        self.assertEqual((img["width"], img["height"]), (1920, 1080))
+
+        box = condition_settings("box", "400", Args)
+        self.assertEqual(box["box"], 400)
+        self.assertEqual((box["width"], box["height"]), (1920, 1080))
+
+
 class TestSyntheticFrames(unittest.TestCase):
     def test_frames_are_unique_and_prompt_lands_on_the_target(self):
         with tempfile.TemporaryDirectory() as tmp:
