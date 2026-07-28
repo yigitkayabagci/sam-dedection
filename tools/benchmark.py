@@ -106,6 +106,7 @@ def build_synthetic_cache(cache_dir: Path, frames: int, width: int, height: int,
     """
     import cv2
     import numpy as np
+    from tqdm import tqdm
 
     from src.prompts import BoxPrompt, PromptSet
 
@@ -117,10 +118,22 @@ def build_synthetic_cache(cache_dir: Path, frames: int, width: int, height: int,
         150 - 50 * (xx / max(1, width - 1)),
     ], axis=-1)
 
+    # Texture is generated ONCE. A smooth gradient compresses to a tiny JPEG
+    # that decodes unrealistically fast, so the backdrop needs grain -- but
+    # drawing fresh noise per frame means millions of gaussians per frame and
+    # dominates setup time (a minute per 4K frame on Orin's CPU). Baking it in
+    # once costs one array copy per frame instead. Frames still differ from each
+    # other because the target moves.
     rng = np.random.default_rng(0)
+    base = np.clip(backdrop + rng.normal(0, 4.0, size=(height, width, 3)),
+                   0, 255).astype(np.uint8)
+    del backdrop, yy, xx
+
     margin = box + 8
+    half = box // 2
     cx0, cy0 = None, None
-    for i in range(frames):
+    progress = tqdm(range(frames), desc="synth frames", unit="frame", leave=False)
+    for i in progress:
         t = i / max(1, frames - 1)
         # A Lissajous path keeps the target moving in both axes without ever
         # leaving the frame, so the memory bank sees genuine displacement.
@@ -128,13 +141,12 @@ def build_synthetic_cache(cache_dir: Path, frames: int, width: int, height: int,
         cy = int(margin + (height - 2 * margin) * (0.5 + 0.5 * np.sin(2 * np.pi * 1.7 * t + 1.1)))
         if cx0 is None:
             cx0, cy0 = cx, cy
-        frame = backdrop + rng.normal(0, 4.0, size=(height, width, 3))
-        img = np.clip(frame, 0, 255).astype(np.uint8)
-        half = box // 2
+        img = base.copy()
         cv2.rectangle(img, (cx - half, cy - half), (cx + half, cy + half),
                       (40, 220, 250), thickness=-1)
         cv2.circle(img, (cx, cy), max(3, half // 3), (20, 40, 60), thickness=-1)
         cv2.imwrite(str(cache_dir / f"{i:05d}.jpg"), img)
+    progress.close()
 
     half = box // 2
     prompts = PromptSet(boxes=[BoxPrompt(
