@@ -146,9 +146,20 @@ def main() -> int:
         tracker, encoder = load_encoder(config_path, "cuda", size)
         sample = torch.randn(1, 3, size, size, device="cuda")
 
+        # Same weights at every size: RepViT's trunk is convolutional, so the
+        # kernels slide over whatever spatial extent they are given. Printing
+        # the parameter count and the feature shapes makes that checkable
+        # rather than something to take on trust.
+        params = sum(p.numel() for p in encoder.parameters())
+        with tracker._inference_ctx():
+            feats = encoder(sample)["backbone_fpn"]
+        shapes = [tuple(f.shape[-2:]) for f in feats]
+        print(f"  params     {params / 1e6:7.2f} M   features {shapes}")
+
         eager = time_eager(encoder, sample, args.iters, args.warmup,
                            tracker._inference_ctx)
         row = {"image_size": size, "pixels": size * size,
+               "params": params, "feature_shapes": [list(s) for s in shapes],
                "eager_ms": statistics.median(eager)}
         print(f"  eager      {row['eager_ms']:7.2f} ms")
 

@@ -361,8 +361,8 @@ class TestSweepReporting(unittest.TestCase):
             self.assertIsNotNone(out)
             self.assertGreater(Path(out).stat().st_size, 0)
 
-    def test_fps_chart_renders_and_ignores_empty_series(self):
-        from tools.sweep import fps_chart
+    def test_frame_time_chart_renders_and_ignores_empty_series(self):
+        from tools.sweep import frame_time_chart
 
         try:
             import matplotlib  # noqa: F401
@@ -374,15 +374,15 @@ class TestSweepReporting(unittest.TestCase):
             "failed": [],
         }
         with tempfile.TemporaryDirectory() as tmp:
-            out = fps_chart(series, Path(tmp) / "fps.png", "objects")
+            out = frame_time_chart(series, Path(tmp) / "fps.png", "objects")
             self.assertIsNotNone(out)
             self.assertGreater(Path(out).stat().st_size, 0)
 
-    def test_fps_chart_returns_none_when_nothing_ran(self):
-        from tools.sweep import fps_chart
+    def test_frame_time_chart_returns_none_when_nothing_ran(self):
+        from tools.sweep import frame_time_chart
 
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(fps_chart({"a": [], "b": []},
+            self.assertIsNone(frame_time_chart({"a": [], "b": []},
                                         Path(tmp) / "fps.png", "objects"))
 
     def test_objects_axis_maps_to_the_object_count(self):

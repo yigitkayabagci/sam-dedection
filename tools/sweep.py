@@ -57,7 +57,7 @@ DEFAULT_MATRIX = ROOT / "configs" / "bench_matrix.yaml"
 
 AXES = {
     "resolution": ["640x480", "1280x720", "1920x1080", "3840x2160"],
-    "image-size": ["1024", "768", "512"],
+    "image-size": ["1024", "768", "512", "256"],
     "box": ["20", "96", "400"],
     "frames": ["50", "100", "300", "500", "1000"],
     "objects": ["1", "2", "3", "4"],
@@ -290,13 +290,16 @@ def stage_chart(rows: list[dict], out_path: Path, axis: str):
     return out_path.resolve()
 
 
-def fps_chart(series: dict[str, list[float]], out_path: Path, axis: str):
-    """Per-frame FPS trace for each condition, so spikes stay visible.
+def frame_time_chart(series: dict[str, list[float]], out_path: Path, axis: str):
+    """Per-frame time for each condition, so stalls stay visible.
 
-    A median hides a stall; a run that drops to 3 FPS for ten frames and a run
-    that never leaves 11 can report the same average. One panel per condition
-    rather than overlaid lines: comparing shapes matters more here than
-    comparing levels, and four traces on one axes is unreadable.
+    Milliseconds rather than FPS: FPS is a reciprocal, which squashes the slow
+    end and stretches the fast end, so a stall shows up as a hard-to-read dip.
+    In milliseconds the same stall is a spike whose height is the time it
+    actually cost.
+
+    One panel per condition rather than overlaid lines, because comparing
+    shapes matters more here than comparing levels.
     """
     try:
         import matplotlib
@@ -306,15 +309,14 @@ def fps_chart(series: dict[str, list[float]], out_path: Path, axis: str):
     except ImportError:
         return None
 
-    panels = [(label, [1000.0 / ms for ms in vals if ms > 0])
-              for label, vals in series.items() if vals]
+    panels = [(label, vals) for label, vals in series.items() if vals]
     if not panels:
         return None
 
     fig, axes = plt.subplots(len(panels), 1, sharex=True, squeeze=False,
                              figsize=(10, 1.0 + 1.55 * len(panels)))
-    for ax, (label, fps) in zip(axes[:, 0], panels):
-        arr = np.asarray(fps)
+    for ax, (label, values) in zip(axes[:, 0], panels):
+        arr = np.asarray(values, dtype=float)
         lo, hi, mean = float(arr.min()), float(arr.max()), float(arr.mean())
         ax.axhspan(lo, hi, color="#2E6F8E", alpha=0.07)
         ax.plot(arr, linewidth=0.9, color="#2E6F8E")
@@ -323,21 +325,50 @@ def fps_chart(series: dict[str, list[float]], out_path: Path, axis: str):
         ax.axhline(hi, color="#5B6B7A", linestyle=":", linewidth=0.9)
         ax.set_ylabel(label, fontsize=9)
         ax.grid(alpha=0.2)
-        ax.text(0.995, 0.06, f"min {lo:.1f}   mean {mean:.1f}   max {hi:.1f}",
-                transform=ax.transAxes, ha="right", fontsize=8.5, color="#333")
+        ax.text(0.995, 0.9, f"min {lo:.1f}   mean {mean:.1f}   max {hi:.1f} ms",
+                transform=ax.transAxes, ha="right", va="top", fontsize=8.5,
+                color="#333")
     axes[-1, 0].set_xlabel("frame index")
-    axes[0, 0].set_title(f"Per-frame FPS, varying {axis}")
+    axes[0, 0].set_title(f"Per-frame time (ms), varying {axis}")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
     return out_path.resolve()
 
 
+def write_outputs(out_dir: Path, axis: str, variant: str,
+                  rows: list[dict], series: dict) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    table = markdown(rows)
+    (out_dir / "report.md").write_text(
+        f"# Input sweep: {axis}\n\nvariant: `{variant}`\n\n{table}\n")
+    (out_dir / "report.csv").write_text(csv(rows) + "\n")
+    (out_dir / "report.tex").write_text(latex(rows) + "\n")
+    # Everything needed to redraw without measuring again. Chart tweaks are
+    # frequent and a sweep is not cheap; re-running one to change an axis
+    # label wastes half an hour.
+    (out_dir / "sweep.json").write_text(json.dumps(
+        {"axis": axis, "variant": variant, "rows": rows, "series": series}, indent=2))
+
+    stages = stage_chart(rows, out_dir / "stages.png", axis)
+    frame_time = frame_time_chart(series, out_dir / "frame_time.png", axis)
+
+    print(f"\n{table}\n")
+    print(f"[sweep] report -> {out_dir / 'report.md'} (+ .csv, .tex, .json)")
+    if stages:
+        print(f"[sweep] stages -> {stages}")
+    if frame_time:
+        print(f"[sweep] frames -> {frame_time}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--axis", required=True, choices=sorted(AXES),
+    p.add_argument("--axis", choices=sorted(AXES),
                    help="Which input condition to vary.")
+    p.add_argument("--replot", metavar="DIR",
+                   help="Redraw the charts and tables from a finished sweep's "
+                        "sweep.json, without measuring anything again.")
     p.add_argument("--values", default=None,
                    help="Comma-separated override for the axis values.")
     p.add_argument("--variant", default="pytorch_bf16",
@@ -360,25 +391,25 @@ def main() -> int:
     p.add_argument("--keep-cache", action="store_true")
     args = p.parse_args()
 
+    if args.replot:
+        source = Path(args.replot)
+        payload = source / "sweep.json"
+        if not payload.exists():
+            raise SystemExit(
+                f"{payload} not found. Only sweeps run after sweep.json was "
+                "introduced can be replotted; re-run the sweep once to create it.")
+        data = json.loads(payload.read_text())
+        write_outputs(source, data["axis"], data.get("variant", "?"),
+                      data["rows"], data.get("series", {}))
+        return 0
+
+    if not args.axis:
+        raise SystemExit("Pass --axis (or --replot DIR).")
+
     values = ([v.strip() for v in args.values.split(",") if v.strip()]
               if args.values else AXES[args.axis])
     rows, series = sweep(args.axis, values, args)
-
-    out_dir = Path(args.out)
-    table = markdown(rows)
-    (out_dir / "report.md").write_text(
-        f"# Input sweep: {args.axis}\n\nvariant: `{args.variant}`\n\n{table}\n")
-    (out_dir / "report.csv").write_text(csv(rows) + "\n")
-    (out_dir / "report.tex").write_text(latex(rows) + "\n")
-    stages = stage_chart(rows, out_dir / "stages.png", args.axis)
-    fps = fps_chart(series, out_dir / "fps.png", args.axis)
-
-    print(f"\n{table}\n")
-    print(f"[sweep] report -> {out_dir / 'report.md'} (+ .csv, .tex)")
-    if stages:
-        print(f"[sweep] stages -> {stages}")
-    if fps:
-        print(f"[sweep] fps    -> {fps}")
+    write_outputs(Path(args.out), args.axis, args.variant, rows, series)
     return 0
 
 
