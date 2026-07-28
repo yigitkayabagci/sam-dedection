@@ -51,6 +51,7 @@ class EdgeTAMTracker(VideoTracker):
         compile_mode: str = "default",
         image_size: int | None = None,
         fill_hole_area: int | None = None,
+        cuda_graph_image_encoder: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -72,6 +73,13 @@ class EdgeTAMTracker(VideoTracker):
         # drives preprocess and postprocess cost.
         self.image_size = image_size
         self.fill_hole_area = fill_hole_area
+        # Replay the encoder from a captured CUDA graph instead of issuing its
+        # kernels one at a time. Measured on Orin: the encoder's GPU work at
+        # 1024 is 29.6 ms while the CPU needs ~33 ms just to issue the calls,
+        # so the GPU idles waiting. Capturing removes that gap. Costs nothing
+        # in accuracy -- the same kernels run on the same weights.
+        self.cuda_graph_image_encoder = cuda_graph_image_encoder
+        self.encoder_graphed = False
         self._predictor = None
         self._state = None
 
@@ -163,8 +171,73 @@ class EdgeTAMTracker(VideoTracker):
             stack.enter_context(torch.autocast(device_type=self.device, dtype=dtype))
         return stack
 
+    def _graph_image_encoder(self) -> None:
+        """Replace image_encoder.forward with a lazily-captured CUDA graph.
+
+        Capture happens on the first real call rather than up front, so the
+        graph sees exactly the shapes and the autocast state the pipeline
+        uses. Any failure falls back to eager for the rest of the run: a
+        slower tracker beats a broken one.
+        """
+        import torch
+
+        encoder = self._predictor.image_encoder
+        original = encoder.forward
+        state: dict = {"graph": None, "static_in": None, "out": None, "failed": False}
+
+        def capture(image):
+            static_in = torch.empty_like(image)
+            static_in.copy_(image)
+            # Warm up on a side stream first: capture must not race with lazy
+            # cuDNN/cuBLAS init, allocator first-touch, or the autocast weight
+            # cache, all of which would otherwise be recorded into the graph.
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(3):
+                    original(static_in)
+            torch.cuda.current_stream().wait_stream(side)
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out = original(static_in)
+            torch.cuda.synchronize()
+            state.update(graph=graph, static_in=static_in, out=out)
+            self.encoder_graphed = True
+            print("[edgetam] image encoder captured into a CUDA graph")
+
+        def graphed(image):
+            if state["failed"]:
+                return original(image)
+            if state["graph"] is None:
+                try:
+                    capture(image)
+                except Exception as exc:
+                    state["failed"] = True
+                    print(f"[edgetam] CUDA graph capture failed ({exc}); "
+                          "running the encoder eagerly.")
+                    return original(image)
+
+            state["static_in"].copy_(image)
+            state["graph"].replay()
+            # The graph writes into fixed buffers every replay, and EdgeTAM
+            # holds the previous frame's features while the next one is
+            # encoded, so hand back copies rather than the buffers themselves.
+            out = state["out"]
+            fpn = [t.clone() for t in out["backbone_fpn"]]
+            pos = [t.clone() for t in out["vision_pos_enc"]]
+            # vision_features is backbone_fpn[-1] upstream; keep them the same
+            # object so the aliasing the rest of the model expects survives.
+            return {"vision_features": fpn[-1], "vision_pos_enc": pos,
+                    "backbone_fpn": fpn}
+
+        encoder.forward = graphed
+
     def prepare(self, frames_dir: str | Path) -> None:
         self._ensure_predictor()
+        if self.cuda_graph_image_encoder and self.device == "cuda":
+            self._graph_image_encoder()
         with self._inference_ctx():
             self._state = self._predictor.init_state(
                 video_path=str(frames_dir),

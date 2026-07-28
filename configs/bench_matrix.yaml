@@ -44,6 +44,15 @@ variants:
     precision: bfloat16
     note: "The repo's default recipe (matches EdgeTAM's vos_inference.py)."
 
+  pytorch_graph:
+    tracker: edgetam
+    precision: bfloat16
+    cuda_graph_image_encoder: true
+    note: "Encoder replayed from a CUDA graph. Measured on Orin: its GPU work at
+           1024 is 29.6 ms while the CPU needs ~33 ms to issue the calls, so the
+           GPU idles. Capturing removes that gap at zero accuracy cost, and it
+           needs no TensorRT."
+
   pytorch_compile:
     tracker: edgetam
     precision: bfloat16

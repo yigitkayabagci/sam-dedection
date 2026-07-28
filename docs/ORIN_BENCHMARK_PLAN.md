@@ -436,6 +436,43 @@ ve hatanın tam traceback'i.
 
 ---
 
+## 6.5 ÖLÇÜM SONUCU: darboğaz CPU, sıralama değişti
+
+`tools/encoder_probe.py` Orin AGX üzerinde şunu ölçtü:
+
+| image_size | eager | CUDA graph | hızlanma |
+|---|---|---|---|
+| 1024 | 41.53 ms | **29.58 ms** | 1.40× |
+| 768 | 35.46 ms | 15.69 ms | 2.26× |
+| 512 | 33.33 ms | **6.54 ms** | 5.10× |
+
+Graph süresi GPU'nun boşluksuz çalışma süresidir ve **pikselle neredeyse
+birebir ölçeklenir** (oranlar 1.00 / 0.94 / 0.88). Yani GPU tarafı sağlıklı.
+
+Eager süresi ise girdi küçüldükçe **~33 ms'lik bir tabana** yaklaşıp durur.
+O taban, CPU'nun ~300 kernel'i sıraya koyma maliyetidir; kernel sayısı
+girdi boyutuyla değişmediği için sabittir. 512'de GPU işini 6.5 ms'de
+bitirir, kalan 26.8 ms boyunca **boş bekler**.
+
+```
+GPU'nun ihtiyacı :  29.6 ms (1024) · 15.7 (768) · 6.5 (512)   pikselle ölçeklenir
+CPU'nun ihtiyacı :  ~33 ms sabit                              kernel sayısı belirler
+eager süre       :  ikisinin kusurlu örtüşmesi
+```
+
+**Planın sırası bu yüzden değişti:**
+
+1. **Önce kernel sayısını azalt** — CUDA graph (launch'ı siler) ve TensorRT
+   katman füzyonu (kernel'leri birleştirir). Bağlayıcı kısıt budur.
+2. **Sonra quantization** — INT8 GPU süresini azaltır, ama bağlayıcı kısıt
+   CPU iken görünmez. Ancak 1. adım tamamlandıktan sonra ölçülebilir hale
+   gelir.
+
+Bugün doğrudan INT8'e gitmek, 29.6 ms'lik GPU işini yarıya indirip 33 ms'lik
+CPU tabanının arkasında kaybetmek olurdu. `pytorch_graph` varyantı bu
+kazancı TensorRT'siz ve doğruluk kaybı olmadan alıyor: 1024'te encoder
+41.5 → 29.6 ms, tam kare 147.9 → 135.9 ms, uçtan uca 1.09×.
+
 ## 7. Encoder tavanını kırmak
 
 TensorRT bugün sadece image encoder'ı kapsıyor. Faz 1 çıktısındaki
