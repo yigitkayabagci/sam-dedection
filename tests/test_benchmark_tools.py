@@ -6,6 +6,7 @@ front of the Jetson.
 """
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -370,10 +371,13 @@ class TestSyntheticFrames(unittest.TestCase):
             files = sorted(out.glob("*.jpg"))
             self.assertEqual(len(files), 10)
 
-            # Duplicated frames would let the page cache serve the same JPEG
-            # bytes repeatedly and flatter the preprocess measurement.
-            prefixes = {cv2.imread(str(f)).tobytes()[:4096] for f in files}
-            self.assertEqual(len(prefixes), len(files))
+            # No two frames may be identical: a duplicated frame gives the
+            # tracker a stationary target that barely exercises the memory
+            # bank. Hash the whole file -- the backdrop is deliberately shared
+            # between frames, so only the region around the moving target
+            # differs and any prefix check would compare identical bytes.
+            digests = {hashlib.sha256(f.read_bytes()).hexdigest() for f in files}
+            self.assertEqual(len(digests), len(files))
 
             self.assertEqual(len(prompts.boxes), 1)
             box = prompts.boxes[0]
