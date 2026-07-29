@@ -145,7 +145,10 @@ python tools/build_trt_engines.py --outdir models/ --max-batch 4
 # 3. Check numerics and measure the speedup, per module.
 python tools/check_trt_parity.py --outdir models/
 
-# 4. Track.
+# 4. Measure end-to-end tracking throughput, PyTorch vs TensorRT on the same clip.
+python tools/benchmark_tracking.py --frames 500 --offload-video
+
+# 5. Track.
 python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml \
     --video samples/road.mp4 --output outputs/road.mp4 \
     --prompt file --prompt-file examples/car_box_example.json \
@@ -160,6 +163,12 @@ Step 3 reports, per module, the fp16 engine's drift from fp32 PyTorch *next to*
 the drift PyTorch's own fp16 autocast produces. That second column is the
 baseline you were already running — an engine in the same range is not a
 precision regression.
+
+Step 4 runs the real `propagate()` loop on a generated clip and reports FPS,
+p50/p90/p99 latency and where the milliseconds go, for the stock backend and
+the TensorRT one back to back. `--offload-video` matters for long clips:
+EdgeTAM otherwise preloads every frame to the GPU as fp32 at model resolution,
+which is ~6.3 GB for 500 frames at 1024×1024.
 
 ## Knobs
 
