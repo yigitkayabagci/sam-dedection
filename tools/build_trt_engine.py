@@ -226,6 +226,13 @@ def build(args) -> int:
         config.builder_optimization_level = args.opt_level
         print(f"[build] builder_optimization_level={args.opt_level}")
 
+    # Keep the per-layer precision/tactic info inside the serialized engine so
+    # `--inspect` can answer "did INT8 actually get used, and where?" without a
+    # rebuild. Costs a little engine metadata, nothing at runtime.
+    detailed = getattr(trt.ProfilingVerbosity, "DETAILED", None)
+    if detailed is not None:
+        config.profiling_verbosity = detailed
+
     if args.sparsity:
         if _set_flag(trt, config, "SPARSE_WEIGHTS"):
             report["sparsity"] = True
@@ -346,6 +353,90 @@ def _make_calibrator(trt, args, input_shape, report: dict):
     return make_entropy_calibrator(trt, batches, cache)
 
 
+def _layer_records(info: dict) -> list[dict]:
+    """Normalise EngineInspector's JSON into a list of dicts.
+
+    With ProfilingVerbosity.LAYER_NAMES_ONLY (TensorRT's default, and what any
+    engine built before this flag was added will carry) "Layers" is a list of
+    bare strings; with DETAILED it is a list of dicts.
+    """
+    out = []
+    for entry in info.get("Layers") or []:
+        if isinstance(entry, str):
+            out.append({"Name": entry})
+        elif isinstance(entry, dict):
+            out.append(entry)
+    return out
+
+
+_DTYPE_TAGS = (("INT8", "INT8"), ("BF16", "BF16"), ("FP16", "FP16"), ("HALF", "FP16"),
+               ("FP32", "FP32"), ("FLOAT", "FP32"), ("INT32", "INT32"))
+
+
+def _layer_precision(rec: dict) -> str:
+    """Best-effort precision for one layer, from whichever key TRT filled in."""
+    for key in ("Precision", "precision"):
+        if rec.get(key):
+            return str(rec[key]).upper()
+    for io in ("Outputs", "Inputs"):
+        items = rec.get(io) or []
+        if items and isinstance(items[0], dict):
+            fmt = str(items[0].get("Format/Datatype")
+                      or items[0].get("Datatype") or "").upper()
+            for tag, label in _DTYPE_TAGS:
+                if tag in fmt:
+                    return label
+    return "unknown"
+
+
+def _is_reformat(rec: dict) -> bool:
+    """Reformat/copy nodes: pure memory traffic inserted at format boundaries.
+
+    On a bandwidth-bound board these are where a mixed-precision engine gives
+    back what the low precision saved, so their count is the number that
+    explains a disappointing INT8 result.
+    """
+    if str(rec.get("LayerType", "")).lower() in ("reformat", "constantshuffle"):
+        return True
+    name = str(rec.get("Name", "")).lower()
+    return "reformat" in name or "copy_" in name
+
+
+def print_layer_breakdown(trt, engine) -> None:
+    inspector = getattr(engine, "create_engine_inspector", None)
+    if inspector is None:
+        return
+    try:
+        raw = inspector().get_engine_information(trt.LayerInformationFormat.JSON)
+        info = json.loads(raw)
+    except Exception as e:                                  # pragma: no cover
+        print(f"\nlayer breakdown unavailable: {e}")
+        return
+
+    records = _layer_records(info)
+    if not records:
+        return
+    detailed = any(len(r) > 1 for r in records)
+    reformats = sum(1 for r in records if _is_reformat(r))
+
+    print(f"\nlayers: {len(records)}   "
+          f"reformat/copy: {reformats} ({100 * reformats / len(records):.0f}%)")
+    if detailed:
+        hist: dict[str, int] = {}
+        for r in records:
+            p = _layer_precision(r)
+            hist[p] = hist.get(p, 0) + 1
+        print("precision mix (layers actually built at each precision):")
+        for prec, n in sorted(hist.items(), key=lambda kv: -kv[1]):
+            print(f"  {prec:<8} {n:4d}  ({100 * n / len(records):.0f}%)")
+        if hist.get("INT8"):
+            print("  -> INT8 layers are a minority when the model is depthwise-heavy; "
+                  "every INT8<->float boundary above shows up as a reformat.")
+    else:
+        print("(engine was built with LAYER_NAMES_ONLY, so per-layer precision is "
+              "not stored — rebuild to get the precision mix)")
+
+
 def inspect(engine_path: str) -> int:
     import tensorrt as trt
 
@@ -367,6 +458,7 @@ def inspect(engine_path: str) -> int:
         mode = "IN " if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT else "OUT"
         print(f"  {mode} {name} {tuple(engine.get_tensor_shape(name))} "
               f"{engine.get_tensor_dtype(name)}")
+    print_layer_breakdown(trt, engine)
     meta = path.with_suffix(path.suffix + ".json")
     if meta.exists():
         print("\nbuild metadata:")

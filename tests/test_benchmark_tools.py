@@ -33,6 +33,11 @@ from tools.benchmark import (  # noqa: E402
     variant_runnable,
     _percentile,
 )
+from tools.build_trt_engine import (  # noqa: E402
+    _is_reformat,
+    _layer_precision,
+    _layer_records,
+)
 from tools.calibration import IMG_MEAN, IMG_STD, calibration_batches, preprocess_rgb  # noqa: E402
 from tools.compare_masks import compare, iou, load_dump, unpack  # noqa: E402
 
@@ -570,6 +575,45 @@ class TestMaskComparison(unittest.TestCase):
             np.savez(path, something=np.zeros(3))
             with self.assertRaises(SystemExit):
                 load_dump(path)
+
+
+class TestEngineLayerBreakdown(unittest.TestCase):
+    """The parsing behind `build_trt_engine.py --inspect`, which is how we tell
+    whether an INT8 engine really put layers in INT8 or just paid for the
+    reformats."""
+
+    def test_names_only_engines_yield_name_records(self):
+        recs = _layer_records({"Layers": ["conv_1", "conv_2"]})
+        self.assertEqual([r["Name"] for r in recs], ["conv_1", "conv_2"])
+        # One key each => the caller must report "not detailed" rather than
+        # inventing a precision histogram out of nothing.
+        self.assertTrue(all(len(r) == 1 for r in recs))
+
+    def test_detailed_records_pass_through(self):
+        recs = _layer_records({"Layers": [{"Name": "conv_1", "LayerType": "Convolution"}]})
+        self.assertEqual(recs[0]["LayerType"], "Convolution")
+
+    def test_missing_or_malformed_layers_key(self):
+        self.assertEqual(_layer_records({}), [])
+        self.assertEqual(_layer_records({"Layers": None}), [])
+        self.assertEqual(_layer_records({"Layers": [None, 7]}), [])
+
+    def test_precision_from_explicit_key(self):
+        self.assertEqual(_layer_precision({"Precision": "int8"}), "INT8")
+
+    def test_precision_falls_back_to_output_format(self):
+        rec = {"Name": "conv", "Outputs": [{"Format/Datatype": "Half (Thirty-two wide...)"}]}
+        self.assertEqual(_layer_precision(rec), "FP16")
+        rec = {"Name": "conv", "Outputs": [{"Datatype": "Int8"}]}
+        self.assertEqual(_layer_precision(rec), "INT8")
+
+    def test_precision_unknown_when_nothing_says(self):
+        self.assertEqual(_layer_precision({"Name": "conv"}), "unknown")
+
+    def test_reformat_detection(self):
+        self.assertTrue(_is_reformat({"LayerType": "Reformat"}))
+        self.assertTrue(_is_reformat({"Name": "Reformatting CopyNode for Input Tensor 0"}))
+        self.assertFalse(_is_reformat({"Name": "conv_1", "LayerType": "Convolution"}))
 
 
 class TestToolEntryPoints(unittest.TestCase):

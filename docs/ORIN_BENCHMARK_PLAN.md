@@ -502,6 +502,78 @@ Faz 3 bu bütçeyi kesinleştirecek: TRT füzyonu encoder'ı 29.6'dan kaça
 indiriyor? O sayı kalan blokların ne kadar hızlanması gerektiğini —
 ve INT8'in gerekip gerekmediğini — belirliyor.
 
+## 6.7 ÖLÇÜM SONUCU (Faz 4): INT8 işe yaramadı, çözünürlük yaradı
+
+500 sentetik kare, 1 nesne, 3 tekrar, warmup 25. `precision: bfloat16`
+her satırda sabit, yani tek değişken `.engine` dosyası.
+
+| varyant | infer ms | enc ms | memattn | memenc | dec | other | fps (loop) | engine MB |
+|---|---|---|---|---|---|---|---|---|
+| trt_fp16 (1024) | 49.26 | 19.00 | 8.72 | 6.81 | 11.21 | 12.36 | 16.13 | 11.8 |
+| trt_int8 (1024) | 50.00 | **19.92** | 9.46 | 6.85 | 11.12 | 12.29 | 15.97 | 7.8 |
+| trt_int8_fp16 | 48.75 | 18.78 | 8.77 | 6.82 | 11.17 | 12.33 | 16.28 | 8.5 |
+| trt_best | 47.52 | 18.81 | 8.71 | 6.79 | 11.07 | 12.32 | 16.61 | 8.5 |
+| **trt_fp16_512** | **31.11** | **4.70** | 7.25 | 5.43 | 10.97 | 13.84 | **22.08** | 11.9 |
+
+### INT8 neden hiçbir şey vermedi
+
+Quantization gerçekten oldu: engine 11.8 MB → 7.8 MB, ağırlıklar küçüldü.
+Süre değişmedi. Üç satırın sıralaması sebebi söylüyor:
+
+- `int8` (INT8 + FP32 fallback) **en yavaş**: INT8 kernel'ı olmayan katman
+  FP32'ye düşüyor, FP16'dan pahalı.
+- `int8-fp16` en hızlı INT8 satırı: aynı katmanlar bu kez FP16'ya düşüyor.
+- Ama saf `fp16`'ya karşı kazancı **%1.2**, yani gürültü.
+- `best`, havuza bf16+tf32 ekleyip `int8-fp16` ile aynı yeri buluyor:
+  daha geniş arama uzayı yeni bir şey bulamadı.
+
+Mekanizma: RepViT depthwise ağırlıklı bir mimari. Depthwise conv'ların INT8
+yolu ya yok ya zayıf, ve her INT8↔float sınırı bir **reformat** katmanı
+doğuruyor (tensörü oku, formatı değiştir, geri yaz — saf memory trafiği).
+Bandwidth-bound bir kartta INT8'in kazandırdığını tam olarak burası geri
+alıyor. Doğrulaması:
+
+```bash
+python3 tools/build_trt_engine.py --inspect models/enc_int8.engine
+python3 tools/build_trt_engine.py --inspect models/enc_fp16.engine
+```
+
+`--inspect` artık katman sayısını, reformat/copy oranını ve (DETAILED
+verbosity ile kurulmuş engine'lerde) katman başına precision dağılımını
+basıyor.
+
+### Çözünürlük neden yaradı
+
+`19.00 / 4.70 = 4.04`, ideal ölçekleme `(1024/512)² = 4.00`. TensorRT
+encoder'ı **piksel sayısıyla neredeyse mükemmel ölçekleniyor**. PyTorch'ta
+512'ye inmek işe yaramamıştı çünkü orada encoder launch-bound'du (bkz. §6.5);
+TRT füzyonu kernel sayısını düşürünce darboğaz gerçek işe kaydı ve knob
+çalışır hale geldi. **Aynı knob, farklı backend, tamamen farklı cevap.**
+
+Buradaki ders, ağırlık byte'ını küçültmenin (INT8) değil **aktivasyon
+byte'ını** küçültmenin (çözünürlük) bu modelde kazandırdığıdır.
+
+### Hedef karşısındaki durum
+
+- 1024'te en iyi: **47.5 ms** — 40 ms hedefinin üstünde.
+- 512'de: **31.11 ms** — hedefin altında, ama doğruluğu doğrulanmadı.
+
+512'nin bedava olmadığı yerler: RoPE tabloları 64×64 için eğitildi, biz
+`q_sizes`'ı 32×32'ye override ediyoruz; maske çözünürlüğü düşüyor (ince
+yapılar); memory bank 32×32 feature tutuyor, yani uzun takipte kayıp tek
+kare IoU'sundan fazla olabilir. Etiketli veri gelince ilk ölçülecek şey bu.
+
+Yan fayda: peak torch bellek 6970 MB → 1839 MB (3.8x), 500 karelik memory
+bank feature haritasıyla birlikte küçüldüğü için.
+
+### Encoder işi bitti
+
+512'de encoder inference'ın **%10**'u. Kalan bütçe: mask decoder 10.97,
+memory attention 7.25, memory encoder 5.43, ve `other` 13.84 ms. `other`
+1024'te 12.3, 512'de 13.8 — image size ile ölçeklenmiyor, yani CPU tarafı
+(Python döngüsü, state bookkeeping, threshold + D2H kopya). Encoder'ı daha
+fazla optimize etmenin getirisi kalmadı; §7'deki iş listesi artık asıl iş.
+
 ## 7. Encoder tavanını kırmak
 
 TensorRT bugün sadece image encoder'ı kapsıyor. Faz 1 çıktısındaki

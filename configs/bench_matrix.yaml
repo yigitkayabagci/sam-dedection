@@ -140,6 +140,27 @@ variants:
            input size while weights do not. Same knob, different backend, possibly
            very different answer. Costs accuracy (RoPE was tuned at 64x64)."
 
+  trt_fp16_512_graph:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16_512.engine
+    image_size: 512
+    strict: true
+    use_cuda_graph: true
+    note: "Measured: at 512 the encoder is 4.70 ms and only 10% of inference, so
+           what is left of the frame is launch and CPU overhead. This asks how
+           much of that the graph removes."
+
+  trt_fp16_768:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16_768.engine
+    image_size: 768
+    strict: true
+    note: "The middle point. 512 beats the 40 ms target but changes RoPE and the
+           memory bank resolution; 768 is the fallback if 512 turns out to cost
+           too much accuracy once labelled data exists. Needs its own onnx+engine."
+
   trt_fp16_nosync:
     tracker: edgetam_trt
     precision: bfloat16
