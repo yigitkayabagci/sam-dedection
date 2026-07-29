@@ -49,22 +49,55 @@ class TestRegistry(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             t.prepare("/tmp/whatever")
 
-    def test_edgetam_trt_constructs_without_engine(self):
-        # Non-strict mode must not raise at construction time even if the engine
-        # file is missing — only the runtime fallback message should fire later.
-        t = build_tracker(
-            "edgetam_trt",
-            engine_path="/tmp/does_not_exist.engine",
+    def _trt_tracker(self, **kwargs):
+        base = dict(
             model_cfg="configs/edgetam.yaml",
             checkpoint="/tmp/does_not_exist.pt",
             device="cpu",
             precision="float32",
-            strict=False,
         )
-        self.assertEqual(t.engine_path, "/tmp/does_not_exist.engine")
+        base.update(kwargs)
+        return build_tracker("edgetam_trt", **base)
+
+    def test_edgetam_trt_constructs_without_engines(self):
+        # Non-strict mode must not raise at construction time even with no
+        # engines at all; each module just stays on PyTorch.
+        t = self._trt_tracker(
+            memory_attention_engine="/tmp/does_not_exist.engine", strict=False
+        )
         self.assertFalse(t.strict)
-        # _try_load_engine returns False when the file is absent.
-        self.assertFalse(t._try_load_engine())
+        t._load_engines()
+        self.assertEqual(t._engines, {})
+
+    def test_edgetam_trt_accepts_legacy_engine_path(self):
+        # `engine_path` was the single-engine config key; it still points at
+        # the image encoder so old configs keep working.
+        t = self._trt_tracker(engine_path="/tmp/enc.engine")
+        self.assertEqual(t.engine_paths["image_encoder"], "/tmp/enc.engine")
+        self.assertIsNone(t.engine_paths["memory_attention"])
+
+    def test_edgetam_trt_strict_rejects_missing_engine(self):
+        t = self._trt_tracker(
+            image_encoder_engine="/tmp/does_not_exist.engine",
+            memory_attention_engine="/tmp/does_not_exist.engine",
+            memory_encoder_engine="/tmp/does_not_exist.engine",
+            sam_head_engine="/tmp/does_not_exist.engine",
+            strict=True,
+        )
+        with self.assertRaises((FileNotFoundError, ImportError)):
+            t._load_engines()
+
+    def test_edgetam_trt_defaults_to_fp16(self):
+        self.assertEqual(self._trt_tracker(precision="fp16").precision, "float16")
+        self.assertEqual(
+            build_tracker(
+                "edgetam_trt",
+                model_cfg="configs/edgetam.yaml",
+                checkpoint="/tmp/x.pt",
+                device="cpu",
+            ).precision,
+            "float16",
+        )
 
     def test_precision_aliases(self):
         t = build_tracker(

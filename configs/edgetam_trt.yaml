@@ -1,19 +1,30 @@
-# EdgeTAM with a TensorRT image-encoder engine. Use on Orin AGX after
-# building the engine (see tools/build_trt_engine.sh).
+# EdgeTAM with its whole per-frame graph on TensorRT (Orin AGX, fp16).
 #
-# Build steps:
-#   1) python tools/export_image_encoder_onnx.py \
-#        --output models/edgetam_image_encoder.onnx
-#   2) tools/build_trt_engine.sh \
-#        models/edgetam_image_encoder.onnx \
-#        models/edgetam_image_encoder.engine
-#   3) python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml ...
-engine_path: models/edgetam_image_encoder.engine
-model_cfg: configs/edgetam.yaml
+# Build ON THE ORIN -- engines are specific to the GPU and the TensorRT version:
+#   1) python tools/export_edgetam_onnx.py  --outdir models/ --verify
+#   2) python tools/build_trt_engines.py    --outdir models/ --max-batch 4
+#   3) python tools/check_trt_parity.py     --outdir models/
+#   4) python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml ...
+#
+# Every engine is optional. A missing file leaves that module on PyTorch, so
+# you can bring them up one at a time; set strict: true once all four are built
+# to turn any silent fallback into an error.
+image_encoder_engine:    models/edgetam_image_encoder.engine
+memory_attention_engine: models/edgetam_memory_attention.engine
+memory_encoder_engine:   models/edgetam_memory_encoder.engine
+sam_head_engine:         models/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
 checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
 device: cuda
-precision: bfloat16
+precision: float16                        # matches the fp16 engines
 mask_threshold: 0.0
-offload_video_to_cpu: false
-offload_state_to_cpu: false
-strict: false                             # true = refuse silent fallback
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
+
+strict: false                             # true = refuse silent PyTorch fallback
+use_cuda_graph: true                      # replay engines from a captured graph
+# null  -> keep EdgeTAM's default (8), but disable it automatically when the
+#          sam2._C extension is missing, since it would raise every frame.
+# 0     -> off. Any int -> that hole area.
+fill_hole_area: null

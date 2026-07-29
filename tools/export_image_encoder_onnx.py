@@ -1,126 +1,59 @@
 #!/usr/bin/env python3
-"""Export EdgeTAM's image encoder to ONNX.
+"""Deprecated: use `tools/export_edgetam_onnx.py`.
 
-The image encoder is the heaviest per-frame component; replacing just it
-with a TensorRT engine is what unlocks big speedups on Jetson Orin AGX.
-The rest of EdgeTAM (memory module, mask decoder) stays in PyTorch.
+This used to be the only exporter, back when TensorRT covered just the image
+encoder. It now forwards to the unified exporter, which also emits the memory
+attention, memory encoder and SAM head graphs plus the `.spec.json` files
+`tools/build_trt_engines.py` needs to build optimisation profiles.
 
-Output: a single ONNX graph
-    Input:  image  [1, 3, 1024, 1024]   (static shape; faster TRT engine)
-    Outputs (raw FPN levels — all 256-channel because EdgeTAM's FpnNeck
-    projects every level to d_model=256; the downstream `forward_image`
-    later applies conv_s0/conv_s1 to project the high-res ones to 32/64 ch):
-        backbone_fpn_0  [1, 256, 256, 256]   (highest resolution)
-        backbone_fpn_1  [1, 256, 128, 128]
-        backbone_fpn_2  [1, 256,  64,  64]   (lowest resolution = vision_features)
-
-Positional encodings are NOT exported — they are deterministic functions
-of spatial size and re-generated in PyTorch on the consumer side.
-
-Usage:
-    python tools/export_image_encoder_onnx.py \\
-        --checkpoint third_party/EdgeTAM/checkpoints/edgetam.pt \\
-        --output     models/edgetam_image_encoder.onnx
+The image encoder graph itself changed too: it now folds in the mask decoder's
+conv_s0/conv_s1 projections, which shrinks its per-frame output from ~45 MB to
+~6 MB. Pass --no-fuse-high-res-proj to the new exporter for the old behaviour.
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
-from typing import Tuple
 
-import torch
-import torch.nn as nn
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-class ImageEncoderWrapper(nn.Module):
-    """Wrap EdgeTAM's image encoder so it returns a tuple instead of a dict.
-
-    ONNX export does not support dict outputs. The wrapper calls the
-    image_encoder (which already applies the configured `scalp` discard
-    inside its forward) and returns the post-scalp backbone_fpn levels as
-    a tuple. We expect exactly 3 levels — that is what the SAM2 base
-    consumes downstream.
-    """
-
-    def __init__(self, image_encoder: nn.Module) -> None:
-        super().__init__()
-        self.image_encoder = image_encoder
-
-    def forward(self, image: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        out = self.image_encoder(image)
-        feats = out["backbone_fpn"]
-        if len(feats) != 3:
-            raise RuntimeError(
-                f"Expected 3 post-scalp FPN levels, got {len(feats)}. "
-                "Adjust the wrapper if you use a non-default scalp."
-            )
-        return feats[0], feats[1], feats[2]
+from tools.export_edgetam_onnx import main as export_main  # noqa: E402
 
 
-def build(checkpoint: str, model_cfg: str = "configs/edgetam.yaml") -> nn.Module:
-    from sam2.build_sam import build_sam2_video_predictor
-
-    predictor = build_sam2_video_predictor(model_cfg, checkpoint, device="cpu")
-    predictor.eval()
-    return ImageEncoderWrapper(predictor.image_encoder)
-
-
-def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--checkpoint", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
-    p.add_argument("--model-cfg", default="configs/edgetam.yaml",
-                   help="Hydra config name resolved by the sam2 package.")
+    p.add_argument("--model-cfg", default="configs/edgetam.yaml")
     p.add_argument("--output", default="models/edgetam_image_encoder.onnx")
-    p.add_argument("--input-size", type=int, default=1024)
-    p.add_argument("--opset", type=int, default=18,
-                   help="ONNX opset. 18 is the lowest version torch's exporter "
-                        "natively emits; lower values trigger a version-converter "
-                        "round-trip with noisy warnings. TRT 10 supports >=11.")
-    p.add_argument("--verify", action="store_true",
-                   help="Run onnxruntime CPU and assert numerical parity with PyTorch.")
-    args = p.parse_args()
+    p.add_argument("--input-size", type=int, default=None,
+                   help="Ignored; the resolution comes from the model config.")
+    p.add_argument("--opset", type=int, default=18)
+    p.add_argument("--verify", action="store_true")
+    args = p.parse_args(argv)
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-
-    model = build(args.checkpoint, args.model_cfg)
-    model.eval()
-    dummy = torch.randn(1, 3, args.input_size, args.input_size, dtype=torch.float32)
-
-    # Sanity check: run once eagerly so any shape mismatch surfaces here.
-    with torch.no_grad():
-        sample = model(dummy)
-    for i, t in enumerate(sample):
-        print(f"output[{i}] shape={tuple(t.shape)} dtype={t.dtype}")
-
-    torch.onnx.export(
-        model,
-        dummy,
-        args.output,
-        input_names=["image"],
-        output_names=["backbone_fpn_0", "backbone_fpn_1", "backbone_fpn_2"],
-        opset_version=args.opset,
-        do_constant_folding=True,
-        # Static shape; TensorRT builds a faster engine without dynamic axes.
-        dynamic_axes=None,
+    outdir = Path(args.output).parent or Path("models")
+    print(
+        "tools/export_image_encoder_onnx.py is deprecated. Forwarding to:\n"
+        f"  python tools/export_edgetam_onnx.py --module image_encoder "
+        f"--outdir {outdir}\n"
+        "Run it without --module to export all four graphs.\n"
     )
-    print(f"wrote {args.output}  ({Path(args.output).stat().st_size / 1e6:.1f} MB)")
+    if args.input_size is not None:
+        print(f"NOTE: --input-size {args.input_size} ignored; using the model's image_size.\n")
 
+    forwarded = [
+        "--module", "image_encoder",
+        "--checkpoint", args.checkpoint,
+        "--model-cfg", args.model_cfg,
+        "--outdir", str(outdir),
+        "--opset", str(args.opset),
+    ]
     if args.verify:
-        try:
-            import onnxruntime as ort
-        except ImportError:
-            print("WARN: onnxruntime not installed; skipping --verify.")
-            return 0
-        import numpy as np
-        sess = ort.InferenceSession(args.output, providers=["CPUExecutionProvider"])
-        ort_out = sess.run(None, {"image": dummy.numpy()})
-        worst = 0.0
-        for py, o in zip(sample, ort_out):
-            worst = max(worst, float(np.abs(py.detach().numpy() - o).max()))
-        print(f"PyTorch vs ONNX Runtime max abs diff = {worst:.2e}")
-        if worst > 1e-3:
-            raise SystemExit(f"Parity check failed (diff={worst:.2e} > 1e-3).")
-    return 0
+        forwarded.append("--verify")
+    return export_main(forwarded)
 
 
 if __name__ == "__main__":

@@ -124,7 +124,17 @@ def main(argv: list[str] | None = None) -> int:
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
     # Resolve filesystem paths; model_cfg is a Hydra config name, not a path.
-    backend_cfg = _resolve_paths(backend_cfg, keys=("checkpoint",))
+    backend_cfg = _resolve_paths(
+        backend_cfg,
+        keys=(
+            "checkpoint",
+            "engine_path",
+            "image_encoder_engine",
+            "memory_attention_engine",
+            "memory_encoder_engine",
+            "sam_head_engine",
+        ),
+    )
     tracker = build_tracker(args.tracker, **backend_cfg)
 
     prompts = _collect_prompts(args)
