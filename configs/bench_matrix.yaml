@@ -128,6 +128,18 @@ variants:
     note: "Isolates TensorRT's kernel-launch overhead. Same engine as trt_fp16,
            so any delta is pure launch cost (Orin's CPU makes this visible)."
 
+  trt_fp16_512:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16_512.engine
+    image_size: 512
+    strict: true
+    note: "Needs its OWN onnx and engine -- the input size is baked into both.
+           Worth re-testing on TensorRT even though it barely helped in PyTorch:
+           the bottleneck here is memory traffic, and activations do scale with
+           input size while weights do not. Same knob, different backend, possibly
+           very different answer. Costs accuracy (RoPE was tuned at 64x64)."
+
   trt_fp16_nosync:
     tracker: edgetam_trt
     precision: bfloat16

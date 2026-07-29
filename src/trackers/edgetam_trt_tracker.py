@@ -46,6 +46,8 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         use_cuda_graph: bool = False,
         trt_synchronize: bool = True,
         trt_output_dtype: str = "auto",
+        image_size: int | None = None,
+        fill_hole_area: int | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -55,6 +57,8 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             mask_threshold=mask_threshold,
             offload_video_to_cpu=offload_video_to_cpu,
             offload_state_to_cpu=offload_state_to_cpu,
+            image_size=image_size,
+            fill_hole_area=fill_hole_area,
         )
         if trt_output_dtype not in _OUTPUT_DTYPES:
             raise ValueError(
