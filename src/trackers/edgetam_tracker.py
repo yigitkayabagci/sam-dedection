@@ -185,22 +185,40 @@ class EdgeTAMTracker(VideoTracker):
         original = encoder.forward
         state: dict = {"graph": None, "static_in": None, "out": None, "failed": False}
 
+        def uncached_autocast():
+            """Autocast with weight caching OFF, for the captured region.
+
+            autocast casts fp32 weights to bf16 and caches them, then frees
+            that cache when the outermost autocast context exits. Capture
+            happens inside prepare()'s context and replay inside propagate()'s
+            -- a different context -- so a graph recorded against cached
+            weights would replay against freed memory. Disabling the cache
+            records the casts as ops inside the graph instead, where they read
+            the module's own persistent fp32 parameters every replay. Costs a
+            few hundred microseconds of re-casting; buys correctness.
+            """
+            if self.precision == "float32" or self.device == "cpu":
+                return nullcontext()
+            dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[self.precision]
+            return torch.autocast(device_type=self.device, dtype=dtype,
+                                  cache_enabled=False)
+
         def capture(image):
             static_in = torch.empty_like(image)
             static_in.copy_(image)
             # Warm up on a side stream first: capture must not race with lazy
-            # cuDNN/cuBLAS init, allocator first-touch, or the autocast weight
-            # cache, all of which would otherwise be recorded into the graph.
+            # cuDNN/cuBLAS init or allocator first-touch, either of which would
+            # otherwise be recorded into the graph.
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
+            with torch.cuda.stream(side), uncached_autocast():
                 for _ in range(3):
                     original(static_in)
             torch.cuda.current_stream().wait_stream(side)
             torch.cuda.synchronize()
 
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
+            with uncached_autocast(), torch.cuda.graph(graph):
                 out = original(static_in)
             torch.cuda.synchronize()
             state.update(graph=graph, static_in=static_in, out=out)
