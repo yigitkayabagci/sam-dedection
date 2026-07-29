@@ -48,6 +48,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         trt_output_dtype: str = "auto",
         image_size: int | None = None,
         fill_hole_area: int | None = None,
+        cuda_graph_blocks: list[str] | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -59,7 +60,17 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             offload_state_to_cpu=offload_state_to_cpu,
             image_size=image_size,
             fill_hole_area=fill_hole_area,
+            cuda_graph_blocks=cuda_graph_blocks,
         )
+        if "image_encoder" in (cuda_graph_blocks or []):
+            # The encoder's forward is about to be replaced by the TRT engine.
+            # Graphing the engine is `use_cuda_graph` (it lives in the TRT
+            # runtime, where the bindings are); a torch graph over it would
+            # capture a Python call into TensorRT, which is not capturable.
+            raise ValueError(
+                "cuda_graph_blocks must not contain 'image_encoder' on the TRT "
+                "tracker -- use use_cuda_graph: true instead."
+            )
         if trt_output_dtype not in _OUTPUT_DTYPES:
             raise ValueError(
                 f"trt_output_dtype must be one of {_OUTPUT_DTYPES} (got {trt_output_dtype})"
@@ -146,6 +157,9 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         self._ensure_predictor()
         if self._try_load_engine():
             self._patch_image_encoder()
+        if self.device == "cuda":
+            for name in self.cuda_graph_blocks:
+                self._graph_block(name)
         with self._inference_ctx():
             self._state = self._predictor.init_state(
                 video_path=str(frames_dir),

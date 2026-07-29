@@ -151,6 +151,35 @@ variants:
            what is left of the frame is launch and CPU overhead. This asks how
            much of that the graph removes."
 
+  # The everything-on pipeline: TensorRT fusion on the encoder, a CUDA graph
+  # around the engine, and CUDA graphs around the three blocks TensorRT does
+  # not cover. Measured at 512 the encoder is 10% of inference, so this is
+  # where the remaining time actually is.
+  trt_fp16_max:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16.engine
+    strict: true
+    use_cuda_graph: true
+    cuda_graph_blocks: [memory_attention, memory_encoder, sam_mask_decoder]
+
+  trt_fp16_512_max:
+    tracker: edgetam_trt
+    precision: bfloat16
+    engine_path: models/enc_fp16_512.engine
+    image_size: 512
+    strict: true
+    use_cuda_graph: true
+    cuda_graph_blocks: [memory_attention, memory_encoder, sam_mask_decoder]
+
+  # No TensorRT anywhere. Isolates how much of the max pipeline's gain is the
+  # graphs alone, which is the honest way to attribute the speedup.
+  pytorch_graph_all:
+    tracker: edgetam
+    precision: bfloat16
+    cuda_graph_image_encoder: true
+    cuda_graph_blocks: [memory_attention, memory_encoder, sam_mask_decoder]
+
   trt_fp16_768:
     tracker: edgetam_trt
     precision: bfloat16

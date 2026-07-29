@@ -527,20 +527,40 @@ Süre değişmedi. Üç satırın sıralaması sebebi söylüyor:
 - `best`, havuza bf16+tf32 ekleyip `int8-fp16` ile aynı yeri buluyor:
   daha geniş arama uzayı yeni bir şey bulamadı.
 
-Mekanizma: RepViT depthwise ağırlıklı bir mimari. Depthwise conv'ların INT8
-yolu ya yok ya zayıf, ve her INT8↔float sınırı bir **reformat** katmanı
-doğuruyor (tensörü oku, formatı değiştir, geri yaz — saf memory trafiği).
-Bandwidth-bound bir kartta INT8'in kazandırdığını tam olarak burası geri
-alıyor. Doğrulaması:
+İlk hipotez **reformat patlaması**ydı: INT8↔float her sınırında TensorRT bir
+reformat katmanı (tensörü oku, formatı çevir, geri yaz) koyar ve
+bandwidth-bound bir kartta bu, INT8'in kazandırdığını geri alır. Ölçüm bunu
+**doğrulamadı**:
+
+| engine | katman | reformat/copy |
+|---|---|---|
+| enc_fp16 | 272 | 96 (%35) |
+| enc_int8 | 263 | **87 (%33)** |
+
+INT8 engine'de reformat *daha az*. Yani "ekstra dönüşüm katmanları" hipotezi
+yanlış, o sayıyla açıklanmıyor.
+
+Geriye kalan ve verilerle uyumlu açıklama: **TensorRT INT8 kernel'larını
+ölçtü ve çoğunu reddetti.** Autotuner katman başına aday kernel'ları gerçek
+donanımda süreleyip en hızlısını seçer; INT8 adayı FP16'yı yenemediğinde
+seçilmez. Bu bir hata değil, autotuner'ın doğru çalışması. Bunu kesinleştiren
+sayı katman başına precision dağılımıdır ve o, engine DETAILED profiling
+verbosity ile kurulduğunda saklanır (artık varsayılan):
 
 ```bash
-python3 tools/build_trt_engine.py --inspect models/enc_int8.engine
-python3 tools/build_trt_engine.py --inspect models/enc_fp16.engine
+python3 tools/build_trt_engine.py --precision int8 \
+  --onnx models/edgetam_image_encoder.onnx --engine models/enc_int8_v2.engine \
+  --calib-cache models/enc_int8.calib
+python3 tools/build_trt_engine.py --inspect models/enc_int8_v2.engine
 ```
 
-`--inspect` artık katman sayısını, reformat/copy oranını ve (DETAILED
-verbosity ile kurulmuş engine'lerde) katman başına precision dağılımını
-basıyor.
+Yan bulgu, asıl bulgudan daha önemli olabilir: **fp16 engine'in katmanlarının
+%35'i saf veri taşıma.** Encoder grafiğinin üçte biri hesap değil kopya. Bu,
+bandwidth-bound teşhisini bağımsız olarak destekliyor ve iki şeyi işaret
+ediyor: (1) çözünürlüğü düşürmek neden bu kadar iyi çalıştı, (2) engine'in
+FP32 çıkışı neden israf. Encoder kare başına 88 MB FP32 yazıyor
+(256×256×256 + 128×128×256 + 64×64×256). `--io-fp16` bunu yarıya indirir ve
+grafiğin sonundaki genişletme reformat'ını siler.
 
 ### Çözünürlük neden yaradı
 
@@ -566,6 +586,26 @@ kare IoU'sundan fazla olabilir. Etiketli veri gelince ilk ölçülecek şey bu.
 Yan fayda: peak torch bellek 6970 MB → 1839 MB (3.8x), 500 karelik memory
 bank feature haritasıyla birlikte küçüldüğü için.
 
+### Hangi sayı 40 ms ile karşılaştırılır
+
+Üç farklı sayı var ve karıştırmak kolay:
+
+```
+pre 36.38 ms   <- init_state icinde, loop'un disinda
+--- propagate loop: 45.27 ms/kare = 22.08 FPS ---
+    infer  31.11   <- 40 ms hedefi bu sayiya konduysa TUTTU
+    post    0.32
+    other  13.84   <- CPU: python dongusu, state bookkeeping, D2H kopya
+```
+
+- **inference = 31.11 ms** → hedefin altında.
+- **kare süresi = 45.27 ms (22.08 FPS)** → hedef "kare başına 40 ms" ise 5 ms
+  eksiğimiz var.
+- **uçtan uca = 81.65 ms (12.2 FPS)** → preprocess dahil.
+
+Fark tamamen `other`, yani GPU değil CPU. Bu yüzden bir sonraki iş TensorRT
+değil, launch ve Python maliyetini kesmek.
+
 ### Encoder işi bitti
 
 512'de encoder inference'ın **%10**'u. Kalan bütçe: mask decoder 10.97,
@@ -573,6 +613,42 @@ memory attention 7.25, memory encoder 5.43, ve `other` 13.84 ms. `other`
 1024'te 12.3, 512'de 13.8 — image size ile ölçeklenmiyor, yani CPU tarafı
 (Python döngüsü, state bookkeeping, threshold + D2H kopya). Encoder'ı daha
 fazla optimize etmenin getirisi kalmadı; §7'deki iş listesi artık asıl iş.
+
+## 6.8 "Max" pipeline: her şey açık
+
+INT8 rafa kalktığına göre kalan tüm hızlanma kaynaklarını tek bir varyantta
+topluyoruz. Yeni matris satırları:
+
+| varyant | encoder | encoder graph | diğer bloklar |
+|---|---|---|---|
+| `trt_fp16` | TRT füzyon | yok | eager PyTorch |
+| `trt_fp16_graph` | TRT füzyon | var | eager PyTorch |
+| `pytorch_graph_all` | yok | var (torch) | **CUDA graph** |
+| `trt_fp16_max` | TRT füzyon | var | **CUDA graph** |
+| `trt_fp16_512_max` | TRT füzyon @512 | var | **CUDA graph** |
+
+Mekanizma: `src/trackers/_cuda_graph.py`. Bir modülün `forward`'ını sarar,
+girdi imzası (şekil + dtype + tensör olmayan argümanlar) başına bir graph
+yakalar ve sonraki çağrılarda girdileri sabit tampona kopyalayıp `replay()`
+eder. Yakalayamadığı her şeyde eager'a düşer.
+
+İki tasarım kararı ölçümden geliyor:
+
+- **`min_hits=2`:** bir imza ilk görüldüğünde yakalanmaz. EdgeTAM'in memory
+  bank'i ilk birkaç karede büyür, o geçici şekillerin her biri bir kez
+  görünür; onları yakalamak bütçeyi asıl kararlı şekil gelmeden tüketirdi.
+- **Çıkışlar klonlanır, ama aynı nesne olanlar aynı nesne kalır.** Graph her
+  replay'de aynı belleğe yazar ve EdgeTAM bir karenin feature'larını bir
+  sonraki hesaplanırken elinde tutar; klonlamazsak kareler sessizce aynı
+  belleği paylaşır. Kimlik korunmazsa da SAM2'nin `vision_features is
+  backbone_fpn[-1]` beklentisi bozulur ve 16 MB iki kez kopyalanır.
+
+Neden bu blokların TensorRT'ye taşınmasından önce deneniyor: encoder'da
+ölçtüğümüz orana göre TRT füzyonunun CUDA graph üzerine kattığı ek kazanç
+512'de 6.54 → 4.70 ms, yani 1.4x. Graph'in eager üzerine kattığı ise
+33.33 → 6.54, yani 5.1x. **Kazancın büyük kısmı graph'ten geliyor, füzyondan
+değil**, ve graph ONNX export gerektirmiyor. Kalan bloklar için de aynı
+sıralamayı izliyoruz: önce ucuz olanı ölç, ihtiyaç kalırsa export et.
 
 ## 7. Encoder tavanını kırmak
 

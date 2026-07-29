@@ -18,6 +18,17 @@ _PRECISION_ALIASES = {
     "fp32": "float32",
 }
 
+# Blocks that may be replayed from a CUDA graph. Restricted to the per-frame
+# submodules of SAM2Base so a typo in the YAML fails at construction instead of
+# silently graphing nothing.
+GRAPHABLE_BLOCKS = (
+    "image_encoder",
+    "memory_attention",
+    "memory_encoder",
+    "sam_mask_decoder",
+    "sam_prompt_encoder",
+)
+
 
 @register("edgetam")
 class EdgeTAMTracker(VideoTracker):
@@ -52,6 +63,7 @@ class EdgeTAMTracker(VideoTracker):
         image_size: int | None = None,
         fill_hole_area: int | None = None,
         cuda_graph_image_encoder: bool = False,
+        cuda_graph_blocks: list[str] | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -79,7 +91,21 @@ class EdgeTAMTracker(VideoTracker):
         # so the GPU idles waiting. Capturing removes that gap. Costs nothing
         # in accuracy -- the same kernels run on the same weights.
         self.cuda_graph_image_encoder = cuda_graph_image_encoder
+        # The same treatment for the rest of the per-frame step. Measured at
+        # image_size 512 the TensorRT encoder is 4.70 ms of a 31.11 ms
+        # inference; the mask decoder alone is 10.97 ms for far less
+        # arithmetic. Once the encoder stops being the bottleneck these are
+        # where the launch overhead lives.
+        blocks = list(cuda_graph_blocks or [])
+        unknown = [b for b in blocks if b not in GRAPHABLE_BLOCKS]
+        if unknown:
+            raise ValueError(
+                f"cuda_graph_blocks contains unknown block(s) {unknown}; "
+                f"valid names are {list(GRAPHABLE_BLOCKS)}"
+            )
+        self.cuda_graph_blocks = blocks
         self.encoder_graphed = False
+        self.graphed_blocks: list[str] = []
         self._predictor = None
         self._state = None
 
@@ -171,91 +197,51 @@ class EdgeTAMTracker(VideoTracker):
             stack.enter_context(torch.autocast(device_type=self.device, dtype=dtype))
         return stack
 
-    def _graph_image_encoder(self) -> None:
-        """Replace image_encoder.forward with a lazily-captured CUDA graph.
+    def _uncached_autocast(self):
+        """Autocast with weight caching OFF, for a CUDA-graph capture region.
 
-        Capture happens on the first real call rather than up front, so the
-        graph sees exactly the shapes and the autocast state the pipeline
-        uses. Any failure falls back to eager for the rest of the run: a
-        slower tracker beats a broken one.
+        autocast casts fp32 weights to bf16 and caches them, then frees that
+        cache when the outermost autocast context exits. Capture happens
+        inside prepare()'s context and replay inside propagate()'s -- a
+        different context -- so a graph recorded against cached weights would
+        replay against freed memory, with no error and wrong numbers.
+        Disabling the cache records the casts as ops inside the graph instead,
+        where they read the module's own persistent fp32 parameters on every
+        replay. Costs a few hundred microseconds of re-casting; buys
+        correctness.
         """
         import torch
 
-        encoder = self._predictor.image_encoder
-        original = encoder.forward
-        state: dict = {"graph": None, "static_in": None, "out": None, "failed": False}
+        if self.precision == "float32" or self.device == "cpu":
+            return nullcontext()
+        dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[self.precision]
+        return torch.autocast(device_type=self.device, dtype=dtype,
+                              cache_enabled=False)
 
-        def uncached_autocast():
-            """Autocast with weight caching OFF, for the captured region.
+    def _graph_block(self, name: str) -> None:
+        """Replay one submodule from a lazily-captured CUDA graph."""
+        from ._cuda_graph import graph_module
 
-            autocast casts fp32 weights to bf16 and caches them, then frees
-            that cache when the outermost autocast context exits. Capture
-            happens inside prepare()'s context and replay inside propagate()'s
-            -- a different context -- so a graph recorded against cached
-            weights would replay against freed memory. Disabling the cache
-            records the casts as ops inside the graph instead, where they read
-            the module's own persistent fp32 parameters every replay. Costs a
-            few hundred microseconds of re-casting; buys correctness.
-            """
-            if self.precision == "float32" or self.device == "cpu":
-                return nullcontext()
-            dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[self.precision]
-            return torch.autocast(device_type=self.device, dtype=dtype,
-                                  cache_enabled=False)
+        module = getattr(self._predictor, name, None)
+        if module is None:
+            print(f"[edgetam] no block named {name} on the predictor; skipping.")
+            return
+        graph_module(module, name, self._uncached_autocast)
+        self.graphed_blocks.append(name)
 
-        def capture(image):
-            static_in = torch.empty_like(image)
-            static_in.copy_(image)
-            # Warm up on a side stream first: capture must not race with lazy
-            # cuDNN/cuBLAS init or allocator first-touch, either of which would
-            # otherwise be recorded into the graph.
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side), uncached_autocast():
-                for _ in range(3):
-                    original(static_in)
-            torch.cuda.current_stream().wait_stream(side)
-            torch.cuda.synchronize()
-
-            graph = torch.cuda.CUDAGraph()
-            with uncached_autocast(), torch.cuda.graph(graph):
-                out = original(static_in)
-            torch.cuda.synchronize()
-            state.update(graph=graph, static_in=static_in, out=out)
-            self.encoder_graphed = True
-            print("[edgetam] image encoder captured into a CUDA graph")
-
-        def graphed(image):
-            if state["failed"]:
-                return original(image)
-            if state["graph"] is None:
-                try:
-                    capture(image)
-                except Exception as exc:
-                    state["failed"] = True
-                    print(f"[edgetam] CUDA graph capture failed ({exc}); "
-                          "running the encoder eagerly.")
-                    return original(image)
-
-            state["static_in"].copy_(image)
-            state["graph"].replay()
-            # The graph writes into fixed buffers every replay, and EdgeTAM
-            # holds the previous frame's features while the next one is
-            # encoded, so hand back copies rather than the buffers themselves.
-            out = state["out"]
-            fpn = [t.clone() for t in out["backbone_fpn"]]
-            pos = [t.clone() for t in out["vision_pos_enc"]]
-            # vision_features is backbone_fpn[-1] upstream; keep them the same
-            # object so the aliasing the rest of the model expects survives.
-            return {"vision_features": fpn[-1], "vision_pos_enc": pos,
-                    "backbone_fpn": fpn}
-
-        encoder.forward = graphed
+    def _graph_image_encoder(self) -> None:
+        self._graph_block("image_encoder")
+        self.encoder_graphed = True
 
     def prepare(self, frames_dir: str | Path) -> None:
         self._ensure_predictor()
-        if self.cuda_graph_image_encoder and self.device == "cuda":
-            self._graph_image_encoder()
+        if self.device == "cuda":
+            if self.cuda_graph_image_encoder:
+                self._graph_image_encoder()
+            for name in self.cuda_graph_blocks:
+                if name == "image_encoder" and self.encoder_graphed:
+                    continue
+                self._graph_block(name)
         with self._inference_ctx():
             self._state = self._predictor.init_state(
                 video_path=str(frames_dir),

@@ -577,6 +577,130 @@ class TestMaskComparison(unittest.TestCase):
                 load_dump(path)
 
 
+class _FakeTensor:
+    """Enough of a tensor for the graph plumbing: shape, dtype, device, clone."""
+
+    def __init__(self, shape=(1,), dtype="float32", device="cuda:0"):
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self.device = device
+
+
+class _FakeTorch:
+    Tensor = _FakeTensor
+
+
+class TestCudaGraphPlumbing(unittest.TestCase):
+    """The arg flattening and output cloning behind the CUDA-graph wrapper.
+
+    Runs without torch on purpose: the helpers take the torch module as an
+    argument so they stay testable off the Jetson. These are the parts that
+    decide *whether a replay is correct*, and getting them wrong produces
+    silently aliased frames rather than an exception.
+    """
+
+    def setUp(self):
+        from src.trackers import _cuda_graph as cg
+
+        self.cg = cg
+        self.torch = _FakeTorch
+
+    def test_flatten_rebuild_roundtrip_through_new_tensors(self):
+        cg = self.cg
+        a, b = _FakeTensor((2,)), _FakeTensor((3,))
+        args = {"a": a, "b": [b, 7], "c": "text"}
+        tensors: list = []
+        spec = cg.flatten(args, tensors, self.torch)
+        self.assertEqual(tensors, [a, b])
+        # Substituting different tensors is the whole point: capture rebuilds
+        # the same structure around the static buffers.
+        swapped = [_FakeTensor((2,)), _FakeTensor((3,))]
+        out = cg.rebuild(spec, swapped)
+        self.assertIs(out["a"], swapped[0])
+        self.assertIs(out["b"][0], swapped[1])
+        self.assertEqual(out["b"][1], 7)
+        self.assertEqual(out["c"], "text")
+
+    def test_tuple_stays_tuple_and_list_stays_list(self):
+        cg = self.cg
+        tensors: list = []
+        spec = cg.flatten(([1, 2], (3, 4)), tensors, self.torch)
+        out = cg.rebuild(spec, tensors)
+        self.assertIsInstance(out, tuple)
+        self.assertIsInstance(out[0], list)
+        self.assertIsInstance(out[1], tuple)
+
+    def test_signature_separates_shape_dtype_and_constants(self):
+        cg = self.cg
+
+        def sig(obj):
+            tensors: list = []
+            spec = cg.flatten(obj, tensors, self.torch)
+            return cg.signature(spec, ("d", []), tensors)
+
+        base = sig([_FakeTensor((1, 4))])
+        self.assertEqual(base, sig([_FakeTensor((1, 4))]))
+        self.assertNotEqual(base, sig([_FakeTensor((1, 5))]))
+        self.assertNotEqual(base, sig([_FakeTensor((1, 4), dtype="float16")]))
+        self.assertNotEqual(base, sig([_FakeTensor((1, 4), device="cpu")]))
+        # A bool that selects a code path must not share a graph with its
+        # opposite, so it has to reach the key.
+        self.assertNotEqual(sig([_FakeTensor((1, 4)), True]),
+                            sig([_FakeTensor((1, 4)), False]))
+
+    def test_clone_outputs_copies_but_preserves_aliasing(self):
+        cg = self.cg
+        shared = _FakeTensor((2,))
+        shared.clone = lambda: _FakeTensor((2,))
+        out = {"a": shared, "b": [shared], "n": 5}
+        cloned = cg.clone_outputs(out, self.torch)
+        # Copied, so a later replay overwriting the buffer cannot corrupt it.
+        self.assertIsNot(cloned["a"], shared)
+        # But still one object: SAM2 expects vision_features to *be*
+        # backbone_fpn[-1], and cloning twice would double a 16 MB copy.
+        self.assertIs(cloned["a"], cloned["b"][0])
+        self.assertEqual(cloned["n"], 5)
+
+    def test_clone_outputs_keeps_namedtuple_type(self):
+        import collections
+
+        cg = self.cg
+        t = _FakeTensor((1,))
+        t.clone = lambda: _FakeTensor((1,))
+        Pair = collections.namedtuple("Pair", "x y")
+        cloned = cg.clone_outputs(Pair(t, 3), self.torch)
+        self.assertIsInstance(cloned, Pair)
+        self.assertEqual(cloned.y, 3)
+
+
+class TestGraphBlockValidation(unittest.TestCase):
+    """A typo in cuda_graph_blocks must fail at construction, not silently
+    graph nothing and report a disappointing speedup."""
+
+    def test_unknown_block_name_is_rejected(self):
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+
+        with self.assertRaises(ValueError) as ctx:
+            EdgeTAMTracker(model_cfg="x", checkpoint="y",
+                           cuda_graph_blocks=["mask_decoder"])
+        self.assertIn("mask_decoder", str(ctx.exception))
+
+    def test_known_blocks_are_accepted(self):
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+
+        t = EdgeTAMTracker(model_cfg="x", checkpoint="y",
+                           cuda_graph_blocks=["memory_encoder", "sam_mask_decoder"])
+        self.assertEqual(t.cuda_graph_blocks, ["memory_encoder", "sam_mask_decoder"])
+
+    def test_trt_tracker_refuses_to_graph_the_engine(self):
+        from src.trackers.edgetam_trt_tracker import EdgeTAMTRTTracker
+
+        with self.assertRaises(ValueError) as ctx:
+            EdgeTAMTRTTracker(engine_path="e", model_cfg="x", checkpoint="y",
+                              cuda_graph_blocks=["image_encoder"])
+        self.assertIn("use_cuda_graph", str(ctx.exception))
+
+
 class TestEngineLayerBreakdown(unittest.TestCase):
     """The parsing behind `build_trt_engine.py --inspect`, which is how we tell
     whether an INT8 engine really put layers in INT8 or just paid for the

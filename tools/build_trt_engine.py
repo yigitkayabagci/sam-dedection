@@ -217,6 +217,22 @@ def build(args) -> int:
             print(f"  layer[{i:4d}] {network.get_layer(i).name}")
         return 0
 
+    if args.io_fp16:
+        # The encoder's three FPN outputs are 256x256, 128x128 and 64x64 at 256
+        # channels: 88 MB per frame in FP32. The engine already computes them in
+        # FP16, so an FP32 output means a widening reformat plus twice the write
+        # traffic on a board that is memory bound. Declaring the outputs HALF
+        # removes both. The consumer is PyTorch under bf16/fp16 autocast, which
+        # casts on read anyway.
+        narrowed = []
+        for i in range(network.num_outputs):
+            t = network.get_output(i)
+            if t.dtype == trt.DataType.FLOAT:
+                t.dtype = trt.DataType.HALF
+                narrowed.append(t.name)
+        report["io_fp16"] = narrowed
+        print(f"[build] outputs narrowed to FP16: {narrowed}")
+
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, args.workspace * (1 << 20))
     report: dict = {}
@@ -480,6 +496,10 @@ def main() -> int:
                    help="builderOptimizationLevel 0-5 (higher = slower build, "
                         "possibly faster engine).")
     p.add_argument("--sparsity", action="store_true", help="Enable 2:4 sparse weights.")
+    p.add_argument("--io-fp16", action="store_true",
+                   help="Declare the engine's float outputs as FP16. Halves the "
+                        "88 MB/frame the encoder writes and drops the widening "
+                        "reformat at the end of the graph.")
     p.add_argument("--dla-core", type=int, default=None, help="Target a DLA core (0/1).")
     p.add_argument("--allow-gpu-fallback", action="store_true",
                    help="With --dla-core: let unsupported layers run on the GPU "
