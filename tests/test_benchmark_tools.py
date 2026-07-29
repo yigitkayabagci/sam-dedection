@@ -29,6 +29,7 @@ from tools.benchmark import (  # noqa: E402
     latex_table,
     load_matrix,
     markdown_table,
+    rotated,
     variant_kwargs,
     variant_runnable,
     _percentile,
@@ -588,6 +589,32 @@ class _FakeTensor:
 
 class _FakeTorch:
     Tensor = _FakeTensor
+
+
+class TestRoundRobinOrdering(unittest.TestCase):
+    """Repeats are interleaved with a rotating order so an unlocked Orin's
+    thermal drift lands on every variant instead of only the ones that ran
+    late. Measured drift with an identical engine: 13%."""
+
+    def test_rotation_moves_the_first_slot(self):
+        seq = ["a", "b", "c"]
+        self.assertEqual(rotated(seq, 0), ["a", "b", "c"])
+        self.assertEqual(rotated(seq, 1), ["b", "c", "a"])
+        self.assertEqual(rotated(seq, 2), ["c", "a", "b"])
+        self.assertEqual(rotated(seq, 3), ["a", "b", "c"])
+
+    def test_no_variant_keeps_the_coolest_slot(self):
+        seq = list("abcdef")
+        firsts = {rotated(seq, i)[0] for i in range(3)}
+        self.assertEqual(len(firsts), 3)
+
+    def test_every_round_still_runs_every_variant(self):
+        seq = list("abcdef")
+        for i in range(7):
+            self.assertCountEqual(rotated(seq, i), seq)
+
+    def test_empty_is_not_a_zero_division(self):
+        self.assertEqual(rotated([], 3), [])
 
 
 class TestCudaGraphPlumbing(unittest.TestCase):

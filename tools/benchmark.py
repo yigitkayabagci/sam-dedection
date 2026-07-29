@@ -587,6 +587,14 @@ class _NullCtx:
         return {}
 
 
+def rotated(seq: list, i: int) -> list:
+    """`seq` rotated left by `i`, for round-robin variant ordering."""
+    if not seq:
+        return []
+    shift = i % len(seq)
+    return seq[shift:] + seq[:shift]
+
+
 def _percentile(sorted_vals: list[float], pct: float) -> float:
     if not sorted_vals:
         return 0.0
@@ -601,7 +609,11 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
 
 _COLUMNS = [
     ("variant", "variant", "{}"),
-    ("fps", "fps_median", "{:.2f}"),
+    # "fps" alone is ambiguous and was read as end-to-end more than once.
+    # loop fps = 1000/p50, the propagate loop only. e2e fps includes the
+    # preprocess that init_state pays before the loop starts.
+    ("loop fps", "fps_median", "{:.2f}"),
+    ("e2e fps", "fps_end_to_end", "{:.2f}"),
     ("fps min", "fps_min", "{:.2f}"),
     ("fps max", "fps_max", "{:.2f}"),
     ("fps sd", "fps_stdev", "{:.2f}"),
@@ -812,7 +824,7 @@ def main() -> int:
         frames_dir = build_frame_cache(args.video, args.frames_dir, args.frame_pattern,
                                        cache_dir, args.max_frames)
 
-    rows: list[dict] = []
+    prepared: list[tuple[str, str, dict]] = []
     for name in names:
         tracker_name, kwargs = variant_kwargs(defaults, matrix[name])
         ok, reason = variant_runnable(tracker_name, kwargs)
@@ -821,29 +833,50 @@ def main() -> int:
                 print(f"\n[bench] SKIP {name}: {reason}")
                 continue
             raise SystemExit(f"{name}: {reason}")
+        prepared.append((name, tracker_name, kwargs))
 
-        print(f"\n[bench] ===== {name} ({tracker_name}) =====")
-        runs, error = [], None
-        for i in range(args.repeat):
+    runs_by_name: dict[str, list] = {n: [] for n, _, _ in prepared}
+    errors: dict[str, str] = {}
+
+    # Round-robin with a rotating order, NOT all repeats of one variant before
+    # the next. Orin's clocks are not locked, so they drift with board
+    # temperature over a long run: the same variant measured 22.08 FPS early in
+    # one session and 19.97 FPS later, a 13% drift with an identical engine.
+    # Running variants in blocks hands the first one the coolest board and
+    # bakes that advantage into its median. Rotating gives every variant every
+    # thermal position, so the drift becomes noise instead of bias.
+    for i in range(args.repeat):
+        if not prepared:
+            break
+        for name, tracker_name, kwargs in rotated(prepared, i):
+            if name in errors:
+                continue
+            runs = runs_by_name[name]
+            print(f"\n[bench] ===== {name} ({tracker_name}) "
+                  f"round {i + 1}/{args.repeat} =====")
             dump = None
-            if args.dump_masks_dir and i == 0:
+            if args.dump_masks_dir and not runs:
                 dump = Path(args.dump_masks_dir) / f"{name}.npz"
             try:
                 run = run_variant(name, tracker_name, kwargs, frames_dir, prompts,
                                   args.warmup, args.max_frames, dump, args.tegrastats)
             except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                print(f"[bench] FAILED {name}: {error}")
-                break
+                errors[name] = f"{type(exc).__name__}: {exc}"
+                print(f"[bench] FAILED {name}: {errors[name]}")
+                continue
             runs.append(run)
             split = ("enc n/a" if run["encoder_ms"] is None else
                      f"enc {run['encoder_ms']:.2f} ms, rest {run['rest_ms']:.2f} ms")
-            print(f"[bench] run {i + 1}/{args.repeat}: {run['fps']:.2f} FPS ({split})")
+            print(f"[bench] run {len(runs)}/{args.repeat}: "
+                  f"{run['fps']:.2f} FPS ({split})")
 
+    rows: list[dict] = []
+    for name, tracker_name, kwargs in prepared:
+        runs = runs_by_name[name]
         row: dict = {"variant": name, "tracker": tracker_name,
                      "precision": kwargs.get("precision"), "repeats": len(runs)}
-        if error:
-            row["error"] = error
+        if name in errors:
+            row["error"] = errors[name]
         if runs:
             numeric = {k for r in runs for k, v in r.items() if isinstance(v, (int, float))}
             for key in numeric:

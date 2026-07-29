@@ -650,6 +650,105 @@ Neden bu blokların TensorRT'ye taşınmasından önce deneniyor: encoder'da
 değil**, ve graph ONNX export gerektirmiyor. Kalan bloklar için de aynı
 sıralamayı izliyoruz: önce ucuz olanı ölç, ihtiyaç kalırsa export et.
 
+## 6.9 ÖLÇÜM SONUCU (Faz 6): graph kazandı, ama saatler kilitli değil
+
+### Önce ölçüm hatası: aynı varyant üç farklı sayı verdi
+
+`trt_fp16_512` üç ayrı oturumda, aynı engine ve aynı kodla:
+
+| oturum | loop fps | infer ms | enc ms | dec ms |
+|---|---|---|---|---|
+| Faz 4 | 22.08 | 31.11 | 4.70 | 10.97 |
+| Faz 5 | 19.99 | 35.11 | 5.55 | 12.54 |
+| Faz 6 | 19.97 | 35.38 | 5.47 | 12.78 |
+
+**%13 sapma, sabit bir TensorRT binary'siyle.** `trt_fp16` de aynı: Faz 4'te
+encoder 19.00 ms, Faz 6'da 24.01 ms. Kod değişmedi, engine değişmedi.
+
+Sebep saatlerin kilitli olmaması: Orin DVFS'i sıcaklıkla saat düşürüyor.
+Faz 4 soğuk kartta koştu, Faz 5 ve 6 ısınmış kartta ve birbirleriyle
+%0.1 uyuşuyorlar. Bu, plandaki "saatleri kilitle" adımının atlanmasının
+faturası ve **ölçülmüş bir hata**, teorik bir risk değil.
+
+İki sonuç:
+
+1. **Sadece aynı run içindeki satırlar karşılaştırılabilir.** Farklı
+   tablolardan sayı çekip yan yana koymak geçersiz.
+2. Run içinde de sıra etkisi vardı: eski harness bir varyantın bütün
+   tekrarlarını bitirip diğerine geçiyordu, yani ilk varyant hep en soğuk
+   kartı alıyordu. Artık tekrarlar **round-robin ve her turda kaydırılmış
+   sırayla** koşuyor (`rotated()`), böylece sapma bias değil gürültü oluyor.
+
+Sayıları mutlak olarak da sabitlemek istenirse:
+`sudo jetson_clocks` + sabit `nvpmodel`, ve `--tegrastats` ile saat/güç
+sütunlarını tabloya yazdırmak.
+
+### Faz 6 içi karşılaştırma (aynı run, geçerli)
+
+**512 grubu:**
+
+| | infer | enc | memattn | memenc | dec | other | loop fps |
+|---|---|---|---|---|---|---|---|
+| trt_fp16_512 | 35.38 | 5.47 | 9.17 | 5.62 | 12.78 | 14.41 | 19.97 |
+| **trt_fp16_512_max** | **15.90** | 5.66 | **3.39** | **1.96** | **1.81** | 11.69 | **35.78** |
+
+Blok bazında graph kazancı: **mask decoder 7.1x**, memory encoder 2.9x,
+memory attention 2.7x. Inference 2.2x, kare süresi 50.01 → 27.93 ms.
+
+**1024 grubu:**
+
+| | infer | enc | memattn | memenc | dec | other |
+|---|---|---|---|---|---|---|
+| trt_fp16 | 59.02 | 24.01 | 12.19 | 7.92 | 11.78 | 12.40 |
+| trt_fp16_graph | 61.23 | 25.24 | 12.45 | 8.51 | 12.01 | 13.01 |
+| trt_fp16_max | 57.08 | 27.10 | 12.68 | 9.41 | **4.90** | 7.84 |
+| pytorch_graph_all | 76.96 | 47.17 | 12.40 | 8.63 | **5.24** | 6.56 |
+
+1024'te decoder yine 2.4x kazanıyor ama memory attention ve memory encoder
+kazanmıyor, encoder ise sıra etkisiyle bozuluyor. Net kazanç %3.
+
+### Kural: graph, bloğun GPU işi CPU launch maliyetinden küçükken kazandırır
+
+Aynı blok, iki çözünürlük, iki farklı cevap:
+
+| blok | 1024 kazanç | 512 kazanç |
+|---|---|---|
+| mask decoder | 2.4x | 7.1x |
+| memory encoder | yok | 2.9x |
+| memory attention | yok | 2.7x |
+
+Girdi büyüdükçe kernel başına gerçek iş artıyor, launch payı küçülüyor,
+graph'in kesecek bir şeyi kalmıyor. Bu, encoder'da §6.5'te bulunan kuralın
+aynısı: **512 launch-bound, 1024 compute-bound.**
+
+### Kalan bütçe ve full-TensorRT'nin tavanı
+
+`trt_fp16_512_max`, kare 27.93 ms:
+
+```
+enc      5.66
+memattn  3.39
+memenc   1.96
+dec      1.81
+(diger)  ~3.1
+--------------
+infer   15.90
+post     0.35
+other   11.69   <- karenin %42'si, ve GPU degil CPU
+```
+
+Kalan blokları TensorRT'ye taşımanın 512'de üst sınırı bellidir: GPU işinin
+tamamı sıfırlansa kare 27.93'ten ~12 ms'ye iner, gerçekçi kazanç 4-6 ms.
+Graph zaten launch payını aldı, TRT'ye kalan sadece füzyon farkı (encoder'da
+ölçülen oran 1.4x).
+
+1024'te durum farklı: orada GPU blokları 57 ms ve graph çoğuna dokunamıyor,
+yani full-TensorRT'nin asıl getirisi **1024'te**.
+
+`other` 11.69 ms'ye ne TensorRT ne graph dokunuyor. Python döngüsü, EdgeTAM
+state bookkeeping, threshold ve D2H kopya. Kare bütçesinde en büyük tek
+kalem artık bu.
+
 ## 7. Encoder tavanını kırmak
 
 TensorRT bugün sadece image encoder'ı kapsıyor. Faz 1 çıktısındaki
