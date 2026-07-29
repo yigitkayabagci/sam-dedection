@@ -665,23 +665,47 @@ sıralamayı izliyoruz: önce ucuz olanı ölç, ihtiyaç kalırsa export et.
 **%13 sapma, sabit bir TensorRT binary'siyle.** `trt_fp16` de aynı: Faz 4'te
 encoder 19.00 ms, Faz 6'da 24.01 ms. Kod değişmedi, engine değişmedi.
 
-Sebep saatlerin kilitli olmaması: Orin DVFS'i sıcaklıkla saat düşürüyor.
-Faz 4 soğuk kartta koştu, Faz 5 ve 6 ısınmış kartta ve birbirleriyle
-%0.1 uyuşuyorlar. Bu, plandaki "saatleri kilitle" adımının atlanmasının
-faturası ve **ölçülmüş bir hata**, teorik bir risk değil.
+**GPU saati değil.** `jetson_clocks` üç oturumda da açıktı. Sapmanın blok
+dağılımı zaten saat düşüşüne uymuyor, çünkü saat düşüşü bütün GPU bloklarını
+aynı oranda vurur:
 
-İki sonuç:
+| ölçüm | Faz 4 → Faz 6 | ne ile ölçülüyor |
+|---|---|---|
+| pre | +%1.5 | perf_counter (saf CPU) |
+| memenc | +%3.5 | CUDA event |
+| enc | +%16 | CUDA event |
+| dec | +%16 | CUDA event |
+| memattn | +%26 | CUDA event |
 
-1. **Sadece aynı run içindeki satırlar karşılaştırılabilir.** Farklı
-   tablolardan sayı çekip yan yana koymak geçersiz.
-2. Run içinde de sıra etkisi vardı: eski harness bir varyantın bütün
-   tekrarlarını bitirip diğerine geçiyordu, yani ilk varyant hep en soğuk
-   kartı alıyordu. Artık tekrarlar **round-robin ve her turda kaydırılmış
-   sırayla** koşuyor (`rotated()`), böylece sapma bias değil gürültü oluyor.
+Tek biçimli değil. Sıralama "GPU matematiği" ile değil, **bloktaki küçük
+kernel sayısı** ile örtüşüyor.
 
-Sayıları mutlak olarak da sabitlemek istenirse:
-`sudo jetson_clocks` + sabit `nvpmodel`, ve `--tegrastats` ile saat/güç
-sütunlarını tabloya yazdırmak.
+Sebep bu: `AttrTimer` GPU işini stream üzerine kaydedilen CUDA event'leriyle
+ölçüyor. Event çifti iki event'in stream'de çalıştığı an arasını verir, yani
+**CPU bir sonraki kernel'ı yetiştiremediği için GPU'nun boş beklediği süre de
+bloğun içinde sayılır.** Launch-bound bir pipeline'da bu doğru davranıştır
+(graph kazancını görünür yapan da budur), ama bir yan etkisi vardır: ölçülen
+blok süresi o an CPU'nun kernel besleme hızına bağlıdır. CPU tarafında ne
+değiştiyse (başka bir süreç, çekirdek göçü, GC baskısı) küçük kernel'lı
+bloklara orantısız yansır.
+
+Elimizdeki veriyle hangi CPU olayının sorumlu olduğu ayırt edilemiyor.
+Ayırt edecek iki şey eklendi:
+
+1. **`repeat %` sütunu:** aynı config'in tekrarları arasındaki en hızlı/en
+   yavaş farkı, medyanın yüzdesi olarak. Bir varyant %5 öndeyse ama aynı
+   config kendi içinde %10 oynuyorsa, o %5 gürültüdür. `frame sd` bunu
+   söylemez, o tek run içindeki kare dağılımıdır.
+2. **`--tegrastats`:** yavaş run'da GPU% düşük ve güç benzerse, GPU besleme
+   sorunu doğrulanır.
+
+Bağımsız olarak düzeltilen bir sıra biası daha vardı: eski harness bir
+varyantın bütün tekrarlarını bitirip diğerine geçiyordu, yani listedeki ilk
+varyant her zaman aynı makine durumunu alıyordu. Artık tekrarlar
+**round-robin ve her turda kaydırılmış sırayla** koşuyor (`rotated()`).
+
+**Kural: sadece aynı run içindeki satırlar karşılaştırılabilir.** Farklı
+tablolardan sayı çekip yan yana koymak geçersiz.
 
 ### Faz 6 içi karşılaştırma (aynı run, geçerli)
 
@@ -705,7 +729,11 @@ memory attention 2.7x. Inference 2.2x, kare süresi 50.01 → 27.93 ms.
 | pytorch_graph_all | 76.96 | 47.17 | 12.40 | 8.63 | **5.24** | 6.56 |
 
 1024'te decoder yine 2.4x kazanıyor ama memory attention ve memory encoder
-kazanmıyor, encoder ise sıra etkisiyle bozuluyor. Net kazanç %3.
+kazanmıyor. Encoder'ın 24.01 → 25.24 → 27.10 gidişi tam olarak çalışma
+sırasını takip ediyor (bu run'da hâlâ blok sırayla koşuluyordu), yani graph'e
+değil sıraya ait. Net kazanç %3, ve `repeat %` sütunu olmadan bunun gürültüden
+ayırt edilebilir olduğu söylenemez. **1024 grubunun yeniden ölçülmesi
+gerekiyor.**
 
 ### Kural: graph, bloğun GPU işi CPU launch maliyetinden küçükken kazandırır
 

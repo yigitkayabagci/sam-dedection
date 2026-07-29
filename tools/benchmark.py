@@ -614,9 +614,14 @@ _COLUMNS = [
     # preprocess that init_state pays before the loop starts.
     ("loop fps", "fps_median", "{:.2f}"),
     ("e2e fps", "fps_end_to_end", "{:.2f}"),
+    # repeat % is run-to-run: the gap between the fastest and slowest repeat of
+    # this same config. frame sd is within one run, across single frames. Two
+    # different questions, and only the first one tells you whether a gap
+    # between two variants is real.
+    ("repeat %", "fps_repeat_spread_pct", "{:.1f}"),
     ("fps min", "fps_min", "{:.2f}"),
     ("fps max", "fps_max", "{:.2f}"),
-    ("fps sd", "fps_stdev", "{:.2f}"),
+    ("frame sd", "fps_stdev", "{:.2f}"),
     ("p50 ms", "latency_p50_ms", "{:.2f}"),
     ("p95 ms", "latency_p95_ms", "{:.2f}"),
     ("pre ms", "preprocess_ms", "{:.2f}"),
@@ -884,6 +889,18 @@ def main() -> int:
                 if vals:
                     row[f"{key}_median" if key == "fps" else key] = round(
                         statistics.median(vals), 4)
+            # How far apart the repeats of THIS config landed, as a percentage
+            # of the median. Distinct from `frame sd`, which is the spread of
+            # single frames inside one run. This is the number that says
+            # whether a 5% gap between two variants means anything: if the
+            # same config re-run varies by 10%, it does not.
+            fps_vals = [r["fps"] for r in runs
+                        if isinstance(r.get("fps"), (int, float))]
+            if len(fps_vals) > 1:
+                med = statistics.median(fps_vals)
+                if med:
+                    row["fps_repeat_spread_pct"] = round(
+                        100.0 * (max(fps_vals) - min(fps_vals)) / med, 2)
             # Kept verbatim from the first run: the full per-block breakdown is
             # a dict, so the numeric median pass above skips it.
             row["blocks_ms"] = runs[0].get("blocks_ms")
