@@ -473,6 +473,35 @@ CPU tabanının arkasında kaybetmek olurdu. `pytorch_graph` varyantı bu
 kazancı TensorRT'siz ve doğruluk kaybı olmadan alıyor: 1024'te encoder
 41.5 → 29.6 ms, tam kare 147.9 → 135.9 ms, uçtan uca 1.09×.
 
+## 6.6 Hedef: 40 ms inference — bütçe
+
+Çalışmanın hedefi kare başına **40 ms inference** (25 FPS). Faz 1 ölçümü
+(1920×1080, 1 nesne, PyTorch bf16):
+
+```
+inference = encoder 41.1 + kalan bloklar 28.7 = 69.9 ms      gereken: 1.75x
+```
+
+Kritik kısıt: **kalan bloklara dokunulmazsa encoder'ın 11.3 ms'nin altına
+inmesi gerekir.** Ölçülmüş CUDA graph encoder'ı 29.6 ms'ye getiriyor;
+oradan 11.3'e inmek TensorRT'den gerçekçi olmayan bir beklenti.
+
+| Adım | encoder | kalan | inference |
+|---|---|---|---|
+| bugün | 41.1 | 28.7 | 69.9 |
+| + CUDA graph *(ölçüldü)* | **29.6** | 28.7 | 58.3 |
+| + TRT fp16 encoder (temkinli) | ~20 | 28.7 | 48.7 |
+| + TRT fp16 encoder (iyimser) | ~15 | 28.7 | 43.7 |
+| **+ kalan bloklar da TRT** | ~20 | **~18** | **38** ✓ |
+
+Sonuç: **40 ms hedefi, memory attention + mask decoder + memory encoder'ın
+da TensorRT'ye taşınmasını zorunlu kılıyor.** §7'de "getirisi belirsiz"
+diye sıralanan iş, bu hedefle birlikte opsiyonel olmaktan çıktı.
+
+Faz 3 bu bütçeyi kesinleştirecek: TRT füzyonu encoder'ı 29.6'dan kaça
+indiriyor? O sayı kalan blokların ne kadar hızlanması gerektiğini —
+ve INT8'in gerekip gerekmediğini — belirliyor.
+
 ## 7. Encoder tavanını kırmak
 
 TensorRT bugün sadece image encoder'ı kapsıyor. Faz 1 çıktısındaki
