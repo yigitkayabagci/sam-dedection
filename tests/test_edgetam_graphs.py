@@ -293,6 +293,99 @@ def test_sam_head_graph_matches_when_object_absent(model):
     torch.testing.assert_close(got[4], ref[5])  # obj_ptr
 
 
+# -------------------------------------------------- why the rewrite exists
+
+
+def test_stock_memory_attention_cannot_be_exported(model, layout):
+    """The stock module does not export to ONNX at all.
+
+    This is the whole reason `MemoryAttentionGraph` exists, so it is worth
+    pinning: `apply_rotary_enc*` multiplies by a complex `freqs_cis` table, and
+    ONNX has no complex tensor type. If a future torch gains complex export
+    support this test starts failing, which is the signal to reconsider the
+    rewrite -- not a regression.
+    """
+    import tempfile
+
+    import torch.nn as nn
+
+    slot = model.spatial_perceiver.num_latents + model.spatial_perceiver.num_latents_2d
+    tokens = _feat_side(model) ** 2
+    slots, ptr_tokens = 2, 8
+
+    class Stock(nn.Module):
+        def __init__(self, mem_attn):
+            super().__init__()
+            self.mem_attn = mem_attn
+
+        def forward(self, curr, curr_pos, memory, memory_pos):
+            return self.mem_attn(
+                curr=curr, curr_pos=curr_pos, memory=memory, memory_pos=memory_pos,
+                num_obj_ptr_tokens=ptr_tokens, num_spatial_mem=slots,
+            )
+
+    args = (
+        torch.randn(tokens, 1, model.hidden_dim),
+        torch.randn(tokens, 1, model.hidden_dim),
+        torch.randn(slots * slot + ptr_tokens, 1, model.mem_dim),
+        torch.randn(slots * slot + ptr_tokens, 1, model.mem_dim),
+    )
+    with tempfile.NamedTemporaryFile(suffix=".onnx") as f:
+        with pytest.raises(Exception) as excinfo:
+            torch.onnx.export(
+                Stock(model.memory_attention).eval(), args, f.name, opset_version=18,
+                input_names=["curr", "curr_pos", "memory", "memory_pos"],
+                output_names=["out"],
+            )
+    assert "complex" in str(excinfo.value).lower()
+
+
+def test_stock_memory_attention_uses_complex_tensors(model):
+    """Name the ops that block the export, so the diagnosis stays visible."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class RecordOps(TorchDispatchMode):
+        def __init__(self):
+            super().__init__()
+            self.ops: set[str] = set()
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            self.ops.add(str(getattr(func, "_overloadpacket", func)))
+            return func(*args, **(kwargs or {}))
+
+    slot = model.spatial_perceiver.num_latents + model.spatial_perceiver.num_latents_2d
+    tokens = _feat_side(model) ** 2
+    recorder = RecordOps()
+    with torch.no_grad(), recorder:
+        model.memory_attention(
+            curr=torch.randn(tokens, 1, model.hidden_dim),
+            curr_pos=torch.randn(tokens, 1, model.hidden_dim),
+            memory=torch.randn(2 * slot + 8, 1, model.mem_dim),
+            memory_pos=torch.randn(2 * slot + 8, 1, model.mem_dim),
+            num_obj_ptr_tokens=8,
+            num_spatial_mem=2,
+        )
+    assert "aten.view_as_complex" in recorder.ops
+    assert "aten.view_as_real" in recorder.ops
+
+
+def test_memory_key_length_varies_across_frames(model, layout):
+    """The key sequence length a CUDA graph would have to fix is not fixed.
+
+    Reproduces the growth pattern `tools/analyze_cost.py --trace-frames` shows
+    on the real model: one more spatial memory per frame until the bank is
+    full, then one more pointer per frame until that saturates too.
+    """
+    lengths = []
+    for spatial in range(1, layout.num_slots + 1):
+        for ptr in (0, 4, 8):
+            lengths.append(spatial * layout.tokens_per_slot + ptr)
+    assert len(set(lengths)) > 1
+    assert max(lengths) <= layout.total_tokens, (
+        "the padded buffer must be able to hold every length the tracker can produce"
+    )
+
+
 # ------------------------------------------------------------ ONNX export
 
 

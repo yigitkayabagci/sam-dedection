@@ -5,26 +5,46 @@ everyone accelerates first — but on EdgeTAM it is not where the time goes.
 
 ## Where the time actually goes
 
-Analytical FLOP counts for one tracked frame at 1024×1024, one object, with
-EdgeTAM's shipped config (`hidden_dim=256`, `mem_dim=64`, `num_maskmem=7`,
+Measured with `tools/analyze_cost.py` on the real checkpoint, one tracked frame
+at 1024×1024, one object (`hidden_dim=256`, `mem_dim=64`, `num_maskmem=7`,
 Perceiver emitting 256 + 256 latents per memory):
 
-| module | GFLOP/frame | share | was on TensorRT? |
-|---|---:|---:|---|
-| image encoder (RepViT-M1 + FPN + conv_s0/s1) | ~28 | 21 % | yes |
-| **memory attention** (2 × self+cross+FFN) | **~89** | **67 %** | no |
-| memory encoder + spatial Perceiver | ~13 | 10 % | no |
-| SAM mask decoder | ~3 | 2 % | no |
+| module | GFLOP/frame | share | of which attention | params (M) | was on TensorRT? |
+|---|---:|---:|---:|---:|---|
+| image encoder (RepViT-M1 + FPN + conv_s0/s1) | 38.7 | 26.8 % | 0.0 | 4.92 | yes |
+| **memory attention** (2 × self+cross+FFN) | **89.3** | **61.9 %** | **65.2** | 2.96 | no |
+| memory encoder + spatial Perceiver | 12.6 | 8.8 % | 0.6 | 1.62 | no |
+| SAM mask decoder | 3.6 | 2.5 % | 0.0 | 4.41 | no |
+| **total** | **144.4** | | 65.8 | 13.9 | |
+
+Accelerating only the image encoder covered **26.8 %** of the per-frame
+compute. The other **73.2 %** stayed in PyTorch — and note the parameter
+column: memory attention is 21 % of the weights but 62 % of the work, so model
+size is a bad proxy for where the time goes.
 
 The memory attention dominates because its self-attention runs over all 4096
 image tokens with a *single* 256-dimensional head: the score matrix alone is
-4096 × 4096, and it happens twice per layer, twice per frame. So roughly 79 %
-of the per-frame arithmetic was still in PyTorch, launching a few thousand
-small kernels from the Orin's Cortex-A78AE cores.
+4096 × 4096, and that happens twice per layer, twice per frame. Attention is
+45 % of the entire frame's arithmetic and essentially all of it lives in this
+one module — which is exactly the shape fp16 tensor cores and TensorRT's fused
+MHA kernels are built for.
 
 All four now run on TensorRT in fp16, each replayed from a captured CUDA graph.
 
+Reproduce with:
+
+```bash
+python tools/analyze_cost.py --trace-frames 24
+```
+
 ## The three things that made this non-trivial
+
+Worth saying plainly first: the image encoder was accelerated first because it
+is the *easy* one. It is a feed-forward stack of convolutions with one fixed
+input shape and one fixed output shape, no state, no complex arithmetic. It
+exports to ONNX in a single call with no rewriting whatsoever. Every other
+module fails at least one of those conditions, which is why they were left
+behind — not because they were cheap.
 
 ### 1. The memory bank changes length every frame
 
@@ -32,6 +52,23 @@ All four now run on TensorRT in fp16, each replayed from a captured CUDA graph.
 right now: one spatial memory after the first frame, growing to `num_maskmem`
 (7) plus a pointer region that fills over ~16 frames. A TensorRT engine inside
 a CUDA graph has exactly one shape, forever.
+
+Traced on the real model (`tools/analyze_cost.py --trace-frames 24`), the
+memory-attention key length over the first frames of a video:
+
+| frame | spatial memories | pointer tokens | key length |
+|---:|---:|---:|---:|
+| 1 | 1 | 4 | 516 |
+| 2 | 2 | 8 | 1032 |
+| … | | | |
+| 7 | 7 | 28 | 3612 |
+| 8 | 7 | 32 | 3616 |
+| … | | | |
+| 16 | 7 | 64 | 3648 |
+| 17+ | 7 | 64 | 3648 |
+
+**16 distinct key lengths across 23 tracked frames.** Each would need its own
+CUDA graph capture, its own TensorRT context and its own set of buffers.
 
 The fix is a **fixed-slot buffer plus an additive attention mask**:
 
@@ -68,10 +105,19 @@ garbage in the unused slots, at three fill levels.
 ### 2. ONNX has no complex numbers
 
 `apply_rotary_enc` / `apply_rotary_enc_v2` multiply `view_as_complex(x)` by a
-complex table. There is no ONNX opset for that. Expanding
-`(a + ib)(cos + i·sin)` into two real multiply-adds is the same arithmetic and
-exports to plain `Mul`/`Sub`/`Add`; the cos/sin tables become graph constants.
-`test_rope_real_matches_complex_*` pins both forms against upstream.
+complex table. Pointing `torch.onnx.export` at the stock module does not
+produce a slow graph or a subtly wrong one — it refuses outright:
+
+```
+RuntimeError: ScalarType ComplexFloat is an unexpected tensor scalar type
+```
+
+The offending operations are `aten.view_as_complex` and `aten.view_as_real`.
+Expanding `(a + ib)(cos + i·sin)` into two real multiply-adds is the same
+arithmetic and exports to plain `Mul`/`Sub`/`Add`; the cos/sin tables become
+graph constants. `test_rope_real_matches_complex_*` pins both forms against
+upstream, and `test_stock_memory_attention_cannot_be_exported` pins the failure
+so the rewrite can be revisited if a future torch gains complex support.
 
 The cross-attention key rotation has one extra wrinkle worth knowing about:
 within each slot, only the *trailing* 256 tokens (the Perceiver's 2D latents)
