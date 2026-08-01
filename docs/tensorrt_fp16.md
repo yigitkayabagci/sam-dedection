@@ -179,14 +179,26 @@ These are independent of TensorRT and mostly cost nothing:
 ## What fp16 costs, and why INT8 did not work
 
 Measured with `tools/analyze_precision.py` on the real checkpoint: track a clip
-at fp32, re-track it with reduced-precision activations, compare masks. 30
-frames, one object, IoU against the fp32 run.
+at fp32, re-track it with reduced-precision activations, compare masks. One
+object, IoU against the fp32 run.
 
 | configuration | mean IoU | worst frame | frames < 0.99 |
 |---|---:|---:|---:|
+| **the rewrite itself, fp32** | **1.0000** | **1.0000** | **0 / 20** |
 | bf16 — what was already in production | 0.9997 | 0.9993 | 0 / 30 |
 | **fp16 — what the engines run** | **0.9999** | **0.9998** | **0 / 30** |
-| int8, all modules | 0.8169 | 0.0000 | 20 / 30 |
+| int8, all modules, naive scale | 0.8169 | 0.0000 | 20 / 30 |
+
+The first row separates two things that are easy to conflate. Running the real
+checkpoint at 1024×1024 through the rewritten graphs — padded memory slots,
+masked attention, real-arithmetic RoPE, the specialised head, all four modules,
+`strict=True` so no PyTorch fallback can hide a mistake — reproduces stock
+EdgeTAM to **IoU 1.0000 on every frame**. The port costs nothing; everything
+below it is the price of precision.
+
+```bash
+python tools/analyze_precision.py --frames 20 --verify-graphs --skip-precision
+```
 
 fp16 is not a compromise against the previous setup — it is more precise than
 it. bfloat16 has 8 mantissa bits to fp16's 11, and EdgeTAM normalises before
