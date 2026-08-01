@@ -84,6 +84,10 @@ def fake_quant_int8(t: torch.Tensor) -> torch.Tensor:
     return torch.clamp(torch.round(t / step), -127, 127) * step
 
 
+# torch.quantile's input-size ceiling; tensors above this are strided down.
+_QUANTILE_LIMIT = 1_000_000
+
+
 def fake_quant_int8_percentile(percentile: float = 0.999):
     """Symmetric per-tensor int8 with the scale clipped to a percentile.
 
@@ -98,10 +102,13 @@ def fake_quant_int8_percentile(percentile: float = 0.999):
         flat = t.detach().abs().flatten()
         if flat.numel() == 0:
             return t
-        # torch.quantile caps out around 16M elements; sample above that.
-        if flat.numel() > 1_000_000:
-            idx = torch.randint(0, flat.numel(), (1_000_000,), device=flat.device)
-            flat = flat[idx]
+        # torch.quantile caps out around 16M elements, so large tensors have to
+        # be subsampled. Stride rather than sample randomly: a random subsample
+        # makes the whole run non-deterministic, and a quantile estimated from
+        # a different draw each frame is a moving target on top of the effect
+        # being measured.
+        if flat.numel() > _QUANTILE_LIMIT:
+            flat = flat[:: (flat.numel() // _QUANTILE_LIMIT) + 1]
         scale = torch.quantile(flat.float(), percentile)
         if scale == 0:
             scale = flat.max()

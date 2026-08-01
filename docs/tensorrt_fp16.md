@@ -273,11 +273,33 @@ the whole model (0.8169 → 0.7157) — and the mean hides the interesting part.
 Its failure is a sustained decline across the clip rather than the naive
 setting's occasional dropouts.
 
-That shape is the signature of a **recurrent** pipeline. Each frame's mask is
-encoded into a memory that conditions the next seven, so a *systematic* error
-— and clipping outliers is systematic, unlike rounding — is fed back into the
-state that produced it and compounds. Clipping helps a feed-forward encoder
-and hurts a memory path with a loop in it.
+Applying the same clipping one module at a time says which one:
+
+| clipped module | mean IoU | frames < 0.99 | worst |
+|---|---:|---:|---:|
+| image encoder | 0.9930 | 1 / 30 | 0.9835 |
+| memory attention | 0.9998 | 0 / 30 | 0.9995 |
+| **memory encoder** | **0.9397** | **7 / 30** | **0.7153** |
+| SAM mask decoder | 0.9990 | 0 / 30 | 0.9975 |
+
+That shape is the signature of a **recurrent** pipeline, and the module it
+lands on is the mechanism rather than a coincidence: the memory encoder's
+output *is* the stored memory. It is the write port of the loop, so a
+systematic bias in it goes straight into the memory bank and is read back for
+the next seven frames. The memory *attention*, which only reads that bank,
+is untouched at 0.9998.
+
+Clipping is a *systematic* error — it always removes the tails, unlike
+rounding, which scatters. So it helps the feed-forward image encoder and
+wrecks the module that writes the memory.
+
+Reproducibility note: the clipped variant estimates its percentile from a
+strided subsample, because `torch.quantile` has an input-size ceiling. An
+earlier build sampled randomly instead, which made those runs
+non-deterministic — the same whole-model configuration scored 0.7157 and
+0.5520 on two runs. The subsample is deterministic now, but treat the absolute
+clipped numbers as approximate. What is stable across both runs, and what the
+argument rests on, is the *shape*.
 
 **The number to plan against is 0.9926**: fusion-modelled INT8, no clipping,
 flat across the clip. That is the closest model here of what a real TensorRT
