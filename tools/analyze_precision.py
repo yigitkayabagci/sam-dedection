@@ -70,12 +70,47 @@ def round_to(dtype):
 
 
 def fake_quant_int8(t: torch.Tensor) -> torch.Tensor:
-    """Symmetric per-tensor int8, the activation scheme TensorRT defaults to."""
+    """Symmetric per-tensor int8 scaled to the largest value present.
+
+    Per-tensor is not a simplification: TensorRT quantises *activations* per
+    tensor (per-channel applies to weights), so this is the scheme a real INT8
+    engine uses. Scaling to absmax is the naive choice — see
+    `fake_quant_int8_percentile` for what calibration buys.
+    """
     scale = t.abs().amax()
     if scale == 0:
         return t
     step = scale / 127.0
     return torch.clamp(torch.round(t / step), -127, 127) * step
+
+
+def fake_quant_int8_percentile(percentile: float = 0.999):
+    """Symmetric per-tensor int8 with the scale clipped to a percentile.
+
+    Stands in for TensorRT's entropy/percentile calibration: outliers are
+    clipped rather than allowed to stretch the scale and starve the bulk of
+    the distribution of resolution. If a module survives this but not absmax,
+    its problem is calibration; if it survives neither, its problem is
+    structural.
+    """
+
+    def apply(t: torch.Tensor) -> torch.Tensor:
+        flat = t.detach().abs().flatten()
+        if flat.numel() == 0:
+            return t
+        # torch.quantile caps out around 16M elements; sample above that.
+        if flat.numel() > 1_000_000:
+            idx = torch.randint(0, flat.numel(), (1_000_000,), device=flat.device)
+            flat = flat[idx]
+        scale = torch.quantile(flat.float(), percentile)
+        if scale == 0:
+            scale = flat.max()
+        if scale == 0:
+            return t
+        step = scale / 127.0
+        return torch.clamp(torch.round(t / step), -127, 127) * step
+
+    return apply
 
 
 def _map_tensors(value, fn):
@@ -90,16 +125,37 @@ def _map_tensors(value, fn):
 
 
 class PrecisionSimulation:
-    """Round the output of every leaf layer inside the chosen modules.
+    """Round the output of layers inside the chosen modules.
 
-    Hooks leaf `nn.Module`s rather than intercepting every ATen op: layer
-    boundaries are where a quantised engine actually changes precision, and
-    hooking there sidesteps the aliasing hazards of rewriting the output of
-    view and in-place operations.
+    Hooks `nn.Module`s rather than intercepting every ATen op: layer boundaries
+    are where a quantised engine actually changes precision, and hooking there
+    sidesteps the aliasing hazards of rewriting the output of view and in-place
+    operations.
+
+    Where to place the rounding is a real modelling choice, so both are offered:
+
+    `compute`  only convolutions and linear layers. This is the faithful model
+               of a TensorRT INT8 network: those are the layers with INT8
+               kernels, batch norm is folded into their weights, and
+               activations fuse into them — one quantisation point per
+               fused block, which is also where QAT toolkits insert Q/DQ.
+
+    `leaf`     every leaf module, normalisations and activations included.
+               Deliberately pessimistic: a conv/BN/GELU block gets quantised
+               three times instead of once.
+
+    Reporting both is the point. A conclusion that survives the faithful model
+    and the pessimistic one does not depend on where the rounding was put.
     """
 
-    def __init__(self, model, modules, transform):
+    COMPUTE_LAYERS = (torch.nn.Conv2d, torch.nn.Conv1d, torch.nn.Linear,
+                      torch.nn.ConvTranspose2d)
+
+    def __init__(self, model, modules, transform, placement: str = "leaf"):
+        if placement not in ("leaf", "compute"):
+            raise ValueError(f"placement must be 'leaf' or 'compute', got {placement}")
         self.transform = transform
+        self.placement = placement
         self.handles = []
         self.roots = []
         for name in modules:
@@ -108,13 +164,18 @@ class PrecisionSimulation:
                 if root is not None:
                     self.roots.append(root)
 
+    def _selected(self, module) -> bool:
+        if self.placement == "compute":
+            return isinstance(module, self.COMPUTE_LAYERS)
+        return not list(module.children())
+
     def __enter__(self):
         def hook(_module, _inputs, output):
             return _map_tensors(output, self.transform)
 
         for root in self.roots:
             for module in root.modules():
-                if not list(module.children()):  # leaf
+                if self._selected(module):
                     self.handles.append(module.register_forward_hook(hook))
         return self
 
@@ -155,12 +216,30 @@ def write_clip(outdir: Path, frames: int, size: int = 640):
     )
 
 
-def track(model, frames_dir, prompts, simulation=None):
-    tracker = EdgeTAMTracker(
-        model_cfg="configs/edgetam.yaml", checkpoint="unused",
-        device="cpu", precision="float32",
-    )
-    tracker._predictor = model
+def track(model, frames_dir, prompts, simulation=None, engines=None):
+    """Track a clip, optionally through the TensorRT integration path.
+
+    `engines` routes the four hot modules through `tools/reference_engines.py`
+    -- the same wrapper graphs the ONNX is exported from, behind the same
+    runtime API the real engines use. That isolates the *rewrite* from
+    TensorRT and from fp16: if masks match here, anything that goes wrong on
+    the Orin is in the engine build or the precision, not in this code.
+    """
+    if engines is not None:
+        from src.trackers.edgetam_trt_tracker import EdgeTAMTRTTracker
+
+        tracker = EdgeTAMTRTTracker(
+            model_cfg="configs/edgetam.yaml", checkpoint="unused",
+            device="cpu", precision="float32", strict=True,
+        )
+        tracker._predictor = model
+        tracker._engines = engines
+    else:
+        tracker = EdgeTAMTracker(
+            model_cfg="configs/edgetam.yaml", checkpoint="unused",
+            device="cpu", precision="float32",
+        )
+        tracker._predictor = model
     masks = []
     context = simulation if simulation is not None else _null()
     with context:
@@ -208,6 +287,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--clip-size", type=int, default=640)
     p.add_argument("--json", default=None)
     p.add_argument("--skip-int8", action="store_true")
+    p.add_argument("--only", default=None,
+                   help="Run only configurations whose label contains this string "
+                        "(the fp32 reference always runs).")
+    p.add_argument("--int8-percentile", type=float, default=0.999,
+                   help="Clipping percentile for the calibrated INT8 variant.")
+    p.add_argument("--skip-precision", action="store_true",
+                   help="Only verify the graph rewrite, skip the precision sweep.")
+    p.add_argument("--verify-graphs", action="store_true",
+                   help="Also track through tools/reference_engines.py at fp32, "
+                        "which checks the TensorRT rewrite itself against stock "
+                        "EdgeTAM on this model at this resolution.")
     args = p.parse_args(argv)
 
     from sam2.build_sam import build_sam2_video_predictor
@@ -227,21 +317,52 @@ def main(argv: list[str] | None = None) -> int:
         print(f"tracking {args.frames} frames at fp32 (reference)...")
         reference = track(model, tmp, prompts)
 
-        runs = [
-            ("bf16  (all modules)", all_modules, round_to(torch.bfloat16)),
-            ("fp16  (all modules)", all_modules, round_to(torch.float16)),
+        results = {}
+
+        if args.verify_graphs:
+            from sam2.build_sam import build_sam2_video_predictor as _build
+            from tools.reference_engines import build_reference_engines
+
+            print("tracking through the TensorRT graph rewrite at fp32...")
+            # A separate instance: a real engine is a frozen export-time
+            # snapshot, so the graphs must not share the modules being patched.
+            snapshot = _build(args.model_cfg, args.checkpoint, device="cpu").eval()
+            engines = build_reference_engines(snapshot, batch=1)
+            masks = track(model, tmp, prompts, engines=engines)
+            results["graph rewrite (fp32)"] = compare(reference, masks)
+
+        runs = [] if args.skip_precision else [
+            ("bf16  (all modules)", all_modules, round_to(torch.bfloat16), "leaf"),
+            ("fp16  (all modules)", all_modules, round_to(torch.float16), "leaf"),
         ]
-        if not args.skip_int8:
-            runs.append(("int8  (all modules)", all_modules, fake_quant_int8))
+        if not args.skip_int8 and not args.skip_precision:
+            runs.append(("int8  (all modules)", all_modules, fake_quant_int8, "leaf"))
             runs += [
-                (f"int8  ({name} only)", (name,), fake_quant_int8)
+                (f"int8  ({name} only)", (name,), fake_quant_int8, "leaf")
+                for name in all_modules
+            ]
+            # Does calibration rescue whatever absmax broke, or is it structural?
+            calib = fake_quant_int8_percentile(args.int8_percentile)
+            runs.append(("int8+calib  (all modules)", all_modules, calib, "leaf"))
+            runs += [
+                (f"int8+calib  ({name} only)", (name,), calib, "leaf")
+                for name in all_modules
+            ]
+            # And does the conclusion survive the faithful fusion model?
+            runs.append(("int8 fused  (all modules)", all_modules, fake_quant_int8, "compute"))
+            runs += [
+                (f"int8 fused  ({name} only)", (name,), fake_quant_int8, "compute")
                 for name in all_modules
             ]
 
-        results = {}
-        for label, modules, transform in runs:
-            print(f"tracking {args.frames} frames with {label}...")
-            with PrecisionSimulation(model, modules, transform) as sim:
+        if args.only:
+            runs = [r for r in runs if args.only in r[0]]
+            if not runs:
+                raise SystemExit(f"--only {args.only!r} matched no configuration.")
+
+        for label, modules, transform, placement in runs:
+            print(f"tracking {args.frames} frames with {label} [{placement}]...")
+            with PrecisionSimulation(model, modules, transform, placement) as sim:
                 masks = track(model, tmp, prompts, simulation=sim)
             results[label] = compare(reference, masks)
 

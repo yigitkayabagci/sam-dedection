@@ -7,10 +7,11 @@ that matches it, keeping the object-pointer region where the RoPE split expects
 it, and copying out the outputs that outlive a frame instead of handing back a
 buffer the next frame overwrites.
 
-So this substitutes a fake engine that runs the PyTorch wrapper behind the
-exact `TRTEngine` surface the tracker uses -- including persistent output
-buffers that get overwritten on every call, which is what turns a missing
-`clone` from an invisible aliasing bug into a failing assertion here.
+So this substitutes `tools/reference_engines.py`, which runs the PyTorch
+wrapper behind the exact `TRTEngine` surface the tracker uses -- including
+persistent output buffers that get overwritten on every call, which is what
+turns a missing `clone` from an invisible aliasing bug into a failing
+assertion here.
 
 The reference is stock `EdgeTAMTracker` on identical weights and frames: the
 patched tracker has to produce the same masks, frame for frame.
@@ -32,16 +33,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.prompts import BoxPrompt, PromptSet  # noqa: E402
-from src.trackers._trt_layout import MemoryLayout  # noqa: E402
-from src.trackers._trt_runtime import CLONE_ALL  # noqa: E402
 from src.trackers.edgetam_tracker import EdgeTAMTracker  # noqa: E402
 from src.trackers.edgetam_trt_tracker import EdgeTAMTRTTracker  # noqa: E402
-from tools.edgetam_graphs import (  # noqa: E402
-    ImageEncoderGraph,
-    MemoryAttentionGraph,
-    MemoryEncoderGraph,
-    SamHeadGraph,
-)
+from tools.reference_engines import build_reference_engines  # noqa: E402
 
 # Same miniature EdgeTAM as test_edgetam_graphs, so a full propagation run
 # stays inside a few seconds on CPU.
@@ -65,147 +59,6 @@ def build_model():
         "configs/edgetam.yaml", None, device="cpu", hydra_overrides_extra=SMALL_OVERRIDES
     )
     return model.eval()
-
-
-# --------------------------------------------------------------------------
-# A stand-in for TRTEngine backed by the PyTorch wrapper
-# --------------------------------------------------------------------------
-
-
-class _FakeBinding:
-    def __init__(self, graph, input_names, output_names, shapes):
-        self._graph = graph
-        self._input_names = list(input_names)
-        self._output_names = list(output_names)
-        self.inputs = {n: torch.zeros(shapes[n]) for n in self._input_names}
-        self.outputs = {n: t.clone() for n, t in zip(self._output_names, self._call())}
-        self.graph = object()  # stand-in for a captured CUDA graph
-
-    def _call(self):
-        with torch.no_grad():
-            out = self._graph(*[self.inputs[n] for n in self._input_names])
-        return (out,) if isinstance(out, torch.Tensor) else out
-
-    def enqueue(self):
-        self.run()
-
-    def run(self):
-        # Write into the *same* buffers every call, exactly like a replayed
-        # CUDA graph does. Anything the tracker keeps without cloning breaks.
-        for name, value in zip(self._output_names, self._call()):
-            self.outputs[name].copy_(value)
-
-
-class FakeEngine:
-    """The subset of `TRTEngine` the tracker touches, running PyTorch instead."""
-
-    def __init__(self, name, graph, reference_inputs, output_names):
-        self.name = name
-        self._graph = graph.eval()
-        self.input_names = list(reference_inputs)
-        self.output_names = list(output_names)
-        self._reference = {n: tuple(t.shape) for n, t in reference_inputs.items()}
-        with torch.no_grad():
-            out = graph(*reference_inputs.values())
-        out = (out,) if isinstance(out, torch.Tensor) else out
-        self._shapes = dict(self._reference)
-        self._shapes.update({n: tuple(t.shape) for n, t in zip(output_names, out)})
-        self._bindings: dict[tuple, _FakeBinding] = {}
-
-    def dtype(self, name):
-        return torch.float32
-
-    def engine_shape(self, name):
-        return self._shapes[name]
-
-    def profile_shape(self, name):
-        return None
-
-    def accepts(self, shapes):
-        if set(shapes) != set(self.input_names):
-            return False
-        # Batch is free; every other axis must match what the graph was built for.
-        return all(
-            tuple(shapes[n])[1:] == self._reference[n][1:] for n in self.input_names
-        )
-
-    def binding(self, shapes):
-        key = tuple(sorted((n, tuple(s)) for n, s in shapes.items()))
-        if key not in self._bindings:
-            self._bindings[key] = _FakeBinding(
-                self._graph, self.input_names, self.output_names, dict(key)
-            )
-        return self._bindings[key]
-
-    def run(self, inputs, clone=CLONE_ALL):
-        binding = self.binding({n: tuple(t.shape) for n, t in inputs.items()})
-        for name, tensor in inputs.items():
-            binding.inputs[name].copy_(tensor)
-        binding.run()
-        if clone == CLONE_ALL:
-            return {n: t.clone() for n, t in binding.outputs.items()}
-        wanted = set(clone)
-        return {n: (t.clone() if n in wanted else t) for n, t in binding.outputs.items()}
-
-
-def fake_engines(model, layout, batch):
-    """One FakeEngine per module, shaped the way the exporter would.
-
-    `model` must be a *separate* instance from the one the tracker patches. A
-    real engine is a frozen snapshot taken at export time; sharing the live
-    modules would have the graph call back into the patched forward.
-    """
-    side = model.image_size // model.backbone_stride
-    dim, mem_dim = model.hidden_dim, model.mem_dim
-    size = model.image_size
-    zeros = torch.zeros
-
-    return {
-        "image_encoder": FakeEngine(
-            "image_encoder",
-            ImageEncoderGraph(model),
-            {"image": zeros(1, 3, size, size)},
-            ["backbone_fpn_0", "backbone_fpn_1", "backbone_fpn_2"],
-        ),
-        "memory_attention": FakeEngine(
-            "memory_attention",
-            MemoryAttentionGraph(model, layout),
-            {
-                "curr": zeros(batch, dim, side, side),
-                "curr_pos": zeros(batch, dim, side, side),
-                "memory": zeros(batch, layout.total_tokens, mem_dim),
-                "memory_pos": zeros(batch, layout.total_tokens, mem_dim),
-                "memory_mask": zeros(batch, 1, 1, layout.total_tokens),
-            },
-            ["pix_feat"],
-        ),
-        "memory_encoder": FakeEngine(
-            "memory_encoder",
-            MemoryEncoderGraph(model),
-            {
-                "pix_feat": zeros(batch, dim, side, side),
-                "mask_for_mem": zeros(batch, 1, size, size),
-            },
-            ["maskmem", "maskmem_pos"],
-        ),
-        "sam_head": FakeEngine(
-            "sam_head",
-            SamHeadGraph(model),
-            {
-                "pix_feat": zeros(batch, dim, side, side),
-                "high_res_0": zeros(batch, dim // 8, side * 4, side * 4),
-                "high_res_1": zeros(batch, dim // 4, side * 2, side * 2),
-            },
-            [
-                "low_res_multimasks",
-                "ious",
-                "low_res_masks",
-                "high_res_masks",
-                "obj_ptr",
-                "object_score_logits",
-            ],
-        ),
-    }
 
 
 # --------------------------------------------------------------------------
@@ -245,9 +98,12 @@ def make_trt_tracker(model, batch, **kwargs):
         **kwargs,
     )
     tracker._predictor = model
-    layout = MemoryLayout.from_model(model, ptr_tokens=PTR_TOKENS)
-    # build_model() is seeded, so this snapshot carries identical weights.
-    tracker._engines = fake_engines(build_model(), layout, batch)
+    # build_model() is seeded, so this snapshot carries identical weights. It
+    # must be a separate instance: a real engine is frozen at export time, and
+    # sharing live modules would have a graph call back into its patched self.
+    tracker._engines = build_reference_engines(
+        build_model(), batch=batch, ptr_tokens=PTR_TOKENS
+    )
     return tracker
 
 
@@ -328,6 +184,8 @@ def test_memory_attention_falls_back_when_pointers_overflow(frames_dir):
     tracker = make_trt_tracker(model, batch=1)
     tracker.prepare(frames_dir)
     tracker.set_prompts(_prompts(1))
+
+    from src.trackers._trt_layout import MemoryLayout
 
     layout = MemoryLayout.from_model_and_engine(
         model, tracker._engines["memory_attention"].engine_shape("memory")[1]

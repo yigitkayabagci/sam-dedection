@@ -176,6 +176,67 @@ These are independent of TensorRT and mostly cost nothing:
   frame. The tracker checks once and turns it off. Override with
   `fill_hole_area:` in the config.
 
+## What fp16 costs, and why INT8 did not work
+
+Measured with `tools/analyze_precision.py` on the real checkpoint: track a clip
+at fp32, re-track it with reduced-precision activations, compare masks. 30
+frames, one object, IoU against the fp32 run.
+
+| configuration | mean IoU | worst frame | frames < 0.99 |
+|---|---:|---:|---:|
+| bf16 — what was already in production | 0.9997 | 0.9993 | 0 / 30 |
+| **fp16 — what the engines run** | **0.9999** | **0.9998** | **0 / 30** |
+| int8, all modules | 0.8169 | 0.0000 | 20 / 30 |
+
+fp16 is not a compromise against the previous setup — it is more precise than
+it. bfloat16 has 8 mantissa bits to fp16's 11, and EdgeTAM normalises before
+every matmul, so activations sit comfortably inside fp16's range. fp16 scored
+exactly 1.0000 on every frame of the clip.
+
+Reduced precision is *simulated*, not run through autocast: a TensorRT fp16
+layer on Orin reads and writes fp16 but accumulates in fp32, so rounding layer
+outputs while accumulating in fp32 models the deployed engine more closely
+than autocast (which lowers the accumulation too) — and is ~90× faster than
+fp16 autocast on a CPU with no half-precision SIMD.
+
+### INT8, one module at a time
+
+| quantised module | mean IoU | worst frame | share of FLOPs |
+|---|---:|---:|---:|
+| image encoder | 0.8170 | 0.0000 | 26.8 % |
+| memory attention | 0.9998 | 0.9993 | 61.9 % |
+| memory encoder | 0.9999 | 0.9996 | 8.8 % |
+| SAM mask decoder | 0.9993 | 0.9989 | 2.5 % |
+
+Quantising the image encoder alone costs as much as quantising the entire
+model (0.8170 vs 0.8169). The other three modules are individually harmless.
+And the failure mode is not gentle: on 5 of 30 frames the tracker loses the
+object outright (IoU 0.0000) and then re-acquires it.
+
+This explains a failed INT8 experiment cleanly. The image encoder was the only
+module with an engine, so it was the only place INT8 could be tried — and it
+is the worst candidate in the model. It is RepViT: depthwise-separable
+convolutions, whose per-channel activation ranges differ by orders of
+magnitude. TensorRT quantises *activations* per tensor (per-channel is a
+weights-only option), which is exactly the case that collapses on
+depthwise-separable stacks — the same reason MobileNet-family networks need
+per-channel treatment. The memory path is the opposite: dense matmuls with a
+LayerNorm in front of every one, so activation ranges are bounded by
+construction.
+
+**So the next INT8 experiment should be the inverse of the failed one**:
+quantise the memory path (73.2 % of the frame's arithmetic, all three modules
+individually harmless) and keep the encoder in fp16. Before this work that was
+not an option, because those three modules had no engines at all.
+
+Caveats worth stating: activations are quantised, weights are not (TensorRT
+does weights per-channel, which is more forgiving), so these are a lower bound
+on INT8 damage. Run it yourself with:
+
+```bash
+python tools/analyze_precision.py --frames 30
+```
+
 ## Workflow
 
 Everything runs **on the Orin**. Engines are specific to the GPU and to the
