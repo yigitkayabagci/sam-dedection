@@ -257,6 +257,32 @@ least on the memory path** (73.2 % of the frame's arithmetic, ~1e-4 error) and
 costs real accuracy on the encoder even done properly. Before this work only
 the encoder had an engine, so only the expensive option was reachable.
 
+### The whole model is not the sum of its parts
+
+Applying the same treatment to every module at once does not give the
+per-module numbers back:
+
+| whole model, int8 | mean IoU | frame 1 | frame 30 | shape |
+|---|---:|---:|---:|---|
+| naive scale | 0.8169 | 0.9927 | 0.9935 | intermittent total losses |
+| 99.9th percentile clipping | 0.7157 | 0.9932 | 0.5579 | declines, never recovers |
+| fusion-modelled, no clipping | 0.9926 | 0.9916 | 0.9913 | flat |
+
+Percentile clipping *helped* the encoder alone (0.8170 → 0.9936) and *hurt*
+the whole model (0.8169 → 0.7157) — and the mean hides the interesting part.
+Its failure is a sustained decline across the clip rather than the naive
+setting's occasional dropouts.
+
+That shape is the signature of a **recurrent** pipeline. Each frame's mask is
+encoded into a memory that conditions the next seven, so a *systematic* error
+— and clipping outliers is systematic, unlike rounding — is fed back into the
+state that produced it and compounds. Clipping helps a feed-forward encoder
+and hurts a memory path with a loop in it.
+
+**The number to plan against is 0.9926**: fusion-modelled INT8, no clipping,
+flat across the clip. That is the closest model here of what a real TensorRT
+INT8 engine does to the whole network — usable, but still ~100× fp16's error.
+
 Caveats: activations are quantised, weights are not (TensorRT does weights
 per-channel, which is more forgiving), so these remain a lower bound on INT8
 damage. Reproduce with:
