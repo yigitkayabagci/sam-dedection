@@ -14,11 +14,18 @@ Usage:
 
 Precision
 ---------
-Everything is built with --fp16, and engine inputs/outputs are fp16 too. That
-second part matters more than it looks: with the default fp32 boundary
-TensorRT inserts reformat kernels around every engine, and the image encoder
-alone would write ~45 MB of fp32 feature maps per frame. Pass --io-fp32 to get
-the fp32 boundary back if you need to compare against a previous build.
+Default is --fp16, with engine inputs/outputs in fp16 too. That second part
+matters more than it looks: with the default fp32 boundary TensorRT inserts
+reformat kernels around every engine, and the image encoder alone would write
+~45 MB of fp32 feature maps per frame. Pass --io-fp32 to get the fp32 boundary
+back if you need to compare against a previous build.
+
+--precision bf16 and --precision fp32 build the same engines at other
+precisions, for comparison. bf16 is not expected to win on an Orin: it uses the
+same tensor cores at the same rate as fp16 while carrying 8 bits of significand
+to fp16's 11, and TensorRT has fewer bf16 tactics. Its one advantage is dynamic
+range, which only matters if activations overflow fp16 -- and
+tools/analyze_precision.py measures that EdgeTAM's do not.
 """
 from __future__ import annotations
 
@@ -58,16 +65,26 @@ def shape_arg(spec: dict, batch: int) -> str:
     return ",".join(parts)
 
 
+# trtexec flag and IO dtype per precision. bf16 needs TensorRT >= 9 and an
+# Ampere-class GPU or newer; Orin (sm_87) qualifies.
+PRECISION_FLAGS = {
+    "fp16": (["--fp16"], "fp16"),
+    "bf16": (["--bf16"], "bf16"),
+    "fp32": ([], "fp32"),
+}
+
+
 def build_one(
     spec_path: Path,
     trtexec: str,
     *,
+    precision: str,
     min_batch: int,
     opt_batch: int,
     max_batch: int,
     workspace_mb: int,
     opt_level: int,
-    io_fp16: bool,
+    io_reduced: bool,
     timing_cache: Path | None,
     extra: list[str],
     dry_run: bool,
@@ -79,11 +96,12 @@ def build_one(
     if not onnx.exists():
         raise SystemExit(f"{spec['module']}: ONNX missing at {onnx}; re-run the exporter.")
 
+    precision_flags, io_dtype = PRECISION_FLAGS[precision]
     cmd = [
         trtexec,
         f"--onnx={onnx}",
         f"--saveEngine={engine}",
-        "--fp16",
+        *precision_flags,
         f"--memPoolSize=workspace:{workspace_mb}",
         f"--builderOptimizationLevel={opt_level}",
     ]
@@ -93,16 +111,16 @@ def build_one(
             f"--optShapes={shape_arg(spec, opt_batch)}",
             f"--maxShapes={shape_arg(spec, max_batch)}",
         ]
-    if io_fp16:
+    if io_reduced:
         cmd += [
-            "--inputIOFormats=" + ",".join(["fp16:chw"] * len(spec["inputs"])),
-            "--outputIOFormats=" + ",".join(["fp16:chw"] * len(spec["outputs"])),
+            "--inputIOFormats=" + ",".join([f"{io_dtype}:chw"] * len(spec["inputs"])),
+            "--outputIOFormats=" + ",".join([f"{io_dtype}:chw"] * len(spec["outputs"])),
         ]
     if timing_cache is not None:
         cmd.append(f"--timingCacheFile={timing_cache}")
     cmd += extra
 
-    print(f"\n>> {spec['module']}: {onnx.name} -> {engine.name}")
+    print(f"\n>> {spec['module']} [{precision}]: {onnx.name} -> {engine.name}")
     if spec.get("dynamic_batch"):
         print(f"   batch profile min={min_batch} opt={opt_batch} max={max_batch}")
     else:
@@ -157,9 +175,19 @@ def main(argv: list[str] | None = None) -> int:
         "builds much slower; worth trying once for the memory attention.",
     )
     p.add_argument(
+        "--precision",
+        default="fp16",
+        choices=tuple(PRECISION_FLAGS),
+        help="Engine precision (default: fp16). On Orin, bf16 runs on the same "
+        "tensor cores at the same rate as fp16 but carries 8 bits of significand "
+        "to fp16's 11, and TensorRT has fewer bf16 tactics -- so it is a "
+        "strictly worse trade here unless activations overflow fp16, which "
+        "tools/analyze_precision.py says EdgeTAM's do not.",
+    )
+    p.add_argument(
         "--io-fp32",
         action="store_true",
-        help="Keep engine inputs/outputs in fp32 instead of fp16.",
+        help="Keep engine inputs/outputs in fp32 instead of the engine precision.",
     )
     p.add_argument(
         "--no-timing-cache",
@@ -203,12 +231,13 @@ def main(argv: list[str] | None = None) -> int:
         build_one(
             spec_path,
             trtexec,
+            precision=args.precision,
             min_batch=lo,
             opt_batch=opt,
             max_batch=hi,
             workspace_mb=args.workspace,
             opt_level=args.opt_level,
-            io_fp16=not args.io_fp32,
+            io_reduced=not args.io_fp32,
             timing_cache=timing_cache,
             extra=list(args.extra),
             dry_run=args.dry_run,
