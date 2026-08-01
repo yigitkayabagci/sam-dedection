@@ -201,40 +201,57 @@ fp16 autocast on a CPU with no half-precision SIMD.
 
 ### INT8, one module at a time
 
-| quantised module | mean IoU | worst frame | share of FLOPs |
+Under the harshest quantisation model available here — scale to the largest
+activation present, quantise after every layer:
+
+| quantised module | mean IoU | worst frame | frames < 0.99 | share of FLOPs |
+|---|---:|---:|---:|---:|
+| image encoder | 0.8170 | 0.0000 | 19 / 30 | 26.8 % |
+| memory attention | 0.9998 | 0.9993 | 0 / 30 | 61.9 % |
+| memory encoder | 0.9999 | 0.9996 | 0 / 30 | 8.8 % |
+| SAM mask decoder | 0.9993 | 0.9989 | 0 / 30 | 2.5 % |
+
+Quantising the image encoder alone costs as much as quantising the whole model
+(0.8170 vs 0.8169), and the failure is not gradual: on 5 of 30 frames the
+tracker loses the object outright and then re-acquires it. The three
+memory-path modules clear the bar under the *pessimistic* model, so a real
+engine can only do better on them.
+
+### Is the encoder simply unquantisable? No — it is calibration-sensitive
+
+Both of the naive choices above matter, and relaxing either one recovers it:
+
+| scale · placement | mean IoU | worst frame | frames < 0.99 |
 |---|---:|---:|---:|
-| image encoder | 0.8170 | 0.0000 | 26.8 % |
-| memory attention | 0.9998 | 0.9993 | 61.9 % |
-| memory encoder | 0.9999 | 0.9996 | 8.8 % |
-| SAM mask decoder | 0.9993 | 0.9989 | 2.5 % |
+| largest value present · every layer | 0.8170 | 0.0000 | 19 / 30 |
+| largest value present · conv & linear only | 0.9926 | 0.9881 | 2 / 30 |
+| 99.9th percentile · every layer | 0.9936 | 0.9900 | 1 / 30 |
 
-Quantising the image encoder alone costs as much as quantising the entire
-model (0.8170 vs 0.8169). The other three modules are individually harmless.
-And the failure mode is not gentle: on 5 of 30 frames the tracker loses the
-object outright (IoU 0.0000) and then re-acquires it.
+"conv & linear only" models how TensorRT fuses convolution, batch norm and
+activation into one kernel with a single quantisation point — also where QAT
+toolkits insert Q/DQ. "Every layer" quantises three times per such block.
 
-This explains a failed INT8 experiment cleanly. The image encoder was the only
-module with an engine, so it was the only place INT8 could be tried — and it
-is the worst candidate in the model. It is RepViT: depthwise-separable
-convolutions, whose per-channel activation ranges differ by orders of
-magnitude. TensorRT quantises *activations* per tensor (per-channel is a
-weights-only option), which is exactly the case that collapses on
-depthwise-separable stacks — the same reason MobileNet-family networks need
-per-channel treatment. The memory path is the opposite: dense matmuls with a
-LayerNorm in front of every one, so activation ranges are bounded by
-construction.
+So the practical advice is concrete: **check which calibrator the failed INT8
+build used.** A min/max calibrator reproduces exactly the collapse above; the
+entropy calibrator clips outliers instead of letting a handful of them stretch
+the scale until the bulk of the distribution has no resolution left. RepViT
+makes this worse than average — per-channel activation ranges inside a
+depthwise-separable stack differ by orders of magnitude, while TensorRT scales
+activations per tensor — but "worse than average" is not "impossible".
 
-**So the next INT8 experiment should be the inverse of the failed one**:
-quantise the memory path (73.2 % of the frame's arithmetic, all three modules
-individually harmless) and keep the encoder in fp16. Before this work that was
-not an option, because those three modules had no engines at all.
+Even calibrated well, the encoder at 0.9936 carries roughly a hundred times
+the error of fp16's 0.9999. So the ranking is: **INT8 buys the most for the
+least on the memory path** (73.2 % of the frame's arithmetic, ~1e-4 error) and
+costs real accuracy on the encoder even done properly. Before this work only
+the encoder had an engine, so only the expensive option was reachable.
 
-Caveats worth stating: activations are quantised, weights are not (TensorRT
-does weights per-channel, which is more forgiving), so these are a lower bound
-on INT8 damage. Run it yourself with:
+Caveats: activations are quantised, weights are not (TensorRT does weights
+per-channel, which is more forgiving), so these remain a lower bound on INT8
+damage. Reproduce with:
 
 ```bash
 python tools/analyze_precision.py --frames 30
+python tools/analyze_precision.py --frames 30 --only image_encoder
 ```
 
 ## Workflow
