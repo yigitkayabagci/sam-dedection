@@ -233,7 +233,14 @@ def run_backend(tracker_name, config, frames_dir, prompts, args):
         cfg["offload_video_to_cpu"] = True
     if args.precision:
         cfg["precision"] = args.precision
-    label = f"{tracker_name}  ({cfg.get('precision', '?')}, {Path(config).name if config else 'default config'})"
+    if args.no_cuda_graph:
+        cfg["use_cuda_graph"] = False
+    graphs = cfg.get("use_cuda_graph")
+    suffix = ""
+    if tracker_name.endswith("_trt"):
+        suffix = f", cuda graphs {'on' if graphs is not False else 'off'}"
+    label = (f"{tracker_name}  ({cfg.get('precision', '?')}, "
+             f"{Path(config).name if config else 'default config'}{suffix})")
     print(f"\n{'=' * 70}\n>> {label}\n{'=' * 70}")
 
     tracker = build_tracker(tracker_name, **cfg)
@@ -268,6 +275,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="Override the config's precision (float16 | bfloat16 | float32).")
     p.add_argument("--breakdown-frames", type=int, default=100,
                    help="Frames for the synchronized per-module pass. 0 to skip.")
+    p.add_argument("--no-cuda-graph", action="store_true",
+                   help="Force use_cuda_graph=false. Pair with a normal run to "
+                        "measure what CUDA graph replay is worth end to end; "
+                        "TensorRT itself is unaffected either way.")
+    p.add_argument("--cuda-graph-ab", action="store_true",
+                   help="Run edgetam_trt twice, with and without CUDA graphs, "
+                        "and report the difference. Implies --tracker edgetam_trt.")
     p.add_argument("--offload-video", action="store_true",
                    help="Keep decoded frames on the CPU. EdgeTAM otherwise holds "
                         "every frame on the GPU as fp32.")
@@ -302,18 +316,26 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     try:
-        backends = (
-            [(args.tracker, args.config)]
-            if args.tracker
-            else [("edgetam", None), ("edgetam_trt", None)]
-        )
+        if args.cuda_graph_ab:
+            # Same backend twice; only the graph toggle differs.
+            backends = [("edgetam_trt", args.config), ("edgetam_trt", args.config)]
+            graph_flags = [False, True]
+        else:
+            backends = (
+                [(args.tracker, args.config)]
+                if args.tracker
+                else [("edgetam", None), ("edgetam_trt", None)]
+            )
+            graph_flags = [args.no_cuda_graph] * len(backends)
+
         results = []
-        for tracker_name, config in backends:
+        for (tracker_name, config), no_graph in zip(backends, graph_flags):
+            args.no_cuda_graph = no_graph
             try:
                 results.append(run_backend(tracker_name, config, frames_dir, prompts, args))
             except Exception as exc:
                 print(f"\n!! {tracker_name} failed: {type(exc).__name__}: {exc}")
-                if args.tracker:
+                if args.tracker or args.cuda_graph_ab:
                     raise
 
         if len(results) > 1:
