@@ -124,9 +124,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stage-chart", default=None,
                    help="Save a per-frame decode/inference/render breakdown chart to this "
                         "PNG path (needs matplotlib).")
+    p.add_argument("--offload-video", dest="offload_video", action="store_true", default=None,
+                   help="Keep decoded frames on the CPU, overriding the backend YAML. "
+                        "EdgeTAM otherwise preloads every frame to the GPU as fp32 at "
+                        "model resolution (~6.3 GB for 500 frames at 1024x1024), which "
+                        "on a Jetson's shared memory slows the model down. Match this to "
+                        "tools/benchmark_tracking.py's --offload-video when comparing.")
+    p.add_argument("--no-offload-video", dest="offload_video", action="store_false",
+                   help="Force GPU-resident frames, overriding the backend YAML.")
     args = p.parse_args(argv)
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
+    if args.offload_video is not None:
+        backend_cfg["offload_video_to_cpu"] = args.offload_video
     # Resolve filesystem paths; model_cfg is a Hydra config name, not a path.
     backend_cfg = _resolve_paths(
         backend_cfg,
