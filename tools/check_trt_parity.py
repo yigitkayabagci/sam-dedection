@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.trackers._hydra_overrides import image_size_overrides  # noqa: E402
 from src.trackers._trt_layout import MemoryLayout, build_memory_mask  # noqa: E402
 from src.trackers._trt_runtime import TRTEngine  # noqa: E402
 from tools.edgetam_graphs import (  # noqa: E402
@@ -256,6 +257,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--outdir", default="models")
     p.add_argument("--checkpoint", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
     p.add_argument("--model-cfg", default="configs/edgetam.yaml")
+    p.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Build the PyTorch reference at this resolution instead of the "
+        "Hydra config's 1024. Must match how the engines in --outdir were "
+        "exported, or every module reports a shape mismatch.",
+    )
     p.add_argument("--module", default="all", choices=("all",) + MODULES)
     p.add_argument("--batch", type=int, default=1, help="Object count to test at.")
     p.add_argument("--iters", type=int, default=50)
@@ -294,7 +303,12 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = args.checkpoint if args.checkpoint and Path(args.checkpoint).exists() else None
     if checkpoint is None:
         print(f"WARNING: {args.checkpoint} not found; comparing with random weights.")
-    model = build_sam2_video_predictor(args.model_cfg, checkpoint, device="cuda").eval()
+    model = build_sam2_video_predictor(
+        args.model_cfg, checkpoint, device="cuda",
+        hydra_overrides_extra=image_size_overrides(args.image_size),
+    ).eval()
+    if args.image_size:
+        print(f"Model built at image_size={model.image_size}")
 
     outdir = Path(args.outdir)
     wanted = MODULES if args.module == "all" else (args.module,)

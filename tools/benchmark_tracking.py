@@ -299,7 +299,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="Frames excluded from the FPS average.")
     p.add_argument("--tracker", default=None,
                    help="Benchmark one backend. Default: edgetam then edgetam_trt.")
-    p.add_argument("--config", default=None, help="Backend YAML for --tracker.")
+    p.add_argument("--config", default=None,
+                   help="Backend YAML for --tracker, or for edgetam_trt in the "
+                        "default two-backend run.")
+    p.add_argument("--baseline-config", default=None,
+                   help="Backend YAML for the stock PyTorch side of the default "
+                        "two-backend run. Needed when the two must match on "
+                        "something the default YAMLs disagree on -- comparing at "
+                        "512, both sides have to run at 512 or the result "
+                        "measures the resolution change, not TensorRT.")
     p.add_argument("--precision", default=None,
                    help="Override the config's precision (float16 | bfloat16 | float32).")
     p.add_argument("--breakdown-frames", type=int, default=100,
@@ -359,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
             backends = (
                 [(args.tracker, args.config)]
                 if args.tracker
-                else [("edgetam", None), ("edgetam_trt", None)]
+                else [("edgetam", args.baseline_config), ("edgetam_trt", args.config)]
             )
             graph_flags = [args.no_cuda_graph] * len(backends)
 

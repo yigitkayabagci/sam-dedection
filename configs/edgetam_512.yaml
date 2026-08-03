@@ -1,0 +1,20 @@
+# Stock PyTorch EdgeTAM at 512x512 instead of the checkpoint's native 1024.
+#
+# This is the baseline the 512 TensorRT engines must be compared against. Using
+# the 1024 baseline instead would measure "1024 vs 512", not "PyTorch vs
+# TensorRT", and the resolution change would swamp everything else.
+#
+# The checkpoint was trained at 1024. Nothing here retrains it -- the backbone
+# and neck are fully convolutional so they accept any size, and
+# src/trackers/_hydra_overrides.py fixes up the one table that does not
+# self-adjust (the memory attention's cross-attention rotary embedding). Token
+# count drops 4x (32x32=1024 per frame against 64x64=4096), so expect some
+# accuracy loss on small objects; that is the thing being measured, not a bug.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+image_size: 512                           # overrides the Hydra config's 1024
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

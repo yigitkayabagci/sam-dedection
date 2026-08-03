@@ -80,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="Target radius for the video clip, px (default 12: a small, "
                         "hard-to-track object).")
     p.add_argument("--size", default="1280x720", help="Source frame size, WxH.")
+    p.add_argument("--image-size", type=int, default=None,
+                   help="Model input resolution, for the parity step's PyTorch "
+                        "reference. Must match how the engines were exported. The "
+                        "tracking steps read it from the YAMLs instead.")
     p.add_argument("--skip", default="", help="Comma-separated steps to skip: "
                                               "parity,accuracy,speed,video")
     args = p.parse_args(argv)
@@ -92,9 +96,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---------------------------------------------------------------- parity
     if "parity" not in skip:
+        cmd = [PY, "tools/check_trt_parity.py", "--outdir", args.engines]
+        if args.image_size:
+            cmd += ["--image-size", args.image_size]
         ok, out = run_step(
             "1/4  parity — does each engine reproduce its module?",
-            [PY, "tools/check_trt_parity.py", "--outdir", args.engines],
+            cmd,
             outdir / "01_parity.txt",
         )
         status["parity"] = ok
@@ -109,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
             [PY, "tools/compare_backends.py", "--frames", args.frames,
              "--offload-video", "--reference-precision", "float32",
              "--candidate-config", args.config,
+             # The reference has to run at the same resolution as the candidate,
+             # or this measures the resolution change instead of TensorRT.
+             "--reference-config", args.baseline_config,
              "--json", outdir / "02_accuracy.json"],
             outdir / "02_accuracy.txt",
         )
@@ -124,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             "3/4  speed — model-only ms/frame, PyTorch vs TensorRT",
             [PY, "tools/benchmark_tracking.py", "--frames", args.frames,
              "--warmup", args.warmup, "--size", args.size, "--offload-video",
+             "--config", args.config, "--baseline-config", args.baseline_config,
              "--fps-chart", outdir / "03_speed.png"],
             outdir / "03_speed.txt",
         )
@@ -169,8 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     lines = [
         f"# Experiment results — {outdir.name}",
         "",
-        f"engines: `{args.engines}`  ·  config: `{args.config}`  ·  "
-        f"{args.frames} frames  ·  {args.warmup} warm-up excluded",
+        f"engines: `{args.engines}`  ·  TensorRT config: `{args.config}`  ·  "
+        f"baseline config: `{args.baseline_config}`",
+        "",
+        f"{args.frames} frames at {args.size}  ·  {args.warmup} warm-up excluded"
+        + (f"  ·  model input {args.image_size}x{args.image_size}" if args.image_size else ""),
         "",
         "## The two frame times, and why they differ",
         "",
