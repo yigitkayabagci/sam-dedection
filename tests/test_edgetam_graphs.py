@@ -454,3 +454,54 @@ def test_onnx_matches_pytorch_at_any_batch(model, layout, exported, batch):
             np.testing.assert_allclose(
                 expected.numpy(), actual, atol=1e-4, rtol=1e-4, err_msg=name
             )
+
+
+@pytest.mark.parametrize("name", list(__import__("tools.export_edgetam_onnx", fromlist=["MODULES"]).MODULES))
+def test_onnx_has_no_trt_hostile_ops(exported, name):
+    """No graph may contain an op TensorRT's parser rejects.
+
+    Exporting is the cheap step; building an engine on the Orin is the slow
+    one, and a parse failure there costs minutes and reads as a TensorRT
+    internal error rather than as an export bug. Two of these were real:
+    `repeat_interleave` lowering to OneHot -> Tile in the mask decoder, and
+    `Tensor.squeeze(dim)` lowering to an If whose branches differ in rank.
+    """
+    import onnx
+
+    from tools.export_edgetam_onnx import TRT_HOSTILE_OPS, _traces_to_onehot
+
+    _, paths = exported
+    graph = onnx.load(str(paths[name])).graph
+    producer = {out: n for n in graph.node for out in n.output}
+
+    offenders = [
+        f"{n.op_type} ({n.name})"
+        for n in graph.node
+        if n.op_type in TRT_HOSTILE_OPS
+        or (
+            n.op_type == "Tile"
+            and len(n.input) > 1
+            and _traces_to_onehot(n.input[1], producer)
+        )
+    ]
+    assert not offenders, f"{name} would fail to parse in TensorRT: {offenders}"
+
+
+def test_hostile_op_scan_detects_repeat_interleave():
+    """The scan must actually fire -- otherwise the test above proves nothing.
+
+    Builds the exact pattern that broke the sam_head build: OneHot feeding the
+    repeats input of a Tile.
+    """
+    onnx = pytest.importorskip("onnx")
+
+    from tools.export_edgetam_onnx import _traces_to_onehot
+
+    nodes = [
+        onnx.helper.make_node("OneHot", ["idx", "depth", "values"], ["oh"], name="oh"),
+        onnx.helper.make_node("Cast", ["oh"], ["reps"], to=onnx.TensorProto.INT64, name="c"),
+        onnx.helper.make_node("Tile", ["x", "reps"], ["y"], name="tile"),
+    ]
+    producer = {out: n for n in nodes for out in n.output}
+    assert _traces_to_onehot("reps", producer)
+    assert not _traces_to_onehot("x", producer)

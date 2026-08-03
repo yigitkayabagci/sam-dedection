@@ -217,9 +217,74 @@ def export_plan(
     for name, tensor in zip(plan.output_names, sample):
         print(f"    out {name:<20} {tuple(tensor.shape)} {tensor.dtype}")
 
+    _warn_trt_hostile_ops(onnx_path, plan.name)
+
     if verify:
         _verify(onnx_path, plan, args, sample)
     return onnx_path
+
+
+# Ops TensorRT's ONNX parser either rejects outright or supports only in narrow
+# forms. None of them are needed by these graphs; each one that showed up was a
+# tracer artefact with a plain equivalent, so seeing one means the wrapper has
+# regressed. Catching it here costs a second, versus discovering it after a
+# multi-minute build on the Orin.
+TRT_HOSTILE_OPS = {
+    "OneHot": "torch.repeat_interleave on a dynamic axis -- use expand when the axis is 1",
+    "If": "a shape-dependent branch, e.g. Tensor.squeeze(dim) -- index with [:, 0] instead",
+    "Loop": "a Python loop over a traced length -- unroll it or make the length static",
+    "NonZero": "data-dependent output shape; TensorRT cannot build a profile for it",
+}
+
+# A plain Tile is fine -- the sine positional encodings use several and they
+# build. The failure is Tile fed by OneHot, which is how torch lowers
+# repeat_interleave with a traced repeat count: TensorRT then reports
+# "an IIOneHotLayer cannot be used to compute a shape tensor" and blames the
+# Tile. So flag Tile only when its repeats input traces back to a OneHot.
+TILE_REASON = "repeats come from a OneHot, which TensorRT cannot use as a shape tensor"
+
+
+def _traces_to_onehot(name: str, producer: dict, depth: int = 8) -> bool:
+    node = producer.get(name)
+    if node is None or depth == 0:
+        return False
+    if node.op_type == "OneHot":
+        return True
+    return any(_traces_to_onehot(i, producer, depth - 1) for i in node.input)
+
+
+def _warn_trt_hostile_ops(onnx_path: Path, module: str) -> None:
+    try:
+        import onnx
+    except ImportError:
+        return
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    found: dict[str, list[str]] = {}
+    stack = [model.graph]
+    while stack:
+        graph = stack.pop()
+        producer = {out: n for n in graph.node for out in n.output}
+        for node in graph.node:
+            label = node.name or "<unnamed>"
+            if node.op_type in TRT_HOSTILE_OPS:
+                found.setdefault(node.op_type, []).append(label)
+            elif (
+                node.op_type == "Tile"
+                and len(node.input) > 1
+                and _traces_to_onehot(node.input[1], producer)
+            ):
+                found.setdefault("Tile", []).append(label)
+            for attr in node.attribute:
+                if attr.HasField("g"):
+                    stack.append(attr.g)
+                stack.extend(attr.graphs)
+    if not found:
+        return
+    print(f"    WARN: {module} contains ops TensorRT is likely to reject:")
+    for op, names in sorted(found.items()):
+        shown = ", ".join(names[:3]) + (" ..." if len(names) > 3 else "")
+        print(f"      {op} x{len(names)} ({shown})")
+        print(f"        {TRT_HOSTILE_OPS.get(op, TILE_REASON)}")
 
 
 def _artifacts(onnx_path: Path) -> list[Path]:

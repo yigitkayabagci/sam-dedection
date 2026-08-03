@@ -354,6 +354,47 @@ the TensorRT one back to back. `--offload-video` matters for long clips:
 EdgeTAM otherwise preloads every frame to the GPU as fp32 at model resolution,
 which is ~6.3 GB for 500 frames at 1024×1024.
 
+## Reading the build log
+
+Two warnings appear on every Orin build and neither one needs action:
+
+```
+[TRT] [W] DLA requests all profiles have same min, max, and opt value.
+          All dla layers are falling back to GPU
+```
+
+TensorRT mentions the deep-learning accelerator whenever a profile has a
+range. We do not target DLA — it has no attention kernels and EdgeTAM is
+mostly attention — so "falling back to GPU" is where we wanted to be anyway.
+
+```
+[TRT] [W] Detected layernorm nodes in FP16.
+[TRT] [W] Running layernorm after self-attention with FP16 Reduce or Pow may
+          cause overflow. Forcing Reduce or Pow Layers in FP32 precision ...
+```
+
+Read the second sentence: TensorRT already did the fix. The sum-of-squares
+inside a layer norm is the one place fp16 can overflow, so it puts those two
+layers in fp32 and leaves the rest of the norm in fp16. It warns because
+EdgeTAM's hand-written `LayerNorm2d` exports as separate Reduce/Pow/Div nodes
+rather than as a single `LayerNormalization`, so TensorRT has to recognise the
+pattern instead of being told. `check_trt_parity.py` measures the result.
+
+### When the parser rejects a graph
+
+A parse failure names the *ONNX node*, not the PyTorch line, which makes it
+look like a TensorRT bug when it is an export bug. Two hit us, both in the SAM
+head, and both are now regression-tested:
+
+| symptom | cause | fix |
+|---|---|---|
+| `an IIOneHotLayer cannot be used to compute a shape tensor`, blamed on a `Tile` | `MaskDecoder.predict_masks` broadcasts the positional encoding with `torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)`. With a traced repeat count, torch lowers that to OneHot → Tile, and TensorRT will not compute a shape from a OneHot. | `image_pe`'s batch axis is asserted to be 1 one line earlier, so repeating it *is* expanding it. `_repeat_interleave_as_expand()` in `tools/edgetam_graphs.py` swaps in `expand` for the duration of the call. |
+| an `If` whose branches differ in rank | `Tensor.squeeze(dim)` — torch cannot prove at trace time that the axis is 1, so it emits both outcomes behind a runtime branch. | Index instead: `x[:, 0]`. Unconditional, same result. |
+
+`export_edgetam_onnx.py` now scans each graph for these before it writes the
+spec and prints a warning naming the offending nodes, so a regression shows up
+in seconds on your laptop rather than minutes into a build on the Orin.
+
 ## Knobs
 
 | where | what |
@@ -385,6 +426,7 @@ mismatch spelled out, rather than producing quietly wrong masks.
 | fused memory encoder + Perceiver == the two run separately | `test_memory_encoder_graph_matches` |
 | specialised SAM head == `_forward_sam_heads`, present *and* occluded | `test_sam_head_graph_matches`, `..._when_object_absent` |
 | ONNX == PyTorch, and stays correct at batch ≠ trace batch | `test_onnx_matches_pytorch_at_any_batch` |
+| no graph contains an op TensorRT's parser rejects | `test_onnx_has_no_trt_hostile_ops`, `test_hostile_op_scan_detects_repeat_interleave` |
 | the whole patched tracker == stock EdgeTAM, 1 and 2 objects | `test_patched_tracker_matches_pytorch` |
 | pointer overflow falls back instead of corrupting | `test_memory_attention_falls_back_when_pointers_overflow` |
 

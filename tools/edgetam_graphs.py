@@ -48,6 +48,7 @@ engine.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import sys
 from pathlib import Path
@@ -392,6 +393,49 @@ class MemoryEncoderGraph(nn.Module):
 # --------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _repeat_interleave_as_expand():
+    """Make `repeat_interleave` along a size-1 axis export as `Expand`.
+
+    `MaskDecoder.predict_masks` broadcasts the positional encoding across the
+    batch with `torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)`.
+    With a dynamic batch, torch exports that as OneHot -> Tile, and TensorRT
+    refuses it:
+
+        an IIOneHotLayer cannot be used to compute a shape tensor
+        In node ... and operator: Tile (parseNode): INVALID_NODE
+
+    Repeating a size-1 axis n times *is* expanding it, so swapping in `expand`
+    changes no arithmetic while exporting to a plain Expand node that TensorRT
+    parses. The substitution is scoped to this call and only fires when the
+    axis really is size 1; anything else falls through to the original.
+
+    Reading the shape makes the tracer warn that it is baking in a constant.
+    That is the intent: whether the axis is 1 is a property of the module, not
+    of the input -- `predict_masks` asserts `image_pe.size(0) == 1` two lines
+    above the call -- so freezing that decision is correct. The batch *count*
+    stays dynamic; it flows into Expand's shape input.
+    """
+    original = torch.repeat_interleave
+
+    def patched(input, repeats, dim=None, **kwargs):
+        if (
+            dim is not None
+            and isinstance(input, torch.Tensor)
+            and input.shape[dim] == 1
+        ):
+            sizes = [-1] * input.dim()
+            sizes[dim] = repeats
+            return input.expand(sizes)
+        return original(input, repeats, dim=dim, **kwargs)
+
+    torch.repeat_interleave = patched
+    try:
+        yield
+    finally:
+        torch.repeat_interleave = original
+
+
 class SamHeadGraph(nn.Module):
     """`SAM2Base._forward_sam_heads` specialised to propagation.
 
@@ -461,15 +505,16 @@ class SamHeadGraph(nn.Module):
         sparse = self.sparse_prompt.expand(pix_feat.shape[0], -1, -1)
         dense = self.dense_prompt.expand(pix_feat.shape[0], -1, -1, -1)
 
-        low_res_multimasks, ious, sam_tokens, object_score_logits = self.mask_decoder(
-            image_embeddings=pix_feat,
-            image_pe=self.image_pe,
-            sparse_prompt_embeddings=sparse,
-            dense_prompt_embeddings=dense,
-            multimask_output=True,
-            repeat_image=False,
-            high_res_features=[high_res_0, high_res_1],
-        )
+        with _repeat_interleave_as_expand():
+            low_res_multimasks, ious, sam_tokens, object_score_logits = self.mask_decoder(
+                image_embeddings=pix_feat,
+                image_pe=self.image_pe,
+                sparse_prompt_embeddings=sparse,
+                dense_prompt_embeddings=dense,
+                multimask_output=True,
+                repeat_image=False,
+                high_res_features=[high_res_0, high_res_1],
+            )
 
         is_obj = object_score_logits > 0
         low_res_multimasks = torch.where(
@@ -495,7 +540,11 @@ class SamHeadGraph(nn.Module):
 
         token_dim = sam_tokens.shape[-1]
         token_idx = best.reshape(-1, 1, 1).expand(-1, 1, token_dim)
-        sam_output_token = torch.gather(sam_tokens, 1, token_idx).squeeze(1)
+        # `[:, 0]` rather than `.squeeze(1)`: torch cannot prove at trace time
+        # that axis 1 is 1, so it exports squeeze as an If whose branches differ
+        # in rank ([B, C] vs [B, 1, C]) -- which TensorRT rejects. Indexing is
+        # unconditional and gives the same [B, C] upstream produces.
+        sam_output_token = torch.gather(sam_tokens, 1, token_idx)[:, 0]
 
         obj_ptr = self.obj_ptr_proj(sam_output_token)
         appearing = is_obj.to(obj_ptr.dtype)
