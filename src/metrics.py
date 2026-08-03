@@ -8,6 +8,7 @@ from pathlib import Path
 _BLUE = "#2a78d6"
 _ORANGE = "#eb6834"
 _AQUA = "#1baf7a"
+_VIOLET = "#4a3aa7"
 
 _SURFACE = "#fcfcfb"
 _INK_PRIMARY = "#0b0b0b"
@@ -221,8 +222,13 @@ def write_stage_chart(
     warmup: int = 0,
     note: str | None = None,
     label: str | None = None,
+    encode_ms: list[float] | None = None,
 ):
     """Where each frame's time goes: decode, model inference, render/overlay.
+
+    `encode_ms` (mp4 writing) is optional and gets its own panel when present:
+    it is a cost of producing a demo video, not of tracking, so folding it into
+    "post" would overstate what the pipeline costs in production.
 
     One histogram per stage, stacked as small multiples. A histogram answers
     the question this chart is for -- "what does a frame usually cost, and how
@@ -237,7 +243,8 @@ def write_stage_chart(
     plt = _matplotlib()
     if plt is None:
         return None
-    n = min(len(pre_ms), len(infer_ms), len(post_ms))
+    series = [pre_ms, infer_ms, post_ms] + ([encode_ms] if encode_ms else [])
+    n = min(len(s) for s in series)
     if n < 2:
         return None
     w = max(0, min(warmup, n - 1))
@@ -247,10 +254,15 @@ def write_stage_chart(
         ("inference", infer_ms[w:n], _ORANGE),
         ("post (render)", post_ms[w:n], _AQUA),
     ]
+    if encode_ms:
+        # Violet rather than the palette's 4th slot (yellow): each stage sits in
+        # its own labelled panel, so colour is not carrying identity here, and
+        # yellow washes out as a large filled area on a light surface.
+        stages.append(("encode (mp4)", encode_ms[w:n], _VIOLET))
     if any(len(v) < 2 for _, v, _ in stages):
         return None
 
-    fig, axes = plt.subplots(3, 1, figsize=(9, 5.4), dpi=140)
+    fig, axes = plt.subplots(len(stages), 1, figsize=(9, 1.8 * len(stages)), dpi=140)
     fig.patch.set_facecolor(_SURFACE)
 
     for ax, (name, values, color) in zip(axes, stages):

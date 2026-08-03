@@ -76,6 +76,7 @@ def _report_timing(
     pre_ms: list[float],
     infer_ms: list[float],
     post_ms: list[float],
+    encode_ms: list[float] | None = None,
 ) -> None:
     """Print FPS stats (with warm-up exclusion) and optionally write charts."""
     if not per_frame_dt:
@@ -99,7 +100,8 @@ def _report_timing(
             print(f"[pipeline] wrote latency chart -> {out}")
     if cfg.stage_chart is not None:
         out = write_stage_chart(pre_ms, infer_ms, post_ms, cfg.stage_chart,
-                                 warmup=cfg.fps_warmup, note=note, label=label)
+                                 warmup=cfg.fps_warmup, note=note, label=label,
+                                 encode_ms=encode_ms)
         if out:
             print(f"[pipeline] wrote stage chart -> {out}")
 
@@ -183,6 +185,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         pre_ms: list[float] = []
         infer_ms: list[float] = []
         post_ms: list[float] = []
+        encode_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
         with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
             t0 = time.perf_counter()
@@ -190,17 +193,20 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                 t1 = time.perf_counter()
                 rgb = load_frame_rgb8(frame_files[result.frame_idx])
                 t2 = time.perf_counter()
-                emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                   draw_bbox=cfg.draw_bbox))
+                frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                      draw_bbox=cfg.draw_bbox)
                 t3 = time.perf_counter()
+                emit(frame)
+                t4 = time.perf_counter()
                 infer_ms.append((t1 - t0) * 1000.0)
                 pre_ms.append((t2 - t1) * 1000.0)
                 post_ms.append((t3 - t2) * 1000.0)
-                per_frame_dt.append(t3 - t0)
-                t0 = t3
+                encode_ms.append((t4 - t3) * 1000.0)
+                per_frame_dt.append(t4 - t0)
+                t0 = t4
                 progress.update(1)
         progress.close()
-        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
+        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
         return Path(cfg.output_path).resolve()
     finally:
         tracker.reset()
@@ -221,6 +227,7 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
     pre_ms: list[float] = []
     infer_ms: list[float] = []
     post_ms: list[float] = []
+    encode_ms: list[float] = []
     cursor = 0
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:
@@ -238,21 +245,24 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
                 cursor += 1
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 t2 = time.perf_counter()
-                emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                   draw_bbox=cfg.draw_bbox))
+                frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                      draw_bbox=cfg.draw_bbox)
                 t3 = time.perf_counter()
+                emit(frame)
+                t4 = time.perf_counter()
                 infer_ms.append((t1 - t0) * 1000.0)
                 pre_ms.append((t2 - t1) * 1000.0)
                 post_ms.append((t3 - t2) * 1000.0)
-                per_frame_dt.append(t3 - t0)
-                t0 = t3
+                encode_ms.append((t4 - t3) * 1000.0)
+                per_frame_dt.append(t4 - t0)
+                t0 = t4
                 progress.update(1)
     finally:
         progress.close()
         cap.release()
         tracker.reset()
 
-    _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
+    _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
     return Path(cfg.output_path).resolve()
 
 
@@ -270,6 +280,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         pre_ms: list[float] = []
         infer_ms: list[float] = []
         post_ms: list[float] = []
+        encode_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
         with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
             t0 = time.perf_counter()
@@ -278,17 +289,20 @@ def _run_jpg(tracker, prompts, cfg, video_path):
                 bgr = cv2.imread(str(frame_files[result.frame_idx]))
                 rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 t2 = time.perf_counter()
-                emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                   draw_bbox=cfg.draw_bbox))
+                frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                      draw_bbox=cfg.draw_bbox)
                 t3 = time.perf_counter()
+                emit(frame)
+                t4 = time.perf_counter()
                 infer_ms.append((t1 - t0) * 1000.0)
                 pre_ms.append((t2 - t1) * 1000.0)
                 post_ms.append((t3 - t2) * 1000.0)
-                per_frame_dt.append(t3 - t0)
-                t0 = t3
+                encode_ms.append((t4 - t3) * 1000.0)
+                per_frame_dt.append(t4 - t0)
+                t0 = t4
                 progress.update(1)
         progress.close()
-        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
+        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
         return Path(cfg.output_path).resolve()
     finally:
         tracker.reset()
