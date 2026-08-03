@@ -260,11 +260,43 @@ def main(argv: list[str] | None = None) -> int:
               f"IoU {record['iou']:.4f}")
     if len(below) > 10:
         print(f"      ... and {len(below) - 10} more")
-    print(
-        "\n  A mean at 1.0000 with nothing below the threshold means TensorRT\n"
-        "  reproduced the reference masks pixel for pixel over the whole clip,\n"
-        "  memory feedback included."
-    )
+    # Whether the gap grows with time is the question this test exists to
+    # answer. EdgeTAM writes its own masks into the memory bank, so a constant
+    # offset and a slow drift look identical in the mean and mean nothing alike:
+    # the first is fp16 rounding at the mask boundary, the second is the
+    # recurrent loop amplifying it.
+    order = np.array([r["frame"] for r in per_frame], dtype=float)
+    drift = ""
+    if len(scores) > 20 and scores.std() > 0:
+        head = scores[: len(scores) // 4].mean()
+        tail = scores[-len(scores) // 4 :].mean()
+        slope = float(np.polyfit(order, scores, 1)[0])
+        drift = (
+            f"  first quarter      {head:.4f}\n"
+            f"  last quarter       {tail:.4f}\n"
+            f"  trend              {slope * 1e3:+.4f} IoU per 1000 frames\n"
+        )
+    print("\n" + drift, end="")
+
+    if scores.min() == 1.0:
+        verdict = (
+            "  Identical: TensorRT reproduced every reference mask pixel for\n"
+            "  pixel over the whole clip, memory feedback included."
+        )
+    elif not below:
+        verdict = (
+            f"  No frame fell below {args.warn_below:.2f}. A mean just under 1.0 is\n"
+            "  boundary jitter: fp16 moves logits near the mask edge across zero,\n"
+            "  flipping a thin rim of pixels. Check the trend line above -- flat\n"
+            "  means rounding, negative means the memory loop is amplifying it."
+        )
+    else:
+        verdict = (
+            f"  {len(below)} comparisons fell below {args.warn_below:.2f}. Look at the\n"
+            "  trend: a flat line with a few dips is usually occlusion or a hard\n"
+            "  frame; a falling line is the memory bank compounding the error."
+        )
+    print(verdict)
 
     if args.json:
         out = Path(args.json)
