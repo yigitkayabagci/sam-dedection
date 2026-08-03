@@ -329,10 +329,14 @@ python tools/build_trt_engines.py --outdir models/ --max-batch 4
 # 3. Check numerics and measure the speedup, per module.
 python tools/check_trt_parity.py --outdir models/
 
-# 4. Measure end-to-end tracking throughput, PyTorch vs TensorRT on the same clip.
+# 4. Prove the masks did not change: track one clip twice, compare mask IoU.
+python tools/compare_backends.py --frames 500 --offload-video \
+    --reference-precision float32
+
+# 5. Measure end-to-end tracking throughput, PyTorch vs TensorRT on the same clip.
 python tools/benchmark_tracking.py --frames 500 --offload-video
 
-# 5. Track.
+# 6. Track.
 python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml \
     --video samples/road.mp4 --output outputs/road.mp4 \
     --prompt file --prompt-file examples/car_box_example.json \
@@ -348,7 +352,15 @@ the drift PyTorch's own fp16 autocast produces. That second column is the
 baseline you were already running — an engine in the same range is not a
 precision regression.
 
-Step 4 runs the real `propagate()` loop on a generated clip and reports FPS,
+Step 4 is the accuracy claim. Step 3 checks each engine against its module in
+isolation, with a fresh input every call; that cannot see accumulation, and
+EdgeTAM feeds its own masks back through the memory bank. Step 4 runs the whole
+loop twice and compares the masks pixel for pixel, so a drift that only appears
+after two hundred frames of feedback has somewhere to show up. It refuses to
+report a score if the TensorRT backend quietly fell back to PyTorch — that
+would trivially match the reference and mean nothing.
+
+Step 5 runs the real `propagate()` loop on a generated clip and reports FPS,
 p50/p90/p99 latency and where the milliseconds go, for the stock backend and
 the TensorRT one back to back. `--offload-video` matters for long clips:
 EdgeTAM otherwise preloads every frame to the GPU as fp32 at model resolution,
@@ -428,6 +440,7 @@ mismatch spelled out, rather than producing quietly wrong masks.
 | ONNX == PyTorch, and stays correct at batch ≠ trace batch | `test_onnx_matches_pytorch_at_any_batch` |
 | no graph contains an op TensorRT's parser rejects | `test_onnx_has_no_trt_hostile_ops`, `test_hostile_op_scan_detects_repeat_interleave` |
 | the whole patched tracker == stock EdgeTAM, 1 and 2 objects | `test_patched_tracker_matches_pytorch` |
+| the built engines produce the same masks over a whole clip | `tools/compare_backends.py` (on device) |
 | pointer overflow falls back instead of corrupting | `test_memory_attention_falls_back_when_pointers_overflow` |
 
 These run on CPU with random weights at 256×256 — enough to prove the
