@@ -2,7 +2,12 @@
 """Build TensorRT engines from the ONNX graphs `export_edgetam_onnx.py` wrote.
 
 Reads each `<name>.spec.json` next to its .onnx, so shapes and optimisation
-profiles are never retyped by hand, and drives `trtexec`.
+profiles are never retyped by hand.
+
+Builds through `trtexec` when it is on the machine, and through TensorRT's
+Python API when it is not -- JetPack does not always install the samples
+package that ships trtexec, even though `import tensorrt` works. Both paths
+produce the same engine; `--builder` forces one.
 
 Engines are hardware- and TensorRT-version-specific. Build them on the Orin
 you will run on; do not copy from another machine.
@@ -36,10 +41,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Running this as a script puts tools/ on sys.path, not the repo root, so the
+# sibling Python-API builder would not import.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 MODULES = ("image_encoder", "memory_attention", "memory_encoder", "sam_head")
 
 
-def find_trtexec(explicit: str | None) -> str:
+def find_trtexec(explicit: str | None) -> str | None:
+    """Locate trtexec, or None if it is not installed."""
     if explicit:
         return explicit
     found = shutil.which("trtexec")
@@ -47,12 +59,28 @@ def find_trtexec(explicit: str | None) -> str:
         return found
     # JetPack installs it here and does not put it on PATH.
     jetson = Path("/usr/src/tensorrt/bin/trtexec")
-    if jetson.is_file():
-        return str(jetson)
-    raise SystemExit(
-        "trtexec not found. It ships with TensorRT (JetPack provides it at "
-        "/usr/src/tensorrt/bin/trtexec); pass --trtexec to point at it."
-    )
+    return str(jetson) if jetson.is_file() else None
+
+
+def python_api_available() -> bool:
+    try:
+        import tensorrt  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def shape_tuples(spec: dict, lo: int, opt: int, hi: int) -> dict:
+    """{input name: (min, opt, max)} with the batch axis substituted."""
+    out = {}
+    for io in spec["inputs"]:
+        def at(batch):
+            shape = list(io["shape"])
+            shape[io["batch_axis"]] = batch
+            return tuple(shape)
+
+        out[io["name"]] = (at(lo), at(opt), at(hi))
+    return out
 
 
 def shape_arg(spec: dict, batch: int) -> str:
@@ -76,9 +104,10 @@ PRECISION_FLAGS = {
 
 def build_one(
     spec_path: Path,
-    trtexec: str,
+    trtexec: str | None,
     *,
     precision: str,
+    verbose: bool,
     min_batch: int,
     opt_batch: int,
     max_batch: int,
@@ -95,6 +124,32 @@ def build_one(
     engine = outdir / spec["engine"]
     if not onnx.exists():
         raise SystemExit(f"{spec['module']}: ONNX missing at {onnx}; re-run the exporter.")
+
+    print(f"\n>> {spec['module']} [{precision}]: {onnx.name} -> {engine.name}")
+    if spec.get("dynamic_batch"):
+        print(f"   batch profile min={min_batch} opt={opt_batch} max={max_batch}")
+    else:
+        print(f"   static batch={spec['batch']}")
+
+    if trtexec is None:
+        from tools._trt_build_python import build_engine
+
+        print("   builder: TensorRT Python API (trtexec not installed)")
+        if dry_run:
+            return
+        build_engine(
+            onnx,
+            engine,
+            shapes=shape_tuples(spec, min_batch, opt_batch, max_batch),
+            precision=precision,
+            io_reduced=io_reduced,
+            workspace_mb=workspace_mb,
+            opt_level=opt_level,
+            timing_cache=timing_cache,
+            verbose=verbose,
+        )
+        print(f"   built {engine} ({engine.stat().st_size / 1e6:.1f} MB)")
+        return
 
     precision_flags, io_dtype = PRECISION_FLAGS[precision]
     cmd = [
@@ -120,11 +175,9 @@ def build_one(
         cmd.append(f"--timingCacheFile={timing_cache}")
     cmd += extra
 
-    print(f"\n>> {spec['module']} [{precision}]: {onnx.name} -> {engine.name}")
-    if spec.get("dynamic_batch"):
-        print(f"   batch profile min={min_batch} opt={opt_batch} max={max_batch}")
-    else:
-        print(f"   static batch={spec['batch']}")
+    if verbose:
+        cmd.append("--verbose")
+    print("   builder: trtexec")
     print("   " + " ".join(cmd))
     if dry_run:
         return
@@ -195,6 +248,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Do not reuse trtexec's kernel timing cache between builds.",
     )
     p.add_argument("--trtexec", default=None, help="Path to trtexec.")
+    p.add_argument(
+        "--builder",
+        default="auto",
+        choices=("auto", "trtexec", "python"),
+        help="auto (default) uses trtexec when present and the TensorRT Python "
+        "API otherwise. Both produce the same engine.",
+    )
+    p.add_argument("--verbose", action="store_true", help="Full TensorRT builder log.")
     p.add_argument("--dry-run", action="store_true", help="Print commands, build nothing.")
     p.add_argument(
         "extra", nargs="*", help="Extra arguments appended verbatim to every trtexec call."
@@ -219,7 +280,20 @@ def main(argv: list[str] | None = None) -> int:
             f"  python tools/export_edgetam_onnx.py --outdir {outdir}"
         )
 
-    trtexec = find_trtexec(args.trtexec)
+    trtexec = None if args.builder == "python" else find_trtexec(args.trtexec)
+    if trtexec is None:
+        if args.builder == "trtexec":
+            raise SystemExit(
+                "trtexec not found. It ships with TensorRT's samples package "
+                "(JetPack puts it at /usr/src/tensorrt/bin/trtexec). Pass "
+                "--trtexec to point at it, or use --builder python."
+            )
+        if not python_api_available():
+            raise SystemExit(
+                "Neither trtexec nor the TensorRT Python bindings are available. "
+                "Install TensorRT, or run this on the Orin."
+            )
+        print("trtexec not found; building through the TensorRT Python API instead.")
     timing_cache = None if args.no_timing_cache else outdir / "trt_timing.cache"
 
     for spec_path in specs:
@@ -232,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             spec_path,
             trtexec,
             precision=args.precision,
+            verbose=args.verbose,
             min_batch=lo,
             opt_batch=opt,
             max_batch=hi,
