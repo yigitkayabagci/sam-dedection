@@ -267,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
         "| file | what |",
         "|---|---|",
         "| `01_parity.txt` | per-module engine-vs-PyTorch error and speed |",
-        "| `02_accuracy.txt` / `.json` | per-frame mask IoU against fp32 PyTorch |",
+        f"| `02_accuracy.txt` / `.json` | per-frame mask IoU against "
+        f"`{Path(reference_config).name}` |",
         "| `03_speed.txt` | FPS, p50/p90/p99, per-module ms, both backends |",
         "| `03_speed_edgetam.png` / `_edgetam_trt.png` | per-frame latency, one per backend |",
         "| `04_video.mp4` | the tracked clip, watchable |",
