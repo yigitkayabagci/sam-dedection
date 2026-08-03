@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import shutil
 import tempfile
 import time
@@ -26,9 +27,27 @@ from .trackers import VideoTracker
 from .visualize import overlay_masks
 
 
+@contextmanager
+def _video_sink(cfg: "PipelineConfig", meta):
+    """Yield a `write(frame_rgb)` callable, or None when no video was asked for.
+
+    None means measurement-only: the overlay is not drawn, the source frame is
+    not re-read for it, and nothing is encoded. That is the shape of a
+    real-time edge pipeline, where the masks go to a controller rather than to
+    an mp4 -- so it is the configuration to quote a frame budget from.
+    """
+    if cfg.output_path is None:
+        yield None
+        return
+    with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+        yield emit
+
+
 @dataclass
 class PipelineConfig:
-    output_path: Path
+    # None = do not produce a video: skip the overlay and the encode, and
+    # measure tracking on its own.
+    output_path: Path | None
     # Exactly one input source must be set:
     #   video_path  -> an .mp4 (or any cv2-readable video) file, OR
     #   frames_dir  -> a directory of pre-extracted frames (frame_000000.tiff, ...).
@@ -88,6 +107,23 @@ def _report_timing(
         print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
               f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
 
+    # The headline figure above includes mp4 encoding, because that is what this
+    # process really spent. But writing a video is how we get something
+    # watchable, not something a consumer of these masks would do -- so report
+    # the number without it too, rather than making the reader subtract stages
+    # off a chart to find out what tracking alone costs.
+    if encode_ms and cfg.output_path is not None:
+        w = stats["warmup"]
+        kept = per_frame_dt[w:] or per_frame_dt
+        kept_encode = encode_ms[w:] or encode_ms
+        if len(kept_encode) == len(kept):
+            net = sum(kept) - sum(kept_encode) / 1000.0
+            if net > 0:
+                ms = net / len(kept) * 1000.0
+                enc = sum(kept_encode) / len(kept_encode)
+                print(f"[pipeline] excluding mp4 encoding ({enc:.1f} ms/frame): "
+                      f"{ms:.1f} ms/frame -> {1000.0 / ms:.1f} FPS")
+
     if cfg.fps_chart is None and cfg.stage_chart is None:
         return
     note = _benchmark_note(tracker, meta, prompts)
@@ -131,7 +167,7 @@ def _resolve_video_mode(cfg: PipelineConfig) -> str:
     return "jpg"
 
 
-def run(tracker: VideoTracker, prompts: PromptSet, cfg: PipelineConfig) -> Path:
+def run(tracker: VideoTracker, prompts: PromptSet, cfg: PipelineConfig) -> Path | None:
     """Run a full video -> tracked video pipeline.
 
     Two flavors, chosen by `cfg.video_mode`:
@@ -187,16 +223,19 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         post_ms: list[float] = []
         encode_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
-        with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+        with _video_sink(cfg, meta) as emit:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
-                rgb = load_frame_rgb8(frame_files[result.frame_idx])
+                if emit is not None:
+                    rgb = load_frame_rgb8(frame_files[result.frame_idx])
                 t2 = time.perf_counter()
-                frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                      draw_bbox=cfg.draw_bbox)
+                if emit is not None:
+                    frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                          draw_bbox=cfg.draw_bbox)
                 t3 = time.perf_counter()
-                emit(frame)
+                if emit is not None:
+                    emit(frame)
                 t4 = time.perf_counter()
                 infer_ms.append((t1 - t0) * 1000.0)
                 pre_ms.append((t2 - t1) * 1000.0)
@@ -207,7 +246,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                 progress.update(1)
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
-        return Path(cfg.output_path).resolve()
+        return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
         if not cfg.keep_frames and cfg.frames_cache is None:
@@ -231,24 +270,27 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
     cursor = 0
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:
-        with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+        with _video_sink(cfg, meta) as emit:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
-                # Sequential read; propagate yields frames in chronological order.
-                while cursor < result.frame_idx:
-                    cap.read()
+                if emit is not None:
+                    # Sequential read; propagate yields frames in order.
+                    while cursor < result.frame_idx:
+                        cap.read()
+                        cursor += 1
+                    ok, bgr = cap.read()
+                    if not ok:
+                        break
                     cursor += 1
-                ok, bgr = cap.read()
-                if not ok:
-                    break
-                cursor += 1
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 t2 = time.perf_counter()
-                frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                      draw_bbox=cfg.draw_bbox)
+                if emit is not None:
+                    frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                          draw_bbox=cfg.draw_bbox)
                 t3 = time.perf_counter()
-                emit(frame)
+                if emit is not None:
+                    emit(frame)
                 t4 = time.perf_counter()
                 infer_ms.append((t1 - t0) * 1000.0)
                 pre_ms.append((t2 - t1) * 1000.0)
@@ -263,7 +305,7 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
         tracker.reset()
 
     _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
-    return Path(cfg.output_path).resolve()
+    return Path(cfg.output_path).resolve() if cfg.output_path else None
 
 
 def _run_jpg(tracker, prompts, cfg, video_path):
@@ -282,17 +324,20 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         post_ms: list[float] = []
         encode_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
-        with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+        with _video_sink(cfg, meta) as emit:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
-                bgr = cv2.imread(str(frame_files[result.frame_idx]))
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                if emit is not None:
+                    bgr = cv2.imread(str(frame_files[result.frame_idx]))
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 t2 = time.perf_counter()
-                frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                      draw_bbox=cfg.draw_bbox)
+                if emit is not None:
+                    frame = overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                          draw_bbox=cfg.draw_bbox)
                 t3 = time.perf_counter()
-                emit(frame)
+                if emit is not None:
+                    emit(frame)
                 t4 = time.perf_counter()
                 infer_ms.append((t1 - t0) * 1000.0)
                 pre_ms.append((t2 - t1) * 1000.0)
@@ -303,7 +348,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
                 progress.update(1)
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
-        return Path(cfg.output_path).resolve()
+        return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
         if not cfg.keep_frames and cfg.frames_cache is None:

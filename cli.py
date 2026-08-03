@@ -99,7 +99,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="Glob for frames inside --frames-dir (default: *.tif*).")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Output FPS for --frames-dir mode (image sequences have no inherent fps).")
-    p.add_argument("--output", required=True, help="Output video (.mp4) path.")
+    p.add_argument("--output", default=None, help="Output video (.mp4) path. Omit "
+                                                  "with --no-video to measure only.")
+    p.add_argument("--no-video", action="store_true",
+                   help="Track without producing a video: skip re-reading each frame "
+                        "for the overlay, skip drawing it, and skip mp4 encoding. "
+                        "Those three exist to make something watchable, not to track, "
+                        "so this is the configuration that reflects a real-time edge "
+                        "deployment and the one to quote a frame budget from.")
     p.add_argument("--tracker", default="edgetam", help=f"Backend (one of {available_trackers()}).")
     p.add_argument("--config", default=None, help="Optional backend YAML override.")
     p.add_argument("--prompt", choices=("box", "point", "file"), default="box")
@@ -134,6 +141,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="Force GPU-resident frames, overriding the backend YAML.")
     args = p.parse_args(argv)
 
+    # Before building anything: an unusable flag combination should not cost the
+    # user a model load and a prompt read first.
+    if args.no_video:
+        if args.output:
+            raise SystemExit("--no-video produces no video; drop --output.")
+    elif not args.output:
+        raise SystemExit("--output is required (or pass --no-video to measure only).")
+
     backend_cfg = _load_backend_config(args.tracker, args.config)
     if args.offload_video is not None:
         backend_cfg["offload_video_to_cpu"] = args.offload_video
@@ -154,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     prompts = _collect_prompts(args)
 
     cfg = PipelineConfig(
-        output_path=Path(args.output),
+        output_path=Path(args.output) if args.output else None,
         video_path=Path(args.video) if args.video else None,
         frames_dir=Path(args.frames_dir) if args.frames_dir else None,
         frame_pattern=args.frame_pattern,
@@ -168,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         stage_chart=Path(args.stage_chart) if args.stage_chart else None,
     )
     out = run(tracker, prompts, cfg)
-    print(f"wrote {out}")
+    print(f"wrote {out}" if out else "done (no video written)")
     return 0
 
 

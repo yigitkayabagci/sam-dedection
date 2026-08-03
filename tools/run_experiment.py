@@ -242,15 +242,19 @@ def main(argv: list[str] | None = None) -> int:
         "",
         "| | what it measures | number |",
         "|---|---|---|",
-        f"| model only (step 3) | the four engines + EdgeTAM's bookkeeping, nothing else | "
-        f"{results.get('speed_trt', '-')} |",
-        f"| end-to-end app (step 4) | the above **plus** reading each frame off disk and "
-        f"drawing the mask on it | {results.get('video_fps', '-')} |",
+        f"| **tracking only (step 3)** | the four engines + EdgeTAM's bookkeeping, "
+        f"nothing else | **{results.get('speed_trt', '-')}** |",
+        f"| demo video (step 4) | the above **plus** re-reading each frame, drawing "
+        f"the mask on it, and encoding an mp4 | {results.get('video_fps', '-')} |",
         "",
-        "Both are real. Step 3 is the model in isolation — the number to compare "
-        "against another engine set or another resolution. Step 4 is what someone "
-        "running the app sees. Quote both, labelled — a single number invites the "
-        "question \"including what?\".",
+        "**Quote step 3 as the frame budget.** Re-reading the frame, drawing the "
+        "overlay and encoding an mp4 exist to produce something watchable; a "
+        "real-time deployment sends masks to a consumer and does none of them. "
+        "Step 4 is the demo, and its extra cost scales with output resolution, not "
+        "with the model.",
+        "",
+        "`python cli.py --no-video ...` runs step 4's path with those three removed, "
+        "if you want the same tool to report the real-time number.",
         "",
         "## Results",
         "",
