@@ -250,15 +250,15 @@ def write_stage_chart(
     w = max(0, min(warmup, n - 1))
 
     stages = [
-        ("pre (decode)", pre_ms[w:n], _BLUE),
+        ("pre (decode + resize to model input)", pre_ms[w:n], _BLUE),
         ("inference", infer_ms[w:n], _ORANGE),
-        ("post (render)", post_ms[w:n], _AQUA),
+        ("post (masks to source resolution)", post_ms[w:n], _AQUA),
     ]
     if encode_ms:
         # Violet rather than the palette's 4th slot (yellow): each stage sits in
         # its own labelled panel, so colour is not carrying identity here, and
         # yellow washes out as a large filled area on a light surface.
-        stages.append(("encode (mp4)", encode_ms[w:n], _VIOLET))
+        stages.append(("overlay + encode (demo only)", encode_ms[w:n], _VIOLET))
     if any(len(v) < 2 for _, v, _ in stages):
         return None
 
