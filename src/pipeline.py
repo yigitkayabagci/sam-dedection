@@ -20,7 +20,7 @@ from .io_utils import (
     write_video,
 )
 from .io_utils.video import read_metadata
-from .metrics import fps_summary, write_fps_chart
+from .metrics import format_benchmark_note, fps_summary, write_latency_chart, write_stage_chart
 from .prompts import PromptSet
 from .trackers import VideoTracker
 from .visualize import overlay_masks
@@ -47,13 +47,37 @@ class PipelineConfig:
     draw_bbox: bool = True
     mask_alpha: float = 0.5
     # FPS reporting: drop the first `fps_warmup` frames (model load / CUDA
-    # warm-up) from the average, and optionally save a per-frame FPS chart.
+    # warm-up) from the average, and optionally save per-frame charts.
     fps_warmup: int = 0
     fps_chart: Path | None = None
+    # Per-frame breakdown: decode, model inference, mask render. Separate from
+    # fps_chart because it needs three timed stages instead of one.
+    stage_chart: Path | None = None
 
 
-def _report_fps(cfg: PipelineConfig, per_frame_dt: list[float]) -> None:
-    """Print FPS stats (with warm-up exclusion) and optionally write a chart."""
+def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
+    model_size = getattr(getattr(tracker, "_predictor", None), "image_size", None)
+    objects = len(prompts.object_ids()) if prompts is not None else None
+    return format_benchmark_note(
+        tracker_name=getattr(tracker, "name", None),
+        precision=getattr(tracker, "precision", None),
+        source_size=(meta.width, meta.height) if meta is not None else None,
+        model_size=model_size,
+        batch=objects,
+    )
+
+
+def _report_timing(
+    cfg: PipelineConfig,
+    tracker: VideoTracker,
+    meta,
+    prompts: PromptSet,
+    per_frame_dt: list[float],
+    pre_ms: list[float],
+    infer_ms: list[float],
+    post_ms: list[float],
+) -> None:
+    """Print FPS stats (with warm-up exclusion) and optionally write charts."""
     if not per_frame_dt:
         return
     stats = fps_summary(per_frame_dt, warmup=cfg.fps_warmup)
@@ -62,10 +86,21 @@ def _report_fps(cfg: PipelineConfig, per_frame_dt: list[float]) -> None:
     if stats["warmup"] > 0:
         print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
               f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
+
+    if cfg.fps_chart is None and cfg.stage_chart is None:
+        return
+    note = _benchmark_note(tracker, meta, prompts)
+    label = getattr(tracker, "name", None)
     if cfg.fps_chart is not None:
-        out = write_fps_chart(per_frame_dt, cfg.fps_chart, warmup=cfg.fps_warmup)
+        out = write_latency_chart(per_frame_dt, cfg.fps_chart, warmup=cfg.fps_warmup,
+                                   note=note, label=label)
         if out:
-            print(f"[pipeline] wrote FPS chart -> {out}")
+            print(f"[pipeline] wrote latency chart -> {out}")
+    if cfg.stage_chart is not None:
+        out = write_stage_chart(pre_ms, infer_ms, post_ms, cfg.stage_chart,
+                                 warmup=cfg.fps_warmup, note=note, label=label)
+        if out:
+            print(f"[pipeline] wrote stage chart -> {out}")
 
 
 def _decord_available() -> bool:
@@ -145,19 +180,27 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
 
         rendered: list[np.ndarray] = []
         per_frame_dt: list[float] = []
+        pre_ms: list[float] = []
+        infer_ms: list[float] = []
+        post_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
-        t_prev = time.perf_counter()
+        t0 = time.perf_counter()
         for result in tracker.propagate():
+            t1 = time.perf_counter()
             rgb = load_frame_rgb8(frame_files[result.frame_idx])
+            t2 = time.perf_counter()
             rendered.append(
                 overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
             )
-            now = time.perf_counter()
-            per_frame_dt.append(now - t_prev)
-            t_prev = now
+            t3 = time.perf_counter()
+            infer_ms.append((t1 - t0) * 1000.0)
+            pre_ms.append((t2 - t1) * 1000.0)
+            post_ms.append((t3 - t2) * 1000.0)
+            per_frame_dt.append(t3 - t0)
+            t0 = t3
             progress.update(1)
         progress.close()
-        _report_fps(cfg, per_frame_dt)
+        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
         write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
         return Path(cfg.output_path).resolve()
     finally:
@@ -177,11 +220,15 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
 
     rendered: list[np.ndarray] = []
     per_frame_dt: list[float] = []
+    pre_ms: list[float] = []
+    infer_ms: list[float] = []
+    post_ms: list[float] = []
     cursor = 0
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
-    t_prev = time.perf_counter()
+    t0 = time.perf_counter()
     try:
         for result in tracker.propagate():
+            t1 = time.perf_counter()
             # Sequential read; propagate yields frames in chronological order.
             while cursor < result.frame_idx:
                 cap.read()
@@ -191,19 +238,23 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
                 break
             cursor += 1
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            t2 = time.perf_counter()
             rendered.append(
                 overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
             )
-            now = time.perf_counter()
-            per_frame_dt.append(now - t_prev)
-            t_prev = now
+            t3 = time.perf_counter()
+            infer_ms.append((t1 - t0) * 1000.0)
+            pre_ms.append((t2 - t1) * 1000.0)
+            post_ms.append((t3 - t2) * 1000.0)
+            per_frame_dt.append(t3 - t0)
+            t0 = t3
             progress.update(1)
     finally:
         progress.close()
         cap.release()
         tracker.reset()
 
-    _report_fps(cfg, per_frame_dt)
+    _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
     write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
     return Path(cfg.output_path).resolve()
 
@@ -220,20 +271,28 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         frame_files = sorted(cache_root.glob("*.jpg"))
         rendered: list[np.ndarray] = []
         per_frame_dt: list[float] = []
+        pre_ms: list[float] = []
+        infer_ms: list[float] = []
+        post_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
-        t_prev = time.perf_counter()
+        t0 = time.perf_counter()
         for result in tracker.propagate():
+            t1 = time.perf_counter()
             bgr = cv2.imread(str(frame_files[result.frame_idx]))
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            t2 = time.perf_counter()
             rendered.append(
                 overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
             )
-            now = time.perf_counter()
-            per_frame_dt.append(now - t_prev)
-            t_prev = now
+            t3 = time.perf_counter()
+            infer_ms.append((t1 - t0) * 1000.0)
+            pre_ms.append((t2 - t1) * 1000.0)
+            post_ms.append((t3 - t2) * 1000.0)
+            per_frame_dt.append(t3 - t0)
+            t0 = t3
             progress.update(1)
         progress.close()
-        _report_fps(cfg, per_frame_dt)
+        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
         write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
         return Path(cfg.output_path).resolve()
     finally:

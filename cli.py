@@ -119,7 +119,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="Exclude the first N frames (model load / CUDA warm-up) from the "
                         "average FPS report.")
     p.add_argument("--fps-chart", default=None,
-                   help="Save a per-frame FPS line chart to this PNG path (needs matplotlib).")
+                   help="Save a per-frame latency chart (ms, with max/min/avg) to this "
+                        "PNG path (needs matplotlib).")
+    p.add_argument("--stage-chart", default=None,
+                   help="Save a per-frame decode/inference/render breakdown chart to this "
+                        "PNG path (needs matplotlib).")
     args = p.parse_args(argv)
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
@@ -151,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         mask_alpha=args.alpha,
         fps_warmup=args.fps_warmup,
         fps_chart=Path(args.fps_chart) if args.fps_chart else None,
+        stage_chart=Path(args.stage_chart) if args.stage_chart else None,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}")

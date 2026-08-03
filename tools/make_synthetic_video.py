@@ -12,18 +12,21 @@ Usage:
     python tools/make_synthetic_video.py --frames 750 --outdir data/synth_750
 
     # --frame-pattern is required: frames-dir mode defaults to *.tif*, and
-    # this writes the same JPGs benchmark_tracking.py does.
+    # this writes the same JPGs benchmark_tracking.py does. --fps-chart and
+    # --stage-chart are independent -- pass either, both, or neither.
     python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml \\
         --frames-dir data/synth_750 --frame-pattern "*.jpg" --fps 30 \\
         --output outputs/synth_trt.mp4 \\
         --prompt file --prompt-file data/synth_750/prompts.json \\
-        --fps-warmup 20 --fps-chart outputs/synth_trt_fps.png
+        --fps-warmup 20 --fps-chart outputs/synth_trt_fps.png \\
+        --stage-chart outputs/synth_trt_stages.png
 
     python cli.py --tracker edgetam --config configs/edgetam.yaml \\
         --frames-dir data/synth_750 --frame-pattern "*.jpg" --fps 30 \\
         --output outputs/synth_torch.mp4 \\
         --prompt file --prompt-file data/synth_750/prompts.json \\
-        --fps-warmup 20 --fps-chart outputs/synth_torch_fps.png
+        --fps-warmup 20 --fps-chart outputs/synth_torch_fps.png \\
+        --stage-chart outputs/synth_torch_stages.png
 """
 from __future__ import annotations
 
@@ -79,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         f"       --frames-dir {outdir} --frame-pattern \"*.jpg\" --fps 30 \\\n"
         f"       --output outputs/synth_trt.mp4 \\\n"
         f"       --prompt file --prompt-file {prompt_path} \\\n"
-        f"       --fps-warmup 20 --fps-chart outputs/synth_trt_fps.png\n"
+        f"       --fps-warmup 20 --fps-chart outputs/synth_trt_fps.png \\\n"
+        f"       --stage-chart outputs/synth_trt_stages.png\n"
     )
     return 0
 

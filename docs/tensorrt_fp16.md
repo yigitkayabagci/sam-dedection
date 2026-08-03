@@ -334,13 +334,16 @@ python tools/compare_backends.py --frames 500 --offload-video \
     --reference-precision float32
 
 # 5. Measure end-to-end tracking throughput, PyTorch vs TensorRT on the same clip.
-python tools/benchmark_tracking.py --frames 500 --offload-video
+#    --fps-chart writes one latency chart (ms, max/min/avg) per backend.
+python tools/benchmark_tracking.py --frames 500 --offload-video \
+    --fps-chart outputs/speed.png
 
-# 6. Track.
+# 6. Track, with both charts: latency (ms, max/min/avg) and the
+#    decode/inference/render breakdown.
 python cli.py --tracker edgetam_trt --config configs/edgetam_trt.yaml \
     --video samples/road.mp4 --output outputs/road.mp4 \
     --prompt file --prompt-file examples/car_box_example.json \
-    --fps-warmup 5 --fps-chart outputs/fps.png
+    --fps-warmup 5 --fps-chart outputs/fps.png --stage-chart outputs/stages.png
 ```
 
 `--verify` in step 1 runs each graph through onnxruntime on CPU and asserts

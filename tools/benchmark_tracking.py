@@ -20,6 +20,10 @@ Usage on the Orin:
     python tools/benchmark_tracking.py --frames 500
     python tools/benchmark_tracking.py --frames 500 --objects 2
     python tools/benchmark_tracking.py --frames 500 --tracker edgetam_trt
+
+    # Latency chart (ms, max/min/avg, warm-up shaded) per backend:
+    python tools/benchmark_tracking.py --frames 500 --fps-chart outputs/speed.png
+    # -> outputs/speed_edgetam.png, outputs/speed_edgetam_trt.png
 """
 from __future__ import annotations
 
@@ -38,6 +42,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from cli import _load_backend_config, _resolve_paths  # noqa: E402
+from src.metrics import format_benchmark_note, write_latency_chart  # noqa: E402
 from src.prompts import BoxPrompt, PromptSet  # noqa: E402
 from src.trackers import build_tracker  # noqa: E402
 
@@ -227,7 +232,7 @@ def summarise(per_frame, setup_ms, warmup, totals, counts, breakdown_frames):
     return {"ms": mean, "fps": 1000.0 / mean}
 
 
-def run_backend(tracker_name, config, frames_dir, prompts, args):
+def run_backend(tracker_name, config, frames_dir, prompts, args, chart_tag=None):
     cfg = _resolve_paths(_load_backend_config(tracker_name, config), RESOLVE_KEYS)
     if args.offload_video:
         cfg["offload_video_to_cpu"] = True
@@ -245,6 +250,20 @@ def run_backend(tracker_name, config, frames_dir, prompts, args):
 
     tracker = build_tracker(tracker_name, **cfg)
     setup_ms, per_frame = timed_propagate(tracker, frames_dir, prompts)
+
+    if args.fps_chart:
+        width, height = (int(v) for v in args.size.lower().split("x"))
+        model_size = getattr(getattr(tracker, "_predictor", None), "image_size", None)
+        note = format_benchmark_note(
+            tracker_name=tracker_name, precision=cfg.get("precision"),
+            source_size=(width, height), model_size=model_size, batch=args.objects,
+        )
+        base = Path(args.fps_chart)
+        out_path = base.with_name(f"{base.stem}_{chart_tag or tracker_name}{base.suffix}")
+        out = write_latency_chart(per_frame, out_path, warmup=args.warmup,
+                                   note=note, label=tracker_name)
+        if out:
+            print(f"  wrote latency chart -> {out}")
 
     totals = counts = None
     breakdown_frames = min(args.breakdown_frames, len(per_frame))
@@ -285,6 +304,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--offload-video", action="store_true",
                    help="Keep decoded frames on the CPU. EdgeTAM otherwise holds "
                         "every frame on the GPU as fp32.")
+    p.add_argument("--fps-chart", default=None,
+                   help="Save a per-frame latency chart (ms, with max/min/avg, "
+                        "warm-up shaded) for each backend. One PNG per backend, "
+                        "named <path stem>_<backend>.png (needs matplotlib).")
     p.add_argument("--keep-frames", action="store_true")
     args = p.parse_args(argv)
 
@@ -331,8 +354,15 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for (tracker_name, config), no_graph in zip(backends, graph_flags):
             args.no_cuda_graph = no_graph
+            # cuda-graph-ab runs the same tracker_name twice; tag the chart
+            # filenames by graph state too, or the second run overwrites the first.
+            chart_tag = tracker_name
+            if args.cuda_graph_ab:
+                chart_tag += "_graphoff" if no_graph else "_graphon"
             try:
-                results.append(run_backend(tracker_name, config, frames_dir, prompts, args))
+                results.append(
+                    run_backend(tracker_name, config, frames_dir, prompts, args, chart_tag)
+                )
             except Exception as exc:
                 print(f"\n!! {tracker_name} failed: {type(exc).__name__}: {exc}")
                 if args.tracker or args.cuda_graph_ab:
