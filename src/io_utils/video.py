@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -75,13 +76,16 @@ def extract_frames(video_path: str | Path, out_dir: str | Path) -> VideoMetadata
     return meta
 
 
-def write_video(
-    frames: Iterable[np.ndarray],
-    out_path: str | Path,
-    fps: float,
-    size: tuple[int, int],
-) -> None:
-    """Write RGB frames to an MP4."""
+@contextmanager
+def open_video_writer(out_path: str | Path, fps: float, size: tuple[int, int]):
+    """Yield a `write(frame_rgb)` callable that encodes straight to disk.
+
+    Use this instead of collecting frames and calling `write_video` at the end.
+    A 500-frame 720p clip is ~1.4 GB of RGB held at once, and on a Jetson --
+    where CPU and GPU share both the memory and its bandwidth -- that is not
+    free: it competes with the model for exactly the resource the model is
+    bound by.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -89,7 +93,18 @@ def write_video(
     if not writer.isOpened():
         raise RuntimeError(f"Could not open writer for {out_path}")
     try:
-        for frame_rgb in frames:
-            writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+        yield lambda frame_rgb: writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
+
+
+def write_video(
+    frames: Iterable[np.ndarray],
+    out_path: str | Path,
+    fps: float,
+    size: tuple[int, int],
+) -> None:
+    """Write RGB frames to an MP4."""
+    with open_video_writer(out_path, fps, size) as write:
+        for frame_rgb in frames:
+            write(frame_rgb)

@@ -161,8 +161,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # ----------------------------------------------------------------- speed
     if "speed" not in skip:
+        # Same --radius as the video step: without it these two measure the
+        # same model on different clips, and the numbers stop being comparable.
         cmd = [PY, "tools/benchmark_tracking.py", "--frames", args.frames,
                "--warmup", args.warmup, "--size", args.size, "--offload-video",
+               "--radius", args.radius,
                "--config", args.config,
                "--fps-chart", outdir / "03_speed.png"]
         if args.trt_only:

@@ -15,9 +15,9 @@ from .io_utils import (
     frames_metadata,
     list_frame_files,
     load_frame_rgb8,
+    open_video_writer,
     read_first_frame,
     read_first_frame_dir,
-    write_video,
 )
 from .io_utils.video import read_metadata
 from .metrics import format_benchmark_note, fps_summary, write_latency_chart, write_stage_chart
@@ -179,30 +179,28 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         tracker.prepare(cache_root)
         tracker.set_prompts(prompts)
 
-        rendered: list[np.ndarray] = []
         per_frame_dt: list[float] = []
         pre_ms: list[float] = []
         infer_ms: list[float] = []
         post_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
-        t0 = time.perf_counter()
-        for result in tracker.propagate():
-            t1 = time.perf_counter()
-            rgb = load_frame_rgb8(frame_files[result.frame_idx])
-            t2 = time.perf_counter()
-            rendered.append(
-                overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
-            )
-            t3 = time.perf_counter()
-            infer_ms.append((t1 - t0) * 1000.0)
-            pre_ms.append((t2 - t1) * 1000.0)
-            post_ms.append((t3 - t2) * 1000.0)
-            per_frame_dt.append(t3 - t0)
-            t0 = t3
-            progress.update(1)
+        with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+            t0 = time.perf_counter()
+            for result in tracker.propagate():
+                t1 = time.perf_counter()
+                rgb = load_frame_rgb8(frame_files[result.frame_idx])
+                t2 = time.perf_counter()
+                emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                   draw_bbox=cfg.draw_bbox))
+                t3 = time.perf_counter()
+                infer_ms.append((t1 - t0) * 1000.0)
+                pre_ms.append((t2 - t1) * 1000.0)
+                post_ms.append((t3 - t2) * 1000.0)
+                per_frame_dt.append(t3 - t0)
+                t0 = t3
+                progress.update(1)
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
-        write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
         return Path(cfg.output_path).resolve()
     finally:
         tracker.reset()
@@ -219,44 +217,42 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video for overlay: {video_path}")
 
-    rendered: list[np.ndarray] = []
     per_frame_dt: list[float] = []
     pre_ms: list[float] = []
     infer_ms: list[float] = []
     post_ms: list[float] = []
     cursor = 0
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
-    t0 = time.perf_counter()
     try:
-        for result in tracker.propagate():
-            t1 = time.perf_counter()
-            # Sequential read; propagate yields frames in chronological order.
-            while cursor < result.frame_idx:
-                cap.read()
+        with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+            t0 = time.perf_counter()
+            for result in tracker.propagate():
+                t1 = time.perf_counter()
+                # Sequential read; propagate yields frames in chronological order.
+                while cursor < result.frame_idx:
+                    cap.read()
+                    cursor += 1
+                ok, bgr = cap.read()
+                if not ok:
+                    break
                 cursor += 1
-            ok, bgr = cap.read()
-            if not ok:
-                break
-            cursor += 1
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            t2 = time.perf_counter()
-            rendered.append(
-                overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
-            )
-            t3 = time.perf_counter()
-            infer_ms.append((t1 - t0) * 1000.0)
-            pre_ms.append((t2 - t1) * 1000.0)
-            post_ms.append((t3 - t2) * 1000.0)
-            per_frame_dt.append(t3 - t0)
-            t0 = t3
-            progress.update(1)
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                t2 = time.perf_counter()
+                emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                   draw_bbox=cfg.draw_bbox))
+                t3 = time.perf_counter()
+                infer_ms.append((t1 - t0) * 1000.0)
+                pre_ms.append((t2 - t1) * 1000.0)
+                post_ms.append((t3 - t2) * 1000.0)
+                per_frame_dt.append(t3 - t0)
+                t0 = t3
+                progress.update(1)
     finally:
         progress.close()
         cap.release()
         tracker.reset()
 
     _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
-    write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
     return Path(cfg.output_path).resolve()
 
 
@@ -270,31 +266,29 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         tracker.set_prompts(prompts)
 
         frame_files = sorted(cache_root.glob("*.jpg"))
-        rendered: list[np.ndarray] = []
         per_frame_dt: list[float] = []
         pre_ms: list[float] = []
         infer_ms: list[float] = []
         post_ms: list[float] = []
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
-        t0 = time.perf_counter()
-        for result in tracker.propagate():
-            t1 = time.perf_counter()
-            bgr = cv2.imread(str(frame_files[result.frame_idx]))
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            t2 = time.perf_counter()
-            rendered.append(
-                overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha, draw_bbox=cfg.draw_bbox)
-            )
-            t3 = time.perf_counter()
-            infer_ms.append((t1 - t0) * 1000.0)
-            pre_ms.append((t2 - t1) * 1000.0)
-            post_ms.append((t3 - t2) * 1000.0)
-            per_frame_dt.append(t3 - t0)
-            t0 = t3
-            progress.update(1)
+        with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+            t0 = time.perf_counter()
+            for result in tracker.propagate():
+                t1 = time.perf_counter()
+                bgr = cv2.imread(str(frame_files[result.frame_idx]))
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                t2 = time.perf_counter()
+                emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                   draw_bbox=cfg.draw_bbox))
+                t3 = time.perf_counter()
+                infer_ms.append((t1 - t0) * 1000.0)
+                pre_ms.append((t2 - t1) * 1000.0)
+                post_ms.append((t3 - t2) * 1000.0)
+                per_frame_dt.append(t3 - t0)
+                t0 = t3
+                progress.update(1)
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms)
-        write_video(rendered, cfg.output_path, fps=meta.fps, size=(meta.width, meta.height))
         return Path(cfg.output_path).resolve()
     finally:
         tracker.reset()

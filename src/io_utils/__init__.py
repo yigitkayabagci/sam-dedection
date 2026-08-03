@@ -8,6 +8,7 @@ from .frames import (
 from .video import (
     VideoMetadata,
     extract_frames,
+    open_video_writer,
     read_first_frame,
     write_video,
 )
@@ -15,6 +16,7 @@ from .video import (
 __all__ = [
     "VideoMetadata",
     "extract_frames",
+    "open_video_writer",
     "read_first_frame",
     "write_video",
     "FRAME_SUFFIXES",
