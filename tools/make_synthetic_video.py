@@ -11,6 +11,10 @@ an `--fps-chart` PNG -- the same clip, same prompts, for both backends.
 Usage:
     python tools/make_synthetic_video.py --frames 750 --outdir data/synth_750
 
+    # A small target (radius in px) stresses tracking harder than the default
+    # frame-proportional size:
+    python tools/make_synthetic_video.py --frames 500 --radius 12 --outdir data/synth_small
+
     # --frame-pattern is required: frames-dir mode defaults to *.tif*, and
     # this writes the same JPGs benchmark_tracking.py does. --fps-chart and
     # --stage-chart are independent -- pass either, both, or neither.
@@ -49,14 +53,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--frames", type=int, default=750)
     p.add_argument("--size", default="1280x720", help="WxH.")
     p.add_argument("--objects", type=int, default=1)
+    p.add_argument("--radius", type=int, default=None,
+                   help="Target radius in pixels (default: proportional to frame "
+                        "size, ~60px at 720p). Pass a small fixed value (e.g. 10-15) "
+                        "to stress-test tracking on a small object.")
     p.add_argument("--outdir", default="data/synth_clip")
     args = p.parse_args(argv)
 
     width, height = (int(v) for v in args.size.lower().split("x"))
     outdir = Path(args.outdir)
 
-    print(f">> Writing {args.frames} frames at {width}x{height} to {outdir}")
-    prompts = write_synthetic_clip(outdir, args.frames, width, height, args.objects)
+    print(f">> Writing {args.frames} frames at {width}x{height} to {outdir}"
+          + (f" (target radius {args.radius}px)" if args.radius else ""))
+    prompts = write_synthetic_clip(
+        outdir, args.frames, width, height, args.objects, radius=args.radius
+    )
 
     prompt_path = outdir / "prompts.json"
     prompt_path.write_text(

@@ -92,7 +92,8 @@ def _report_timing(
     note = _benchmark_note(tracker, meta, prompts)
     label = getattr(tracker, "name", None)
     if cfg.fps_chart is not None:
-        out = write_latency_chart(per_frame_dt, cfg.fps_chart, warmup=cfg.fps_warmup,
+        per_frame_ms = [dt * 1000.0 for dt in per_frame_dt]
+        out = write_latency_chart(per_frame_ms, cfg.fps_chart, warmup=cfg.fps_warmup,
                                    note=note, label=label)
         if out:
             print(f"[pipeline] wrote latency chart -> {out}")

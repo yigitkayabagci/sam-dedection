@@ -61,12 +61,18 @@ RESOLVE_KEYS = (
 # --------------------------------------------------------------------------
 
 
-def write_synthetic_clip(outdir: Path, frames: int, width: int, height: int, objects: int):
+def write_synthetic_clip(
+    outdir: Path, frames: int, width: int, height: int, objects: int,
+    radius: int | None = None,
+):
     """A textured background with `objects` blobs on smooth trajectories.
 
     Smooth motion matters: a clip where the target teleports would make the
     memory bank useless and is not what you will run in production. Returns the
     box prompts for frame 0.
+
+    `radius` defaults to a size proportional to the frame (large, easy target);
+    pass a smaller fixed value to stress-test tracking on a small object instead.
     """
     import cv2
 
@@ -75,7 +81,7 @@ def write_synthetic_clip(outdir: Path, frames: int, width: int, height: int, obj
     background = rng.integers(30, 90, size=(height, width, 3), dtype=np.uint8)
     background = cv2.GaussianBlur(background, (0, 0), 3)
 
-    radius = max(12, min(width, height) // 12)
+    radius = max(4, radius) if radius is not None else max(12, min(width, height) // 12)
     colors = [(230, 60, 60), (60, 220, 90), (70, 120, 240), (240, 200, 60)]
     starts = [
         (width // 4 + i * width // (2 * max(objects, 1)), height // 2)
@@ -285,6 +291,10 @@ def main(argv: list[str] | None = None) -> int:
                    "model resizes to its own image_size regardless; this only "
                    "affects JPEG decode and the mask download.")
     p.add_argument("--objects", type=int, default=1)
+    p.add_argument("--radius", type=int, default=None,
+                   help="Target radius in pixels (default: proportional to frame "
+                        "size, ~60px at 720p). Pass a small fixed value to stress-"
+                        "test tracking on a small object.")
     p.add_argument("--warmup", type=int, default=20,
                    help="Frames excluded from the FPS average.")
     p.add_argument("--tracker", default=None,
@@ -328,7 +338,9 @@ def main(argv: list[str] | None = None) -> int:
     frames_dir = tmp
     print(f"generating {args.frames} synthetic {width}x{height} frames "
           f"with {args.objects} target(s) -> {frames_dir}")
-    prompts = write_synthetic_clip(frames_dir, args.frames, width, height, args.objects)
+    prompts = write_synthetic_clip(
+        frames_dir, args.frames, width, height, args.objects, radius=args.radius
+    )
 
     if not args.offload_video:
         # EdgeTAM preloads the whole clip to the GPU as fp32 at model resolution.

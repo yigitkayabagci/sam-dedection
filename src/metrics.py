@@ -147,13 +147,16 @@ def _finish(
 
 
 def write_latency_chart(
-    per_frame_dt: list[float],
+    per_frame_ms: list[float],
     out_path: str | Path,
     warmup: int = 0,
     note: str | None = None,
     label: str | None = None,
 ):
     """Per-frame latency in ms: the line, plus max/min/avg -- nothing else.
+
+    Takes milliseconds directly (matching write_stage_chart) -- callers that
+    only have second-resolution durations convert before calling.
 
     Max and min are labelled directly on the point they belong to (the two
     frames that were actually slowest and fastest); avg gets a reference line
@@ -163,7 +166,7 @@ def write_latency_chart(
     plt = _matplotlib()
     if plt is None:
         return None
-    ms = [dt * 1000.0 for dt in per_frame_dt]
+    ms = list(per_frame_ms)
     n = len(ms)
     if n < 2:
         return None
