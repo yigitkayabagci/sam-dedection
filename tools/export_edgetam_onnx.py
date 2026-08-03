@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.trackers._hydra_overrides import image_size_overrides  # noqa: E402
 from tools.edgetam_graphs import (  # noqa: E402
     ImageEncoderGraph,
     MemoryAttentionGraph,
@@ -314,10 +315,13 @@ def _verify(onnx_path: Path, plan: ExportPlan, args, sample) -> None:
         raise SystemExit(f"{plan.name}: ONNX parity check failed ({worst:.2e} > 1e-3).")
 
 
-def build_model(checkpoint: str | None, model_cfg: str):
+def build_model(checkpoint: str | None, model_cfg: str, image_size: int | None = None):
     from sam2.build_sam import build_sam2_video_predictor
 
-    model = build_sam2_video_predictor(model_cfg, checkpoint, device="cpu")
+    model = build_sam2_video_predictor(
+        model_cfg, checkpoint, device="cpu",
+        hydra_overrides_extra=image_size_overrides(image_size),
+    )
     model.eval()
     return model
 
@@ -339,6 +343,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Hydra config name resolved by the sam2 package.",
     )
     p.add_argument("--outdir", default="models")
+    p.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Override the Hydra config's model.image_size (default 1024). The "
+        "checkpoint's backbone and neck are fully convolutional and its "
+        "positional encodings are computed per-frame, not a fixed learned "
+        "table, so a different size loads and runs -- verified at 512. Use a "
+        "separate --outdir per size; engines are shape-specific.",
+    )
     p.add_argument("--batch", type=int, default=1, help="Batch size baked into the trace.")
     p.add_argument(
         "--static-batch",
@@ -382,8 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    print(f">> Building EdgeTAM from {checkpoint or '<random weights>'}")
-    model = build_model(checkpoint, args.model_cfg)
+    size_note = f" at image_size={args.image_size}" if args.image_size else ""
+    print(f">> Building EdgeTAM from {checkpoint or '<random weights>'}{size_note}")
+    model = build_model(checkpoint, args.model_cfg, image_size=args.image_size)
     layout = MemoryLayout.from_model(model, ptr_tokens=args.max_ptr_tokens)
     print(f">> Memory layout: {layout}")
     print(

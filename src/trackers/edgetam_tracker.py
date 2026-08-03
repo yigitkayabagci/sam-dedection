@@ -7,6 +7,7 @@ from typing import Iterator
 import numpy as np
 
 from ..prompts import PromptSet
+from ._hydra_overrides import image_size_overrides
 from .base import TrackingResult, VideoTracker
 from .registry import register
 
@@ -65,11 +66,15 @@ class EdgeTAMTracker(VideoTracker):
         # its positional encodings are computed per-frame from the actual
         # feature-map size, not a fixed learned table, so a different input
         # resolution loads and runs -- verified against the real checkpoint at
-        # 512 (proportional FPN shapes, no shape errors). It is still the same
-        # weights evaluated off their training resolution, so accuracy at a
-        # new size is a measurement, not a given: compare_backends.py answers
-        # "did TensorRT change the masks", not "does 512 track as well as
-        # 1024" -- that second question needs ground truth, not a backend A/B.
+        # 512 (proportional FPN shapes, no shape errors), once
+        # `_hydra_overrides.image_size_overrides` also fixes up the memory
+        # attention's cross-attention RoPE table (see that module -- it does
+        # not self-heal like the self-attention one does). It is still the
+        # same weights evaluated off their training resolution, so accuracy at
+        # a new size is a measurement, not a given: compare_backends.py
+        # answers "did TensorRT change the masks", not "does 512 track as well
+        # as 1024" -- that second question needs ground truth, not a backend
+        # A/B.
         self.image_size = image_size
         self._predictor = None
         self._state = None
@@ -91,7 +96,7 @@ class EdgeTAMTracker(VideoTracker):
                 "(see scripts/setup_edgetam.sh comments). For dev machines without "
                 "CUDA, pass --config configs/edgetam_cpu.yaml."
             )
-        overrides = [f"++model.image_size={self.image_size}"] if self.image_size else []
+        overrides = image_size_overrides(self.image_size)
         self._predictor = build_sam2_video_predictor(
             self.model_cfg, self.checkpoint, device=self.device,
             hydra_overrides_extra=overrides,

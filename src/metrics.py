@@ -187,13 +187,15 @@ def write_latency_chart(
     _style_axes(ax)
     _warmup_span(ax, w)
 
-    # Headroom for the max/min annotations: on a short/flat clip the default
-    # autoscale margin can put an extreme point close enough to the axes edge
-    # that its offset label pokes into the subtitle above or the tick labels
-    # below.
-    ymin, ymax = ax.get_ylim()
-    pad = 0.12 * (ymax - ymin)
-    ax.set_ylim(ymin - pad, ymax + pad)
+    # Scale to the post-warmup data, not to everything. The first frames are
+    # often an order of magnitude slower (model load, CUDA/TensorRT warm-up),
+    # and autoscaling to them squashes the steady-state band -- exactly the
+    # part worth reading -- into a sliver. The warm-up line still draws; it
+    # just runs off the top, which is what the shaded span already says.
+    # Padding is on top of that range so the max/min labels have room.
+    lo, hi = min(kept), max(kept)
+    pad = 0.15 * (hi - lo) if hi > lo else max(0.05 * hi, 1.0)
+    ax.set_ylim(lo - pad, hi + pad)
 
     ax.hlines(avg, w, n - 1, colors=_INK_SECONDARY, linestyles=(0, (4, 3)),
               linewidth=1.2, zorder=2)
@@ -222,8 +224,15 @@ def write_stage_chart(
 ):
     """Where each frame's time goes: decode, model inference, render/overlay.
 
-    Three lines rather than a stack, so each stage's own value stays directly
-    readable instead of requiring the reader to subtract band edges.
+    One histogram per stage, stacked as small multiples. A histogram answers
+    the question this chart is for -- "what does a frame usually cost, and how
+    tight is it?" -- which a time series buries: 500 points of jitter read as
+    noise, while the same data binned shows the mode and the spread at a
+    glance. Each stage gets its own x-range because they differ by an order of
+    magnitude (render ~1 ms against inference ~30 ms); sharing one axis would
+    flatten the two small stages into a single bar at the origin.
+
+    Warm-up frames are excluded, same as everywhere else.
     """
     plt = _matplotlib()
     if plt is None:
@@ -231,23 +240,68 @@ def write_stage_chart(
     n = min(len(pre_ms), len(infer_ms), len(post_ms))
     if n < 2:
         return None
-    idx = list(range(n))
-
-    fig, ax = plt.subplots(figsize=(9, 3.6), dpi=140)
-    fig.patch.set_facecolor(_SURFACE)
-    for name, values, color in (
-        ("pre (decode)", pre_ms[:n], _BLUE),
-        ("inference", infer_ms[:n], _ORANGE),
-        ("post (render)", post_ms[:n], _AQUA),
-    ):
-        ax.plot(idx, values, linewidth=2.0, color=color, label=name,
-                solid_capstyle="round", zorder=3)
-
     w = max(0, min(warmup, n - 1))
-    _style_axes(ax)
-    _warmup_span(ax, w)
-    ax.legend(loc="upper right", frameon=False, fontsize=9,
-              labelcolor=_INK_SECONDARY, handlelength=1.4, borderaxespad=0.0)
+
+    stages = [
+        ("pre (decode)", pre_ms[w:n], _BLUE),
+        ("inference", infer_ms[w:n], _ORANGE),
+        ("post (render)", post_ms[w:n], _AQUA),
+    ]
+    if any(len(v) < 2 for _, v, _ in stages):
+        return None
+
+    fig, axes = plt.subplots(3, 1, figsize=(9, 5.4), dpi=140)
+    fig.patch.set_facecolor(_SURFACE)
+
+    for ax, (name, values, color) in zip(axes, stages):
+        ordered = sorted(values)
+        median = ordered[len(ordered) // 2]
+        mean = sum(values) / len(values)
+        lo, hi = ordered[0], ordered[-1]
+
+        # Clip the x-range to p99 only when a straggler actually distorts it:
+        # one frame at 67 ms against a 38-47 ms body stretches the axis and
+        # squashes the distribution into a few bins. When the tail is tame
+        # (p99 close to max) clipping buys nothing and the note it prints is
+        # noise, so bin the full range instead.
+        p99 = ordered[min(len(ordered) - 1, int(0.99 * len(ordered)))]
+        clipped = hi > p99 * 1.15 and p99 > lo
+        top = p99 if clipped else hi
+        outliers = sum(1 for v in values if v > top) if clipped else 0
+
+        bins = 40 if top > lo else 1
+        ax.hist(values, bins=bins, range=(lo, top) if top > lo else None,
+                color=color, zorder=3)
+        _style_axes(ax)
+        ax.yaxis.grid(True, color=_GRID, linewidth=1.0)
+
+        ax.axvline(median, color=_INK_SECONDARY, linestyle=(0, (4, 3)),
+                   linewidth=1.2, zorder=4)
+        ax.set_ylabel("frames", color=_INK_MUTED, fontsize=9)
+        ax.set_title(
+            f"{name}   median {median:.1f} ms   ·   mean {mean:.1f}   ·   "
+            f"min {lo:.1f}   ·   max {hi:.1f}",
+            fontsize=9.5, color=_INK_PRIMARY, loc="left", pad=6,
+        )
+        if outliers:
+            ax.text(0.995, 0.90, f"{outliers} frame(s) above {top:.1f} ms not shown",
+                    transform=ax.transAxes, ha="right", va="top",
+                    fontsize=7.5, color=_INK_MUTED)
+
+    axes[-1].set_xlabel("ms", color=_INK_MUTED, fontsize=9)
 
     title = "per-frame stage breakdown" + (f" — {label}" if label else "")
-    return _finish(fig, ax, out_path, title, note, warmup=w)
+    fig.suptitle(title, fontsize=10.5, color=_INK_PRIMARY, x=0.01, ha="left")
+    if w > 0:
+        fig.text(0.01, 0.955, f"first {w} frames excluded (warm-up)",
+                 fontsize=8, color=_INK_MUTED, ha="left", va="top")
+    if note:
+        fig.text(0.01, 0.005, note, fontsize=7.5, color=_INK_MUTED,
+                 ha="left", va="bottom")
+    fig.tight_layout(rect=(0, 0.035, 1, 0.935))
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, facecolor=_SURFACE)
+    plt.close(fig)
+    return out_path.resolve()
