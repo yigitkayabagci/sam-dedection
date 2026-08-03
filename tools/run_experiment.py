@@ -223,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
             results["video_fps"] = find(
                 r"avg ([\d.]+ FPS over \d+ frames)", out
             ) or find(r"tracked \d+ frames in [\d.]+s \(([\d.]+ FPS) all\)", out) or "not found"
+            results["demo_cost"] = find(
+                r"overlay \+ mp4 encoding: ([\d.]+ ms/frame)", out
+            ) or "n/a"
         status["video"] = ok
 
     # --------------------------------------------------------------- summary
@@ -242,19 +245,21 @@ def main(argv: list[str] | None = None) -> int:
         "",
         "| | what it measures | number |",
         "|---|---|---|",
-        f"| **tracking only (step 3)** | the four engines + EdgeTAM's bookkeeping, "
-        f"nothing else | **{results.get('speed_trt', '-')}** |",
-        f"| demo video (step 4) | the above **plus** re-reading each frame, drawing "
-        f"the mask on it, and encoding an mp4 | {results.get('video_fps', '-')} |",
+        f"| model only (step 3) | the four engines + EdgeTAM's bookkeeping. Frames "
+        f"are decoded up front, so no preprocessing is in here | "
+        f"{results.get('speed_trt', '-')} |",
+        f"| **real-time budget (step 4)** | decode + resize to model input, then the "
+        f"model, then masks back to source resolution — per frame | "
+        f"**{results.get('video_fps', '-')}** |",
         "",
-        "**Quote step 3 as the frame budget.** Re-reading the frame, drawing the "
-        "overlay and encoding an mp4 exist to produce something watchable; a "
-        "real-time deployment sends masks to a consumer and does none of them. "
-        "Step 4 is the demo, and its extra cost scales with output resolution, not "
-        "with the model.",
+        "**Quote step 4 as the deployable frame budget.** It is the one that pays "
+        "per-frame preprocessing, which a camera forces on you and which step 3's "
+        "bulk-decoded clip hides. Step 3 isolates what TensorRT changed, and is the "
+        "right number for comparing engine sets or resolutions against each other.",
         "",
-        "`python cli.py --no-video ...` runs step 4's path with those three removed, "
-        "if you want the same tool to report the real-time number.",
+        "Drawing the overlay and encoding the mp4 are excluded from both — they "
+        "produce something watchable, not something a consumer of these masks needs. "
+        "Their cost is charted separately, in the panel marked *demo only*.",
         "",
         "## Results",
         "",
@@ -267,7 +272,10 @@ def main(argv: list[str] | None = None) -> int:
         f"| 2 accuracy | does error accumulate? | trend {results.get('trend', '-')} |",
         f"| 3 speed | stock PyTorch | {results.get('speed_torch', '-')} |",
         f"| 3 speed | TensorRT fp16 + CUDA graphs | {results.get('speed_trt', '-')} |",
-        f"| 4 video | end-to-end | {results.get('video_fps', '-')} |",
+        f"| 4 video | real-time budget (pre + model + post) | "
+        f"{results.get('video_fps', '-')} |",
+        f"| 4 video | overlay + mp4, excluded from the budget | "
+        f"{results.get('demo_cost', '-')} |",
         "",
         "## Files",
         "",
@@ -279,8 +287,8 @@ def main(argv: list[str] | None = None) -> int:
         "| `03_speed.txt` | FPS, p50/p90/p99, per-module ms, both backends |",
         "| `03_speed_edgetam.png` / `_edgetam_trt.png` | per-frame latency, one per backend |",
         "| `04_video.mp4` | the tracked clip, watchable |",
-        "| `04_video_latency.png` | per-frame latency, end to end |",
-        "| `04_video_stages.png` | decode / inference / render histograms |",
+        "| `04_video_latency.png` | per-frame latency: pre + model + post |",
+        "| `04_video_stages.png` | one histogram per stage, plus the demo-only cost |",
         "",
     ]
     failed = [k for k, v in status.items() if not v]
