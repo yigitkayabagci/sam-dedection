@@ -73,7 +73,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", default="configs/edgetam_trt.yaml",
                    help="TensorRT backend YAML.")
     p.add_argument("--baseline-config", default="configs/edgetam.yaml",
-                   help="Stock PyTorch backend YAML, for the speed comparison.")
+                   help="Stock PyTorch backend YAML, for the speed comparison. "
+                        "Ignored with --trt-only.")
+    p.add_argument("--trt-only", action="store_true",
+                   help="Measure the TensorRT backend alone: skip the stock PyTorch "
+                        "run in the speed step. Halves the runtime, and is the right "
+                        "choice when you already have the PyTorch number and are "
+                        "comparing two TensorRT configurations against each other.")
+    p.add_argument("--reference-config", default=None,
+                   help="What the accuracy step compares against (default: "
+                        "--baseline-config). Point this at another TensorRT YAML to "
+                        "ask a different question: with configs/edgetam_trt.yaml as "
+                        "the reference and a 512 config as --config, the mask IoU "
+                        "answers 'what did dropping to 512 cost?' rather than 'did "
+                        "TensorRT change anything?'. Both models emit masks at the "
+                        "source frame resolution, so the two are directly comparable.")
     p.add_argument("--frames", type=int, default=500)
     p.add_argument("--warmup", type=int, default=20)
     p.add_argument("--radius", type=int, default=12,
@@ -94,6 +108,18 @@ def main(argv: list[str] | None = None) -> int:
     results: dict[str, str] = {}
     status: dict[str, bool] = {}
 
+    # A reference that is itself a TensorRT config means the accuracy step is
+    # comparing two engine sets, so it has to run the edgetam_trt backend on
+    # both sides rather than stock PyTorch on the reference side.
+    reference_config = args.reference_config or args.baseline_config
+    reference_is_trt = "trt" in Path(reference_config).stem
+    reference_tracker = "edgetam_trt" if reference_is_trt else "edgetam"
+    accuracy_question = (
+        f"what did this config cost against `{Path(reference_config).name}`?"
+        if reference_is_trt
+        else "did TensorRT change the masks?"
+    )
+
     # ---------------------------------------------------------------- parity
     if "parity" not in skip:
         cmd = [PY, "tools/check_trt_parity.py", "--outdir", args.engines]
@@ -111,15 +137,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # -------------------------------------------------------------- accuracy
     if "accuracy" not in skip:
+        cmd = [PY, "tools/compare_backends.py", "--frames", args.frames,
+               "--offload-video",
+               "--candidate-config", args.config,
+               "--reference", reference_tracker,
+               "--reference-config", reference_config,
+               "--json", outdir / "02_accuracy.json"]
+        if not reference_is_trt:
+            # fp32 PyTorch is the strictest ground truth available. Against a
+            # TensorRT reference there is nothing to force -- the engines are
+            # built at whatever precision they were built at.
+            cmd += ["--reference-precision", "float32"]
         ok, out = run_step(
-            "2/4  accuracy — do the masks change over a whole clip?",
-            [PY, "tools/compare_backends.py", "--frames", args.frames,
-             "--offload-video", "--reference-precision", "float32",
-             "--candidate-config", args.config,
-             # The reference has to run at the same resolution as the candidate,
-             # or this measures the resolution change instead of TensorRT.
-             "--reference-config", args.baseline_config,
-             "--json", outdir / "02_accuracy.json"],
+            f"2/4  accuracy — {accuracy_question}",
+            cmd,
             outdir / "02_accuracy.txt",
         )
         status["accuracy"] = ok
@@ -130,24 +161,39 @@ def main(argv: list[str] | None = None) -> int:
 
     # ----------------------------------------------------------------- speed
     if "speed" not in skip:
-        ok, out = run_step(
-            "3/4  speed — model-only ms/frame, PyTorch vs TensorRT",
-            [PY, "tools/benchmark_tracking.py", "--frames", args.frames,
-             "--warmup", args.warmup, "--size", args.size, "--offload-video",
-             "--config", args.config, "--baseline-config", args.baseline_config,
-             "--fps-chart", outdir / "03_speed.png"],
-            outdir / "03_speed.txt",
-        )
+        cmd = [PY, "tools/benchmark_tracking.py", "--frames", args.frames,
+               "--warmup", args.warmup, "--size", args.size, "--offload-video",
+               "--config", args.config,
+               "--fps-chart", outdir / "03_speed.png"]
+        if args.trt_only:
+            cmd += ["--tracker", "edgetam_trt"]
+            headline = "3/4  speed — model-only ms/frame, TensorRT"
+        else:
+            cmd += ["--baseline-config", args.baseline_config]
+            headline = "3/4  speed — model-only ms/frame, PyTorch vs TensorRT"
+        ok, out = run_step(headline, cmd, outdir / "03_speed.txt")
         status["speed"] = ok
-        # `\s+\(` after the name is what separates the two rows: the TensorRT
-        # row reads "edgetam_trt  (", so the underscore blocks this pattern and
-        # only the stock row can match.
-        results["speed_torch"] = find(
-            r"\bedgetam\s+\([^)]*\)\s+([\d.]+ ms\s+[\d.]+ FPS)", out
-        ) or "not found"
-        results["speed_trt"] = find(
-            r"edgetam_trt\s+\([^)]*\)\s+([\d.]+ ms\s+[\d.]+ FPS(?:\s+\([\d.]+x\))?)", out
-        ) or "not found"
+
+        # With one backend there is no comparison block to parse, so fall back
+        # to the per-run summary line, which is always printed:
+        #   propagate             26.40 ms/frame   ->   37.88 FPS
+        m = re.search(r"propagate\s+([\d.]+) ms/frame\s+->\s+([\d.]+) FPS", out)
+        fallback = f"{m.group(1)} ms   {m.group(2)} FPS" if m else "not found"
+
+        if args.trt_only:
+            results["speed_torch"] = "not measured (--trt-only)"
+            results["speed_trt"] = fallback
+        else:
+            # `\s+\(` after the name is what separates the two rows: the
+            # TensorRT row reads "edgetam_trt  (", so the underscore blocks
+            # this pattern and only the stock row can match.
+            results["speed_torch"] = find(
+                r"\bedgetam\s+\([^)]*\)\s+([\d.]+ ms\s+[\d.]+ FPS)", out
+            ) or "not found"
+            results["speed_trt"] = find(
+                r"edgetam_trt\s+\([^)]*\)\s+([\d.]+ ms\s+[\d.]+ FPS(?:\s+\([\d.]+x\))?)",
+                out,
+            ) or fallback
 
     # ----------------------------------------------------------------- video
     if "video" not in skip:
@@ -180,8 +226,11 @@ def main(argv: list[str] | None = None) -> int:
     lines = [
         f"# Experiment results — {outdir.name}",
         "",
-        f"engines: `{args.engines}`  ·  TensorRT config: `{args.config}`  ·  "
-        f"baseline config: `{args.baseline_config}`",
+        f"engines: `{args.engines}`  ·  TensorRT config: `{args.config}`",
+        "",
+        f"accuracy reference: `{reference_config}` ({reference_tracker})"
+        + ("  ·  PyTorch baseline: not measured (`--trt-only`)" if args.trt_only
+           else f"  ·  PyTorch baseline: `{args.baseline_config}`"),
         "",
         f"{args.frames} frames at {args.size}  ·  {args.warmup} warm-up excluded"
         + (f"  ·  model input {args.image_size}x{args.image_size}" if args.image_size else ""),
@@ -195,16 +244,17 @@ def main(argv: list[str] | None = None) -> int:
         f"| end-to-end app (step 4) | the above **plus** reading each frame off disk and "
         f"drawing the mask on it | {results.get('video_fps', '-')} |",
         "",
-        "Both are real. Step 3 is what TensorRT changed and is the fair comparison "
-        "against PyTorch; step 4 is what someone running the app sees. Quote both, "
-        "labelled — a single number invites the question \"including what?\".",
+        "Both are real. Step 3 is the model in isolation — the number to compare "
+        "against another engine set or another resolution. Step 4 is what someone "
+        "running the app sees. Quote both, labelled — a single number invites the "
+        "question \"including what?\".",
         "",
         "## Results",
         "",
         "| step | question | result |",
         "|---|---|---|",
         f"| 1 parity | does each engine reproduce its module? | {results.get('parity_total', '-')} |",
-        f"| 2 accuracy | do masks change over a whole clip? | mean IoU "
+        f"| 2 accuracy | {accuracy_question} | mean IoU "
         f"{results.get('mean_iou', '-')}, min {results.get('min_iou', '-')}, "
         f"below threshold: {results.get('below', '-')} |",
         f"| 2 accuracy | does error accumulate? | trend {results.get('trend', '-')} |",
