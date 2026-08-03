@@ -47,6 +47,7 @@ class EdgeTAMTracker(VideoTracker):
         mask_threshold: float = 0.0,
         offload_video_to_cpu: bool = False,
         offload_state_to_cpu: bool = False,
+        image_size: int | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -59,6 +60,17 @@ class EdgeTAMTracker(VideoTracker):
         self.mask_threshold = mask_threshold
         self.offload_video_to_cpu = offload_video_to_cpu
         self.offload_state_to_cpu = offload_state_to_cpu
+        # Overrides the Hydra config's own `model.image_size` (1024). The
+        # checkpoint's backbone (RepViT) and neck are fully convolutional and
+        # its positional encodings are computed per-frame from the actual
+        # feature-map size, not a fixed learned table, so a different input
+        # resolution loads and runs -- verified against the real checkpoint at
+        # 512 (proportional FPN shapes, no shape errors). It is still the same
+        # weights evaluated off their training resolution, so accuracy at a
+        # new size is a measurement, not a given: compare_backends.py answers
+        # "did TensorRT change the masks", not "does 512 track as well as
+        # 1024" -- that second question needs ground truth, not a backend A/B.
+        self.image_size = image_size
         self._predictor = None
         self._state = None
 
@@ -79,8 +91,10 @@ class EdgeTAMTracker(VideoTracker):
                 "(see scripts/setup_edgetam.sh comments). For dev machines without "
                 "CUDA, pass --config configs/edgetam_cpu.yaml."
             )
+        overrides = [f"++model.image_size={self.image_size}"] if self.image_size else []
         self._predictor = build_sam2_video_predictor(
-            self.model_cfg, self.checkpoint, device=self.device
+            self.model_cfg, self.checkpoint, device=self.device,
+            hydra_overrides_extra=overrides,
         )
 
     def _inference_ctx(self):

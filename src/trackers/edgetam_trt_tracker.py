@@ -83,6 +83,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         strict: bool = False,
         use_cuda_graph: bool = True,
         fill_hole_area: int | None = None,
+        image_size: int | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -92,6 +93,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             mask_threshold=mask_threshold,
             offload_video_to_cpu=offload_video_to_cpu,
             offload_state_to_cpu=offload_state_to_cpu,
+            image_size=image_size,
         )
         self.engine_paths = {
             # `engine_path` is the pre-multi-engine config key for the image encoder.
