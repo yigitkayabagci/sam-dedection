@@ -85,7 +85,8 @@ faith; the threshold set was *under 0.5 ms of a ~26 ms frame → not worth it,
 over 1.5 ms → worth it*, weighed against losing per-module fallback, per-module
 parity debugging, and a much larger single export.
 
-**Status: measured on CPU (0.1% of frame), not yet measured on device.**
+**Status: measured on device, §3.7 — launch gap is 0.217 ms (0.5% of frame).
+Decision: not fusing.**
 
 ---
 
@@ -320,9 +321,37 @@ charged the encoder's time to bookkeeping).
 (engine output → dict), launch gap (between engine calls — **the only one
 fusion could remove**), mask postprocess, other frame work.
 
-**Status.** Verified on CPU that the accounting sums to the measured frame total
-exactly. **Not yet run on the Orin** — that measurement is what decides whether
-single-engine fusion is worth building.
+**Result.** _(measured on device, 200 frames requested, 180 synchronized,
+`--offload-video`)_
+
+| | ms | % of frame |
+|---|---|---|
+| image_encoder | 14.419 | |
+| memory_attention | 11.874 | |
+| memory_encoder | 4.405 | |
+| sam_head | 2.261 | |
+| **engines total** | **32.958** | **83.3%** |
+| bank assembly | 2.392 | 6.0% |
+| bank write-back | 0.847 | 2.1% |
+| launch gap | **0.217** | **0.5%** |
+| mask postprocess | 0.455 | 1.2% |
+| other frame work | 2.690 | 6.8% |
+| **frame total** | **39.561** | |
+
+**Reading.** Launch gap — the only category a fused engine could remove — is
+0.217 ms, under the 0.5 ms *not-worth-it* threshold set in §2.3. **Decision:
+not fusing.** The rest of the non-engine time (bank assembly + write-back +
+other frame work, 5.93 ms) is Python dict read/write and survives fusion
+regardless, per §2.2.
+
+**Note on the frame total.** 39.56 ms here is higher than §3.5's 26.40 ms for
+the same backend: this pass forces a `cudaStreamSynchronize` after every
+module to attribute time correctly, which §3.5's throughput number does not
+do. Use §3.5 for FPS; use this table only for the split between engines and
+glue.
+
+Verified on CPU (before this run) that the accounting sums to the measured
+frame total exactly.
 
 ---
 
@@ -719,7 +748,6 @@ encodings use four and they build; only a `Tile` whose repeats trace back to a
 
 | question | how to answer it | why it matters |
 |---|---|---|
-| Is single-engine fusion worth it? | `analyze_glue.py` on the Orin; look at `launch gap` | decides a large refactor |
 | What does 512 cost in accuracy? | `run_experiment.py --outdir results/512 --reference-config configs/edgetam_trt.yaml` | 4× fewer tokens; small objects are where it would show |
 | Does target size affect frame time? | `sweep_prompt.py` | if not flat, something depends on content |
 | What does camera preprocessing cost? | JPEG decode is now measured (`cli.py`'s `pre`, §4.2) — 6–18 ms/frame on a dev CPU, not yet on the Orin. A camera pipeline is not covered at all | a CSI camera gives NV12 and can resize on the VIC instead of the CPU, which is likely much cheaper than PIL-decoding a JPEG — but that is a guess until measured |
