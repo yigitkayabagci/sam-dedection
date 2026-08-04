@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -176,6 +176,27 @@ def _split_frame(total_s, preprocess_s, post_s, pre_ms, infer_ms, post_ms) -> No
     infer_ms.append(max(total_s * 1000.0 - pre - post, 0.0))
 
 
+def _center_crop_window(width: int, height: int, size: int):
+    """`(x0, y0, w, h)` of a centred `size`x`size` window, clamped to the frame."""
+    w, h = min(size, width), min(size, height)
+    return (width - w) // 2, (height - h) // 2, w, h
+
+
+def _shift_prompts(prompts: PromptSet, dx: int, dy: int) -> PromptSet:
+    """Move prompts from full-frame into crop coordinates."""
+    return PromptSet(
+        boxes=[replace(b, xyxy=(b.xyxy[0] - dx, b.xyxy[1] - dy,
+                                b.xyxy[2] - dx, b.xyxy[3] - dy))
+               for b in prompts.boxes],
+        points=[replace(p, xy=(p.xy[0] - dx, p.xy[1] - dy)) for p in prompts.points],
+    )
+
+
+def _median(values: list[float], warmup: int) -> float:
+    kept = sorted(values[warmup:] or values)
+    return kept[len(kept) // 2] if kept else 0.0
+
+
 @contextmanager
 def _video_sink(cfg: "PipelineConfig", meta):
     """Yield a `write(frame_rgb)` callable, or None when no video was asked for.
@@ -202,6 +223,11 @@ class PipelineConfig:
     frames_dir: Path | None = None
     # Glob used to pick up frames inside frames_dir (frames mode only).
     frame_pattern: str = "*.tif*"
+    # Take a centred NxN window instead of the whole frame (frames mode only).
+    # The crop becomes the source: masks come back at its size, the overlay is
+    # drawn on it, and prompts are shifted into its coordinates. At N equal to
+    # the model input this removes the resize from preprocessing entirely.
+    center_crop: int | None = None
     # Output frame rate for frames mode (an image sequence has no inherent fps).
     fps: float = 30.0
     # "auto" -> hand mp4 directly to EdgeTAM if decord is available (no JPG dump);
@@ -253,6 +279,14 @@ def _report_timing(
     if stats["warmup"] > 0:
         print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
               f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
+
+    # Otherwise these three only exist in the stage chart's title, which makes
+    # the split unreadable without opening a PNG and unparseable by a caller.
+    if infer_ms:
+        w = min(cfg.fps_warmup, max(len(infer_ms) - 1, 0))
+        print(f"[pipeline] median per frame: pre {_median(pre_ms, w):.1f} + "
+              f"inference {_median(infer_ms, w):.1f} + "
+              f"post {_median(post_ms, w):.1f} ms")
 
     # The figure above is the deployable frame budget: preprocess + model +
     # mask postprocess. Overlay and encoding are excluded from it by
@@ -349,11 +383,22 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
     frame_files = list_frame_files(frames_dir, cfg.frame_pattern)
     meta = frames_metadata(frames_dir, cfg.frame_pattern, fps=cfg.fps)
 
+    # Cropping here, in the pass that already reads every frame, means the crop
+    # is what lands in the JPG cache -- so it is the source for the model, the
+    # mask resize and the overlay alike, with no second decode.
+    view = lambda rgb: rgb  # noqa: E731
+    if cfg.center_crop:
+        x0, y0, cw, ch = _center_crop_window(meta.width, meta.height, cfg.center_crop)
+        view = lambda rgb: rgb[y0:y0 + ch, x0:x0 + cw]  # noqa: E731
+        meta = replace(meta, width=cw, height=ch)
+        prompts = _shift_prompts(prompts, x0, y0)
+        print(f"[pipeline] centre crop {cw}x{ch} at ({x0}, {y0})")
+
     cache_root = Path(cfg.frames_cache) if cfg.frames_cache else Path(tempfile.mkdtemp(prefix="frames_"))
     cache_root.mkdir(parents=True, exist_ok=True)
     try:
         for idx, src in enumerate(tqdm(frame_files, desc="transcoding", unit="frame")):
-            rgb = load_frame_rgb8(src)
+            rgb = view(load_frame_rgb8(src))
             cv2.imwrite(str(cache_root / f"{idx:05d}.jpg"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
         tracker.prepare(cache_root)
@@ -378,7 +423,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                     # Overlay and encoding are how a demo video gets made, not
                     # part of tracking; timed separately, outside the budget.
                     e0 = time.perf_counter()
-                    rgb = load_frame_rgb8(frame_files[result.frame_idx])
+                    rgb = view(load_frame_rgb8(frame_files[result.frame_idx]))
                     emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
                                        draw_bbox=cfg.draw_bbox))
                     encode_ms.append((time.perf_counter() - e0) * 1000.0)

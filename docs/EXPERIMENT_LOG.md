@@ -473,6 +473,48 @@ tensors. Object count should rise: objects are the batch dimension.
 
 ---
 
+### 3.11 Recorded clips: full 1024, full 512, centre-crop 512
+
+**Question.** The synthetic clip is not what this will run on. On real
+recordings, what does each input configuration cost and lose?
+
+**Setup.** `tools/run_records.py` — every folder under `frames/` tracked three
+ways, results in `frame_output/<record>/<mode>/`:
+
+| mode | model | input |
+|---|---|---|
+| `full1024` | 1024² | whole frame, resized |
+| `full512` | 512² | whole frame, resized |
+| `crop512` | 512² | centred 512×512 window, **no resize** |
+
+**Why the crop is not just a third resolution.** The deployment camera already
+centres and focuses on its target, so the outer frame is background that gets
+paid for twice — once resizing it, once running the model over it. Cropping to
+exactly the model input removes the resize from preprocessing altogether. That
+makes it a speed experiment, not only an accuracy one — and §4.1.1 is why that
+matters more than it looks.
+
+**Preprocessing saving, measured** _(CPU, structural — same clip, same 512
+model, 5 measured frames, only the input transform differs)_:
+
+| input | `pre` median | `post` median |
+|---|---|---|
+| whole 1280×720 frame → 512² | 21.6 ms | 2.0 ms |
+| centred 512×512 crop, no resize | **5.2 ms** | 0.7 ms |
+
+**4.2× less preprocessing.** `post` drops for the same reason: masks resize to
+512×512 instead of back out to 1280×720.
+
+**What it costs.** The crop sees 512×512 of the scene at native detail; 512
+sees the whole scene at half detail. If the target leaves the centre window,
+`crop512` loses it outright — the mp4 is written so that failure is watchable
+rather than inferred from an IoU column.
+
+**Status: tool ready and verified end to end on CPU; on-device results
+pending.**
+
+---
+
 ## 4. Measurement methodology
 
 ### 4.1 What counts as a frame
@@ -499,6 +541,44 @@ because both produced numbers that looked reasonable and were not:
 2. **Video encoding was inside the frame budget.** Streaming frames to the writer
    (instead of collecting 1.4 GB of RGB and encoding at the end) put the encode
    call inside the timed region. It is now measured separately and excluded.
+
+#### 4.1.1 Preprocessing is not small: at 1024 it costs about what the model does
+
+Once `pre` measured the real thing, it came out far larger than expected — and
+large enough that a frame budget quoting only the model is not a frame budget.
+Measured on device: `pre` ≈ **30 ms** at 1024 and ≈ **17 ms** at 512, against
+~26–33 ms of model time.
+
+The cost is not the decode. It is `_load_img_as_tensor`
+(`third_party/EdgeTAM/sam2/utils/misc.py:92`), which is upstream SAM 2 code:
+
+```python
+img_np = np.array(img_pil.convert("RGB").resize((image_size, image_size)))
+img_np = img_np / 255.0          # uint8 / float -> float64
+```
+
+Two things happen per frame, both on one CPU core. PIL resizes to the model
+input — 1M pixels at 1024², four times that of 512². Then `uint8 / 255.0`
+promotes to **float64**: 1024×1024×3×8 bytes = **25 MB** written per frame,
+and the normalisation that follows writes 25 MB more. That is what makes
+1024's `pre` roughly double 512's rather than equal to it — the shared JPEG
+decode is a floor both pay, and the resize-plus-float64 part scales with
+output pixels.
+
+**Two consequences worth carrying into any reading of these numbers.**
+
+1. **`pre` at 512 can never legitimately exceed `pre` at 1024** for the same
+   source frames: identical decode, four times smaller resize target. If a run
+   shows otherwise, the machine state changed between the runs, not the
+   configuration.
+2. **A `pre` figure from before 2026-08-03 measures something else.** Commit
+   `7e9715f` is where `pre` became real preprocessing; before it, `pre` was the
+   frame being re-read off disk for the overlay, with no resize in it at all
+   (§4.1, mistake 1). Numbers around 4–5 ms from earlier runs are that older
+   quantity and are not comparable to the ones above.
+
+This is also the direct motivation for `crop512` in §3.11: cropping to exactly
+the model input deletes the resize, and with it most of this cost.
 
 ### 4.2 Per-tool coverage, audited directly
 
@@ -683,6 +763,10 @@ python tools/sweep_prompt.py --radii 12,30,60,120 --objects 1,2,3 \
 # 5. Where the non-engine time goes (decides the fusion question).
 python tools/analyze_glue.py --frames 200 --offload-video
 
+# 5b. Real recordings, three input configurations each.
+#     Each frames/<record>/ needs a prompts.json, or pass one --box for all.
+python tools/run_records.py --records frames --out frame_output
+
 # 6. The same at 512.
 python tools/export_edgetam_onnx.py --outdir models512/ --image-size 512 --verify
 python tools/build_trt_engines.py   --outdir models512/ --max-batch 4
@@ -750,7 +834,8 @@ encodings use four and they build; only a `Tile` whose repeats trace back to a
 |---|---|---|
 | What does 512 cost in accuracy? | `run_experiment.py --outdir results/512 --reference-config configs/edgetam_trt.yaml` | 4× fewer tokens; small objects are where it would show |
 | Does target size affect frame time? | `sweep_prompt.py` | if not flat, something depends on content |
-| What does camera preprocessing cost? | JPEG decode is now measured (`cli.py`'s `pre`, §4.2) — 6–18 ms/frame on a dev CPU, not yet on the Orin. A camera pipeline is not covered at all | a CSI camera gives NV12 and can resize on the VIC instead of the CPU, which is likely much cheaper than PIL-decoding a JPEG — but that is a guess until measured |
+| What does camera preprocessing cost? | JPEG decode is measured (`cli.py`'s `pre`, §4.1.1) — ~30 ms at 1024 on device. A camera pipeline is not covered at all | a CSI camera gives NV12 and can resize on the VIC instead of the CPU, which is likely much cheaper than PIL-decoding a JPEG and promoting it to float64 — but that is a guess until measured |
+| Does centre-cropping keep the target in frame on real recordings? | `run_records.py`, watch the `crop512` mp4s | it removes the resize (§3.11) but loses anything outside the centre window |
 | Would `--opt-level 5` help memory_attention? | rebuild that one engine | it is 62% of FLOPs and has the *lowest* speedup (1.85×) |
 | Does real (calibrated) INT8 survive, not just the simulation? | NVIDIA Model Optimizer PTQ, per §3.8.1 — not yet run | §3.8 only covers activations, no weight quantisation |
 

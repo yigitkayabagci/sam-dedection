@@ -97,6 +97,13 @@ def main(argv: list[str] | None = None) -> int:
                                           "(e.g. frame_000000.tiff, frame_000001.tiff, ...).")
     p.add_argument("--frame-pattern", default="*.tif*",
                    help="Glob for frames inside --frames-dir (default: *.tif*).")
+    p.add_argument("--center-crop", type=int, default=None,
+                   help="Track a centred NxN window instead of the whole frame "
+                        "(--frames-dir only). Set N to the model input size and "
+                        "preprocessing stops resizing: native pixels reach the "
+                        "model, which is what a camera that already centres and "
+                        "focuses on the target delivers. Prompts stay in "
+                        "full-frame coordinates and are shifted for you.")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Output FPS for --frames-dir mode (image sequences have no inherent fps).")
     p.add_argument("--output", default=None, help="Output video (.mp4) path. Omit "
@@ -148,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("--no-video produces no video; drop --output.")
     elif not args.output:
         raise SystemExit("--output is required (or pass --no-video to measure only).")
+    if args.center_crop and not args.frames_dir:
+        raise SystemExit("--center-crop applies to --frames-dir mode only.")
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
     if args.offload_video is not None:
@@ -173,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         video_path=Path(args.video) if args.video else None,
         frames_dir=Path(args.frames_dir) if args.frames_dir else None,
         frame_pattern=args.frame_pattern,
+        center_crop=args.center_crop,
         fps=args.fps,
         video_mode=args.video_mode,
         keep_frames=args.keep_frames,
