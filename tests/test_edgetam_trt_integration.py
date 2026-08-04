@@ -7,7 +7,7 @@ that matches it, keeping the object-pointer region where the RoPE split expects
 it, and copying out the outputs that outlive a frame instead of handing back a
 buffer the next frame overwrites.
 
-So this substitutes `tools/reference_engines.py`, which runs the PyTorch
+So this substitutes `reference_engines.py`, which runs the PyTorch
 wrapper behind the exact `TRTEngine` surface the tracker uses -- including
 persistent output buffers that get overwritten on every call, which is what
 turns a missing `clone` from an invisible aliasing bug into a failing
@@ -35,7 +35,7 @@ if str(ROOT) not in sys.path:
 from src.prompts import BoxPrompt, PromptSet  # noqa: E402
 from src.trackers.edgetam_tracker import EdgeTAMTracker  # noqa: E402
 from src.trackers.edgetam_trt_tracker import EdgeTAMTRTTracker  # noqa: E402
-from tools.reference_engines import build_reference_engines  # noqa: E402
+from tests.reference_engines import build_reference_engines  # noqa: E402
 
 # Same miniature EdgeTAM as test_edgetam_graphs, so a full propagation run
 # stays inside a few seconds on CPU.

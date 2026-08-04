@@ -226,7 +226,7 @@ def write_clip(outdir: Path, frames: int, size: int = 640):
 def track(model, frames_dir, prompts, simulation=None, engines=None):
     """Track a clip, optionally through the TensorRT integration path.
 
-    `engines` routes the four hot modules through `tools/reference_engines.py`
+    `engines` routes the four hot modules through `tests/reference_engines.py`
     -- the same wrapper graphs the ONNX is exported from, behind the same
     runtime API the real engines use. That isolates the *rewrite* from
     TensorRT and from fp16: if masks match here, anything that goes wrong on
@@ -302,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skip-precision", action="store_true",
                    help="Only verify the graph rewrite, skip the precision sweep.")
     p.add_argument("--verify-graphs", action="store_true",
-                   help="Also track through tools/reference_engines.py at fp32, "
+                   help="Also track through tests/reference_engines.py at fp32, "
                         "which checks the TensorRT rewrite itself against stock "
                         "EdgeTAM on this model at this resolution.")
     args = p.parse_args(argv)
@@ -328,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.verify_graphs:
             from sam2.build_sam import build_sam2_video_predictor as _build
-            from tools.reference_engines import build_reference_engines
+            from tests.reference_engines import build_reference_engines
 
             print("tracking through the TensorRT graph rewrite at fp32...")
             # A separate instance: a real engine is a frozen export-time
