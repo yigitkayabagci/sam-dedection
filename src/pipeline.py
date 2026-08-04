@@ -77,6 +77,55 @@ def _install_realtime_preprocess(tracker, cache_root, timer: list[float]) -> boo
     return True
 
 
+class _LazyVideoFrames:
+    """`_LazyFrames`'s counterpart for direct-mp4 mode: decode+resize on demand
+    through decord's random-access indexing instead of `load_video_frames_from_video_file`'s
+    bulk `for frame in VideoReader(...)` loop, which -- like the JPG path's bulk
+    load -- runs entirely inside `init_state` and would otherwise leave mp4-mode
+    with no per-frame preprocessing cost to measure at all.
+
+    Mirrors that function's own per-frame transform (permute, /255, normalise)
+    exactly, so this changes when the work happens, not what it computes.
+    """
+
+    def __init__(self, video_path, image_size, timer: list[float]) -> None:
+        import decord
+        import torch
+
+        decord.bridge.set_bridge("torch")
+        self.reader = decord.VideoReader(str(video_path), width=image_size, height=image_size)
+        self.timer = timer
+        self.mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)[:, None, None]
+        self.std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)[:, None, None]
+
+    def __len__(self) -> int:
+        return len(self.reader)
+
+    def __getitem__(self, index: int):
+        start = time.perf_counter()
+        frame = self.reader[index]  # HWC uint8, already resized by VideoReader's width/height
+        img = frame.permute(2, 0, 1).float() / 255.0
+        img = (img - self.mean) / self.std
+        self.timer.append(time.perf_counter() - start)
+        return img
+
+
+def _install_realtime_preprocess_mp4(tracker, video_path, timer: list[float]) -> bool:
+    """`_install_realtime_preprocess`'s counterpart for direct-mp4 mode."""
+    state = getattr(tracker, "_state", None)
+    predictor = getattr(tracker, "_predictor", None)
+    if state is None or predictor is None or "images" not in state:
+        return False
+    try:
+        lazy = _LazyVideoFrames(video_path, predictor.image_size, timer)
+    except ImportError:
+        return False
+    if len(lazy) != len(state["images"]):
+        return False
+    state["images"] = lazy
+    return True
+
+
 @contextmanager
 def _postprocess_timer(tracker):
     """Accumulate seconds spent resizing masks back to source resolution.
@@ -359,6 +408,10 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
     post_ms: list[float] = []
     encode_ms: list[float] = []
     preprocess_s: list[float] = []
+    if not _install_realtime_preprocess_mp4(tracker, video_path, preprocess_s):
+        print("[pipeline] WARNING: could not install per-frame preprocessing timing "
+              "for mp4 mode -- decode+resize cost will be folded into 'inference' "
+              "rather than reported as 'pre'. Total frame time is still correct.")
     cursor = 0
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:

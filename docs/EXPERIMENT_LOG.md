@@ -15,6 +15,12 @@ two overlap, that one is authoritative on mechanism and this one on results.
 > holds, not what it costs on the target.** Anything not marked is a property
 > of the code, not a measurement.
 
+> **Not every tool in this suite measures real-time-representative frame
+> time.** §4.2 audits each one directly — three tools bulk-decode the clip
+> before timing starts and report a model-only number; one (`cli.py`)
+> decodes per frame and reports the deployable budget. Read that section
+> before quoting a ms/frame figure without knowing which kind it is.
+
 ---
 
 ## 1. What the work set out to do
@@ -437,7 +443,128 @@ because both produced numbers that looked reasonable and were not:
    (instead of collecting 1.4 GB of RGB and encoding at the end) put the encode
    call inside the timed region. It is now measured separately and excluded.
 
-### 4.2 Two frame times, both real
+### 4.2 Per-tool coverage, audited directly
+
+Every tool in the suite was instrumented and re-run to confirm — not assume —
+what it includes. The audit method for each row was: monkeypatch the exact
+call site the claim depends on, log every invocation with its index and
+duration, run a real clip, and read the log. Numbers below are from those
+runs, not from reading the source and reasoning about it.
+
+| tool (step) | preprocess (`pre`) | model | postprocess (`post`) | overlay / encode |
+|---|---|---|---|---|
+| `benchmark_tracking.py` (3) | ❌ bulk, in setup | ✅ | ✅ *(lumped into one number)* | N/A, no video |
+| `sweep_prompt.py` (5) | ❌ bulk, in setup | ✅ | ✅ *(lumped into one number)* | N/A, no video |
+| `analyze_glue.py` | ❌ bulk, in setup | ✅ *(split per module)* | ✅ *(separate line)* | N/A, no video |
+| `cli.py` frames-dir / jpg mode (4) | ✅ **per frame**, separated | ✅ | ✅ **per frame**, separated | ✅ measured, excluded from budget |
+| `cli.py` direct-mp4 mode | ✅ **per frame**, separated | ✅ | ✅ **per frame**, separated | ✅ measured, excluded from budget |
+
+**Only `cli.py` (step 4) measures a real-time-representative frame budget.**
+Steps 3 and 5 decode the whole clip inside `prepare()`, before any per-frame
+timer starts — deliberately, so they isolate the model — which means their
+ms/frame numbers have **zero preprocessing in them**. A camera does not offer
+that: every frame arrives raw and has to be decoded before anything else can
+run. Quoting a step-3 number as "the real-time frame time" **overstates
+achievable FPS** by however much decode+resize costs on the device, an amount
+this repo has not measured for a camera source — only for JPEG, which was
+6–18 ms/frame on this dev machine's CPU (§4.2.2) and will differ on the Orin
+and differ again for whatever a real camera pipeline hands over (raw/NV12,
+likely resizable on the VIC instead of the CPU — see §7).
+
+**What "the model" itself includes**, for every tool: the four TensorRT
+engines (or their PyTorch equivalents) plus EdgeTAM's per-frame bookkeeping —
+memory-bank dict lookup/write, object-pointer accounting. Steps 3 and 5 do not
+separate postprocessing (mask resize to source resolution) from this; it is
+real work and it is included, just not broken out. Step 4 (`cli.py`) is the
+only tool that reports it as its own `post` line.
+
+#### 4.2.1 A universal blind spot: frame 0 is never timed for decode
+
+Verified by logging every call to the frame-decode function, with real
+indices:
+
+```
+JPG mode  (5-frame clip):  __getitem__ called for [1, 2, 3, 4]      -- 0 missing
+mp4 mode (30-frame clip):  __getitem__ called for [1, 2, ..., 29]   -- 0 missing
+```
+
+Frame 0 is never decoded inside the timed loop, in **either** mode. The cause
+is upstream, not a bug in this repo's instrumentation: `SAM2VideoPredictor.
+init_state()` ends with
+
+```python
+# Warm up the visual backbone and cache the image feature on frame 0
+self._get_image_feature(inference_state, frame_idx=0, batch_size=1)
+```
+
+— an unconditional, hardcoded warm-up of frame 0's image encoder, inside
+`init_state()`, i.e. inside `prepare()`, i.e. inside setup. It runs before
+this repo's per-frame timer (or its lazy-decode wrapper) is even installed, so
+there is no hook available to time it from outside without patching upstream
+SAM2 code, which has not been done.
+
+Effect, confirmed against the raw per-frame log: frame 0's wall time was
+**115.6 ms** (JPG mode) and **95.2 ms** (mp4 mode) against **1.2–2.6 s** for
+every other frame in the same *unpinned-clock CPU* run — both anomalously low,
+consistent with frame 0 skipping decode *and* the image-encoder share of
+inference (both already computed during setup).
+
+**Practical impact: small and already covered by convention, not zero.**
+`--fps-warmup` (default 20 in `run_experiment.py`) excludes frame 0 from every
+reported statistic already, for the originally-stated reason ("model load /
+CUDA warm-up") — this finding gives that convention a second, more specific
+justification. The one place it is *not* covered is `--fps-warmup 0` or the
+"FPS all" line (computed over every frame, warm-up included) — that figure is
+inflated by however much one artificially-cheap frame out of the total pulls
+it up. On a 500-frame run that is 1 in 500; on a short clip (`--frames 5`,
+common in a smoke test) it is 1 in 5 and worth noticing.
+
+**Rule going forward: never run with `--fps-warmup 0`, and never quote "FPS
+all"; quote the post-warm-up figure.**
+
+#### 4.2.2 A real gap, found and fixed: direct-mp4 mode measured zero preprocessing
+
+Before this audit, `cli.py --video foo.mp4` (decord-decoded, no JPG cache) had
+no lazy-decode wrapper at all — only the frames-dir/jpg paths had one. Verified
+before the fix, on a real 30-frame clip:
+
+```
+pre (decode + resize to model input)   median 0.0 ms · mean 0.0 · min 0.0 · max 0.0
+```
+
+Flat zero for every frame, silently — no error, no warning, a chart that looks
+complete. The true decode cost was not absent, it was misattributed: `_split_
+frame`'s arithmetic is `infer = total − pre − post`, so with `pre` pinned at
+zero by an empty log, all of it landed inside `inference` instead, understating
+what the model itself costs and overstating what preprocessing costs (as
+exactly zero, which is wrong in the other direction).
+
+**Fixed** by adding `_LazyVideoFrames`, mirroring the existing JPG-mode
+`_LazyFrames` but backed by decord's random-access indexing (`VideoReader[i]`)
+instead of PIL, so decode is deferred to the moment each frame is actually
+needed rather than done in one bulk loop inside `init_state`. If the wrapper
+ever fails to attach, `cli.py` now prints an explicit warning naming the
+consequence, rather than reporting a silent zero:
+
+```
+[pipeline] WARNING: could not install per-frame preprocessing timing for mp4
+mode -- decode+resize cost will be folded into 'inference' rather than
+reported as 'pre'. Total frame time is still correct.
+```
+
+Verified after the fix, same clip:
+
+```
+pre (decode + resize to model input)   median 7.2 ms · mean 8.0 · min 6.0 · max 18.3
+```
+
+**This gap did not affect any number already in this document.**
+`run_experiment.py`'s video step always uses `--frames-dir` (via
+`make_synthetic_video.py`), never `--video`, so it was always on the
+already-correct JPG-mode path. The gap only mattered for direct `cli.py
+--video some.mp4` runs, which nothing in the reproduction commands (§5) does.
+
+### 4.3 Two frame times, both real
 
 | | measures | use for |
 |---|---|---|
@@ -448,7 +575,7 @@ The difference between them is per-frame preprocessing. Quoting one unlabelled
 is what made 37.88 FPS and 23.0 FPS look contradictory when they were measuring
 different things.
 
-### 4.3 Reproducibility hazards found the hard way
+### 4.4 Reproducibility hazards found the hard way
 
 - **Unpinned clocks cost ±30%.** `memory_attention` measured 11.33 ms and
   7.60 ms in two identical runs; the same benchmark configuration produced
@@ -465,7 +592,7 @@ different things.
   memory *and bandwidth* on a Jetson; holding the rendered clip in a list was
   contending for the resource the model is bound by.
 
-### 4.4 The synthetic clip
+### 4.5 The synthetic clip
 
 `write_synthetic_clip` in `tools/benchmark_tracking.py`: a blurred noise
 background with N blobs on smooth sinusoidal trajectories, seeded (`rng =
@@ -567,7 +694,7 @@ encodings use four and they build; only a `Tile` whose repeats trace back to a
 | Is single-engine fusion worth it? | `analyze_glue.py` on the Orin; look at `launch gap` | decides a large refactor |
 | What does 512 cost in accuracy? | `run_experiment.py --outdir results/512 --reference-config configs/edgetam_trt.yaml` | 4× fewer tokens; small objects are where it would show |
 | Does target size affect frame time? | `sweep_prompt.py` | if not flat, something depends on content |
-| What does camera preprocessing cost? | not covered by these tools | the synthetic clip decodes JPEGs; a CSI camera gives NV12 and can resize on the VIC, which is much cheaper |
+| What does camera preprocessing cost? | JPEG decode is now measured (`cli.py`'s `pre`, §4.2) — 6–18 ms/frame on a dev CPU, not yet on the Orin. A camera pipeline is not covered at all | a CSI camera gives NV12 and can resize on the VIC instead of the CPU, which is likely much cheaper than PIL-decoding a JPEG — but that is a guess until measured |
 | Would `--opt-level 5` help memory_attention? | rebuild that one engine | it is 62% of FLOPs and has the *lowest* speedup (1.85×) |
 
 ---
