@@ -219,5 +219,88 @@ class TestFpsMetrics(unittest.TestCase):
         self.assertEqual(s["kept_frames"], 1)
 
 
+class TestEncodeStaysOutOfTheBudget(unittest.TestCase):
+    """Writing the mp4 must never enter the reported frame time.
+
+    The overlay and the encode exist to make something watchable; a consumer of
+    the masks pays neither. They are timed, but on their own counter. This
+    pins that down causally instead of by inspection: make writing a frame take
+    250 ms and check the budget does not move.
+    """
+
+    class _Result:
+        def __init__(self, idx, mask):
+            self.frame_idx, self.masks = idx, {1: mask}
+
+    class _Tracker:
+        """Enough of the VideoTracker surface for _run_frames, no weights."""
+        name, precision = "fake", "float32"
+
+        def __init__(self, frames, shape):
+            self.frames, self.shape = frames, shape
+
+        def prepare(self, _root): pass
+
+        def set_prompts(self, _p): pass
+
+        def reset(self): pass
+
+        def propagate(self):
+            for i in range(self.frames):
+                mask = np.zeros(self.shape, dtype=bool)
+                mask[1:3, 1:3] = True
+                yield TestEncodeStaysOutOfTheBudget._Result(i, mask)
+
+    def _run(self, write_delay_s):
+        import time as _time
+        from contextlib import contextmanager
+        import cv2
+        import src.pipeline as P
+
+        captured = {}
+
+        def capture(cfg, tracker, meta, prompts, per_frame_dt, pre, infer, post,
+                    encode=None):
+            captured.update(per_frame_dt=per_frame_dt, encode=encode)
+
+        real_writer, real_report = P.open_video_writer, P._report_timing
+
+        @contextmanager
+        def slow_writer(*a, **k):
+            with real_writer(*a, **k) as emit:
+                yield lambda frame: (_time.sleep(write_delay_s), emit(frame))[1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(4):
+                cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
+                            np.full((8, 12, 3), 40 * i, dtype=np.uint8))
+            P.open_video_writer, P._report_timing = slow_writer, capture
+            try:
+                P.run(self._Tracker(4, (8, 12)),
+                      PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
+                                     frame_pattern="*.tif*"))
+            finally:
+                P.open_video_writer, P._report_timing = real_writer, real_report
+        return captured
+
+    def test_slow_writer_moves_only_the_encode_counter(self):
+        delay_ms = 250.0
+        fast, slow = self._run(0.0), self._run(delay_ms / 1000.0)
+
+        budget_fast = max(fast["per_frame_dt"]) * 1000.0
+        budget_slow = max(slow["per_frame_dt"]) * 1000.0
+        self.assertLess(
+            budget_slow, budget_fast + delay_ms / 2,
+            f"a {delay_ms:.0f} ms write leaked into the frame budget "
+            f"({budget_fast:.1f} -> {budget_slow:.1f} ms)",
+        )
+        # ...and landed where it belongs, so the test cannot pass by the
+        # writer never having been called at all.
+        self.assertGreater(min(slow["encode"]), delay_ms)
+        self.assertLess(max(fast["encode"]), delay_ms)
+
+
 if __name__ == "__main__":
     unittest.main()
