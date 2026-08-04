@@ -503,15 +503,17 @@ makes it a speed experiment, not only an accuracy one — and §4.1.1 is why tha
 matters more than it looks.
 
 **Preprocessing saving, measured** _(CPU, structural — same clip, same 512
-model, 5 measured frames, only the input transform differs)_:
+model, only the input transform differs, with the §4.1.2 preprocessing)_:
 
 | input | `pre` median | `post` median |
 |---|---|---|
-| whole 1280×720 frame → 512² | 21.6 ms | 2.0 ms |
-| centred 512×512 crop, no resize | **5.2 ms** | 0.7 ms |
+| whole 1280×720 frame → 512² | 7.4 ms | 1.5 ms |
+| centred 512×512 crop, no resize | **5.4 ms** | 0.7 ms |
 
-**4.2× less preprocessing.** `post` drops for the same reason: masks resize to
-512×512 instead of back out to 1280×720.
+The gap is much narrower than it was against upstream's preprocessing (18.9 vs
+5.2 ms) because the rewrite already removed most of what the crop was saving.
+What is left is the resize itself; `post` halves because masks go back to
+512×512 rather than out to 1280×720.
 
 **What it costs.** The crop sees 512×512 of the scene at native detail; 512
 sees the whole scene at half detail. If the target leaves the centre window,
@@ -597,15 +599,11 @@ operations done the way a deployment would:
 | uint8 → float | 13.6 ms (float64) | 1.9 ms (float32) | **7×** |
 | centre-crop 512 | — | 0.07 ms (memcpy) | — |
 
-So the ~30 ms is real, but it is **the cost of upstream's reference
+So the ~30 ms was real, but it was **the cost of upstream's reference
 preprocessing, not a floor**. Nothing about the model requires float64 or PIL;
-`_load_img_as_tensor` was written for research convenience. A deployment that
-receives raw frames (no JPEG to decode at all), resizes with OpenCV or on the
-GPU, and stays in float32 should land in single-digit milliseconds. **Quote
-the 30 ms as what this pipeline currently pays, and say so — do not present it
-as what preprocessing inherently costs.**
+`_load_img_as_tensor` was written for research convenience.
 
-**Two consequences worth carrying into any reading of these numbers.**
+**Three things follow, and they govern how any `pre` number is read.**
 
 1. **`pre` at 512 can never legitimately exceed `pre` at 1024** for the same
    source frames: identical decode, four times smaller resize target. If a run
@@ -616,9 +614,45 @@ as what preprocessing inherently costs.**
    frame being re-read off disk for the overlay, with no resize in it at all
    (§4.1, mistake 1). Numbers around 4–5 ms from earlier runs are that older
    quantity and are not comparable to the ones above.
+3. **A `pre` figure taken before §4.1.2 is 2.6–4.7× too high**, including the
+   ~30 ms on device. Re-measure before quoting it.
 
-This is also the direct motivation for `crop512` in §3.11: cropping to exactly
-the model input deletes the resize, and with it most of this cost.
+#### 4.1.2 Preprocessing rewritten, and what it changed
+
+`_LazyFrames` no longer calls `_load_img_as_tensor`. It decodes the **source**
+frame (not the JPG cache), applies the crop if there is one, resizes with
+`cv2.resize`, and normalises in float32 with in-place ops. Three wasteful
+things disappear: PIL's resize, the float64 promotion, and a lossy JPEG
+round-trip that was being applied to TIFF source data before the model ever
+saw it.
+
+**Measured on the same machine and clip, only the preprocessing differing:**
+
+| model input | before | after | |
+|---|---|---|---|
+| 1024² | 42.8 ms | **9.2 ms** | 4.7× |
+| 512² | 18.9 ms | **7.4 ms** | 2.6× |
+| 512² from a 512 centre crop | 5.2 ms | **5.4 ms** | no resize either way |
+
+**And what it cost in accuracy — the question that matters, since `INTER_AREA`
+is not PIL's bicubic:**
+
+| | |
+|---|---|
+| model input, relative L2 difference | 0.0063 (1024²), 0.0070 (512²) |
+| **mask IoU, upstream vs optimised** | **mean 0.9993, min 0.9985** |
+
+That IoU is the same figure fp16-vs-fp32 scores over a whole clip (§3.4), and
+the input difference is ~4× *smaller* than the image encoder's own fp16 error
+(2.4e-02, §3.3). The resampling change is well inside what this pipeline
+already tolerates.
+
+**Still on the table**, not done: decoding is now the largest remaining term
+(~4.4 ms), and it disappears entirely when frames arrive raw rather than as
+files. Resizing on the GPU or Jetson's VIC would take the rest.
+
+This is also why `crop512` in §3.11 stays interesting: cropping to exactly the
+model input deletes the resize, which is what remains after the rewrite.
 
 ### 4.2 Per-tool coverage, audited directly
 

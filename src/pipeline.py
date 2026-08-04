@@ -28,7 +28,7 @@ from .visualize import overlay_masks
 
 
 class _LazyFrames:
-    """Decode, resize and normalise each frame on demand.
+    """Decode, crop, resize and normalise each source frame on demand.
 
     EdgeTAM's `init_state` does all of that for the whole clip up front, so it
     lands in setup and never appears in a frame time. A camera does not work
@@ -37,16 +37,26 @@ class _LazyFrames:
     after `prepare()` moves that work into the tracking loop, where a real-time
     frame budget has to account for it.
 
-    The bulk load in `init_state` still happens and is still wasted -- it is
-    setup, which is excluded from every number here anyway.
+    Deliberately not upstream's `_load_img_as_tensor`, which this replaced:
+    that one resizes with PIL and writes `uint8 / 255.0`, which NumPy promotes
+    to float64 -- 25 MB per frame at 1024 for the conversion and 25 MB again
+    for the normalisation. Nothing in the model needs either. cv2 resizes the
+    same frame ~30x faster and staying in float32 halves the memory traffic
+    twice over, which on a Jetson (CPU and GPU on one memory bus) is the whole
+    cost. See docs/EXPERIMENT_LOG.md 4.1.1 for the step-by-step measurement.
+
+    Reading the source frames rather than the JPG cache also skips a lossy
+    round-trip: the cache exists because `init_state` only loads JPGs from a
+    directory, and its contents are thrown away the moment this is installed.
     """
 
-    def __init__(self, paths, image_size, timer: list[float]) -> None:
+    def __init__(self, paths, image_size, timer: list[float], view=None) -> None:
         import torch
 
         self.paths = list(paths)
         self.image_size = image_size
         self.timer = timer
+        self.view = view or (lambda rgb: rgb)
         # load_video_frames' own normalisation constants.
         self.mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)[:, None, None]
         self.std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)[:, None, None]
@@ -55,25 +65,35 @@ class _LazyFrames:
         return len(self.paths)
 
     def __getitem__(self, index: int):
-        from sam2.utils.misc import _load_img_as_tensor
+        import torch
 
         start = time.perf_counter()
-        img, _, _ = _load_img_as_tensor(self.paths[index], self.image_size)
-        img = (img - self.mean) / self.std
+        rgb = self.view(load_frame_rgb8(self.paths[index]))
+        size = self.image_size
+        if rgb.shape[0] != size or rgb.shape[1] != size:
+            # INTER_AREA averages over the pixels it discards; on a downscale
+            # that is the difference between a resampled frame and an aliased
+            # one. It degenerates to bilinear when upscaling, so pick by which
+            # way this frame is going.
+            shrinking = size < rgb.shape[0] or size < rgb.shape[1]
+            rgb = cv2.resize(rgb, (size, size),
+                             interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR)
+        img = torch.from_numpy(rgb).permute(2, 0, 1).to(torch.float32).div_(255.0)
+        img = img.sub_(self.mean).div_(self.std)
         self.timer.append(time.perf_counter() - start)
         return img
 
 
-def _install_realtime_preprocess(tracker, cache_root, timer: list[float]) -> bool:
+def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None) -> bool:
     """Route the tracker's frame source through `_LazyFrames`. True if it took."""
     state = getattr(tracker, "_state", None)
     predictor = getattr(tracker, "_predictor", None)
     if state is None or predictor is None or "images" not in state:
         return False
-    paths = sorted(Path(cache_root).glob("*.jpg"))
+    paths = list(paths)
     if len(paths) != len(state["images"]):
         return False
-    state["images"] = _LazyFrames(paths, predictor.image_size, timer)
+    state["images"] = _LazyFrames(paths, predictor.image_size, timer, view)
     return True
 
 
@@ -102,10 +122,12 @@ class _LazyVideoFrames:
         return len(self.reader)
 
     def __getitem__(self, index: int):
+        import torch
+
         start = time.perf_counter()
         frame = self.reader[index]  # HWC uint8, already resized by VideoReader's width/height
-        img = frame.permute(2, 0, 1).float() / 255.0
-        img = (img - self.mean) / self.std
+        img = frame.permute(2, 0, 1).to(torch.float32).div_(255.0)
+        img = img.sub_(self.mean).div_(self.std)
         self.timer.append(time.perf_counter() - start)
         return img
 
@@ -410,7 +432,10 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         post_ms: list[float] = []
         encode_ms: list[float] = []
         preprocess_s: list[float] = []
-        _install_realtime_preprocess(tracker, cache_root, preprocess_s)
+        # The source frames, not the JPG cache: the cache only existed to get
+        # `init_state` through its bulk load, and re-decoding it per frame
+        # would add a lossy compression round-trip to every measurement.
+        _install_realtime_preprocess(tracker, frame_files, preprocess_s, view)
 
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
@@ -507,7 +532,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         post_ms: list[float] = []
         encode_ms: list[float] = []
         preprocess_s: list[float] = []
-        _install_realtime_preprocess(tracker, cache_root, preprocess_s)
+        _install_realtime_preprocess(tracker, frame_files, preprocess_s)
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
