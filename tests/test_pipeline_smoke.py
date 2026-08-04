@@ -260,7 +260,7 @@ class TestEncodeStaysOutOfTheBudget(unittest.TestCase):
         captured = {}
 
         def capture(cfg, tracker, meta, prompts, per_frame_dt, pre, infer, post,
-                    encode=None):
+                    encode=None, read=None):
             captured.update(per_frame_dt=per_frame_dt, encode=encode)
 
         real_writer, real_report = P.open_video_writer, P._report_timing

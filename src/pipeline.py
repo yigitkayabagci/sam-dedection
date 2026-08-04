@@ -15,8 +15,10 @@ from .io_utils import (
     extract_frames,
     frames_metadata,
     list_frame_files,
+    decode_frame,
     load_frame_rgb8,
     open_video_writer,
+    to_rgb8,
     read_first_frame,
     read_first_frame_dir,
 )
@@ -50,13 +52,18 @@ class _LazyFrames:
     directory, and its contents are thrown away the moment this is installed.
     """
 
-    def __init__(self, paths, image_size, timer: list[float], view=None) -> None:
+    def __init__(self, paths, image_size, timer: list[float], view=None,
+                 read_timer: list[float] | None = None) -> None:
         import torch
 
         self.paths = list(paths)
         self.image_size = image_size
         self.timer = timer
-        self.view = view or (lambda rgb: rgb)
+        # Reading a frame off disk is timed separately because a deployment fed
+        # by a camera or a network link does not do it at all -- it is the one
+        # part of `pre` that is an artefact of benchmarking against files.
+        self.read_timer = read_timer if read_timer is not None else []
+        self.view = view or (lambda img: img)
         # load_video_frames' own normalisation constants.
         self.mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)[:, None, None]
         self.std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)[:, None, None]
@@ -68,23 +75,34 @@ class _LazyFrames:
         import torch
 
         start = time.perf_counter()
-        rgb = self.view(load_frame_rgb8(self.paths[index]))
+        img = decode_frame(self.paths[index])
+        read_done = time.perf_counter()
+        self.read_timer.append(read_done - start)
+
+        # Crop and resize first, then convert depth and channels. On a 16-bit
+        # mono frame `to_rgb8` is a full-frame min/max pass plus a 3x data
+        # expansion; doing it at the model's input size instead of the
+        # sensor's is the same arithmetic over far fewer pixels. For an 8-bit
+        # source the order makes no difference to the result at all.
+        img = self.view(img)
         size = self.image_size
-        if rgb.shape[0] != size or rgb.shape[1] != size:
+        if img.shape[0] != size or img.shape[1] != size:
             # INTER_AREA averages over the pixels it discards; on a downscale
             # that is the difference between a resampled frame and an aliased
             # one. It degenerates to bilinear when upscaling, so pick by which
             # way this frame is going.
-            shrinking = size < rgb.shape[0] or size < rgb.shape[1]
-            rgb = cv2.resize(rgb, (size, size),
+            shrinking = size < img.shape[0] or size < img.shape[1]
+            img = cv2.resize(img, (size, size),
                              interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR)
-        img = torch.from_numpy(rgb).permute(2, 0, 1).to(torch.float32).div_(255.0)
-        img = img.sub_(self.mean).div_(self.std)
+        rgb = to_rgb8(img)
+        out = torch.from_numpy(rgb).permute(2, 0, 1).to(torch.float32).div_(255.0)
+        out = out.sub_(self.mean).div_(self.std)
         self.timer.append(time.perf_counter() - start)
-        return img
+        return out
 
 
-def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None) -> bool:
+def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None,
+                                 read_timer: list[float] | None = None) -> bool:
     """Route the tracker's frame source through `_LazyFrames`. True if it took."""
     state = getattr(tracker, "_state", None)
     predictor = getattr(tracker, "_predictor", None)
@@ -93,7 +111,7 @@ def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None) 
     paths = list(paths)
     if len(paths) != len(state["images"]):
         return False
-    state["images"] = _LazyFrames(paths, predictor.image_size, timer, view)
+    state["images"] = _LazyFrames(paths, predictor.image_size, timer, view, read_timer)
     return True
 
 
@@ -291,6 +309,7 @@ def _report_timing(
     infer_ms: list[float],
     post_ms: list[float],
     encode_ms: list[float] | None = None,
+    read_ms: list[float] | None = None,
 ) -> None:
     """Print FPS stats (with warm-up exclusion) and optionally write charts."""
     if not per_frame_dt:
@@ -306,9 +325,18 @@ def _report_timing(
     # the split unreadable without opening a PNG and unparseable by a caller.
     if infer_ms:
         w = min(cfg.fps_warmup, max(len(infer_ms) - 1, 0))
-        print(f"[pipeline] median per frame: pre {_median(pre_ms, w):.1f} + "
-              f"inference {_median(infer_ms, w):.1f} + "
-              f"post {_median(post_ms, w):.1f} ms")
+        line = (f"[pipeline] median per frame: pre {_median(pre_ms, w):.1f} + "
+                f"inference {_median(infer_ms, w):.1f} + "
+                f"post {_median(post_ms, w):.1f} ms")
+        # Reading the frame off disk is inside `pre` but is not something a
+        # camera- or network-fed deployment pays, so name it separately rather
+        # than leaving the split to be guessed.
+        if read_ms:
+            read = _median(read_ms, w) * 1000.0
+            print(f"{line}   (of pre: {read:.1f} ms is reading the file, which "
+                  "a live source does not do)")
+        else:
+            print(line)
 
     # The figure above is the deployable frame budget: preprocess + model +
     # mask postprocess. Overlay and encoding are excluded from it by
@@ -432,10 +460,11 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         post_ms: list[float] = []
         encode_ms: list[float] = []
         preprocess_s: list[float] = []
+        read_s: list[float] = []
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
-        _install_realtime_preprocess(tracker, frame_files, preprocess_s, view)
+        _install_realtime_preprocess(tracker, frame_files, preprocess_s, view, read_s)
 
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
@@ -455,7 +484,8 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                 t0 = time.perf_counter()
                 progress.update(1)
         progress.close()
-        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms, post_ms, encode_ms)
+        _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
+                       post_ms, encode_ms, read_s)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()

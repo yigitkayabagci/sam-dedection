@@ -37,18 +37,34 @@ def _to_uint8(img: np.ndarray) -> np.ndarray:
     return out.astype(np.uint8)
 
 
-def load_frame_rgb8(path: str | Path) -> np.ndarray:
-    """Load a single frame as 8-bit RGB, regardless of source bit depth or
-    channel count (handles 16-bit / grayscale / BGRA TIFFs)."""
-    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise FileNotFoundError(f"Could not read frame: {path}")
+def to_rgb8(img: np.ndarray) -> np.ndarray:
+    """8-bit RGB from a decoded frame of any bit depth or channel count.
+
+    Split out from `load_frame_rgb8` so a caller that is about to downscale can
+    do this *after* the resize: on a 16-bit mono frame it is a full-frame
+    min/max pass followed by tripling the data, and both are far cheaper at the
+    model's input size than at the sensor's.
+    """
     img = _to_uint8(img)
     if img.ndim == 2:
         return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
     if img.shape[2] == 4:
         return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+def decode_frame(path: str | Path) -> np.ndarray:
+    """Decode a frame file, unchanged: whatever depth and channels it holds."""
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise FileNotFoundError(f"Could not read frame: {path}")
+    return img
+
+
+def load_frame_rgb8(path: str | Path) -> np.ndarray:
+    """Load a single frame as 8-bit RGB, regardless of source bit depth or
+    channel count (handles 16-bit / grayscale / BGRA TIFFs)."""
+    return to_rgb8(decode_frame(path))
 
 
 def read_first_frame_dir(frames_dir: str | Path, pattern: str = "*.tif*") -> np.ndarray:

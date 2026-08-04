@@ -1,9 +1,11 @@
 from .frames import (
     FRAME_SUFFIXES,
+    decode_frame,
     frames_metadata,
     list_frame_files,
     load_frame_rgb8,
     read_first_frame_dir,
+    to_rgb8,
 )
 from .video import (
     VideoMetadata,
@@ -24,4 +26,6 @@ __all__ = [
     "list_frame_files",
     "load_frame_rgb8",
     "read_first_frame_dir",
+    "decode_frame",
+    "to_rgb8",
 ]
