@@ -250,7 +250,7 @@ def write_stage_chart(
     w = max(0, min(warmup, n - 1))
 
     stages = [
-        ("pre (decode + resize to model input)", pre_ms[w:n], _BLUE),
+        ("pre (crop + resize to model input + normalise)", pre_ms[w:n], _BLUE),
         ("inference", infer_ms[w:n], _ORANGE),
         ("post (masks to source resolution)", post_ms[w:n], _AQUA),
     ]
