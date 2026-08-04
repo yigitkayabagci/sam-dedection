@@ -118,6 +118,12 @@ def main(argv: list[str] | None = None) -> int:
                         "record. Skips the interactive window entirely.")
     p.add_argument("--repick", action="store_true",
                    help="Select again, replacing a pick saved by an earlier run.")
+    p.add_argument("--pick-only", action="store_true",
+                   help="Select each record's target, save it, and stop without "
+                        "tracking. Use this when you want to run the modes "
+                        "yourself, one command at a time, against one selection "
+                        "-- picking separately per command would give each mode a "
+                        "different box and make them incomparable.")
     p.add_argument("--no-video", action="store_true",
                    help="Measure only. The overlay and the mp4 are already "
                         "outside the reported frame budget, but they still run "
@@ -154,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
             failed += [f"{record.name}/{m}" for m in modes]
             continue
 
+        if args.pick_only:
+            print(f">> {record.name}: {prompts}")
+            continue
+
         for mode in modes:
             config, crop = MODES[mode]
             outdir = out_root / record.name / mode
@@ -185,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
                 # a source shorter than the crop still gets resized on that axis.
                 "input": find(r"centre crop (\d+x\d+) at", text) or "whole frame",
             }
+
+    if args.pick_only:
+        return 1 if failed else 0
 
     # --------------------------------------------------------------- summary
     described = {
