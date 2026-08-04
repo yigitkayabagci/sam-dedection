@@ -104,12 +104,13 @@ def main(argv: list[str] | None = None) -> int:
         base["offload_video_to_cpu"] = True
 
     results = []
-    # Radius sweep at one object; then object sweep at one radius. A full grid
-    # multiplies runs for a cross-term neither claim depends on.
-    plan = [("radius", r, objects[0]) for r in radii]
-    plan += [("objects", radii[0], n) for n in objects if n != objects[0]]
+    # Full grid: the two effects are expected to be independent (size changes
+    # nothing, count scales with the batch), and a grid is what shows whether
+    # that independence actually holds rather than assuming it.
+    plan = [(r, n) for r in radii for n in objects]
+    print(f">> {len(plan)} runs: {len(radii)} target sizes x {len(objects)} object counts")
 
-    for axis, radius, count in plan:
+    for radius, count in plan:
         tmp = Path(tempfile.mkdtemp(prefix="sweep_"))
         try:
             prompts = write_synthetic_clip(
@@ -122,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         if not stats:
             print("   no frames measured")
             continue
-        stats.update(axis=axis, radius=radius, objects=count)
+        stats.update(radius=radius, objects=count)
         results.append(stats)
         print(f"   {stats['mean_ms']:7.2f} ms/frame   {stats['fps']:6.2f} FPS   "
               f"p99 {stats['p99_ms']:.2f} ms")
@@ -130,62 +131,90 @@ def main(argv: list[str] | None = None) -> int:
     if not results:
         raise SystemExit("Nothing measured.")
 
+    grid = {(r["radius"], r["objects"]): r for r in results}
+    measured = min(r["frames"] for r in results) - args.warmup
+
     lines = [
         f"# Prompt sweep — {args.tracker}",
         "",
         f"{args.frames} frames at {args.size}, {args.warmup} warm-up excluded, "
-        f"config `{args.config}`",
+        f"{measured} measured per point, config `{args.config}`",
         "",
-        "## Target size (objects fixed)",
+        "## ms per frame",
         "",
-        "| radius px | ms/frame | FPS | p99 ms |",
-        "|---|---|---|---|",
+        "| target radius \\ objects | " + " | ".join(str(n) for n in objects) + " |",
+        "|---" * (len(objects) + 1) + "|",
     ]
-    size_rows = [r for r in results if r["axis"] == "radius"]
-    for r in size_rows:
-        lines.append(f"| {r['radius']} | {r['mean_ms']:.2f} | {r['fps']:.2f} | "
-                     f"{r['p99_ms']:.2f} |")
-    if len(size_rows) > 1:
-        lo = min(r["mean_ms"] for r in size_rows)
-        hi = max(r["mean_ms"] for r in size_rows)
-        spread = (hi - lo) / lo * 100.0
-        measured = min(r["frames"] for r in size_rows) - args.warmup
-        verdict = (
-            "Flat, as expected: the model resizes every frame to a fixed input, "
-            "so a target's size on screen never reaches it."
-            if spread < 10 else
-            "Not flat. Either something in the per-frame path depends on how much "
-            "of the frame the mask covers, or the run-to-run noise floor is this "
-            "wide — re-run with more frames, and with clocks pinned "
-            "(`sudo jetson_clocks`), before concluding the former."
-        )
-        lines += [
-            "",
-            f"Spread across target sizes: **{spread:.1f}%** ({lo:.2f}–{hi:.2f} ms), "
-            f"over {measured} measured frames per point. {verdict}",
-        ]
+    for r in radii:
+        cells = []
+        for n in objects:
+            cell = grid.get((r, n))
+            cells.append(f"{cell['mean_ms']:.2f}" if cell else "-")
+        lines.append(f"| **{r} px** | " + " | ".join(cells) + " |")
 
-    count_rows = [r for r in results if r["axis"] == "objects"]
-    if count_rows:
-        first = size_rows[0] if size_rows else None
+    lines += [
+        "",
+        "## p99 ms per frame",
+        "",
+        "| target radius \\ objects | " + " | ".join(str(n) for n in objects) + " |",
+        "|---" * (len(objects) + 1) + "|",
+    ]
+    for r in radii:
+        cells = []
+        for n in objects:
+            cell = grid.get((r, n))
+            cells.append(f"{cell['p99_ms']:.2f}" if cell else "-")
+        lines.append(f"| **{r} px** | " + " | ".join(cells) + " |")
+
+    # --- what the grid says --------------------------------------------
+    lines += ["", "## Reading", ""]
+
+    # Target size: spread down each column, worst case across columns.
+    spreads = []
+    for n in objects:
+        col = [grid[(r, n)]["mean_ms"] for r in radii if (r, n) in grid]
+        if len(col) > 1:
+            spreads.append((max(col) - min(col)) / min(col) * 100.0)
+    if spreads:
+        worst = max(spreads)
+        lines.append(
+            f"**Target size: {worst:.1f}% spread** (worst column). "
+            + ("Flat, as expected — the model resizes every frame to a fixed "
+               "input, so how large the target appears on screen never reaches "
+               "it. A 12 px blob and a 120 px blob are identical work."
+               if worst < 10 else
+               "Not flat. Either something in the per-frame path depends on how "
+               "much of the frame the mask covers, or the run-to-run noise floor "
+               "is this wide — re-run with more frames and pinned clocks "
+               "(`sudo jetson_clocks`) before concluding the former.")
+        )
+
+    # Object count: scaling along each row, relative to the smallest count.
+    base_n = objects[0]
+    ratios = []
+    for r in radii:
+        base = grid.get((r, base_n))
+        top = grid.get((r, objects[-1]))
+        if base and top and base["mean_ms"] > 0:
+            ratios.append(top["mean_ms"] / base["mean_ms"])
+    if ratios and len(objects) > 1:
+        mean_ratio = sum(ratios) / len(ratios)
+        span = objects[-1] / base_n
         lines += [
             "",
-            "## Object count (target size fixed)",
+            f"**Object count: {mean_ratio:.2f}× going from {base_n} to "
+            f"{objects[-1]} objects** (averaged over target sizes), against "
+            f"{span:.0f}× the work. "
+            + ("Sub-linear: the extra objects are filling GPU width that one "
+               "object left idle, so they are close to free."
+               if mean_ratio < span * 0.7 else
+               "Close to linear: the batch is already saturating the GPU, so "
+               "each additional object costs about what the first one did."),
             "",
-            "| objects | ms/frame | FPS | p99 ms | vs 1 object |",
-            "|---|---|---|---|---|",
-        ]
-        rows = ([first] if first else []) + count_rows
-        base_ms = rows[0]["mean_ms"] if rows else None
-        for r in rows:
-            ratio = f"{r['mean_ms'] / base_ms:.2f}x" if base_ms else "-"
-            lines.append(f"| {r['objects']} | {r['mean_ms']:.2f} | {r['fps']:.2f} | "
-                         f"{r['p99_ms']:.2f} | {ratio} |")
-        lines += [
-            "",
-            "Objects are the batch dimension, so this one is expected to rise. "
-            "Sub-linear growth means the batch is filling otherwise idle GPU "
-            "width; linear means it is already saturated.",
+            "Objects are the batch dimension — a second target is a second row "
+            "through the memory attention and the mask decoder. Engines must "
+            "have been built with `--max-batch` at least this high, or the "
+            "tracker falls back to PyTorch and the timing means something else.",
         ]
 
     markdown = "\n".join(lines) + "\n"
