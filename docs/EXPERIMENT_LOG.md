@@ -484,8 +484,16 @@ ways, results in `frame_output/<record>/<mode>/`:
 | mode | model | input |
 |---|---|---|
 | `full1024` | 1024² | whole frame, resized |
+| `crop1024` | 1024² | centred 1024×1024 window |
 | `full512` | 512² | whole frame, resized |
-| `crop512` | 512² | centred 512×512 window, **no resize** |
+| `crop512` | 512² | centred 512×512 window |
+
+The crop is clamped to the frame, so a source shorter than the crop is cropped
+on one axis and still resized on the other — at 1280×720, `crop1024` takes
+1024×720 and the model still stretches it vertically, which is why its
+preprocessing saving is small. `crop512` is the only mode where the resize
+disappears completely. The summary reports the window each run actually used,
+so this is visible rather than assumed.
 
 **Why the crop is not just a third resolution.** The deployment camera already
 centres and focuses on its target, so the outer frame is background that gets
@@ -564,6 +572,38 @@ and the normalisation that follows writes 25 MB more. That is what makes
 1024's `pre` roughly double 512's rather than equal to it — the shared JPEG
 decode is a floor both pay, and the resize-plus-float64 part scales with
 output pixels.
+
+**Where the milliseconds go, step by step** _(CPU, structural — one 1280×720
+JPEG, 25 repetitions each; the Orin is faster in absolute terms but the shape
+is the same)_:
+
+| step | → 1024² | → 512² |
+|---|---|---|
+| PIL open + convert RGB (decode) | 4.4 ms | 4.4 ms |
+| PIL resize to model input | 18.9 ms | 11.1 ms |
+| `uint8 / 255.0` → float64 | 13.6 ms | 0.9 ms |
+| normalise (on the float64 tensor) | 28.3 ms | 1.3 ms |
+| **total** | **≈65 ms** | **≈17.7 ms** |
+
+The measured `pre` at 512 in a real run was 21.6 ms, against 17.7 ms here —
+close enough to confirm the accounting.
+
+**Two of these four steps are avoidable, and that is the point.** The same
+operations done the way a deployment would:
+
+| | reference path | alternative | ratio |
+|---|---|---|---|
+| resize to 1024² | 18.9 ms (PIL) | 0.6 ms (`cv2.resize`) | **30×** |
+| uint8 → float | 13.6 ms (float64) | 1.9 ms (float32) | **7×** |
+| centre-crop 512 | — | 0.07 ms (memcpy) | — |
+
+So the ~30 ms is real, but it is **the cost of upstream's reference
+preprocessing, not a floor**. Nothing about the model requires float64 or PIL;
+`_load_img_as_tensor` was written for research convenience. A deployment that
+receives raw frames (no JPEG to decode at all), resizes with OpenCV or on the
+GPU, and stays in float32 should land in single-digit milliseconds. **Quote
+the 30 ms as what this pipeline currently pays, and say so — do not present it
+as what preprocessing inherently costs.**
 
 **Two consequences worth carrying into any reading of these numbers.**
 
@@ -763,8 +803,9 @@ python tools/sweep_prompt.py --radii 12,30,60,120 --objects 1,2,3 \
 # 5. Where the non-engine time goes (decides the fusion question).
 python tools/analyze_glue.py --frames 200 --offload-video
 
-# 5b. Real recordings, three input configurations each.
-#     Each frames/<record>/ needs a prompts.json, or pass one --box for all.
+# 5b. Real recordings, four input configurations each. The target is selected
+#     once per record (a window opens; --prompt point for clicks, --multi for
+#     several targets) and reused by every mode. --box skips the window.
 python tools/run_records.py --records frames --out frame_output
 
 # 6. The same at 512.
