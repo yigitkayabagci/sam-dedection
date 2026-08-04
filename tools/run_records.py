@@ -125,10 +125,16 @@ def main(argv: list[str] | None = None) -> int:
                         "measurement with nothing else competing.")
     args = p.parse_args(argv)
 
-    records = sorted(d for d in Path(args.records).iterdir() if d.is_dir()) \
-        if Path(args.records).is_dir() else []
+    root = Path(args.records)
+    if not root.is_dir():
+        raise SystemExit(f"{root} is not a directory.")
+    # A folder holding frames is one record; a folder holding folders is a set
+    # of them -- so --records can name the whole set or a single clip.
+    records = [root] if list(root.glob(args.pattern)) else \
+        sorted(d for d in root.iterdir() if d.is_dir())
     if not records:
-        raise SystemExit(f"No record folders in {args.records}/")
+        raise SystemExit(f"No frames matching {args.pattern!r} in {root}/, and no "
+                         "record folders inside it either.")
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     for m in modes:
         if m not in MODES:
