@@ -364,6 +364,61 @@ matters only if activations overflow fp16 — measured, they do not.
 non-deterministic — the same configuration scored 0.7157 and 0.5520 on
 different runs. Replaced with a strided subsample.
 
+#### 3.8.1 What the INT8 numbers above are, and are not
+
+Worth being precise about before anyone quotes §3.8 as "INT8 was tried": it
+was **simulated in PyTorch, not built as a TensorRT engine.**
+`analyze_precision.py`'s `fake_quant_int8*` hooks round each layer's *output*
+to an 8-bit grid and immediately dequantise it back to float, inside an
+otherwise-fp32 forward pass (`PrecisionSimulation`, a `register_forward_hook`
+per leaf or per compute layer). That estimates the *damage* INT8 would do
+without paying for an engine build — but it quantises activations only.
+Weights are left alone (TensorRT quantises those per-channel, which is far
+more forgiving), so every number in §3.8 is a **lower bound** on how bad real
+INT8 is, not a prediction of it. `build_trt_engines.py`'s `PRECISION_FLAGS`
+currently holds only `fp16` / `bf16` / `fp32` (`tools/build_trt_engines.py:98`)
+— there is no `--int8` path and no calibration cache in this repo yet.
+
+**Next step, not yet attempted: NVIDIA TensorRT Model Optimizer.**
+
+`nvidia-modelopt` (the library formerly called AMMO) is NVIDIA's own
+PyTorch-side quantisation toolkit, built to hand TensorRT a network it can
+compile straight to real INT8 kernels rather than relying on TensorRT's older
+in-builder calibration. Mechanically, it is the production version of what
+`analyze_precision.py` approximates by hand:
+
+1. It wraps each `nn.Linear` / `nn.Conv2d` (etc.) with fake-quant Q/DQ
+   (quantise/dequantise) ops — same idea as this repo's forward hooks, but it
+   also quantises **weights**, per-channel, which the simulation here does not.
+2. **Calibration**: a short pass over representative input (no labels needed)
+   feeds each Q node's calibrator — max, entropy, or percentile, the same menu
+   `--int8-percentile` explores by hand here — to fix its scale.
+3. The calibrated model exports to ONNX **with the Q/DQ nodes baked in**.
+   TensorRT's parser recognises those nodes directly ("explicit
+   quantisation") and builds native INT8 kernels around them — the modern
+   replacement for `trtexec --int8 --calib=<cache>`, which calibrates inside
+   the builder instead.
+4. Optionally QAT: fine-tune with the Q/DQ nodes active so the model adapts to
+   quantisation noise, if PTQ (steps 1–3 alone) is not accurate enough.
+
+**Why this is a reasonable next step, not a guess:** §3.8 already found the
+image encoder's INT8 problem was **calibration, not architecture** — min/max
+collapses it, percentile or fusion-aware calibration recovers it to 0.99+.
+That is exactly the axis Model Optimizer automates properly (per-channel
+weights, real calibrator implementations, calibrated on representative data
+rather than this repo's hand-rolled hook). The one result that would need to
+survive real calibration before INT8 is worth pursuing end to end is the
+memory encoder's compounding clipping bias (0.9397 mean IoU, §3.8) — it is an
+`nn.Module`-visible boundary, so it calibrates the same way as the others;
+whether calibration alone fixes it, or it has to stay fp16 while the rest goes
+INT8 (per-layer mixed precision, which both Model Optimizer and TensorRT
+support), is the open question.
+
+**Status: not attempted.** Requires `pip install nvidia-modelopt`, a
+calibration dataset (the existing synthetic clip generator is a candidate),
+export to a Q/DQ ONNX, and a re-run of `check_trt_parity.py` /
+`compare_backends.py` once that ONNX and its engine exist.
+
 ---
 
 ### 3.9 Resolution: 1024 vs 512
@@ -696,6 +751,7 @@ encodings use four and they build; only a `Tile` whose repeats trace back to a
 | Does target size affect frame time? | `sweep_prompt.py` | if not flat, something depends on content |
 | What does camera preprocessing cost? | JPEG decode is now measured (`cli.py`'s `pre`, §4.2) — 6–18 ms/frame on a dev CPU, not yet on the Orin. A camera pipeline is not covered at all | a CSI camera gives NV12 and can resize on the VIC instead of the CPU, which is likely much cheaper than PIL-decoding a JPEG — but that is a guess until measured |
 | Would `--opt-level 5` help memory_attention? | rebuild that one engine | it is 62% of FLOPs and has the *lowest* speedup (1.85×) |
+| Does real (calibrated) INT8 survive, not just the simulation? | NVIDIA Model Optimizer PTQ, per §3.8.1 | §3.8 is a lower bound (activations only, no weight quantisation); a real calibrated build could match fp16 on every module except memory_encoder |
 
 ---
 
