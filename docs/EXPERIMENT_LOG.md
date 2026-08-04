@@ -671,10 +671,22 @@ input configurations:
 that, so the dominant term was not the resize. Reproduced against 2048×1536
 16-bit mono TIFF: **`pre` 40.2 ms, of which 35.8 ms is `cv2.imread`.**
 
-That cost is an artefact of benchmarking against files. A camera or a network
-link hands the frame over already in memory; there is no file to open. Leaving
-it in makes the frame budget a measurement of the benchmark's storage rather
-than of the pipeline.
+**It is not the disk.** Decomposed on the same file (warm page cache):
+
+| | ms |
+|---|---|
+| `cv2.imread` — the whole call | 33.8 |
+| reading the bytes off disk | **0.5** |
+| decoding them | **34.4** |
+
+So the excluded cost is the **image-file decoder**, not storage. That matters,
+because the two disappear under different conditions: no deployment reads a
+TIFF off a disk, but a deployment that receives *compressed* frames still
+decodes them.
+
+Leaving it in makes the frame budget a measurement of libtiff rather than of
+the pipeline, which is why it comes out. What it is replaced by in production
+is an open question, not a zero — see below.
 
 So it is now timed on its own and taken out of the budget, exactly as the
 overlay and the encode are — measured, reported, not charged:
@@ -696,6 +708,25 @@ tracker.
 
 **mp4 mode is excepted**: decord decodes and resizes in one indexing call, so
 the read cannot be separated there and nothing is subtracted.
+
+**The excluded number is conditional, and the report must say so.** What
+replaces it depends on a link that does not exist yet:
+
+| frames arrive as | what replaces the 34 ms |
+|---|---|
+| raw, in memory | ~0.001 ms to wrap the buffer, 1.4 ms to copy it once — effectively gone |
+| compressed | a decode, cheaper than libtiff but not free; Orin's NVJPG engine can take JPEG off the CPU |
+
+And the choice is constrained, not free: 2048×1536 at 16 bits is 6.3 MB a
+frame, so 30 fps raw needs ~1.5 Gbit/s — more than 1 GbE carries. Either the
+link is 10 GbE, or the frames are compressed, or less of each frame is sent
+(which is a second argument for `crop512`, §3.11: it shrinks what has to cross
+the wire as well as what the model sees).
+
+**So the budget quoted from these runs is the tracker's cost given a frame
+already in memory.** That is the right number for "is the model fast enough"
+— it is not yet a measured end-to-end deployment figure, and should be
+labelled as the former.
 
 ### 4.2 Per-tool coverage, audited directly
 
@@ -953,6 +984,7 @@ encodings use four and they build; only a `Tile` whose repeats trace back to a
 | What does 512 cost in accuracy? | `run_experiment.py --outdir results/512 --reference-config configs/edgetam_trt.yaml` | 4× fewer tokens; small objects are where it would show |
 | Does target size affect frame time? | `sweep_prompt.py` | if not flat, something depends on content |
 | What does camera preprocessing cost? | JPEG decode is measured (`cli.py`'s `pre`, §4.1.1) — ~30 ms at 1024 on device. A camera pipeline is not covered at all | a CSI camera gives NV12 and can resize on the VIC instead of the CPU, which is likely much cheaper than PIL-decoding a JPEG and promoting it to float64 — but that is a guess until measured |
+| What replaces the excluded image decode in production? | measure it once the Ethernet link exists; §4.1.3 | the quoted budget assumes the frame is already in memory. Raw frames make it ~0; compressed frames do not |
 | Does centre-cropping keep the target in frame on real recordings? | `run_records.py`, watch the `crop512` mp4s | it removes the resize (§3.11) but loses anything outside the centre window |
 | Would `--opt-level 5` help memory_attention? | rebuild that one engine | it is 62% of FLOPs and has the *lowest* speedup (1.85×) |
 | Does real (calibrated) INT8 survive, not just the simulation? | NVIDIA Model Optimizer PTQ, per §3.8.1 — not yet run | §3.8 only covers activations, no weight quantisation |
