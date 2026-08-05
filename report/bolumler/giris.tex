@@ -44,58 +44,16 @@ konusudur.
 \section{Başlangıç Varsayımı ve Neden Yanlış Çıktığı}
 
 Yalnızca image encoder'ın hızlandırılmış olması, yaygın bir varsayımın
-sonucudur: en çok parametreyi taşıyan modül, zamanın çoğunu da harcıyor
+sonucudur: en çok parametreyi taşıyan modül zamanın da çoğunu harcıyor
 olmalıdır. SAM~2 üzerinde bu varsayımla çalışan önceki işler, daha
-küçük ve verimli bir image encoder tasarlamaya yoğunlaşmıştır. Sonuç
-şuna benzer: motoru güçlendirilmiş bir araba, ama trafikte beklediği
-için yine yavaş. Buradaki trafik memory attention'dır; geçerli kareyi
-hafızadaki tüm geçmiş karelerle karşılaştırma maliyeti, encoder ne
-kadar hızlanırsa hızlansın yerinde durur.
+küçük bir image encoder tasarlamaya yoğunlaşmıştır; ama darboğaz orada
+değildir. Geçerli kareyi hafızadaki tüm geçmiş karelerle karşılaştırma
+maliyeti olan memory attention, encoder ne kadar hızlanırsa hızlansın
+yerinde durur.
 
 Bu çalışma varsayımı devralmak yerine ölçmüştür
 (\cref{sec:flop-dagilimi}): kare başına işlem yükünün (FLOP)
 \textbf{\%61,9}'u memory attention modülünde, yalnızca \textbf{\%26,8}'i
-image encoder'dadır. EdgeTAM makalesi de aynı noktayı vurgular; memory
-attention blokları bir gecikme darboğazıdır ve yalnızca image encoder'ı
-küçültmek beklenen hızlanmayı getirmez.
-
-\textbf{Neden bu ölçüm doğru sorunun cevabıdır.} Ölçülen şey süre
-değil, FLOP'tur: gerçek checkpoint üzerinde, gerçek 1024×1024
-girdi çözünürlüğünde, her modülün bir kare için yaptığı
-çarpma-toplama sayısı (\texttt{tools/analyze\_cost.py}, PyTorch'un
-kendi FLOP sayacıyla, CPU üzerinde). Bu tercih bilinçlidir. O aşamada
-image encoder zaten TensorRT'te, diğer üç modül PyTorch'ta çalışıyordu;
-kronometreyle yapılacak bir ölçüm büyük ölçüde \emph{hangi modülün
-hangi arka uçta olduğunu} yansıtırdı, hesabın gerçekte nerede
-yoğunlaştığını değil. Yani zaten hızlandırılmış modülün hızlı çıkması
-kaçınılmazdı ve bu, hangi modülü hızlandırmaya değeceği sorusunu
-cevaplamazdı. FLOP ise donanımdan, saat hızından, TensorRT sürümünden
-ve arka uç seçiminden bağımsızdır; mimarinin talep ettiği aritmetiği
-verir, dolayısıyla herhangi bir arka uçtan istenebilecek işin üst
-sınırıdır. Bu sayede soru, hızlandırma çalışmasına başlamadan
-\emph{önce} cevaplanabilmiştir.
-
-Bu bulgu, çalışmanın kapsamını tek bir modülden EdgeTAM'ın
-\textbf{dört} ana hesaplama bloğunun tamamına genişletmiştir.
-
-\section{Katkılar}
-
-Bu rapor şu katkıları belgelemektedir:
-
-\begin{itemize}
-  \setlength{\itemsep}{1pt}
-  \setlength{\parskip}{0pt}
-  \item EdgeTAM'ın dört ana modülünün (image encoder, memory attention,
-        memory encoder, SAM head) TensorRT'e aktarılabilir hale
-        getirilmesi, bunun için sabit şekilli memory bank, karmaşık
-        sayı içermeyen RoPE ve CUDA Graph ile tekrar oynatmanın
-        kullanılması (\cref{ch:sistem-yontem});
-  \item modüllerin \emph{neden} dört ayrı motor olarak bırakıldığının
-        ölçümle gerekçelendirilmesi, tek motora birleştirmenin
-        kazandıracağı sürenin doğrudan ölçülüp değmeyeceğine karar
-        verilmesi (\cref{sec:fuzyon-karari});
-  \item fp16'nın bf16'ya karşı hem doğruluk hem TensorRT desteği
-        açısından üstün olduğunun ölçülmesi (\cref{sec:hassasiyet});
-  \item her sayının hangi araçtan geldiğini sabitleyen bir ölçüm
-        metodolojisi (\cref{sec:olcum-yontemi}).
-\end{itemize}
+image encoder'dadır; EdgeTAM makalesi de aynı noktayı vurgular. Bu
+bulgu, çalışmanın kapsamını tek bir modülden EdgeTAM'ın \textbf{dört}
+ana hesaplama bloğunun tamamına genişletmiştir.
