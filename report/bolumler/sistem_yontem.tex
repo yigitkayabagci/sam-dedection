@@ -38,18 +38,16 @@ hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
 Bunların \emph{neden} tek bir birleşik TensorRT motoru değil de dört
 ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir; nedeni
 ONNX'in çalışma biçimidir. Bir PyTorch modeli ONNX'e aktarılırken
-\emph{trace} edilir: model örnek bir girdiyle bir kez çalıştırılır ve
-yalnızca o çalışmada gerçekleşen tensör işlemleri kaydedilir.
-Python'un kendisi (bir \texttt{if}, bir sözlük araması, çağrılar arası
-saklanan bir durum) bu kayda hiç girmez: \texttt{if} dallanması export
-anında hangi koldan geçildiyse o kola sabitlenir, diğer kol sessizce
-düşer; bir Python nesnesinde tutulan durum yalnızca export anındaki
-sabit değeriyle donar. TensorRT bu sabit işlem grafiğini derler,
-ONNX'in kaydetmediği hiçbir kararı veremez. Bu yüzden her motorun
-sınırı tam olarak, bir sonraki adımda hangi verinin kullanılacağına
-dair bir Python kararının bulunduğu yerdedir; motorların içi baştan
-sona sabit matris/tensör işlemlerinden oluşur. Modüller, aralarına
-\textbf{Python'un girdiği} noktalardan ayrılmıştır:
+\emph{trace} edilir: model bir örnek girdiyle bir kez çalıştırılır,
+yalnızca o çalışmada gerçekleşen tensör işlemleri kaydedilir. Python'un
+kendisi (bir \texttt{if}, bir sözlük araması, çağrılar arası saklanan
+bir durum) bu kayda hiç girmez: \texttt{if} dallanması export anında
+hangi koldan geçildiyse o kola sabitlenir, durum yalnızca export
+anındaki değeriyle donar. TensorRT bu sabit grafiği derler, ONNX'in
+kaydetmediği hiçbir kararı veremez; bu yüzden her motorun sınırı, bir
+sonraki adımda hangi verinin kullanılacağına dair bir Python kararının
+bulunduğu yerdedir. Modüller, aralarına \textbf{Python'un girdiği}
+noktalardan ayrılmıştır:
 
 \begin{itemize}
   \item \textbf{image encoder → memory attention} arasında memory bank
@@ -114,10 +112,3 @@ Gerçek zamanlı bütçeye giren üç aşama, girmeyen bir aşama vardır:
     \bottomrule
   \end{tabular}
 \end{table}
-
-Bu tanım iki gerçek hatanın düzeltilmesiyle ortaya çıkmıştır. Birincisi,
-\texttt{pre} başlangıçta ön-işleme değil, kaynak karenin görselleştirme
-için diskten \emph{tekrar} okunmasıydı; gerçek ön-işleme
-\texttt{init\_state} içinde toplu yapılıyor ve hiçbir kare süresinde
-görünmüyordu. İkincisi, video kodlama başlangıçta ölçülen bölgenin
-içindeydi; artık akış halinde yazılıp ayrı ölçülmektedir.
