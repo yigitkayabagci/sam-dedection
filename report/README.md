@@ -75,9 +75,9 @@ Deneyler bölümünde her sonuç üç kutudan biriyle işaretlidir:
   olarak boş bırakıldı, uydurulmadı.
 
 `docs/EXPERIMENT_LOG.md`'de "on-device results pending" diye işaretli
-deneylerden ikisi (§4.9 çözünürlük, §4.11 gerçek kayıtlar) raporda hâlâ
-turuncu kutu olarak duruyor. İlgili komutu Orin'de çalıştırıp çıktıyı
-ilgili tabloya işleyin.
+deneylerden §4.9 çözünürlük karşılaştırması raporda hâlâ turuncu kutu
+olarak duruyor. İlgili komutu Orin'de çalıştırıp çıktıyı ilgili tabloya
+işleyin.
 
 ## Görsel eklemek
 

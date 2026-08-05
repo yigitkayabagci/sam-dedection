@@ -580,15 +580,10 @@ hesaplanır.
   \label{fig:girdi-konfig-ucak-izgara}
 \end{figure}
 
-\begin{eksik}
-\texttt{tools/run\_records.py --records frames --out frame\_output}
-komutuyla, uçak kaydı için doldurulacak.
-\end{eksik}
-
 \begin{table}[H]
   \centering
   \caption{Uçak kaydı: aşama başına süreler (ms), dört girdi
-    konfigürasyonu.}
+    konfigürasyonu. (Cihazda ölçüldü.)}
   \label{tab:kayit-ucak}
   \footnotesize
   \begin{tabular}{lr rrr rrr rrr}
@@ -599,10 +594,10 @@ komutuyla, uçak kaydı için doldurulacak.
     \cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}
     Mod & FPS & min & ort & maks & min & ort & maks & min & ort & maks \\
     \midrule
-    \texttt{full1024} & & & & & & & & & & \\
-    \texttt{crop1024} & & & & & & & & & & \\
-    \texttt{full512}  & & & & & & & & & & \\
-    \texttt{crop512}  & & & & & & & & & & \\
+    \texttt{full1024} & 27,2 & 4,3 & 6,3 & 9,3 & 26,2 & 30,3 & 39,7 & 0,1 & 0,1 & 0,2 \\
+    \texttt{crop1024} & 29,8 & 2,0 & 3,9 & 5,9 & 25,3 & 29,5 & 50,6 & 0,1 & 0,2 & 0,2 \\
+    \texttt{full512}  & 56,2 & 3,8 & 5,2 & 9,8 & 9,7  & 12,5 & 17,9 & 0,1 & 0,1 & 0,3 \\
+    \texttt{crop512}  & 92,6 & 1,0 & 2,2 & 4,7 & 7,5  & 8,5  & 13,8 & 0,1 & 0,1 & 0,3 \\
     \bottomrule
   \end{tabular}
 \end{table}
