@@ -66,27 +66,12 @@ sona sabit matris/tensör işlemlerinden oluşur. Modüller, aralarına
         yoktur; bu sınır zorunlu değildir.
 \end{itemize}
 
-Değişken uzunluklu bellek sorunu, sabit 7 yuvaya doldurma (padding) ve
-toplamsal bir dikkat maskesiyle işgal durumunu taşıma yoluyla
-çözülmüştür. Bunun değişken-uzunluklu yolla birebir eşdeğer olduğu
-testle kanıtlanmıştır (\texttt{test\_padded\_memory\_matches\_variable\_}
-\texttt{length}). Motora taşınamayan şey, \emph{hangi} karelerin bu
-yuvaları dolduracağına karar vermektir, çünkü bu karar bir sözlük
-sorgusu ve bir sıralamadır.
-
-\subsection{Tek motora birleştirme mümkün müydü?}
-
-İlke olarak evet: birleşik bir motor \texttt{(görüntü, doldurulmuş banka,
-banka konumu, banka maskesi)} girdisini alıp \texttt{(maskeler, object
-pointer, yeni memory, yeni memory konumu)} döndürebilirdi. Banka
-derleme ve geri yazma yine motorun dışında kalırdı, çünkü bunlar bir
-Python \texttt{dict}'i okuyup yazar.
-
-Birleştirmenin kazandırabileceği tek şey, motor çağrıları arasındaki
-\textbf{başlatma boşluğudur} (launch gap): bir motorun dönüşü ile bir
-sonrakinin başlatılması arasındaki süre. Bu karar varsayıma değil
-doğrudan ölçüme bırakılmıştır; sonuç \cref{sec:fuzyon-karari}'de kısaca
-özetlenmektedir.
+Değişken uzunluklu bellek sorunu, sabit 7 yuvaya padding ve toplamsal
+bir dikkat maskesiyle işgal durumunu taşıma yoluyla çözülmüştür. Motora
+taşınamayan şey, \emph{hangi} karelerin bu yuvaları dolduracağına karar
+vermektir, çünkü bu karar bir sözlük sorgusu ve bir sıralamadır. Tek
+motora birleştirmenin ilke olarak mümkün olup olmadığı ve buna neden
+gerek görülmediği \cref{sec:fuzyon-karari}'de ele alınmaktadır.
 
 \section{Sabit Şekilli Memory Bank ve CUDA Graph}
 
