@@ -3,8 +3,8 @@
 
 Bu bölüm, bu çalışmanın hızlandırdığı modelin nereden geldiğini ve
 \emph{neden} bu şekilde tasarlandığını anlatır. Amaç SAM ailesinin genel
-bir tanıtımı değil, EdgeTAM'ı hızlı kılan tasarım kararının --
-memory attention'ın token sayısını küçültmek -- somut sayılarla
+bir tanıtımı değil, EdgeTAM'ı hızlı kılan tasarım kararının, yani
+memory attention'ın token sayısını küçültmenin, somut sayılarla
 gösterilmesidir; çünkü bu proje, tam olarak o küçültülmüş mimariyi
 TensorRT'e taşımaktadır.
 
@@ -20,14 +20,14 @@ maskesini üreten üç parçalı bir mimaridir:
   \item \textbf{prompt encoder}: kullanıcının işaretlediği nokta/kutuyu
         bir embedding vektörüne çevirir;
   \item \textbf{mask decoder}: özellik haritasını ve prompt embedding'ini
-        birleştirip maskeyi üretir -- hafif bir modüldür, çünkü ağır iş
+        birleştirip maskeyi üretir. Hafif bir modüldür, çünkü ağır iş
         zaten image encoder'da yapılmıştır.
 \end{itemize}
 
 SAM'in tasarımı görüntü başına \emph{bir kez} çalışacak şekilde
 optimize edilmiştir: image encoder pahalıdır ama tek seferliktir,
 komut değiştikçe yalnızca ucuz decoder tekrar çalışır. Bu tasarım
-video için doğrudan uygun değildir -- her kare için sıfırdan
+video için doğrudan uygun değildir: her kare için sıfırdan
 çalıştırılırsa hem yavaştır hem de kareler arasında hiçbir bilgi
 taşımaz; nesne bir karede kaybolsa (örn. kısa süreliğine engellenmiş
 olsa) bir sonraki karede yeniden bulunamaz.
@@ -44,9 +44,9 @@ eklenir:
 
 \begin{itemize}
   \item \textbf{memory bank}: son birkaç karenin (bu projede
-        kullanılan kontrol noktasında en fazla 7 -- \texttt{num\_maskmem})
-        özellik haritalarını ve object pointer'larını tutan, kare
-        indeksiyle anahtarlanmış bir yapı;
+        kullanılan kontrol noktasında en fazla 7, yani
+        \texttt{num\_maskmem}) özellik haritalarını ve object
+        pointer'larını tutan, kare indeksiyle anahtarlanmış bir yapı;
   \item \textbf{memory attention}: geçerli karenin özelliklerini
         memory bank'takilerle karşılaştıran cross-attention katmanları;
   \item \textbf{memory encoder}: geçerli karenin maskesini ve
@@ -59,7 +59,7 @@ SAM 2'nin kontrol noktası 1024×1024 girdiyle çalışır; image encoder'ın
 stride oranı sonucu her kare $H{=}W{=}64$, yani \textbf{4096 uzamsal
 token} olarak temsil edilir. Sorun, memory attention'ın bu token'ları
 \emph{nasıl} karşılaştırdığındadır: SAM 2 her hafıza karesini tam
-çözünürlükte -- yani yine 4096 token olarak -- saklar. $T$ kare hafızada
+çözünürlükte, yani yine 4096 token olarak, saklar. $T$ kare hafızada
 tutulduğunda, geçerli karenin 4096 sorgu token'ı bu $T{\times}4096$
 anahtar/değer token'ıyla karşılaştırılır. Dikkat mekanizmasının
 maliyeti sorgu sayısı ile anahtar sayısının çarpımıyla orantılı
@@ -72,8 +72,8 @@ olduğundan, EdgeTAM makalesinin de belirttiği gibi karmaşıklık
 
 biçimindedir ($C$: kanal/gizli boyut). Buradaki $H^2W^2$ terimi kritik
 öneme sahiptir: çözünürlüğü iki katına çıkarmak dikkat maliyetini dört
-değil, \textbf{on altı} katına çıkarır -- hem sorgu hem anahtar tarafı
-karesel olarak büyüdüğü için. Bu, SAM 2'nin kenar cihazlarda neden
+değil, \textbf{on altı} katına çıkarır, çünkü hem sorgu hem anahtar
+tarafı karesel olarak büyür. Bu, SAM 2'nin kenar cihazlarda neden
 saniyede tek kareye kadar yavaşladığının matematiksel kökenidir ve
 EdgeTAM makalesinin de doğrudan tespit ettiği nokta: yalnızca image
 encoder'ı küçültmek beklenen hızlanmayı getirmez, çünkü darboğaz orada
@@ -97,7 +97,7 @@ tarafından yapılır ve iki tür token üretir:
 \end{itemize}
 
 Toplamda hafızaya yazılan her kare $N_g{+}N_l{=}\mathbf{512}$ token'a
-indirgenir -- 4096'ya karşı \textbf{8 kat} azalma. memory attention'ın
+indirgenir: 4096'ya karşı \textbf{8 kat} azalma. memory attention'ın
 anahtar/değer tarafı artık $T{\times}4096$ değil $T{\times}512$
 büyüklüğündedir, dolayısıyla karmaşıklık
 
@@ -142,7 +142,7 @@ bildirir.
 
 Sıkıştırılmış hafıza, SAM 2'nin sıfırdan eğitilmiş bir küçük modeliyle
 değil, \textbf{knowledge distillation} ile elde edilir: SAM 2 öğretmen,
-EdgeTAM öğrenci rolündedir. Eğitim iki aşamalıdır -- önce tekil
+EdgeTAM öğrenci rolündedir. Eğitim iki aşamalıdır: önce tekil
 görüntüler üzerinde öğretmenle aynı segmentasyon çıktısını üretmeyi
 öğrenme, ardından video dizileri üzerinde öğretmenin memory/takip
 davranışını taklit etme. Bu, EdgeTAM'ın küçük bir omurga (RepViT
@@ -154,7 +154,7 @@ ağırlıklı kontrol noktası üzerinde çalışır.
 \section{Bu Projenin EdgeTAM Mimarisiyle İlişkisi}
 \label{sec:proje-eslesme}
 
-Bu çalışma, yukarıda anlatılan mimariyi değiştirmez -- eğitilmiş
+Bu çalışma, yukarıda anlatılan mimariyi değiştirmez. Eğitilmiş
 EdgeTAM kontrol noktasını alıp dört hesaplama bloğunu TensorRT motoruna
 dönüştürür. \Cref{tab:flop-dagilimi-arkaplan}, bu dört bloğun gerçek
 kontrol noktası üzerinde 1024×1024 çözünürlükte, tek nesneyle ölçülen
@@ -164,16 +164,17 @@ işlem yükü (FLOP) ve parametre sayılarını gösterir
 \begin{table}[H]
   \centering
   \caption{Kare başına hesaplama dağılımı, gerçek kontrol noktası,
-    1024×1024. \emph{(CPU'da, yapısal -- FLOP donanımdan bağımsızdır.)}}
+    1024×1024. \emph{(CPU'da, yapısal, çünkü FLOP donanımdan
+    bağımsızdır.)}}
   \label{tab:flop-dagilimi-arkaplan}
   \begin{tabular}{lrrrl}
     \toprule
     Modül & GFLOP/kare & Pay & Parametre (M) & Bu bölümde nereye karşılık gelir \\
     \midrule
-    image encoder & 38,7 & \%26,8 & 4,92 & \S\ref{sec:sam2-bellek} -- SAM'in encoder'ı \\
-    \textbf{memory attention} & \textbf{89,3} & \textbf{\%61,9} & 2,96 & \S\ref{sec:edgetam-perceiver} -- sıkıştırılmış dikkat \\
-    memory encoder + Perceiver & 12,6 & \%8,8 & 1,62 & \S\ref{sec:edgetam-perceiver} -- sıkıştırmanın kendisi \\
-    SAM head & 3,6 & \%2,5 & 4,41 & \S 2.1 -- SAM'in mask decoder'ı \\
+    image encoder & 38,7 & \%26,8 & 4,92 & \S\ref{sec:sam2-bellek}, SAM'in encoder'ı \\
+    \textbf{memory attention} & \textbf{89,3} & \textbf{\%61,9} & 2,96 & \S\ref{sec:edgetam-perceiver}, sıkıştırılmış dikkat \\
+    memory encoder + Perceiver & 12,6 & \%8,8 & 1,62 & \S\ref{sec:edgetam-perceiver}, sıkıştırmanın kendisi \\
+    SAM head & 3,6 & \%2,5 & 4,41 & \S 2.1, SAM'in mask decoder'ı \\
     \midrule
     \textbf{Toplam} & \textbf{144,4} & & 13,9 & \\
     \bottomrule
@@ -181,9 +182,9 @@ işlem yükü (FLOP) ve parametre sayılarını gösterir
 \end{table}
 
 Dikkat çekici nokta parametre sütunudur: memory attention ağırlıkların
-yalnızca \%21'ini oluşturur ama işlem yükünün \%62'sidir -- model
+yalnızca \%21'ini oluşturur ama işlem yükünün \%62'sidir. Model
 boyutu, zamanın nereye gittiğinin güvenilir bir göstergesi değildir.
 Bu tam olarak \cref{ch:giris}'te bahsedilen, ``yalnızca image encoder'ı
-hızlandırmanın yetmediği'' bulgusunun kaynağıdır ve bu çalışmanın dört
-motora -- yalnızca bire değil -- neden ihtiyaç duyduğunu doğrudan
+hızlandırmanın yetmediği'' bulgusunun kaynağıdır ve bu çalışmanın
+yalnızca bir motora değil dört motora neden ihtiyaç duyduğunu doğrudan
 açıklar (\cref{ch:sistem-yontem}).

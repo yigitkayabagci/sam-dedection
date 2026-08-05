@@ -10,13 +10,13 @@ tek motora birleştirmek.
 
 \Cref{sec:hassasiyet}'te sunulan INT8 sonuçları PyTorch içinde bir
 \textbf{simülasyondur}: her katmanın çıktısı 8 bitlik bir ızgaraya
-yuvarlanıp geri float'a çevrilir, yalnızca etkinleşimler üzerinde --
-ağırlıklara dokunulmaz ve hiçbir TensorRT motoru derlenmez. Buradaki
+yuvarlanıp geri float'a çevrilir, yalnızca etkinleşimler üzerinde.
+Ağırlıklara dokunulmaz ve hiçbir TensorRT motoru derlenmez. Buradaki
 0,82 IoU gibi düşük sonuçlar, TensorRT'in varsayılan davranışına
 yakındır: min/maks'a göre kırpan, katman başına, kalibrasyonsuz bir
 nicemleme. Aynı deneyde (\cref{sec:hassasiyet}) yüzdelik dilim kırpma
 gibi daha iyi bir kalibrasyonla aynı modülün 0,99'un üzerine çıktığı da
-görüldü -- yani sorun mimari değil, kalibrasyon. Bu, gerçek bir
+görüldü, yani sorun mimari değil kalibrasyon. Bu, gerçek bir
 kalibrasyon aracıyla nicemleme denemeye değer bir sonraki adım yapıyor.
 
 \textbf{Planlanan deney: NVIDIA TensorRT Model
@@ -60,7 +60,7 @@ fp16'ya yakın bir doğruluk hedefler.
   \caption{İki INT8 yolu, aynı hedef donanım: TensorRT'in varsayılan
     kırpması hızı verir ama doğruluğu ölçülen 0,82 IoU'ya düşürür
     (\S\ref{sec:hassasiyet}); Model Optimizer'ın kalibrasyonu aynı hızda,
-    fp16'ya yakın doğruluk hedefler -- \S\ref{sec:hassasiyet}'teki kalibre
+    fp16'ya yakın doğruluk hedefler. \S\ref{sec:hassasiyet}'teki kalibre
     edilmiş varyantların (0,99+) zaten gösterdiği yön budur.}
   \label{fig:modelopt-mantik}
 \end{figure}
@@ -74,7 +74,7 @@ bir ONNX'e aktarır.
 
 \textbf{Donanım notu.} Model Optimizer bir PyTorch aracıdır ve kalibrasyon
 adımı fp32/fp16 modeli belleğe alıp bir miktar ileri geçiş çalıştırmayı
-gerektirir -- bu adımın Orin'in üzerinde değil, ayrı ve daha güçlü bir
+gerektirir. Bu adımın Orin'in üzerinde değil, ayrı ve daha güçlü bir
 GPU'da yapılması gerekebilir; Orin'e yalnızca sonuçta çıkan kalibre
 edilmiş ONNX ve ondan derlenen INT8 motoru taşınır.
 
@@ -90,5 +90,5 @@ Dört motoru tek TensorRT motoruna birleştirmek denenebilir. Kazandırabileceğ
 tek şey motor çağrıları arasındaki başlatma boşluğudur; banka derleme ve
 geri yazma yine Python \texttt{dict} okuyup yazdığı için motorun dışında
 kalır (\cref{sec:dort-motor}). Bu boşluk ölçüldü: 0,217~ms, karenin
-\%0,5'i -- şu an değmeyecek kadar küçük. Motor sayısı artarsa ya da farklı
+\%0,5'i, şu an değmeyecek kadar küçük. Motor sayısı artarsa ya da farklı
 bir donanımda çalışılırsa yeniden ölçülüp değerlendirilebilir.

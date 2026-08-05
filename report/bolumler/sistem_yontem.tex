@@ -5,7 +5,7 @@
 
 Tüm cihaz-üzeri ölçümler \textbf{NVIDIA Jetson AGX Orin}~\cite{nvidia2024orin}
 üzerinde alınmıştır. Orin'in CPU ve GPU'su tek bir paylaşımlı bellek
-baytı ve bant genişliği üzerinden çalışır -- bu, \cref{sec:reprod-tehlike}'de
+baytı ve bant genişliği üzerinden çalışır, bu da \cref{sec:reprod-tehlike}'de
 tekrar karşılaşılacak önemli bir kısıttır. Çıkarım motorları
 \textbf{TensorRT}~\cite{nvidia2024tensorrt} ile derlenmiş, fp16
 hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
@@ -16,8 +16,8 @@ hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
 \Cref{sec:proje-eslesme}'de gösterildiği gibi kare başına dört modül
 çalışır: image encoder, memory attention, memory encoder, SAM head.
 Bunların \emph{neden} tek bir birleşik TensorRT motoru değil de dört
-ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir --
-modüller, aralarına \textbf{Python'un girdiği} noktalardan ayrılmıştır:
+ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir. Modüller,
+aralarına \textbf{Python'un girdiği} noktalardan ayrılmıştır:
 
 \begin{itemize}
   \item \textbf{image encoder → memory attention} arasında memory bank
@@ -35,10 +35,10 @@ modüller, aralarına \textbf{Python'un girdiği} noktalardan ayrılmıştır:
 
 Değişken uzunluklu bellek sorunu, sabit 7 yuvaya doldurma (padding) ve
 toplamsal bir dikkat maskesiyle işgal durumunu taşıma yoluyla
-çözülmüştür -- bunun değişken-uzunluklu yolla birebir eşdeğer olduğu
+çözülmüştür. Bunun değişken-uzunluklu yolla birebir eşdeğer olduğu
 testle kanıtlanmıştır (\texttt{test\_padded\_memory\_matches\_variable\_}
 \texttt{length}). Motora taşınamayan şey, \emph{hangi} karelerin bu
-yuvaları dolduracağına karar vermektir -- çünkü bu karar bir sözlük
+yuvaları dolduracağına karar vermektir, çünkü bu karar bir sözlük
 sorgusu ve bir sıralamadır.
 
 \subsection{Tek motora birleştirme mümkün müydü?}
@@ -50,15 +50,15 @@ derleme ve geri yazma yine motorun dışında kalırdı, çünkü bunlar bir
 Python \texttt{dict}'i okuyup yazar.
 
 Birleştirmenin kazandırabileceği tek şey, motor çağrıları arasındaki
-\textbf{başlatma boşluğudur} (launch gap) -- bir motorun dönüşü ile
-bir sonrakinin başlatılması arasındaki süre. Bu karar varsayıma değil
+\textbf{başlatma boşluğudur} (launch gap): bir motorun dönüşü ile bir
+sonrakinin başlatılması arasındaki süre. Bu karar varsayıma değil
 doğrudan ölçüme bırakılmıştır; sonuç \cref{sec:fuzyon-karari}'de kısaca
 özetlenmektedir.
 
 \section{Sabit Şekilli Memory Bank ve CUDA Graph}
 
 Bir CUDA Graph, kaydedildiği kernel çağrılarını \emph{aynı} cihaz
-adreslerine karşı tekrar oynatır -- bu nedenle her motor kalıcı girdi/çıktı
+adreslerine karşı tekrar oynatır, bu nedenle her motor kalıcı girdi/çıktı
 arabellekleri tutar, adreslerini TensorRT'e bir kez verir, ısınır (TensorRT
 bazı bağlam kurulumlarını ilk \texttt{enqueue}'a erteler), yakalar ve o
 andan sonra her kare yalnızca arabelleklere kopyalama ile
@@ -68,7 +68,7 @@ Bunun çalışabilmesi için memory bank'ın \textbf{sabit şekilli}
 olması gerekir. Gerçek kontrol noktası üzerinde izlenen anahtar
 uzunluğu (\texttt{tools/analyze\_cost.py --trace-frames 24}), ilk 23
 karede \textbf{16 farklı} değer almıştır (1. karede 516 belirteç,
-7. karede 3612, 16. kareden sonra sabit 3648) -- her biri kendi CUDA
+7. karede 3612, 16. kareden sonra sabit 3648). Her biri kendi CUDA
 Graph yakalamasını, kendi TensorRT bağlamını gerektirirdi. Çözüm,
 7 sabit yuvalı bir arabellek artı toplamsal bir dikkat maskesidir: boş
 yuvalar $-30000$ ile maskelenir, ki bu değer hem fp16 hem fp32'de
@@ -86,12 +86,12 @@ gömülmüş olması (yalnızca kopyalanır, yeniden hesaplanmaz).
 \section{fp16 Hassasiyet Seçimi}
 \label{sec:hassasiyet-secimi}
 
-Motorlar fp16'da derlenmiştir, bf16'da değil -- ve bu bir uzlaşma değil,
+Motorlar fp16'da derlenmiştir, bf16'da değil. Bu bir uzlaşma değil,
 Orin'in donanımının doğrudan sonucudur: bf16 aynı tensör çekirdeklerini
 aynı hızda kullanır ama fp16'nın 11 bit anlamlı basamağına karşı yalnızca
 8 bit taşır, ve TensorRT'in bf16 için daha az taktiği vardır. bf16'nın tek
 avantajı olan geniş dinamik aralık, yalnızca etkinleşimler (activations)
-fp16'yı taşırsa değer kazanır -- ölçüldü, taşmıyorlar
+fp16'yı taşırsa değer kazanır; ölçüldü, taşmıyorlar
 (\cref{sec:hassasiyet}). INT8'in neden \emph{motor olarak} kapsam dışı
 bırakıldığı \cref{sec:int8-gelecek}'te ele alınmaktadır.
 
@@ -118,15 +118,15 @@ Gerçek zamanlı bütçeye giren üç aşama, girmeyen bir aşama vardır:
     \texttt{pre} & kırpma + model girdisine ölçekleme + normalize etme & Evet \\
     \texttt{inference} & dört modül + EdgeTAM'ın Python defter tutması & Evet \\
     \texttt{post} & maskeleri kaynak çözünürlüğe geri ölçekleme & Evet \\
-    \texttt{read} & kare dosyasını diskten okuma/çözme & \textbf{Hayır} -- ölçülür, hariç tutulur \\
-    overlay + mp4 & maskeyi çizip video kodlama & \textbf{Hayır} -- yalnızca demo \\
+    \texttt{read} & kare dosyasını diskten okuma/çözme & \textbf{Hayır}, ölçülür ama hariç tutulur \\
+    overlay + mp4 & maskeyi çizip video kodlama & \textbf{Hayır}, yalnızca demo \\
     \bottomrule
   \end{tabular}
 \end{table}
 
 Bu tanım iki gerçek hatanın düzeltilmesiyle ortaya çıkmıştır. Birincisi,
 \texttt{pre} başlangıçta ön-işleme değil, kaynak karenin görselleştirme
-için diskten \emph{tekrar} okunmasıydı -- gerçek ön-işleme
+için diskten \emph{tekrar} okunmasıydı. Gerçek ön-işleme
 \texttt{init\_state} içinde toplu yapılıyor, kurulum aşamasında kayboluyor
 ve hiçbir kare süresinde görünmüyordu. İkincisi, video kodlama başlangıçta
 ölçülen bölgenin içindeydi; artık akış halinde yazılıp ayrı ölçülmektedir.
@@ -135,7 +135,7 @@ ve hiçbir kare süresinde görünmüyordu. İkincisi, video kodlama başlangı�
 \label{sec:read-disarida}
 
 Ön-işleme ilk kez doğru ölçüldüğünde 1024 çözünürlükte modelin kendisi
-kadar (\textasciitilde30~ms) pahalı çıkmıştır -- ayrıntılı çöküm
+kadar (\textasciitilde30~ms) pahalı çıkmıştır. Ayrıntılı çöküm
 \cref{sec:onisleme-analizi}'dedir. Bunun ezici çoğunluğu (\textasciitilde35~ms)
 görüntü dosyasının \emph{çözülmesi}dir, diskten okunması değil (aynı
 dosyada ayrıştırıldığında: bayt okuma 0,5~ms, çözme 34,4~ms). Bu ayrım
@@ -148,7 +148,7 @@ Bu nedenle \texttt{read} artık overlay/kodlama ile aynı muameleyi görür:
 \textbf{koşulludur} ve rapor bunu açıkça belirtmelidir: kareler bellekte
 ham geldiğinde yerine geçen maliyet ihmal edilebilir düzeydedir (bir
 arabelleği sarmalamak $\sim$0,001~ms, bir kez kopyalamak $\sim$1,4~ms);
-sıkıştırılmış geldiğinde ise bir çözme maliyeti geri döner -- daha ucuz,
+sıkıştırılmış geldiğinde ise bir çözme maliyeti geri döner, daha ucuz
 ama sıfır değil. Bu projenin hedef dağıtımı (Ethernet üzerinden ham kare)
 henüz kurulmadığından bu koşul ölçülemedi; \cref{sec:uctan-uca-verim}'deki
 bütçenin ``kare bellekte hazırken'' geçerli olduğu buradan gelir.
@@ -173,9 +173,9 @@ bütçenin ``kare bellekte hazırken'' geçerli olduğu buradan gelir.
 \end{table}
 
 Aradaki fark kare başına ön-işlemedir. Birini etiketsiz alıntılamak,
-aynı sistemin 37,88~FPS ve 23,0~FPS gibi çelişkili görünen -- aslında
-farklı şeyleri ölçen -- iki sayı vermesine yol açmıştır. Bu raporda her
-sayı hangi araçtan geldiği belirtilerek sunulur.
+aynı sistemin, aslında farklı şeyleri ölçtüğü için çelişkili görünen
+37,88~FPS ve 23,0~FPS gibi iki sayı vermesine yol açmıştır. Bu raporda
+her sayı hangi araçtan geldiği belirtilerek sunulur.
 
 \subsection{Yeniden Üretilebilirlik Tehlikeleri}
 \label{sec:reprod-tehlike}
@@ -189,9 +189,9 @@ sayı hangi araçtan geldiği belirtilerek sunulur.
   \item \textbf{İki adım aynı klibi kullanmalı.} Aksi halde biri diğerinden
         farklı bir içerik üzerinde ölçüm yapar ve karşılaştırma anlamsızlaşır.
   \item \textbf{\texttt{--offload-video} tüm araçlarda tutarlı olmalı.}
-        Aksi halde EdgeTAM her kareyi GPU'da fp32 olarak tutar --
-        500 kare için \textasciitilde6,3~GB -- ve Orin'in paylaşımlı
-        belleğinde bu modelin kendisini yavaşlatır.
+        Aksi halde EdgeTAM her kareyi GPU'da fp32 olarak tutar (500 kare
+        için \textasciitilde6,3~GB) ve Orin'in paylaşımlı belleğinde bu
+        modelin kendisini yavaşlatır.
   \item \textbf{Biriktirilmiş kareler modelle bellek bant genişliği için
         yarışır.} CPU ve GPU, Orin'de belleği \emph{ve} bant genişliğini
         paylaşır; işlenmiş klibi bir listede tutmak, modelin bağımlı

@@ -3,39 +3,40 @@
 
 \section{Problem}
 
-Video nesne takibi ve segmentasyonu -- bir nesneyi bir kez işaretleyip
-video boyunca otomatik olarak takip ettirmek -- güvenlik, robotik ve
+Video nesne takibi ve segmentasyonu, bir nesneyi bir kez işaretleyip
+video boyunca otomatik olarak takip ettirmektir. Güvenlik, robotik ve
 endüstriyel görü uygulamalarının ortak alt problemidir. Meta'nın
 \emph{Segment Anything Model 2} (SAM~2)~\cite{ravi2024sam2} bu görevi
 yüksek doğrulukla çözmüştür, ancak sunucu sınıfı bir GPU dışında
 pratik değildir; kenar cihazlarda saniyede tek kareye kadar
 düşebilmektedir. \emph{EdgeTAM}~\cite{zhou2025edgetam}, SAM~2'nin bellek
 mekanizmasını yeniden tasarlayarak bu maliyeti telefon sınıfı donanımda
-gerçek zamanlıya (iPhone 15 Pro Max'te 16~FPS) indiren mimaridir --
-ayrıntıları \cref{ch:arka-plan}'da ele alınmaktadır.
+gerçek zamanlıya (iPhone 15 Pro Max'te 16~FPS) indiren mimaridir.
+Ayrıntıları \cref{ch:arka-plan}'da ele alınmaktadır.
 
 Bu çalışmanın konusu EdgeTAM'ın kendisini değiştirmek değil, onun
 kontrol noktasını (checkpoint) \textbf{NVIDIA Jetson AGX Orin} üzerinde
 TensorRT ile gerçek zamanlı çalışacak şekilde dağıtmaktır. Başlangıçta
-yalnızca image encoder TensorRT'e taşınmıştı --
-genellikle ilk hızlandırılan modül budur, çünkü tek bir sabit girdi/çıktı
-şekline sahip, durumsuz, saf ileri beslemeli bir evrişim yığınıdır ve
-hiçbir yeniden yazım gerektirmeden tek seferde ONNX'e aktarılır. Geri
-kalan üç modül ise PyTorch'ta kalmıştı.
+yalnızca image encoder TensorRT'e taşınmıştı. Genellikle ilk
+hızlandırılan modül budur, çünkü tek bir sabit girdi/çıktı şekline
+sahip, durumsuz, saf ileri beslemeli bir evrişim yığınıdır ve hiçbir
+yeniden yazım gerektirmeden tek seferde ONNX'e aktarılır. Geri kalan üç
+modül ise PyTorch'ta kalmıştı.
 
 \section{Amaç}
 
 Hedef üç parçalıdır:
 
 \begin{enumerate}
-  \item \textbf{Kare başına 40~ms} bütçesi -- yani en az 25~FPS -- gerçek
+  \item \textbf{Kare başına 40~ms} bütçesi, yani en az 25~FPS, gerçek
         zamanlı bir uygulamanın kabul edebileceği bir alt sınırdır;
   \item bunu \textbf{doğruluktan ödün vermeden} yapmak, yani fp16/motor
         geçişinin ürettiği maskelerin fp32 PyTorch referansından
         ölçülebilir şekilde sapmaması;
-  \item ve bunu \textbf{iddia ederek değil ölçerek} kanıtlamak -- bu
-        raporun her sayısı cihaz üzerinde alınmış bir ölçümdür ya da
-        öyle olmadığı açıkça belirtilir (\cref{sec:olcum-yontemi}).
+  \item ve bunu \textbf{iddia ederek değil ölçerek} kanıtlamak, yani bu
+        raporun her sayısının cihaz üzerinde alınmış bir ölçüm olması
+        ya da öyle olmadığının açıkça belirtilmesi
+        (\cref{sec:olcum-yontemi}).
 \end{enumerate}
 
 \subsection{Başlangıç varsayımı, ve neden yanlış çıktığı}
@@ -45,11 +46,11 @@ ilk deneyiyle (\cref{sec:flop-dagilimi}) test edilmiş ve çürütülmüştür:
 kare başına işlem yükünün (FLOP) \%61,9'u \emph{memory attention}
 modülündedir, image encoder yalnızca \%26,8'ini oluşturur. Bu,
 EdgeTAM~\cite{zhou2025edgetam} makalesinin kendisinin de vurguladığı bir
-noktayla örtüşür: makale, memory attention bloklarının ``da gecikme
-darboğazı'' olduğunu belirtir -- yalnızca image encoder'ı küçültmenin
-beklenen hızlanmayı getirmediğini. Bu bulgu, çalışmanın
-kapsamını tek bir modülden EdgeTAM'ın \textbf{dört} ana hesaplama
-bloğunun tamamına genişletmiştir.
+noktayla örtüşür: makale, memory attention bloklarının da gecikme
+darboğazı olduğunu ve yalnızca image encoder'ı küçültmenin beklenen
+hızlanmayı getirmediğini belirtir. Bu bulgu, çalışmanın kapsamını tek
+bir modülden EdgeTAM'ın \textbf{dört} ana hesaplama bloğunun tamamına
+genişletmiştir.
 
 \section{Katkılar}
 
@@ -58,19 +59,19 @@ Bu rapor şu katkıları belgelemektedir:
 \begin{itemize}
   \item EdgeTAM'ın dört ana modülünün (image encoder, memory attention,
         memory encoder, SAM head) TensorRT'e aktarılabilir hale
-        getirilmesi -- sabit şekilli memory bank, karmaşık sayı
-        içermeyen RoPE, CUDA Graph ile tekrar oynatma
-        (\cref{ch:sistem-yontem});
+        getirilmesi, bunun için sabit şekilli memory bank, karmaşık
+        sayı içermeyen RoPE ve CUDA Graph ile tekrar oynatmanın
+        kullanılması (\cref{ch:sistem-yontem});
   \item modüllerin \emph{neden} dört ayrı motor olarak bırakıldığının
-        ölçümle gerekçelendirilmesi -- tek motora birleştirmenin
-        kazandıracağı süre doğrudan ölçülmüş ve değmeyeceğine karar
-        verilmiştir (\cref{sec:fuzyon-karari});
+        ölçümle gerekçelendirilmesi, tek motora birleştirmenin
+        kazandıracağı sürenin doğrudan ölçülüp değmeyeceğine karar
+        verilmesi (\cref{sec:fuzyon-karari});
   \item fp16'nın bf16'ya karşı hem doğruluk hem TensorRT desteği
         açısından üstün olduğunun, ve INT8'in hangi modülde neden
         başarısız olduğunun ölçülmesi (\cref{sec:hassasiyet});
   \item bir ölçüm metodolojisi: ``kare süresi'' ifadesinin beş farklı
         araçta beş farklı şeyi ölçtüğünün tespit edilip düzeltilmesi,
-        ve ön-işlemenin -- özellikle dosyadan okuma/çözme adımının --
+        ve ön-işlemenin, özellikle dosyadan okuma/çözme adımının,
         gerçek zamanlı bütçeye dahil edilip edilmemesi gerektiğinin
         net bir kuralla ayrılması (\cref{sec:olcum-yontemi}).
 \end{itemize}
@@ -81,7 +82,7 @@ Bu rapor şu katkıları belgelemektedir:
 evrimin arkasındaki token matematiğini anlatır. \Cref{ch:sistem-yontem},
 bu projede EdgeTAM'ın nasıl dört TensorRT motoruna dönüştürüldüğünü ve
 ölçüm metodolojisini açıklar. \Cref{ch:deneyler}, cihaz üzerinde alınan
-tüm sonuçları -- doğruluk, hız, CUDA Graph katkısı, çözünürlük ve
-ön-işleme analizini -- sunar. \Cref{ch:gelecek-calismalar}, kapsam dışı
-bırakılan gerçek INT8 nicemlemeyi ve tek motora birleştirme sorusunu
-gelecek çalışma olarak ele alır.
+doğruluk, hız, CUDA Graph katkısı, çözünürlük ve ön-işleme analizi gibi
+tüm sonuçları sunar. \Cref{ch:gelecek-calismalar}, kapsam dışı bırakılan
+gerçek INT8 nicemlemeyi ve tek motora birleştirme sorusunu gelecek
+çalışma olarak ele alır.
