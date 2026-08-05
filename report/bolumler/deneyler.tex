@@ -12,7 +12,7 @@ cihazda henüz çalıştırılmamış. Bu üçünü ayırt etmemek, bu projede d
 \section{Hesaplama Nerede Gerçekten Yoğunlaşıyor}
 \label{sec:flop-dagilimi}
 
-\textbf{Soru.} Görüntü kodlayıcı gerçekten darboğaz mı?
+\textbf{Soru.} image encoder gerçekten darboğaz mı?
 
 \textbf{Yöntem.} \texttt{tools/analyze\_cost.py} -- \texttt{torch.utils.}
 \texttt{flop\_counter.flop\_registry} üzerinden özel bir
@@ -21,11 +21,11 @@ cihazda henüz çalıştırılmamış. Bu üçünü ayırt etmemek, bu projede d
 
 \begin{yapisal}
 \Cref{tab:flop-dagilimi-arkaplan}'daki dağılım (\S\ref{sec:proje-eslesme}):
-bellek dikkati \%61,9, görüntü kodlayıcı \%26,8, geri kalan \%11,3.
+memory attention \%61,9, image encoder \%26,8, geri kalan \%11,3.
 \end{yapisal}
 
-\textbf{Okuma.} Yalnızca kodlayıcıyı hızlandırmak işin kabaca dörtte
-birini karşılamıştır. PyTorch'ta bırakılan bellek dikkati, çoğunluğu
+\textbf{Okuma.} Yalnızca encoder'ı hızlandırmak işin kabaca dörtte
+birini karşılamıştır. PyTorch'ta bırakılan memory attention, çoğunluğu
 oluşturmaktadır -- \cref{ch:giris}'teki başlangıç varsayımını çürüten
 bulgu budur.
 
@@ -47,9 +47,9 @@ herhangi bir sessiz geri düşüş olsaydı hata fırlatırdı).
 
 Bu sonuç 48 birim testiyle desteklenmektedir: gerçek-aritmetikli RoPE'nin
 karmaşık RoPE ile eşdeğerliği, doldurulmuş+maskelenmiş belleğin
-değişken-uzunluklu bellekle eşdeğerliği, birleştirilmiş bellek
-kodlayıcı+Perceiver'ın ayrı ayrı çalıştırılanla eşdeğerliği, özelleştirilmiş
-SAM başlığının orijinal \texttt{\_forward\_sam\_heads} ile eşdeğerliği
+değişken-uzunluklu bellekle eşdeğerliği, birleştirilmiş memory
+encoder+Perceiver'ın ayrı ayrı çalıştırılanla eşdeğerliği, özelleştirilmiş
+SAM head'in orijinal \texttt{\_forward\_sam\_heads} ile eşdeğerliği
 (nesne mevcutken \emph{ve} kapalıyken), ONNX çıktısının iz (trace)
 alınan gruptan farklı bir grup boyutunda bile PyTorch ile eşleşmesi, ve
 tüm yamalı takipçinin stok EdgeTAM ile 1 ve 2 nesneyle eşleşmesi.
@@ -72,10 +72,10 @@ autocast, TensorRT \texttt{enqueue}, TensorRT CUDA Graph tekrar oynatma.
   \toprule
   Modül & PyTorch fp16 & TensorRT+Graph & Hızlanma & En kötü L2 & PT fp16'ya oran \\
   \midrule
-  Görüntü kodlayıcı & 49,58~ms & 14,30~ms & 3,47× & 2,48e-02 & 2,9× \\
-  Bellek dikkati & 14,03~ms & 7,60~ms & 1,85× & 9,10e-04 & 7,9× \\
-  Bellek kodlayıcı & 16,63~ms & 2,27~ms & 7,31× & 8,93e-03 & 3,0× \\
-  SAM başlığı & 16,70~ms & 1,39~ms & 12,06× & 4,54e-03 & 2,3× \\
+  image encoder & 49,58~ms & 14,30~ms & 3,47× & 2,48e-02 & 2,9× \\
+  memory attention & 14,03~ms & 7,60~ms & 1,85× & 9,10e-04 & 7,9× \\
+  memory encoder & 16,63~ms & 2,27~ms & 7,31× & 8,93e-03 & 3,0× \\
+  SAM head & 16,70~ms & 1,39~ms & 12,06× & 4,54e-03 & 2,3× \\
   \midrule
   \textbf{Toplam} & \textbf{96,94~ms} & \textbf{25,56~ms} & \textbf{3,79×} & & \\
   \bottomrule
@@ -83,12 +83,12 @@ autocast, TensorRT \texttt{enqueue}, TensorRT CUDA Graph tekrar oynatma.
 \end{center}
 \end{olcum}
 
-\textbf{Geçme/kalma kuralı üzerine.} İlk koşu görüntü kodlayıcıyı sabit
+\textbf{Geçme/kalma kuralı üzerine.} İlk koşu image encoder'ı sabit
 bir 2e-2 eşiğine karşı başarısız saymıştı; bu, modelin bir özelliği değil
 seçilmiş bir sayıydı ve yanıltıcıydı. Hata, \textbf{derinlik} boyunca
-birikmektedir (kodlayıcıda 132 evrişim/doğrusal katman, 2,4e-02 hata; SAM
-başlığında 52 katman, 1,0e-03). Bir oran eşiği de tek başına yeterli
-değildir: bellek dikkati PyTorch'un fp16'sının 7,9 katında görünür çünkü
+birikmektedir (encoder'da 132 evrişim/doğrusal katman, 2,4e-02 hata; SAM
+head'de 52 katman, 1,0e-03). Bir oran eşiği de tek başına yeterli
+değildir: memory attention PyTorch'un fp16'sının 7,9 katında görünür çünkü
 autocast orada softmax ve katman normunu fp32'de tutarak alışılmadık
 temiz bir taban oluşturur -- mutlak hatası 9e-04 ve önemsizdir. Bu nedenle
 bir modül yalnızca hem \texttt{--rel-tol} üzerinde \emph{hem de}
@@ -222,11 +222,11 @@ TensorRT'in daha az bf16 taktiği vardır.
 modül bazında:
 
 \begin{itemize}
-  \item \textbf{Bellek kodlayıcı}, kırpma yanlılığını biriktiren
+  \item \textbf{memory encoder}, kırpma yanlılığını biriktiren
         modüldür (0,9397 ortalama IoU, 30 karenin 7'si 0,99 altında).
         Özyinelemeli döngünün \emph{yazma ucudur} -- hatası bankaya
         gider ve geri okunur.
-  \item Görüntü kodlayıcı \textbf{yapısal olarak düşman değil,
+  \item image encoder \textbf{yapısal olarak düşman değil,
         kalibrasyona duyarlıdır}: min/maks kalibrasyon onu çökertirken
         yüzdelik dilim kırpma (0,9930) ya da füzyon-modellenmiş
         yerleştirme (0,9926) kurtarmaktadır.
@@ -311,7 +311,7 @@ uygulanır, \texttt{cv2.resize} ile ölçeklenir, float32'de yerinde
 \textbf{Doğruluk maliyeti:} model girdisi göreli L2 farkı 0,0063 (1024²)
 / 0,0070 (512²); \textbf{maske IoU (eski/yeni), ortalama 0,9993, en düşük
 0,9985} -- fp16'nın fp32'ye karşı tüm klipte skorladığı sayının aynısı,
-ve görüntü kodlayıcının kendi fp16 hatasından (2,4e-02) $\sim$4× küçük.
+ve image encoder'ın kendi fp16 hatasından (2,4e-02) $\sim$4× küçük.
 \end{olcum}
 
 \subsection{İkinci bulgu: dosya okuma/çözme de bütçenin dışında tutulmalı}

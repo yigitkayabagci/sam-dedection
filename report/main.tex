@@ -43,10 +43,10 @@
                      minimum width=25mm, text width=20mm},
         ok/.style={-{Latex[length=2mm]}, anarenk, thick},
       ]
-      \node[blok] (enc) {Görüntü\\Kodlayıcı};
-      \node[blok, right=8mm of enc] (att) {Bellek\\Dikkati};
-      \node[blok, right=8mm of att] (head) {SAM\\Başlığı};
-      \node[blok, below=6mm of att] (mem) {Bellek\\Kodlayıcı};
+      \node[blok] (enc) {image\\encoder};
+      \node[blok, right=8mm of enc] (att) {memory\\attention};
+      \node[blok, right=8mm of att] (head) {SAM\\head};
+      \node[blok, below=6mm of att] (mem) {memory\\encoder};
       \draw[ok] (enc) -- (att);
       \draw[ok] (att) -- (head);
       \draw[ok] (head.south) -- ++(0,-3mm) -| (mem.east);

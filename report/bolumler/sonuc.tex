@@ -2,8 +2,8 @@
 \label{ch:sonuc}
 
 EdgeTAM'ın kontrol noktası, Jetson AGX Orin üzerinde dört ayrı TensorRT
-motoruna (görüntü kodlayıcı, bellek dikkati, bellek kodlayıcı, SAM
-başlığı), fp16 hassasiyetinde ve CUDA Graph tekrar oynatmasıyla
+motoruna (image encoder, memory attention, memory encoder, SAM head),
+fp16 hassasiyetinde ve CUDA Graph tekrar oynatmasıyla
 taşınmıştır. Başlangıç hedefleri ölçümle karşılanmıştır: uçtan uca
 çıkarım 88,30~ms/kareden 26,40~ms/kareye inmiş (\textbf{3,34×}), kuyruk
 gecikmesi (p99) 40~ms bütçesinin altında kalmış (39,90~ms), ve fp16
@@ -14,9 +14,9 @@ motorları 500 karelik bir klip boyunca fp32 referansına karşı
 raporun asıl katkısını oluşturmaktadır:
 
 \begin{enumerate}
-  \item \textbf{Darboğaz görüntü kodlayıcı değildi.} Kare başına işlem
-        yükünün \%61,9'u bellek dikkatindeydi -- bu, kapsamı tek
-        modülden EdgeTAM'ın Perceiver ile sıkıştırılmış bellek
+  \item \textbf{Darboğaz image encoder değildi.} Kare başına işlem
+        yükünün \%61,9'u memory attention'daydı -- bu, kapsamı tek
+        modülden EdgeTAM'ın Perceiver ile sıkıştırılmış memory
         mimarisinin tamamına genişletmiştir (\cref{ch:arka-plan},
         \cref{sec:flop-dagilimi}).
   \item \textbf{Dört motora ayrışma, gelişigüzel değil ölçülerek

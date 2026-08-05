@@ -14,22 +14,22 @@ hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
 \label{sec:dort-motor}
 
 \Cref{sec:proje-eslesme}'de gösterildiği gibi kare başına dört modül
-çalışır: görüntü kodlayıcı, bellek dikkati, bellek kodlayıcı, SAM
-başlığı. Bunların \emph{neden} tek bir birleşik TensorRT motoru değil
-de dört ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir --
+çalışır: image encoder, memory attention, memory encoder, SAM head.
+Bunların \emph{neden} tek bir birleşik TensorRT motoru değil de dört
+ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir --
 modüller, aralarına \textbf{Python'un girdiği} noktalardan ayrılmıştır:
 
 \begin{itemize}
-  \item \textbf{Görüntü kodlayıcı → bellek dikkati} arasında bellek
-        bankası derlenir. Bu banka kare indeksiyle anahtarlanmış bir
-        Python \texttt{dict}'tir; hangi geçmiş karelerin okunacağı her
-        karede \texttt{.get()} çağrısı ve en yakın adayları sıralayan bir
+  \item \textbf{image encoder → memory attention} arasında memory bank
+        derlenir. Bu banka kare indeksiyle anahtarlanmış bir Python
+        \texttt{dict}'tir; hangi geçmiş karelerin okunacağı her karede
+        \texttt{.get()} çağrısı ve en yakın adayları sıralayan bir
         fonksiyonla (\texttt{select\_closest\_cond\_frames}) belirlenir.
         Bir TensorRT motorunun ne \texttt{dict}'i, ne \texttt{.get()}'i,
         ne de veriye bağlı bir dallanması vardır.
-  \item \textbf{SAM başlığı → bellek kodlayıcı} arasında bu karenin
-        maskesi aynı \texttt{dict}'e geri yazılır.
-  \item \textbf{Bellek dikkati → SAM başlığı} arasında ise hiçbir şey
+  \item \textbf{SAM head → memory encoder} arasında bu karenin maskesi
+        aynı \texttt{dict}'e geri yazılır.
+  \item \textbf{memory attention → SAM head} arasında ise hiçbir şey
         yoktur; bu sınır zorunlu değildir.
 \end{itemize}
 
@@ -44,8 +44,8 @@ sorgusu ve bir sıralamadır.
 \subsection{Tek motora birleştirme mümkün müydü?}
 
 İlke olarak evet: birleşik bir motor \texttt{(görüntü, doldurulmuş banka,
-banka konumu, banka maskesi)} girdisini alıp \texttt{(maskeler, nesne
-göstericisi, yeni bellek, yeni bellek konumu)} döndürebilirdi. Banka
+banka konumu, banka maskesi)} girdisini alıp \texttt{(maskeler, object
+pointer, yeni memory, yeni memory konumu)} döndürebilirdi. Banka
 derleme ve geri yazma yine motorun dışında kalırdı, çünkü bunlar bir
 Python \texttt{dict}'i okuyup yazar.
 
@@ -55,7 +55,7 @@ bir sonrakinin başlatılması arasındaki süre. Bu karar varsayıma değil
 doğrudan ölçüme bırakılmıştır; sonuç \cref{sec:fuzyon-karari}'de kısaca
 özetlenmektedir.
 
-\section{Sabit Şekilli Bellek Bankası ve CUDA Graph}
+\section{Sabit Şekilli Memory Bank ve CUDA Graph}
 
 Bir CUDA Graph, kaydedildiği kernel çağrılarını \emph{aynı} cihaz
 adreslerine karşı tekrar oynatır -- bu nedenle her motor kalıcı girdi/çıktı
@@ -64,7 +64,7 @@ bazı bağlam kurulumlarını ilk \texttt{enqueue}'a erteler), yakalar ve o
 andan sonra her kare yalnızca arabelleklere kopyalama ile
 \texttt{graph.replay()} çağrısından ibarettir.
 
-Bunun çalışabilmesi için bellek bankasının \textbf{sabit şekilli}
+Bunun çalışabilmesi için memory bank'ın \textbf{sabit şekilli}
 olması gerekir. Gerçek kontrol noktası üzerinde izlenen anahtar
 uzunluğu (\texttt{tools/analyze\_cost.py --trace-frames 24}), ilk 23
 karede \textbf{16 farklı} değer almıştır (1. karede 516 belirteç,

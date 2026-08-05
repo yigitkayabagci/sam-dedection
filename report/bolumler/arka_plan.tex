@@ -4,7 +4,7 @@
 Bu bölüm, bu çalışmanın hızlandırdığı modelin nereden geldiğini ve
 \emph{neden} bu şekilde tasarlandığını anlatır. Amaç SAM ailesinin genel
 bir tanıtımı değil, EdgeTAM'ı hızlı kılan tasarım kararının --
-bellek dikkatinin token sayısını küçültmek -- somut sayılarla
+memory attention'ın token sayısını küçültmek -- somut sayılarla
 gösterilmesidir; çünkü bu proje, tam olarak o küçültülmüş mimariyi
 TensorRT'e taşımaktadır.
 
@@ -15,58 +15,55 @@ görüntü üzerinde bir komuta (bir kutu, bir nokta) karşılık gelen nesnenin
 maskesini üreten üç parçalı bir mimaridir:
 
 \begin{itemize}
-  \item \textbf{Görüntü kodlayıcı}: görüntüyü bir kez işleyip yoğun bir
+  \item \textbf{image encoder}: görüntüyü bir kez işleyip yoğun bir
         özellik haritası üretir (bir Vision Transformer);
-  \item \textbf{Komut kodlayıcı}: kullanıcının işaretlediği nokta/kutuyu
-        bir gömme (embedding) vektörüne çevirir;
-  \item \textbf{Maske kod çözücü}: özellik haritasını ve komut gömmesini
+  \item \textbf{prompt encoder}: kullanıcının işaretlediği nokta/kutuyu
+        bir embedding vektörüne çevirir;
+  \item \textbf{mask decoder}: özellik haritasını ve prompt embedding'ini
         birleştirip maskeyi üretir -- hafif bir modüldür, çünkü ağır iş
-        zaten görüntü kodlayıcıda yapılmıştır.
+        zaten image encoder'da yapılmıştır.
 \end{itemize}
 
 SAM'in tasarımı görüntü başına \emph{bir kez} çalışacak şekilde
-optimize edilmiştir: görüntü kodlayıcı pahalıdır ama tek seferliktir,
-komut değiştikçe yalnızca ucuz kod çözücü tekrar çalışır. Bu tasarım
+optimize edilmiştir: image encoder pahalıdır ama tek seferliktir,
+komut değiştikçe yalnızca ucuz decoder tekrar çalışır. Bu tasarım
 video için doğrudan uygun değildir -- her kare için sıfırdan
 çalıştırılırsa hem yavaştır hem de kareler arasında hiçbir bilgi
 taşımaz; nesne bir karede kaybolsa (örn. kısa süreliğine engellenmiş
 olsa) bir sonraki karede yeniden bulunamaz.
 
-\section{SAM 2: Video ve Bellek Mekanizması}
+\section{SAM 2: Video ve Memory Mekanizması}
 \label{sec:sam2-bellek}
 
 \emph{SAM 2}~\cite{ravi2024sam2}, SAM'in imza mimarisine bir
-\textbf{bellek bankası} ekleyerek video için genişletir. Fikir basittir:
+\textbf{memory bank} ekleyerek video için genişletir. Fikir basittir:
 model her karede ürettiği maskeyi ve o karenin görsel özelliklerini bir
 ``hafızaya'' yazar; sonraki karede bu hafızayı okuyarak nesnenin nerede
 olması gerektiğine dair bir önceliği (prior) elde eder. Üç yeni parça
 eklenir:
 
 \begin{itemize}
-  \item \textbf{Bellek bankası}: son birkaç karenin (bu projede
+  \item \textbf{memory bank}: son birkaç karenin (bu projede
         kullanılan kontrol noktasında en fazla 7 -- \texttt{num\_maskmem})
-        özellik haritalarını ve nesne göstericilerini (object pointer)
-        tutan, kare indeksiyle anahtarlanmış bir yapı;
-  \item \textbf{Bellek dikkati (memory attention)}: geçerli karenin
-        özelliklerini bellek bankasındakilerle karşılaştıran
-        çapraz-dikkat (cross-attention) katmanları;
-  \item \textbf{Bellek kodlayıcı (memory encoder)}: geçerli karenin
-        maskesini ve özelliklerini bellek bankasına yazılacak biçime
-        dönüştürür.
+        özellik haritalarını ve object pointer'larını tutan, kare
+        indeksiyle anahtarlanmış bir yapı;
+  \item \textbf{memory attention}: geçerli karenin özelliklerini
+        memory bank'takilerle karşılaştıran cross-attention katmanları;
+  \item \textbf{memory encoder}: geçerli karenin maskesini ve
+        özelliklerini memory bank'a yazılacak biçime dönüştürür.
 \end{itemize}
 
-\subsection{Bellek dikkatinin gerçek maliyeti}
+\subsection{memory attention'ın gerçek maliyeti}
 
-SAM 2'nin kontrol noktası 1024×1024 girdiyle çalışır; görüntü kodlayıcının
-adım (stride) oranı sonucu her kare $H{=}W{=}64$, yani
-\textbf{4096 uzamsal belirteç (token)} olarak temsil edilir. Sorun,
-bellek dikkatinin bu belirteçleri \emph{nasıl} karşılaştırdığındadır: SAM 2
-her hafıza karesini tam çözünürlükte -- yani yine 4096 belirteç olarak --
-saklar. $T$ kare hafızada tutulduğunda, geçerli karenin 4096 sorgu
-belirteci bu $T{\times}4096$ anahtar/değer belirteciyle karşılaştırılır.
-Dikkat mekanizmasının maliyeti sorgu sayısı ile anahtar sayısının
-çarpımıyla orantılı olduğundan, EdgeTAM makalesinin de belirttiği gibi
-karmaşıklık
+SAM 2'nin kontrol noktası 1024×1024 girdiyle çalışır; image encoder'ın
+stride oranı sonucu her kare $H{=}W{=}64$, yani \textbf{4096 uzamsal
+token} olarak temsil edilir. Sorun, memory attention'ın bu token'ları
+\emph{nasıl} karşılaştırdığındadır: SAM 2 her hafıza karesini tam
+çözünürlükte -- yani yine 4096 token olarak -- saklar. $T$ kare hafızada
+tutulduğunda, geçerli karenin 4096 sorgu token'ı bu $T{\times}4096$
+anahtar/değer token'ıyla karşılaştırılır. Dikkat mekanizmasının
+maliyeti sorgu sayısı ile anahtar sayısının çarpımıyla orantılı
+olduğundan, EdgeTAM makalesinin de belirttiği gibi karmaşıklık
 
 \begin{equation}
   \mathcal{O}(T \, C \, H^2 W^2)
@@ -78,30 +75,29 @@ biçimindedir ($C$: kanal/gizli boyut). Buradaki $H^2W^2$ terimi kritik
 değil, \textbf{on altı} katına çıkarır -- hem sorgu hem anahtar tarafı
 karesel olarak büyüdüğü için. Bu, SAM 2'nin kenar cihazlarda neden
 saniyede tek kareye kadar yavaşladığının matematiksel kökenidir ve
-EdgeTAM makalesinin de doğrudan tespit ettiği nokta: yalnızca görüntü
-kodlayıcıyı küçültmek beklenen hızlanmayı getirmez, çünkü darboğaz orada
+EdgeTAM makalesinin de doğrudan tespit ettiği nokta: yalnızca image
+encoder'ı küçültmek beklenen hızlanmayı getirmez, çünkü darboğaz orada
 değildir.
 
-\section{EdgeTAM: 2D Uzamsal Perceiver ile Bellek Sıkıştırma}
+\section{EdgeTAM: 2D Spatial Perceiver ile Memory Sıkıştırma}
 \label{sec:edgetam-perceiver}
 
 EdgeTAM'ın~\cite{zhou2025edgetam} temel katkısı, her hafıza karesini
 \emph{tam çözünürlükte} saklamak yerine sabit sayıda öğrenilebilir
-gizil belirteçe (latent token) sıkıştırmaktır. Bu iş bir
-\textbf{2D Uzamsal Perceiver} tarafından yapılır ve iki tür belirteç
-üretir:
+latent token'a sıkıştırmaktır. Bu iş bir \textbf{2D Spatial Perceiver}
+tarafından yapılır ve iki tür token üretir:
 
 \begin{itemize}
-  \item $N_g{=}256$ \textbf{genel (global) gizil belirteç}: her biri
-        karenin tamamına bakıp genel bir özet çıkarır, uzamsal konum
-        taşımaz;
-  \item $N_l{=}256$ \textbf{2D uzamsal gizil belirteç}: karenin uzamsal
+  \item $N_g{=}256$ \textbf{global latent token} (\emph{Global
+        Perceiver}): her biri karenin tamamına bakıp genel bir özet
+        çıkarır, uzamsal konum taşımaz;
+  \item $N_l{=}256$ \textbf{2D spatial latent token}: karenin uzamsal
         düzenini (hangi bölgede ne olduğunu) daha kaba bir ızgarada
         korur.
 \end{itemize}
 
-Toplamda hafızaya yazılan her kare $N_g{+}N_l{=}\mathbf{512}$ belirtece
-indirgenir -- 4096'ya karşı \textbf{8 kat} azalma. Bellek dikkatinin
+Toplamda hafızaya yazılan her kare $N_g{+}N_l{=}\mathbf{512}$ token'a
+indirgenir -- 4096'ya karşı \textbf{8 kat} azalma. memory attention'ın
 anahtar/değer tarafı artık $T{\times}4096$ değil $T{\times}512$
 büyüklüğündedir, dolayısıyla karmaşıklık
 
@@ -111,11 +107,12 @@ büyüklüğündedir, dolayısıyla karmaşıklık
 \end{equation}
 
 biçimine düşer: $H^2W^2$'deki iki $HW$ çarpanından biri sabit bir sayıyla
-($N_g{+}N_l$) yer değiştirmiştir. EdgeTAM makalesi bu değişikliğin bellek
-dikkati modülünü tek başına \textbf{8×} hızlandırdığını raporlar; ayrıca
-dikkat katman sayısı SAM 2'nin 4'ünden \textbf{2}'ye indirilmiştir. İki
-değişikliğin bir aradaki etkisiyle EdgeTAM, iPhone 15 Pro Max'te SAM 2'ye
-göre \textbf{22×} hızlanma (0,7~FPS → 16~FPS) bildirir.
+($N_g{+}N_l$) yer değiştirmiştir. EdgeTAM makalesi bu değişikliğin
+memory attention modülünü tek başına \textbf{8×} hızlandırdığını
+raporlar; ayrıca dikkat katman sayısı SAM 2'nin 4'ünden \textbf{2}'ye
+indirilmiştir. İki değişikliğin bir aradaki etkisiyle EdgeTAM, iPhone 15
+Pro Max'te SAM 2'ye göre \textbf{22×} hızlanma (0,7~FPS → 16~FPS)
+bildirir.
 
 \begin{figure}[H]
   \centering
@@ -130,29 +127,29 @@ göre \textbf{22×} hızlanma (0,7~FPS → 16~FPS) bildirir.
     \node at (2.2+\barw/2, 0.512+0.35) {\textbf{512}};
     \node at (2.2+\barw/2, -0.5) {\shortstack{EdgeTAM\\($N_g{+}N_l$)}};
     % axis
-    \draw[-{Latex[length=2mm]}] (-0.6,0) -- (-0.6,4.4) node[above, font=\sffamily\footnotesize]{belirteç/kare};
+    \draw[-{Latex[length=2mm]}] (-0.6,0) -- (-0.6,4.4) node[above, font=\sffamily\footnotesize]{token/kare};
     \node[anchor=west, color=vurgu, font=\sffamily\bfseries] at (3.6, 2.0) {8× azalma};
     \draw[-{Latex[length=1.5mm]}, vurgu] (3.5,1.85) -- (2.2+\barw+0.1, 1.0);
   \end{tikzpicture}
-  \caption{Hafızaya yazılan kare başına belirteç sayısı: SAM 2'nin tam
+  \caption{Hafızaya yazılan kare başına token sayısı: SAM 2'nin tam
     uzamsal çözünürlüğüne karşı EdgeTAM'ın Perceiver ile sıkıştırılmış
-    hafızası. Bellek dikkatinin anahtar/değer tarafı bu sayıyla
+    hafızası. memory attention'ın anahtar/değer tarafı bu sayıyla
     doğru orantılıdır.}
   \label{fig:token-karsilastirma}
 \end{figure}
 
-\subsection{Bilgi damıtma (knowledge distillation)}
+\subsection{Knowledge Distillation}
 
-Sıkıştırılmış bellek, SAM 2'nin sıfırdan eğitilmiş bir küçük modeliyle
-değil, \textbf{bilgi damıtma} ile elde edilir: SAM 2 öğretmen, EdgeTAM
-öğrenci rolündedir. Eğitim iki aşamalıdır -- önce tekil görüntüler
-üzerinde öğretmenle aynı segmentasyon çıktısını üretmeyi öğrenme, ardından
-video dizileri üzerinde öğretmenin bellek/takip davranışını taklit etme.
-Bu, EdgeTAM'ın küçük bir omurga (RepViT tabanlı) ve sıkıştırılmış bir
-bellek ile SAM 2'ye yakın doğruluğa ulaşmasını sağlayan eğitim
-tarafındaki tamamlayıcı unsurdur; bu raporun konusu olan çıkarım
-(inference) hızlandırması bu eğitimden sonraki, sabit ağırlıklı kontrol
-noktası üzerinde çalışır.
+Sıkıştırılmış hafıza, SAM 2'nin sıfırdan eğitilmiş bir küçük modeliyle
+değil, \textbf{knowledge distillation} ile elde edilir: SAM 2 öğretmen,
+EdgeTAM öğrenci rolündedir. Eğitim iki aşamalıdır -- önce tekil
+görüntüler üzerinde öğretmenle aynı segmentasyon çıktısını üretmeyi
+öğrenme, ardından video dizileri üzerinde öğretmenin memory/takip
+davranışını taklit etme. Bu, EdgeTAM'ın küçük bir omurga (RepViT
+tabanlı) ve sıkıştırılmış bir hafıza ile SAM 2'ye yakın doğruluğa
+ulaşmasını sağlayan eğitim tarafındaki tamamlayıcı unsurdur; bu raporun
+konusu olan inference hızlandırması bu eğitimden sonraki, sabit
+ağırlıklı kontrol noktası üzerinde çalışır.
 
 \section{Bu Projenin EdgeTAM Mimarisiyle İlişkisi}
 \label{sec:proje-eslesme}
@@ -173,20 +170,20 @@ işlem yükü (FLOP) ve parametre sayılarını gösterir
     \toprule
     Modül & GFLOP/kare & Pay & Parametre (M) & Bu bölümde nereye karşılık gelir \\
     \midrule
-    Görüntü kodlayıcı & 38,7 & \%26,8 & 4,92 & \S\ref{sec:sam2-bellek} -- SAM'in kodlayıcısı \\
-    \textbf{Bellek dikkati} & \textbf{89,3} & \textbf{\%61,9} & 2,96 & \S\ref{sec:edgetam-perceiver} -- sıkıştırılmış dikkat \\
-    Bellek kodlayıcı + Perceiver & 12,6 & \%8,8 & 1,62 & \S\ref{sec:edgetam-perceiver} -- sıkıştırmanın kendisi \\
-    SAM maske kod çözücü & 3,6 & \%2,5 & 4,41 & \S 2.1 -- SAM'in kod çözücüsü \\
+    image encoder & 38,7 & \%26,8 & 4,92 & \S\ref{sec:sam2-bellek} -- SAM'in encoder'ı \\
+    \textbf{memory attention} & \textbf{89,3} & \textbf{\%61,9} & 2,96 & \S\ref{sec:edgetam-perceiver} -- sıkıştırılmış dikkat \\
+    memory encoder + Perceiver & 12,6 & \%8,8 & 1,62 & \S\ref{sec:edgetam-perceiver} -- sıkıştırmanın kendisi \\
+    SAM head & 3,6 & \%2,5 & 4,41 & \S 2.1 -- SAM'in mask decoder'ı \\
     \midrule
     \textbf{Toplam} & \textbf{144,4} & & 13,9 & \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Dikkat çekici nokta parametre sütunudur: bellek dikkati ağırlıkların
+Dikkat çekici nokta parametre sütunudur: memory attention ağırlıkların
 yalnızca \%21'ini oluşturur ama işlem yükünün \%62'sidir -- model
 boyutu, zamanın nereye gittiğinin güvenilir bir göstergesi değildir.
-Bu tam olarak \cref{ch:giris}'te bahsedilen, ``yalnızca görüntü
-kodlayıcıyı hızlandırmanın yetmediği'' bulgusunun kaynağıdır ve bu
-çalışmanın dört motora -- yalnızca bire değil -- neden ihtiyaç
-duyduğunu doğrudan açıklar (\cref{ch:sistem-yontem}).
+Bu tam olarak \cref{ch:giris}'te bahsedilen, ``yalnızca image encoder'ı
+hızlandırmanın yetmediği'' bulgusunun kaynağıdır ve bu çalışmanın dört
+motora -- yalnızca bire değil -- neden ihtiyaç duyduğunu doğrudan
+açıklar (\cref{ch:sistem-yontem}).

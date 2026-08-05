@@ -17,7 +17,7 @@ ayrıntıları \cref{ch:arka-plan}'da ele alınmaktadır.
 Bu çalışmanın konusu EdgeTAM'ın kendisini değiştirmek değil, onun
 kontrol noktasını (checkpoint) \textbf{NVIDIA Jetson AGX Orin} üzerinde
 TensorRT ile gerçek zamanlı çalışacak şekilde dağıtmaktır. Başlangıçta
-yalnızca görüntü kodlayıcı (image encoder) TensorRT'e taşınmıştı --
+yalnızca image encoder TensorRT'e taşınmıştı --
 genellikle ilk hızlandırılan modül budur, çünkü tek bir sabit girdi/çıktı
 şekline sahip, durumsuz, saf ileri beslemeli bir evrişim yığınıdır ve
 hiçbir yeniden yazım gerektirmeden tek seferde ONNX'e aktarılır. Geri
@@ -40,14 +40,14 @@ Hedef üç parçalıdır:
 
 \subsection{Başlangıç varsayımı, ve neden yanlış çıktığı}
 
-``Zamanın çoğu görüntü kodlayıcıda geçiyordur'' varsayımı, bu çalışmanın
+``Zamanın çoğu image encoder'da geçiyordur'' varsayımı, bu çalışmanın
 ilk deneyiyle (\cref{sec:flop-dagilimi}) test edilmiş ve çürütülmüştür:
-kare başına işlem yükünün (FLOP) \%61,9'u \emph{bellek dikkati}
-(memory attention) modülündedir, görüntü kodlayıcı yalnızca \%26,8'ini
-oluşturur. Bu, EdgeTAM~\cite{zhou2025edgetam} makalesinin kendisinin de
-vurguladığı bir noktayla örtüşür: makale, bellek dikkati bloklarının
-``da gecikme darboğazı'' olduğunu belirtir -- yalnızca görüntü kodlayıcıyı
-küçültmenin beklenen hızlanmayı getirmediğini. Bu bulgu, çalışmanın
+kare başına işlem yükünün (FLOP) \%61,9'u \emph{memory attention}
+modülündedir, image encoder yalnızca \%26,8'ini oluşturur. Bu,
+EdgeTAM~\cite{zhou2025edgetam} makalesinin kendisinin de vurguladığı bir
+noktayla örtüşür: makale, memory attention bloklarının ``da gecikme
+darboğazı'' olduğunu belirtir -- yalnızca image encoder'ı küçültmenin
+beklenen hızlanmayı getirmediğini. Bu bulgu, çalışmanın
 kapsamını tek bir modülden EdgeTAM'ın \textbf{dört} ana hesaplama
 bloğunun tamamına genişletmiştir.
 
@@ -56,9 +56,9 @@ bloğunun tamamına genişletmiştir.
 Bu rapor şu katkıları belgelemektedir:
 
 \begin{itemize}
-  \item EdgeTAM'ın dört ana modülünün (görüntü kodlayıcı, bellek dikkati,
-        bellek kodlayıcı, SAM başlığı) TensorRT'e aktarılabilir hale
-        getirilmesi -- sabit şekilli bellek bankası, karmaşık sayı
+  \item EdgeTAM'ın dört ana modülünün (image encoder, memory attention,
+        memory encoder, SAM head) TensorRT'e aktarılabilir hale
+        getirilmesi -- sabit şekilli memory bank, karmaşık sayı
         içermeyen RoPE, CUDA Graph ile tekrar oynatma
         (\cref{ch:sistem-yontem});
   \item modüllerin \emph{neden} dört ayrı motor olarak bırakıldığının
