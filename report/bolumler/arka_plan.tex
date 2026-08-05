@@ -53,6 +53,15 @@ eklenir:
         özelliklerini memory bank'a yazılacak biçime dönüştürür.
 \end{itemize}
 
+\begin{figure}[H]
+  \centering
+  \gorselyertutucu{SAM 2 makalesinden~\cite{ravi2024sam2} alınan orijinal
+    mimari şeması: image encoder, memory bank, memory attention, memory
+    encoder ve mask decoder arasındaki veri akışı}
+  \caption{SAM 2'nin orijinal mimarisi.}
+  \label{fig:sam2-mimari-orijinal}
+\end{figure}
+
 \subsection{memory attention'ın gerçek maliyeti}
 
 SAM 2'nin checkpoint'i 1024×1024 girdiyle çalışır; image encoder'ın
@@ -104,6 +113,17 @@ veriden bağımsız sabit bir ağırlık matrisidir. Bu sorgular hafıza
 karesinin 4096 token'ına bakıp özet çıkarırken çıktı her zaman sorgu
 sayısı kadardır: kare 4096 token'lık kalsa da sıkıştırılmış temsil hep
 512 token'dır.
+
+Yalnızca global latent'lar yeterli değildir; 2D spatial latent'ların
+ayrıca eklenmesinin nedeni budur. EdgeTAM makalesi~\cite{zhou2025edgetam},
+segmentasyonun \emph{yoğun} (dense) bir tahmin görevi olduğunu ve
+memory bank'ın uzamsal yapısının korunması gerektiğini, oysa naif bir
+Perceiver'ın bu yapıyı attığını belirtir. Makalenin kendi ablation'ı
+(SA-V val) bunu ölçer: yalnızca 256 global latent \textbf{62,0} J\&F
+verirken, 256 global + 256 2D spatial latent \textbf{64,4} J\&F'e
+çıkar. Bu \textbf{2,4} puanlık fark, 2D spatial latent'ların süs değil
+gereklilik olduğunu gösterir: mask decoder'ın maskeyi hangi bölgede
+çizeceğini bilmesi gerekir, ki bu bilgi salt global özetlerde yoktur.
 
 Toplamda hafızaya yazılan her kare $N_g{+}N_l{=}\mathbf{512}$ token'a
 indirgenir: 4096'ya karşı \textbf{8 kat} azalma. memory attention'ın
