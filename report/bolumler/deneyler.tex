@@ -190,54 +190,6 @@ yapılandırma \cref{sec:uctan-uca-verim}'de 26,40~ms, burada 33,40~ms
 rağmen geçerlidir çünkü iki kol aynı koşuda arka arkaya ölçülmüştür;
 ortalama böyle değildir.
 
-\section{Motor-Dışı Sürenin Dağılımı ve Füzyon Kararı}
-\label{sec:fuzyon-karari}
-
-\textbf{Soru.} Ölçüm \textasciitilde2,5~ms'lik bir ``diğer'' payı
-raporluyor. Dört motoru tek motora birleştirmek bunu kaldırır mı?
-
-\textbf{Yöntem.} \texttt{tools/analyze\_glue.py} -- bu satırı
-kategorilere ayırır: banka derleme (\texttt{dict} → motor girdi
-arabelleği), banka geri yazma (motor çıktısı → \texttt{dict}),
-başlatma boşluğu (motor çağrıları arası -- \textbf{birleştirmenin
-kaldırabileceği tek kategori}), maske son-işleme, diğer kare işi.
-
-\begin{olcum}[title={Ölçüldü (cihazda, 200 kare istenmiş, 180 senkronize)}]
-\begin{center}
-\begin{tabular}{lrr}
-  \toprule
-  & ms & Karenin \% \\
-  \midrule
-  Görüntü kodlayıcı & 14,419 & \\
-  Bellek dikkati & 11,874 & \\
-  Bellek kodlayıcı & 4,405 & \\
-  SAM başlığı & 2,261 & \\
-  \textbf{Motorlar toplamı} & \textbf{32,958} & \textbf{\%83,3} \\
-  Banka derleme & 2,392 & \%6,0 \\
-  Banka geri yazma & 0,847 & \%2,1 \\
-  \textbf{Başlatma boşluğu} & \textbf{0,217} & \textbf{\%0,5} \\
-  Maske son-işleme & 0,455 & \%1,2 \\
-  Diğer kare işi & 2,690 & \%6,8 \\
-  \midrule
-  \textbf{Kare toplamı} & \textbf{39,561} & \\
-  \bottomrule
-\end{tabular}
-\end{center}
-\end{olcum}
-
-\textbf{Okuma.} Başlatma boşluğu -- birleştirilmiş bir motorun
-kaldırabileceği tek kategori -- 0,217~ms'dir, \S\ref{sec:dort-motor}'de
-belirlenen 0,5~ms ``değmez'' eşiğinin altındadır.
-\textbf{Karar: birleştirmemek.} Motor-dışı sürenin geri kalanı (banka
-derleme + geri yazma + diğer kare işi, 5,93~ms) her durumda Python
-\texttt{dict} okuma/yazmasıdır ve birleştirmeden bağımsız olarak kalır.
-
-\emph{Not: buradaki 39,56~ms kare toplamı, \cref{sec:uctan-uca-verim}'in
-26,40~ms'sinden yüksektir -- bu geçiş, süreyi doğru kategorilere ayırmak
-için her motordan sonra bir \texttt{cudaStreamSynchronize} zorlar. FPS
-için \cref{sec:uctan-uca-verim}'i, yalnızca motor/diğer oranı için bu
-tabloyu kullanın.}
-
 \section{fp16, bf16, INT8}
 \label{sec:hassasiyet}
 
