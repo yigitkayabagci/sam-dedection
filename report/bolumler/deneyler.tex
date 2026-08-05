@@ -83,6 +83,44 @@ autocast, TensorRT \texttt{enqueue}, TensorRT CUDA Graph tekrar oynatma.
 \end{center}
 \end{olcum}
 
+\Cref{sec:flop-dagilimi}'teki FLOP payı (memory attention \%61,9, image
+encoder \%26,8), optimizasyondan \emph{önce} hangi modüle yatırım
+yapılacağını gösteriyordu ve donanımdan bağımsızdı. Dört motor da
+TensorRT + CUDA Graph'a taşındıktan \emph{sonra}, gerçek kare süresinin
+(25,56~ms) modüller arası dağılımı farklıdır (\cref{fig:sure-dagilimi}):
+image encoder artık kare süresinin \textbf{\%55,9}'unu, memory
+attention \textbf{\%29,7}'sini almaktadır. Fark, dört motorun eşit
+hızlanmamasından gelir (yukarıdaki tablo): image encoder 3,47×, memory
+encoder 7,31×, SAM head 12,06× hızlanmıştır; en çok FLOP taşıyan modül
+en agresif hızlandırılan olmak zorunda değildir. Tavan artık tek bir
+modülde toplanmış değildir: image encoder \%100'e değil \%55,9'a inse
+bile, geri kalan \%44,1 hâlâ diğer üç motorun paylaştığı, ayrı ayrı
+küçültülmesi gereken bir bütçedir.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\sffamily\footnotesize]
+    \def\bh{1.1}
+    \draw[fill=vurgu!55, draw=vurgu] (0,0) rectangle (8.954,\bh);
+    \draw[fill=anarenk!30, draw=anarenk] (8.954,0) rectangle (13.712,\bh);
+    \draw[fill=acikgri!90, draw=kutucerceve] (13.712,0) rectangle (15.133,\bh);
+    \draw[fill=grimetin!25, draw=grimetin] (15.133,0) rectangle (16.003,\bh);
+    \node[align=center] at (4.477,\bh/2) {image encoder\\\textbf{\%55,9}};
+    \node[align=center] at (11.333,\bh/2) {memory\\attention\\\textbf{\%29,7}};
+    \node[above=4mm, align=center, font=\sffamily\scriptsize]
+      at (14.423,\bh) {memory encoder\\\textbf{\%8,9}};
+    \node[above=16mm, align=center, font=\sffamily\scriptsize]
+      at (15.568,\bh) {SAM head\\\textbf{\%5,4}};
+    \draw[gray] (14.423,\bh) -- (14.423,\bh+3mm);
+    \draw[gray] (15.568,\bh) -- (15.568,\bh+15mm);
+  \end{tikzpicture}
+  \caption{Dört motor da TensorRT + CUDA Graph'a taşındıktan sonra,
+    kare süresinin (25,56~ms) modüller arası gerçek dağılımı. FLOP
+    payının aksine (\cref{sec:flop-dagilimi}) bu, cihazda ölçülen
+    hızlanma oranlarını da içerir.}
+  \label{fig:sure-dagilimi}
+\end{figure}
+
 \textbf{Geçme/kalma kuralı üzerine.} İlk koşu image encoder'ı sabit
 bir 2e-2 eşiğine karşı başarısız saymıştı; bu, modelin bir özelliği değil
 seçilmiş bir sayıydı ve yanıltıcıydı. Hata, \textbf{derinlik} boyunca
