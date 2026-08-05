@@ -1,7 +1,7 @@
 EdgeTAM, SAM 2'nin video nesne takibi görevini edge cihazlarda
 gerçek zamanlı çalıştırabilmek için memory attention modülünü bir 2D
 Spatial Perceiver ile sıkıştıran bir mimaridir. Bu çalışma, EdgeTAM'ın
-kontrol noktasını (checkpoint) NVIDIA Jetson AGX Orin üzerinde çalışan,
+checkpoint'ini NVIDIA Jetson AGX Orin üzerinde çalışan,
 kare başına dört ayrı TensorRT motoruna (image encoder, memory
 attention, memory encoder, SAM head) fp16 hassasiyetinde ve CUDA Graph
 tekrar oynatmasıyla taşımaktadır.
@@ -16,8 +16,8 @@ genişletilmiştir.
 Cihaz üzerinde ölçülen sonuçlar: uçtan uca inference hızı stok PyTorch'ta
 88,30~ms/kare iken TensorRT + CUDA Graph ile 26,40~ms/kareye
 inmiş (\textbf{3,34×} hızlanma, 37,88~FPS), kuyruk gecikmesi
-(p99)~39,90~ms ile 40~ms hedefinin altında kalmıştır. 500 karelik bir
-klip boyunca fp16 motorlarının maskeleri fp32 referansına karşı
+(p99)~39,90~ms ile 40~ms hedefinin altında kalmıştır. Sentetik olarak
+üretilmiş 500 karelik bir klip boyunca fp16 motorlarının maskeleri fp32 referansına karşı
 \textbf{0,9993} ortalama IoU ile eşleşmiş ve hata klip boyunca
 birikmemiştir (−0,0012 IoU/1000 kare eğilim). Ayrıca ön-işleme
 adımının (kare boyutlandırma, normalize etme) gözden kaçırılmaması
@@ -26,7 +26,7 @@ olabildiği, doğru şekilde yeniden yazıldığında ise 4--5× ucuzlatılabild
 gösterilmiştir.
 
 Rapor; SAM'den SAM~2'ye ve EdgeTAM'a mimari evrimi, dört motorluk ayrışma
-kararının gerekçesini, ölçüm metodolojisini (hangi aracın gerçekte neyi
-ölçtüğü) ve cihaz üzerinde alınan tüm sonuçları kapsar. NVIDIA TensorRT
-Model Optimizer ile gerçek INT8 nicemleme ve dört motoru tek motora
-birleştirme sorusu gelecek çalışma olarak bırakılmıştır.
+kararının gerekçesini, ölçüm metodolojisini ve cihaz üzerinde alınan
+tüm sonuçları kapsar. NVIDIA TensorRT Model Optimizer ile gerçek INT8
+motoru ve dört motoru tek motora birleştirme sorusu gelecek çalışma
+olarak bırakılmıştır.

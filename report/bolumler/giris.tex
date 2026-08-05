@@ -26,7 +26,7 @@ mimariyi alıp hedef donanımda gerçekten o hızda çalıştırmak.
 \end{figure}
 
 Bu çalışmanın konusu EdgeTAM'ın kendisini değiştirmek değil, onun
-eğitilmiş kontrol noktasını (checkpoint) \textbf{NVIDIA Jetson AGX
+eğitilmiş checkpoint'ini \textbf{NVIDIA Jetson AGX
 Orin} üzerinde TensorRT ile gerçek zamanlı çalışacak hale getirmektir.
 Hedef tek cümleyle: doğruluktan ödün vermeden kare başına \textbf{40~ms}
 (en az 25~FPS) bütçesinin altına inmek.
@@ -60,7 +60,7 @@ attention blokları bir gecikme darboğazıdır ve yalnızca image encoder'ı
 küçültmek beklenen hızlanmayı getirmez.
 
 \textbf{Neden bu ölçüm doğru sorunun cevabıdır.} Ölçülen şey süre
-değil, FLOP'tur: gerçek kontrol noktası üzerinde, gerçek 1024×1024
+değil, FLOP'tur: gerçek checkpoint üzerinde, gerçek 1024×1024
 girdi çözünürlüğünde, her modülün bir kare için yaptığı
 çarpma-toplama sayısı (\texttt{tools/analyze\_cost.py}, PyTorch'un
 kendi FLOP sayacıyla, CPU üzerinde). Bu tercih bilinçlidir. O aşamada

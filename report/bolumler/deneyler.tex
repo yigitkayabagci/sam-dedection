@@ -16,7 +16,7 @@ cihazda henüz çalıştırılmamış. Bu üçünü ayırt etmemek, bu projede d
 
 \textbf{Yöntem.} \texttt{tools/analyze\_cost.py}: \texttt{torch.utils.}
 \texttt{flop\_counter.flop\_registry} üzerinden özel bir
-\texttt{TorchDispatchMode} ile FLOP sayımı, gerçek kontrol noktasında,
+\texttt{TorchDispatchMode} ile FLOP sayımı, gerçek checkpoint'te,
 1024×1024.
 
 \begin{yapisal}
@@ -38,7 +38,7 @@ değiştiriyor mu?
 
 \textbf{Yöntem.} \texttt{tools/analyze\_precision.py --verify-graphs}:
 bir klibi yeniden yazılmış modüllerden fp32'de geçirip stok EdgeTAM ile
-maskeleri karşılaştırma, gerçek kontrol noktası, 1024×1024.
+maskeleri karşılaştırma, gerçek checkpoint, 1024×1024.
 
 \begin{olcum}
 Tüm 20 karede \textbf{IoU 1,0000}, \texttt{strict=True} ile (orijinal yola

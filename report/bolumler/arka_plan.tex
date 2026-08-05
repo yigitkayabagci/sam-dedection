@@ -44,7 +44,7 @@ eklenir:
 
 \begin{itemize}
   \item \textbf{memory bank}: son birkaç karenin (bu projede
-        kullanılan kontrol noktasında en fazla 7, yani
+        kullanılan checkpoint'te en fazla 7, yani
         \texttt{num\_maskmem}) özellik haritalarını ve object
         pointer'larını tutan, kare indeksiyle anahtarlanmış bir yapı;
   \item \textbf{memory attention}: geçerli karenin özelliklerini
@@ -55,7 +55,7 @@ eklenir:
 
 \subsection{memory attention'ın gerçek maliyeti}
 
-SAM 2'nin kontrol noktası 1024×1024 girdiyle çalışır; image encoder'ın
+SAM 2'nin checkpoint'i 1024×1024 girdiyle çalışır; image encoder'ın
 stride oranı sonucu her kare $H{=}W{=}64$, yani \textbf{4096 uzamsal
 token} olarak temsil edilir. Sorun, memory attention'ın bu token'ları
 \emph{nasıl} karşılaştırdığındadır: SAM 2 her hafıza karesini tam
@@ -158,21 +158,21 @@ davranışını taklit etme. Bu, EdgeTAM'ın küçük bir omurga (RepViT
 tabanlı) ve sıkıştırılmış bir hafıza ile SAM 2'ye yakın doğruluğa
 ulaşmasını sağlayan eğitim tarafındaki tamamlayıcı unsurdur; bu raporun
 konusu olan inference hızlandırması bu eğitimden sonraki, sabit
-ağırlıklı kontrol noktası üzerinde çalışır.
+ağırlıklı checkpoint üzerinde çalışır.
 
 \section{Bu Projenin EdgeTAM Mimarisiyle İlişkisi}
 \label{sec:proje-eslesme}
 
 Bu çalışma, yukarıda anlatılan mimariyi değiştirmez. Eğitilmiş
-EdgeTAM kontrol noktasını alıp dört hesaplama bloğunu TensorRT motoruna
+EdgeTAM checkpoint'ini alıp dört hesaplama bloğunu TensorRT motoruna
 dönüştürür. \Cref{tab:flop-dagilimi-arkaplan}, bu dört bloğun gerçek
-kontrol noktası üzerinde 1024×1024 çözünürlükte, tek nesneyle ölçülen
+checkpoint üzerinde 1024×1024 çözünürlükte, tek nesneyle ölçülen
 işlem yükü (FLOP) ve parametre sayılarını gösterir
 (\texttt{tools/analyze\_cost.py}, ayrıntılar \cref{sec:flop-dagilimi}).
 
 \begin{table}[H]
   \centering
-  \caption{Kare başına hesaplama dağılımı, gerçek kontrol noktası,
+  \caption{Kare başına hesaplama dağılımı, gerçek checkpoint,
     1024×1024. \emph{(CPU'da, yapısal, çünkü FLOP donanımdan
     bağımsızdır.)}}
   \label{tab:flop-dagilimi-arkaplan}
