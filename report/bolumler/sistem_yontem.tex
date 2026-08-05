@@ -10,6 +10,27 @@ tekrar karşılaşılacak önemli bir kısıttır. Inference motorları
 \textbf{TensorRT}~\cite{nvidia2024tensorrt} ile derlenmiş, fp16
 hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
 
+\begin{table}[H]
+  \centering
+  \caption{Yazılım/donanım ortamı.}
+  \label{tab:ortam}
+  \begin{tabular}{ll}
+    \toprule
+    Bileşen & Sürüm \\
+    \midrule
+    GPU compute capability (SM) & 8.7 \\
+    Güç modu & MAXN, \texttt{sudo jetson\_clocks} \\
+    TensorRT & 10.3.0 \\
+    PyTorch (CUDA) & 2.8 (CUDA 12.6) \\
+    torchvision & 0.23.0 \\
+    ONNX / onnxruntime & 1.22.0 / 1.23.2 \\
+    OpenCV / NumPy & 4.11.0 / 1.26.4 \\
+    Python & 3.10.12 \\
+    Motor hassasiyeti & fp16 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
 \section{Kare Başına Hesaplama ve Dört Motor Kararı}
 \label{sec:dort-motor}
 

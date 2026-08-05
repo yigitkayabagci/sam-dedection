@@ -29,3 +29,18 @@ değiştirin, örneğin:
 `report/main.tex`'in `\graphicspath` ayarlamadığını unutmayın --
 `includegraphics` çağrılarında yolu `figures/dosya.png` şeklinde,
 `report/` köküne göre yazın (yukarıdaki örnekteki gibi).
+
+## Dosya adlandırma kuralı
+
+Kayıt/çözünürlük karşılaştırma görselleri şu kalıbı izler:
+
+```
+<kaynak>-<çözünürlük>[-crop]-<içerik>
+```
+
+- `<kaynak>`: `drone` ya da `ucak`
+- `<çözünürlük>`: `1024` ya da `512`
+- `-crop`: opsiyonel, ortalanmış kırpma modunu işaretler (yoksa tam kare)
+- `<içerik>`: görselin ne gösterdiği (örn. `latency`)
+
+Örnek: `ucak-crop-1024-latency.png`.

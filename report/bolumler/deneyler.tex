@@ -195,6 +195,43 @@ TensorRT arka arkaya aynı kareler üzerinde.
 altındadır}. Gerçek zamanlı bir hat için kuyruk, ortalamadan daha çok
 önem taşır, çünkü kareyi düşüren kuyruktur.
 
+\textbf{İkinci bir koşu.} Aynı karşılaştırma, farklı bir oturumda
+tekrarlanmıştır: stok PyTorch \textbf{84,48~ms} (11,84~FPS), TensorRT +
+CUDA Graph \textbf{30,38~ms} (32,92~FPS, \textbf{2,78×}). İki koşu
+arasındaki fark her iki yöndedir (PyTorch daha hızlı, TensorRT daha
+yavaş çıkmıştır); bu, \cref{sec:reprod-tehlike}'de belgelenen saat
+kilitleme sorununun beklenen bir sonucudur, çelişki değildir: yön
+(PyTorch $\to$ TensorRT hızlanması) her iki koşuda da aynıdır.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\sffamily\footnotesize]
+    \draw[fill=grimetin!30, draw=grimetin] (0,0) rectangle (1.4,7.06);
+    \node at (0.7,7.4) {\textbf{88,30}};
+    \node[font=\sffamily\scriptsize] at (0.7,-0.4) {PyTorch};
+    \draw[fill=anarenk!30, draw=anarenk] (1.7,0) rectangle (3.1,2.11);
+    \node at (2.4,2.45) {\textbf{26,40}};
+    \node[font=\sffamily\scriptsize] at (2.4,-0.4) {TensorRT};
+    \node[font=\sffamily\footnotesize] at (1.55,-1.0) {\emph{koşu 1}};
+
+    \draw[fill=grimetin!30, draw=grimetin] (4.6,0) rectangle (6.0,6.76);
+    \node at (5.3,7.1) {\textbf{84,48}};
+    \node[font=\sffamily\scriptsize] at (5.3,-0.4) {PyTorch};
+    \draw[fill=anarenk!30, draw=anarenk] (6.3,0) rectangle (7.7,2.43);
+    \node at (7.0,2.75) {\textbf{30,38}};
+    \node[font=\sffamily\scriptsize] at (7.0,-0.4) {TensorRT};
+    \node[font=\sffamily\footnotesize] at (6.15,-1.0) {\emph{koşu 2}};
+
+    \draw[-{Latex[length=2mm]}] (-0.6,0) -- (-0.6,7.7)
+      node[above, font=\sffamily\scriptsize]{ms/kare};
+  \end{tikzpicture}
+  \caption{Uçtan uca kare süresi, iki bağımsız koşu (aynı yapılandırma,
+    saatler sabitlenmemiş). Mutlak sayılar
+    \cref{sec:reprod-tehlike}'deki saat değişkenliği kadar farklıdır;
+    PyTorch'tan TensorRT'e yön ikisinde de aynıdır.}
+  \label{fig:iki-kosu-karsilastirma}
+\end{figure}
+
 \section{CUDA Graph'ların Değeri}
 \label{sec:cuda-graph}
 
@@ -416,10 +453,33 @@ girdiye ölçekler, 12~piksellik bir leke ile 120~piksellik bir leke aynı
 şekilli tensör üretir. Nesne sayısı artmalı: nesneler grup (batch)
 boyutudur.
 
-\begin{eksik}
-\texttt{tools/sweep\_prompt.py --radii 12,30,60,120 --objects 1,2,3}
-komutuyla doldurulacak (ms/kare, hedef yarıçapı × nesne sayısı ızgarası).
-\end{eksik}
+\begin{olcum}[title={Ölçüldü (cihazda, nokta başına 1000 kare, ilk 30
+ısınma hariç 970 kare ölçülen, \texttt{configs/edgetam\_trt.yaml})}]
+\begin{center}
+\begin{tabular}{lrrr}
+  \toprule
+  Yarıçap \textbackslash{} nesne sayısı & 1 & 2 & 3 \\
+  \midrule
+  12~px  & 32,02 & 48,92 & 66,33 \\
+  30~px  & 28,31 & 43,08 & 70,32 \\
+  60~px  & 26,98 & 54,96 & 71,22 \\
+  120~px & 28,83 & 48,85 & 75,94 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+(ms/kare)
+\end{olcum}
+
+\textbf{Okuma.} Beklenti büyük ölçüde doğrulanmıştır. Nesne sayısı asıl
+etkendir: 1'den 3 nesneye çıkmak süreyi yarıçapa bağlı olarak
+\%107--164 artırır (\emph{örn.} 60~px'te 26,98'den 71,22~ms'ye). Yarıçapın
+etkisi çok daha küçüktür ve yönü tutarsızdır: aynı nesne sayısında
+yarıçaplar arası fark \%15--28'dir ama en küçük ile en büyük yarıçap
+arasında tek yönlü bir sıralama yoktur. Bu, modelin hedefi sabit bir
+girdiye ölçeklediği, dolayısıyla kutunun boyutunun değil yalnızca
+sayısının (grup boyutu olarak) maliyete yansıdığı beklentisiyle
+örtüşür; kalan küçük ve düzensiz fark muhtemelen
+\cref{sec:reprod-tehlike}'deki saat gürültüsündendir.
 
 \section{Gerçek Kayıtlar Üzerinde Girdi Konfigürasyonu}
 \label{sec:gercek-kayitlar}
@@ -521,21 +581,24 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
   \end{tabular}
 \end{table}
 
-Aynı anın dört girdi konfigürasyonunda nasıl göründüğünü karşılaştırmak
-için \cref{fig:girdi-konfig-dron} ve \cref{fig:girdi-konfig-ucak}
-şablon olarak bırakılmıştır; her hücreye ilgili modun
-\texttt{frame\_output/<kayıt>/<mod>/} altındaki karesi konur.
+Sahnenin kendisini göstermek için \cref{fig:girdi-konfig-dron} ve
+\cref{fig:girdi-konfig-ucak}, her kayıttan \texttt{full1024} modunda
+alınmış birer örnek kare bırakır; dört konfigürasyonun sayısal
+karşılaştırması yukarıdaki \cref{tab:kayit-dron} ve
+\cref{tab:kayit-ucak}'tadır.
 
 \begin{figure}[H]
   \centering
-  \dortlugorsel{}{}{}{}{full1024}{crop1024}{full512}{crop512}
-  \caption{Dron kaydından örnek kare, dört girdi konfigürasyonunda.}
+  \gorselyertutucu[0.7\linewidth]{Dron kaydından örnek kare
+    (\texttt{full1024})}
+  \caption{Dron kaydından örnek kare.}
   \label{fig:girdi-konfig-dron}
 \end{figure}
 
 \begin{figure}[H]
   \centering
-  \dortlugorsel{}{}{}{}{full1024}{crop1024}{full512}{crop512}
-  \caption{Uçak kaydından örnek kare, dört girdi konfigürasyonunda.}
+  \gorselyertutucu[0.7\linewidth]{Uçak kaydından örnek kare
+    (\texttt{full1024})}
+  \caption{Uçak kaydından örnek kare.}
   \label{fig:girdi-konfig-ucak}
 \end{figure}
