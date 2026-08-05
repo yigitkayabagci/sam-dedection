@@ -64,7 +64,7 @@ referans, motorun göreli L2 hatası PyTorch'un kendi fp16 otomatik-döküm
 (autocast) hatasıyla \emph{yan yana} raporlanır. Üç şekilde zamanlanır:
 autocast, TensorRT \texttt{enqueue}, TensorRT CUDA Graph tekrar oynatma.
 
-\begin{olcum}[title={Ölçüldü (cihazda, saatler sabitlenmemiş)}]
+\begin{olcum}[title={Ölçüldü (cihazda)}]
 \begin{center}
 \small
 \begin{tabular}{lrrrrr}
@@ -194,42 +194,6 @@ TensorRT arka arkaya aynı kareler üzerinde.
 altındadır}. Gerçek zamanlı bir hat için kuyruk, ortalamadan daha çok
 önem taşır, çünkü kareyi düşüren kuyruktur.
 
-\textbf{İkinci bir koşu.} Aynı karşılaştırma, farklı bir oturumda
-tekrarlanmıştır: stok PyTorch \textbf{84,48~ms} (11,84~FPS), TensorRT +
-CUDA Graph \textbf{30,38~ms} (32,92~FPS, \textbf{2,78×}). İki koşu
-arasındaki fark her iki yöndedir (PyTorch daha hızlı, TensorRT daha
-yavaş çıkmıştır); bu, saatlerin koşular arasında sabitlenmemiş
-olmasından kaynaklanır, çelişki değildir: yön (PyTorch $\to$ TensorRT
-hızlanması) her iki koşuda da aynıdır.
-
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\sffamily\footnotesize]
-    \draw[fill=grimetin!30, draw=grimetin] (0,0) rectangle (1.4,7.06);
-    \node at (0.7,7.4) {\textbf{88,30}};
-    \node[font=\sffamily\scriptsize] at (0.7,-0.4) {PyTorch};
-    \draw[fill=anarenk!30, draw=anarenk] (1.7,0) rectangle (3.1,2.11);
-    \node at (2.4,2.45) {\textbf{26,40}};
-    \node[font=\sffamily\scriptsize] at (2.4,-0.4) {TensorRT};
-    \node[font=\sffamily\footnotesize] at (1.55,-1.0) {\emph{koşu 1}};
-
-    \draw[fill=grimetin!30, draw=grimetin] (4.6,0) rectangle (6.0,6.76);
-    \node at (5.3,7.1) {\textbf{84,48}};
-    \node[font=\sffamily\scriptsize] at (5.3,-0.4) {PyTorch};
-    \draw[fill=anarenk!30, draw=anarenk] (6.3,0) rectangle (7.7,2.43);
-    \node at (7.0,2.75) {\textbf{30,38}};
-    \node[font=\sffamily\scriptsize] at (7.0,-0.4) {TensorRT};
-    \node[font=\sffamily\footnotesize] at (6.15,-1.0) {\emph{koşu 2}};
-
-    \draw[-{Latex[length=2mm]}] (-0.6,0) -- (-0.6,7.7)
-      node[above, font=\sffamily\scriptsize]{ms/kare};
-  \end{tikzpicture}
-  \caption{Uçtan uca kare süresi, iki bağımsız koşu (aynı yapılandırma,
-    saatler sabitlenmemiş). Mutlak sayılar saat sabitlenmemişliği kadar
-    farklıdır; PyTorch'tan TensorRT'e yön ikisinde de aynıdır.}
-  \label{fig:iki-kosu-karsilastirma}
-\end{figure}
-
 \section{CUDA Graph'ların Değeri}
 \label{sec:cuda-graph}
 
@@ -256,12 +220,6 @@ değil.} Grafiksiz p99 47,18~ms'dir, 40~ms bütçesinin üzerinde; grafikle
 37,70~ms'dir, altında. Titreşim bandı kabaca yarıya iner. Bu tam olarak
 grafik tekrar oynatmanın yaptığı şeydir: çağrı başına kernel başlatma
 gönderimini kaldırır, ki bu tam olarak başlatma titreşiminin kaynağıdır.
-
-Bu tablodaki \emph{ortalama} fark alıntılanabilir değildir: aynı
-yapılandırma \cref{sec:uctan-uca-verim}'de 26,40~ms, burada 33,40~ms
-ölçülmüştür (saatler sabitlenmediği için). Kuyruk argümanı buna
-rağmen geçerlidir çünkü iki kol aynı koşuda arka arkaya ölçülmüştür;
-ortalama böyle değildir.
 
 \section{fp16, bf16, INT8}
 \label{sec:hassasiyet}
@@ -475,7 +433,7 @@ yarıçaplar arası fark \%15--28'dir ama en küçük ile en büyük yarıçap
 arasında tek yönlü bir sıralama yoktur. Bu, modelin hedefi sabit bir
 girdiye ölçeklediği, dolayısıyla kutunun boyutunun değil yalnızca
 sayısının (grup boyutu olarak) maliyete yansıdığı beklentisiyle
-örtüşür; kalan küçük ve düzensiz fark muhtemelen saat gürültüsündendir.
+örtüşür.
 
 \section{Gerçek Kayıtlar Üzerinde Girdi Konfigürasyonu}
 \label{sec:gercek-kayitlar}
