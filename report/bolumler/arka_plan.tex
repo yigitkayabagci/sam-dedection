@@ -96,6 +96,15 @@ tarafından yapılır ve iki tür token üretir:
         korur.
 \end{itemize}
 
+Bu sıkıştırmanın çalışma biçimi cross-attention'ın temel bir özelliğine
+dayanır: çıktının token sayısı anahtar/değer (key/value) tarafından
+değil sorgu (query) tarafından belirlenir. Perceiver'ın $N_g{+}N_l$
+sorgusu karenin kendisinden gelmez; eğitim sırasında güncellenen,
+veriden bağımsız sabit bir ağırlık matrisidir. Bu sorgular hafıza
+karesinin 4096 token'ına bakıp özet çıkarırken çıktı her zaman sorgu
+sayısı kadardır: kare 4096 token'lık kalsa da sıkıştırılmış temsil hep
+512 token'dır.
+
 Toplamda hafızaya yazılan her kare $N_g{+}N_l{=}\mathbf{512}$ token'a
 indirgenir: 4096'ya karşı \textbf{8 kat} azalma. memory attention'ın
 anahtar/değer tarafı artık $T{\times}4096$ değil $T{\times}512$

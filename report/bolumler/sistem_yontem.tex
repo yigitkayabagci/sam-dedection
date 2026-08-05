@@ -16,8 +16,20 @@ hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
 \Cref{sec:proje-eslesme}'de gösterildiği gibi kare başına dört modül
 çalışır: image encoder, memory attention, memory encoder, SAM head.
 Bunların \emph{neden} tek bir birleşik TensorRT motoru değil de dört
-ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir. Modüller,
-aralarına \textbf{Python'un girdiği} noktalardan ayrılmıştır:
+ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir; nedeni
+ONNX'in çalışma biçimidir. Bir PyTorch modeli ONNX'e aktarılırken
+\emph{trace} edilir: model örnek bir girdiyle bir kez çalıştırılır ve
+yalnızca o çalışmada gerçekleşen tensör işlemleri kaydedilir.
+Python'un kendisi (bir \texttt{if}, bir sözlük araması, çağrılar arası
+saklanan bir durum) bu kayda hiç girmez: \texttt{if} dallanması export
+anında hangi koldan geçildiyse o kola sabitlenir, diğer kol sessizce
+düşer; bir Python nesnesinde tutulan durum yalnızca export anındaki
+sabit değeriyle donar. TensorRT bu sabit işlem grafiğini derler,
+ONNX'in kaydetmediği hiçbir kararı veremez. Bu yüzden her motorun
+sınırı tam olarak, bir sonraki adımda hangi verinin kullanılacağına
+dair bir Python kararının bulunduğu yerdedir; motorların içi baştan
+sona sabit matris/tensör işlemlerinden oluşur. Modüller, aralarına
+\textbf{Python'un girdiği} noktalardan ayrılmıştır:
 
 \begin{itemize}
   \item \textbf{image encoder → memory attention} arasında memory bank

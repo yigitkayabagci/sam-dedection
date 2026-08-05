@@ -56,9 +56,10 @@
 \usepackage{array}
 \usepackage{longtable}
 \usepackage{graphicx}
-\usepackage{subcaption}
 \usepackage{caption}
 \captionsetup{font=small, labelfont={sf,bf,color=anarenk}, margin=1em}
+\usepackage{subcaption}
+\usepackage{etoolbox}
 \usepackage{float}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta, positioning, fit, backgrounds, calc}
@@ -113,6 +114,29 @@
     \vspace{2.2cm}
   \end{minipage}}
   \end{center}
+}
+
+% Dört görseli 2x2 ızgarada, her birinin altında kendi kısa alt yazısıyla
+% gösteren şablon: crop/full karşılaştırması, dörtlü grafik sonuçları vb.
+% için tekrar kullanılabilir. Dosya yolu boş bırakılan hücreye
+% \gorselyertutucu çizilir, derleme hiçbir zaman bozulmaz.
+\newcommand{\gorselhucre}[3][0.47\linewidth]{%
+  % #1 (ops.): hücre genişliği; #2: dosya yolu (boşsa yer tutucu); #3: alt yazı
+  \begin{subfigure}[t]{#1}
+    \centering
+    \ifstrempty{#2}{\gorselyertutucu[0.92\linewidth]{#3}}{%
+      \includegraphics[width=\linewidth]{#2}}
+    \caption{#3}
+  \end{subfigure}%
+}
+% #1--#4: dosya yolları (soldan sağa, üstten alta; boşsa yer tutucu);
+% #5--#8: alt yazılar. \caption ve \label çağıran tarafta kalır -- bunu
+% her zaman \begin{figure}[H] ... \end{figure} içine sarın (bkz. kullanım
+% örnekleri deneyler.tex içinde \S{Gerçek Kayıtlar Üzerinde Girdi
+% Konfigürasyonu}'nda).
+\newcommand{\dortlugorsel}[8]{%
+  \gorselhucre{#1}{#5}\hfill\gorselhucre{#2}{#6}\\[2mm]
+  \gorselhucre{#3}{#7}\hfill\gorselhucre{#4}{#8}%
 }
 
 % ---- Bağlantılar, referanslar ------------------------------------------------

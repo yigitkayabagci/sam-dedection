@@ -447,8 +447,23 @@ komutuyla, her kayıt için doldurulacak:
   \bottomrule
 \end{tabular}
 \end{center}
-
-\gorselyertutucu{\texttt{frame\_output/<kayıt>/crop512/tracked.mp4}'ten
-alınmış, hedefin kırpma penceresi içinde kaldığını (ya da kaybedildiğini)
-gösteren kare(ler)}
 \end{eksik}
+
+Aynı anın dört girdi konfigürasyonunda nasıl göründüğünü karşılaştırmak
+için \cref{fig:girdi-konfig-dron} ve \cref{fig:girdi-konfig-ucak}
+şablon olarak bırakılmıştır; her hücreye ilgili modun
+\texttt{frame\_output/<kayıt>/<mod>/} altındaki karesi konur.
+
+\begin{figure}[H]
+  \centering
+  \dortlugorsel{}{}{}{}{full1024}{crop1024}{full512}{crop512}
+  \caption{Dron kaydından örnek kare, dört girdi konfigürasyonunda.}
+  \label{fig:girdi-konfig-dron}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \dortlugorsel{}{}{}{}{full1024}{crop1024}{full512}{crop512}
+  \caption{Uçak kaydından örnek kare, dört girdi konfigürasyonunda.}
+  \label{fig:girdi-konfig-ucak}
+\end{figure}
