@@ -6,8 +6,7 @@ Bu bölümdeki her sayı, üç etiketten biriyle işaretlenmiştir:
 alınmış ve alıntılanabilir; \textbf{CPU'da, yapısal}: CUDA'sız bir
 geliştirme makinesinde ölçülmüş, bir ilişkinin var olduğunu kanıtlar
 ama cihazdaki mutlak maliyeti göstermez; \textbf{TODO}: araç hazır,
-cihazda henüz çalıştırılmamış. Bu üçünü ayırt etmemek, bu projede daha
-önce yanlış sonuçlara yol açmıştır (\cref{sec:reprod-tehlike}).
+cihazda henüz çalıştırılmamış.
 
 \section{Hesaplama Nerede Gerçekten Yoğunlaşıyor}
 \label{sec:flop-dagilimi}
@@ -199,9 +198,9 @@ altındadır}. Gerçek zamanlı bir hat için kuyruk, ortalamadan daha çok
 tekrarlanmıştır: stok PyTorch \textbf{84,48~ms} (11,84~FPS), TensorRT +
 CUDA Graph \textbf{30,38~ms} (32,92~FPS, \textbf{2,78×}). İki koşu
 arasındaki fark her iki yöndedir (PyTorch daha hızlı, TensorRT daha
-yavaş çıkmıştır); bu, \cref{sec:reprod-tehlike}'de belgelenen saat
-kilitleme sorununun beklenen bir sonucudur, çelişki değildir: yön
-(PyTorch $\to$ TensorRT hızlanması) her iki koşuda da aynıdır.
+yavaş çıkmıştır); bu, saatlerin koşular arasında sabitlenmemiş
+olmasından kaynaklanır, çelişki değildir: yön (PyTorch $\to$ TensorRT
+hızlanması) her iki koşuda da aynıdır.
 
 \begin{figure}[H]
   \centering
@@ -226,9 +225,8 @@ kilitleme sorununun beklenen bir sonucudur, çelişki değildir: yön
       node[above, font=\sffamily\scriptsize]{ms/kare};
   \end{tikzpicture}
   \caption{Uçtan uca kare süresi, iki bağımsız koşu (aynı yapılandırma,
-    saatler sabitlenmemiş). Mutlak sayılar
-    \cref{sec:reprod-tehlike}'deki saat değişkenliği kadar farklıdır;
-    PyTorch'tan TensorRT'e yön ikisinde de aynıdır.}
+    saatler sabitlenmemiş). Mutlak sayılar saat sabitlenmemişliği kadar
+    farklıdır; PyTorch'tan TensorRT'e yön ikisinde de aynıdır.}
   \label{fig:iki-kosu-karsilastirma}
 \end{figure}
 
@@ -406,8 +404,7 @@ tutulan maliyet disk değil, \textbf{görüntü dosyası çözücüsüdür}.
 Bu ayrım önemlidir çünkü ikisi farklı koşullarda kaybolur: hiçbir
 dağıtım diskten TIFF okumaz, ama sıkıştırılmış kare alan bir dağıtım
 yine de çözme öder. \texttt{read} artık \texttt{overlay}/kodlama ile
-aynı muameleyi görür: ölçülür, raporlanır, bütçeye yazılmaz,
-\cref{sec:read-disarida}'de tartışılan koşulla birlikte.
+aynı muameleyi görür: ölçülür, raporlanır, bütçeye yazılmaz.
 
 \section{Çözünürlük: 1024'e Karşı 512}
 \label{sec:cozunurluk}
@@ -478,8 +475,7 @@ yarıçaplar arası fark \%15--28'dir ama en küçük ile en büyük yarıçap
 arasında tek yönlü bir sıralama yoktur. Bu, modelin hedefi sabit bir
 girdiye ölçeklediği, dolayısıyla kutunun boyutunun değil yalnızca
 sayısının (grup boyutu olarak) maliyete yansıdığı beklentisiyle
-örtüşür; kalan küçük ve düzensiz fark muhtemelen
-\cref{sec:reprod-tehlike}'deki saat gürültüsündendir.
+örtüşür; kalan küçük ve düzensiz fark muhtemelen saat gürültüsündendir.
 
 \section{Gerçek Kayıtlar Üzerinde Girdi Konfigürasyonu}
 \label{sec:gercek-kayitlar}
