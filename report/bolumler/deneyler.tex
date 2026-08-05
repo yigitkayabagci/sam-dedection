@@ -533,6 +533,20 @@ yavaş kare ortalamayı kaydırır), \textbf{maks} ise kuyruk gecikmesini
 yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
 \end{eksik}
 
+\begin{figure}[H]
+  \centering
+  \gorselyertutucu[0.7\linewidth]{Dron kaydından örnek kare (orijinal)}
+  \caption{Dron kaydından örnek kare.}
+  \label{fig:girdi-konfig-dron}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \dortlugorsel{}{}{}{}{full1024}{crop1024}{full512}{crop512}
+  \caption{Dron kaydından aynı an, dört girdi konfigürasyonunda.}
+  \label{fig:girdi-konfig-dron-izgara}
+\end{figure}
+
 \begin{table}[H]
   \centering
   \caption{Dron kaydı: aşama başına süreler (ms), dört girdi
@@ -555,6 +569,20 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
   \end{tabular}
 \end{table}
 
+\begin{figure}[H]
+  \centering
+  \gorselyertutucu[0.7\linewidth]{Uçak kaydından örnek kare (orijinal)}
+  \caption{Uçak kaydından örnek kare.}
+  \label{fig:girdi-konfig-ucak}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \dortlugorsel{}{}{}{}{full1024}{crop1024}{full512}{crop512}
+  \caption{Uçak kaydından aynı an, dört girdi konfigürasyonunda.}
+  \label{fig:girdi-konfig-ucak-izgara}
+\end{figure}
+
 \begin{table}[H]
   \centering
   \caption{Uçak kaydı: aşama başına süreler (ms), dört girdi
@@ -576,25 +604,3 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
     \bottomrule
   \end{tabular}
 \end{table}
-
-Sahnenin kendisini göstermek için \cref{fig:girdi-konfig-dron} ve
-\cref{fig:girdi-konfig-ucak}, her kayıttan \texttt{full1024} modunda
-alınmış birer örnek kare bırakır; dört konfigürasyonun sayısal
-karşılaştırması yukarıdaki \cref{tab:kayit-dron} ve
-\cref{tab:kayit-ucak}'tadır.
-
-\begin{figure}[H]
-  \centering
-  \gorselyertutucu[0.7\linewidth]{Dron kaydından örnek kare
-    (\texttt{full1024})}
-  \caption{Dron kaydından örnek kare.}
-  \label{fig:girdi-konfig-dron}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \gorselyertutucu[0.7\linewidth]{Uçak kaydından örnek kare
-    (\texttt{full1024})}
-  \caption{Uçak kaydından örnek kare.}
-  \label{fig:girdi-konfig-ucak}
-\end{figure}
