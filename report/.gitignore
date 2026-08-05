@@ -1,0 +1,14 @@
+# LaTeX derleme artefaktları -- kaynak değil, yeniden üretilebilir.
+*.aux
+*.log
+*.bbl
+*.bcf
+*.blg
+*.out
+*.toc
+*.run.xml
+*.fls
+*.fdb_latexmk
+*.xdv
+*.synctex.gz
+main.pdf

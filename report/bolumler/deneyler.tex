@@ -1,0 +1,502 @@
+\chapter{Deneyler ve Sonuçlar}
+\label{ch:deneyler}
+
+Bu bölümdeki her sayı, üç etiketten biriyle işaretlenmiştir:
+\textbf{Ölçüldü (cihazda)} -- Jetson AGX Orin üzerinde gerçek bir koşudan
+alınmış ve alıntılanabilir; \textbf{CPU'da, yapısal} -- CUDA'sız bir
+geliştirme makinesinde ölçülmüş, bir ilişkinin var olduğunu kanıtlar
+ama cihazdaki mutlak maliyeti göstermez; \textbf{TODO} -- araç hazır,
+cihazda henüz çalıştırılmamış. Bu üçünü ayırt etmemek, bu projede daha
+önce yanlış sonuçlara yol açmıştır (\cref{sec:reprod-tehlike}).
+
+\section{Hesaplama Nerede Gerçekten Yoğunlaşıyor}
+\label{sec:flop-dagilimi}
+
+\textbf{Soru.} Görüntü kodlayıcı gerçekten darboğaz mı?
+
+\textbf{Yöntem.} \texttt{tools/analyze\_cost.py} -- \texttt{torch.utils.}
+\texttt{flop\_counter.flop\_registry} üzerinden özel bir
+\texttt{TorchDispatchMode} ile FLOP sayımı, gerçek kontrol noktasında,
+1024×1024.
+
+\begin{yapisal}
+\Cref{tab:flop-dagilimi-arkaplan}'daki dağılım (\S\ref{sec:proje-eslesme}):
+bellek dikkati \%61,9, görüntü kodlayıcı \%26,8, geri kalan \%11,3.
+\end{yapisal}
+
+\textbf{Okuma.} Yalnızca kodlayıcıyı hızlandırmak işin kabaca dörtte
+birini karşılamıştır. PyTorch'ta bırakılan bellek dikkati, çoğunluğu
+oluşturmaktadır -- \cref{ch:giris}'teki başlangıç varsayımını çürüten
+bulgu budur.
+
+\section{Yeniden Yazımın Kayıpsızlığı}
+
+\textbf{Soru.} Dört modül dışa aktarılabilir hale getirilmek için
+yeniden yazıldı -- sabit şekilli bellek, karmaşık sayı yerine gerçek
+aritmetikli RoPE, toplamsal maskeleme. Bu, modelin hesapladığı şeyi
+değiştiriyor mu?
+
+\textbf{Yöntem.} \texttt{tools/analyze\_precision.py --verify-graphs} --
+bir klibi yeniden yazılmış modüllerden fp32'de geçirip stok EdgeTAM ile
+maskeleri karşılaştırma, gerçek kontrol noktası, 1024×1024.
+
+\begin{olcum}
+Tüm 20 karede \textbf{IoU 1,0000}, \texttt{strict=True} ile (orijinal yola
+herhangi bir sessiz geri düşüş olsaydı hata fırlatırdı).
+\end{olcum}
+
+Bu sonuç 48 birim testiyle desteklenmektedir: gerçek-aritmetikli RoPE'nin
+karmaşık RoPE ile eşdeğerliği, doldurulmuş+maskelenmiş belleğin
+değişken-uzunluklu bellekle eşdeğerliği, birleştirilmiş bellek
+kodlayıcı+Perceiver'ın ayrı ayrı çalıştırılanla eşdeğerliği, özelleştirilmiş
+SAM başlığının orijinal \texttt{\_forward\_sam\_heads} ile eşdeğerliği
+(nesne mevcutken \emph{ve} kapalıyken), ONNX çıktısının iz (trace)
+alınan gruptan farklı bir grup boyutunda bile PyTorch ile eşleşmesi, ve
+tüm yamalı takipçinin stok EdgeTAM ile 1 ve 2 nesneyle eşleşmesi.
+
+\section{Motor Bazında Doğruluk ve Hız}
+\label{sec:motor-dogruluk-hiz}
+
+\textbf{Soru.} Her fp16 motoru kendi PyTorch modülünü doğru
+üretiyor mu, ve ne kadar hızlı?
+
+\textbf{Yöntem.} \texttt{tools/check\_trt\_parity.py} -- fp32 PyTorch
+referans, motorun göreli L2 hatası PyTorch'un kendi fp16 otomatik-döküm
+(autocast) hatasıyla \emph{yan yana} raporlanır. Üç şekilde zamanlanır:
+autocast, TensorRT \texttt{enqueue}, TensorRT CUDA Graph tekrar oynatma.
+
+\begin{olcum}[title={Ölçüldü (cihazda, saatler sabitlenmemiş)}]
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+  \toprule
+  Modül & PyTorch fp16 & TensorRT+Graph & Hızlanma & En kötü L2 & PT fp16'ya oran \\
+  \midrule
+  Görüntü kodlayıcı & 49,58~ms & 14,30~ms & 3,47× & 2,48e-02 & 2,9× \\
+  Bellek dikkati & 14,03~ms & 7,60~ms & 1,85× & 9,10e-04 & 7,9× \\
+  Bellek kodlayıcı & 16,63~ms & 2,27~ms & 7,31× & 8,93e-03 & 3,0× \\
+  SAM başlığı & 16,70~ms & 1,39~ms & 12,06× & 4,54e-03 & 2,3× \\
+  \midrule
+  \textbf{Toplam} & \textbf{96,94~ms} & \textbf{25,56~ms} & \textbf{3,79×} & & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{olcum}
+
+\textbf{Geçme/kalma kuralı üzerine.} İlk koşu görüntü kodlayıcıyı sabit
+bir 2e-2 eşiğine karşı başarısız saymıştı; bu, modelin bir özelliği değil
+seçilmiş bir sayıydı ve yanıltıcıydı. Hata, \textbf{derinlik} boyunca
+birikmektedir (kodlayıcıda 132 evrişim/doğrusal katman, 2,4e-02 hata; SAM
+başlığında 52 katman, 1,0e-03). Bir oran eşiği de tek başına yeterli
+değildir: bellek dikkati PyTorch'un fp16'sının 7,9 katında görünür çünkü
+autocast orada softmax ve katman normunu fp32'de tutarak alışılmadık
+temiz bir taban oluşturur -- mutlak hatası 9e-04 ve önemsizdir. Bu nedenle
+bir modül yalnızca hem \texttt{--rel-tol} üzerinde \emph{hem de}
+PyTorch'un kendi fp16'sının \texttt{--max-ratio} katı üzerindeyse
+başarısız sayılır. Dördü de geçmektedir.
+
+\section{Maskeler Klip Boyunca Değişiyor mu}
+
+\textbf{Soru.} Modül bazlı doğruluk her çağrıda taze rastgele girdi
+kullanır. EdgeTAM özyinelemelidir -- ürettiği her maske belleğe yazılıp
+sonra geri okunur -- küçük bir modül hatasının biriktiği yüzlerce kare
+vardır. Birikiyor mu?
+
+\textbf{Yöntem.} \texttt{tools/compare\_backends.py} -- 500 karelik bir
+klibi iki kez izleme (fp32 PyTorch referans, sonra TensorRT fp16), kare
+kare IoU ile karşılaştırma.
+
+\begin{olcum}
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  & \\
+  \midrule
+  Ortalama IoU & \textbf{0,9993} \\
+  En düşük IoU & 0,9973 (kare 405) \\
+  0,99 altı & \textbf{500'ün 0'ı} \\
+  İlk çeyrek → son çeyrek & 0,9995 → 0,9991 \\
+  Eğilim & \textbf{−0,0012 IoU / 1000 kare} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{olcum}
+
+\textbf{Okuma.} Önemli olan sayı eğilimdir ve düzdür. Sabit bir ofset ile
+yavaş bir sürüklenme bir ortalamada özdeş görünür ama aynı şeyi
+söylemez: biri fp16'nın maske sınırındaki yuvarlaması, diğeri
+özyinelemeli döngünün onu büyütmesidir. −0,0012/1000 karede döngü
+hiçbir şeyi büyütmemektedir.
+
+\section{Uçtan Uca Verim}
+\label{sec:uctan-uca-verim}
+
+\textbf{Soru.} Bütün izleme döngüsü 40~ms/kare hedefini tutturuyor mu?
+
+\textbf{Yöntem.} \texttt{tools/benchmark\_tracking.py} -- gerçek
+\texttt{propagate()} döngüsü, 500 karelik sentetik klip, stok PyTorch ve
+TensorRT arka arkaya aynı kareler üzerinde.
+
+\begin{olcum}[title={Ölçüldü (cihazda, 500 kare, 20 ısınma hariç)}]
+\begin{center}
+\begin{tabular}{lrrl}
+  \toprule
+  & ms/kare & FPS & p50 / p90 / p99 \\
+  \midrule
+  Stok PyTorch (bf16) & 88,30 & 11,32 & 84,35 / 101,29 / 109,13 \\
+  \textbf{TensorRT fp16 + CUDA Graph} & \textbf{26,40} & \textbf{37,88} &
+    25,01 / 30,84 / \textbf{39,90} \\
+  \midrule
+  \multicolumn{4}{l}{\textbf{3,34×} hızlanma} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{olcum}
+
+\textbf{Okuma.} 40~ms hedefi tutturulmuştur, ve \textbf{p99 de 40~ms'nin
+altındadır} -- gerçek zamanlı bir hat için kuyruk, ortalamadan daha çok
+önem taşır, çünkü kareyi düşüren kuyruktur.
+
+\section{CUDA Graph'ların Değeri}
+\label{sec:cuda-graph}
+
+\textbf{Soru.} TensorRT hedeftir; CUDA Graph'lar yerini hak ediyor mu?
+
+\textbf{Yöntem.} \texttt{tools/benchmark\_tracking.py --cuda-graph-ab} --
+aynı arka uç, grafik açık/kapalı, tek işlemde.
+
+\begin{olcum}[title={Ölçüldü (cihazda, 500 kare)}]
+\begin{center}
+\begin{tabular}{lrrrr}
+  \toprule
+  & ms/kare & p50 & p99 & p99$-$p50 \\
+  \midrule
+  Grafik açık & 33,40 & 33,26 & \textbf{37,70} & 4,44 \\
+  Grafik kapalı & 35,77 & 37,65 & \textbf{47,18} & 9,53 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{olcum}
+
+\textbf{Okuma.} \textbf{CUDA Graph'ların gerekçesi kuyruktur, ortalama
+değil.} Grafiksiz p99 47,18~ms'dir -- 40~ms bütçesinin üzerinde; grafikle
+37,70~ms'dir -- altında. Titreşim bandı kabaca yarıya iner. Bu tam olarak
+grafik tekrar oynatmanın yaptığı şeydir: çağrı başına kernel başlatma
+gönderimini kaldırır, ki bu tam olarak başlatma titreşiminin kaynağıdır.
+
+Bu tablodaki \emph{ortalama} fark alıntılanabilir değildir -- aynı
+yapılandırma \cref{sec:uctan-uca-verim}'de 26,40~ms, burada 33,40~ms
+ölçülmüştür (saatler sabitlenmediği için). Kuyruk argümanı buna
+rağmen geçerlidir çünkü iki kol aynı koşuda arka arkaya ölçülmüştür;
+ortalama böyle değildir.
+
+\section{Motor-Dışı Sürenin Dağılımı ve Füzyon Kararı}
+\label{sec:fuzyon-karari}
+
+\textbf{Soru.} Ölçüm \textasciitilde2,5~ms'lik bir ``diğer'' payı
+raporluyor. Dört motoru tek motora birleştirmek bunu kaldırır mı?
+
+\textbf{Yöntem.} \texttt{tools/analyze\_glue.py} -- bu satırı
+kategorilere ayırır: banka derleme (\texttt{dict} → motor girdi
+arabelleği), banka geri yazma (motor çıktısı → \texttt{dict}),
+başlatma boşluğu (motor çağrıları arası -- \textbf{birleştirmenin
+kaldırabileceği tek kategori}), maske son-işleme, diğer kare işi.
+
+\begin{olcum}[title={Ölçüldü (cihazda, 200 kare istenmiş, 180 senkronize)}]
+\begin{center}
+\begin{tabular}{lrr}
+  \toprule
+  & ms & Karenin \% \\
+  \midrule
+  Görüntü kodlayıcı & 14,419 & \\
+  Bellek dikkati & 11,874 & \\
+  Bellek kodlayıcı & 4,405 & \\
+  SAM başlığı & 2,261 & \\
+  \textbf{Motorlar toplamı} & \textbf{32,958} & \textbf{\%83,3} \\
+  Banka derleme & 2,392 & \%6,0 \\
+  Banka geri yazma & 0,847 & \%2,1 \\
+  \textbf{Başlatma boşluğu} & \textbf{0,217} & \textbf{\%0,5} \\
+  Maske son-işleme & 0,455 & \%1,2 \\
+  Diğer kare işi & 2,690 & \%6,8 \\
+  \midrule
+  \textbf{Kare toplamı} & \textbf{39,561} & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{olcum}
+
+\textbf{Okuma.} Başlatma boşluğu -- birleştirilmiş bir motorun
+kaldırabileceği tek kategori -- 0,217~ms'dir, \S\ref{sec:dort-motor}'de
+belirlenen 0,5~ms ``değmez'' eşiğinin altındadır.
+\textbf{Karar: birleştirmemek.} Motor-dışı sürenin geri kalanı (banka
+derleme + geri yazma + diğer kare işi, 5,93~ms) her durumda Python
+\texttt{dict} okuma/yazmasıdır ve birleştirmeden bağımsız olarak kalır.
+
+\emph{Not: buradaki 39,56~ms kare toplamı, \cref{sec:uctan-uca-verim}'in
+26,40~ms'sinden yüksektir -- bu geçiş, süreyi doğru kategorilere ayırmak
+için her motordan sonra bir \texttt{cudaStreamSynchronize} zorlar. FPS
+için \cref{sec:uctan-uca-verim}'i, yalnızca motor/diğer oranı için bu
+tabloyu kullanın.}
+
+\section{fp16, bf16, INT8}
+\label{sec:hassasiyet}
+
+\textbf{Soru.} fp16 doğru hassasiyet mi?
+
+\textbf{Yöntem.} \texttt{tools/analyze\_precision.py} -- bir klibi
+fp32'de izleyip azaltılmış hassasiyetli etkinleşimlerle yeniden izleme,
+maskeleri karşılaştırma. Kasıtlı olarak kötümser: TensorRT'in genellikle
+fp32'de bıraktığı normalizasyon ve etkinleşim çıktılarını da yuvarlar,
+bu yüzden temiz bir fp16 sonucu iyimser değil güvenlidir.
+
+\begin{olcum}
+\begin{center}
+\begin{tabular}{lr}
+  \toprule
+  Hassasiyet & fp32'ye karşı maske IoU \\
+  \midrule
+  fp16 & \textbf{0,9999} \\
+  bf16 & 0,9997 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{olcum}
+
+fp16 kazanır ve nedeni yapısaldır: Orin'de bf16 aynı tensör çekirdiklerini
+aynı hızda kullanırken 11 bite karşı 8 bit anlamlı basamak taşır ve
+TensorRT'in daha az bf16 taktiği vardır.
+
+\textbf{INT8.} Simetrik tensör-başına etkinleşim nicemlemesiyle,
+modül bazında:
+
+\begin{itemize}
+  \item \textbf{Bellek kodlayıcı}, kırpma yanlılığını biriktiren
+        modüldür (0,9397 ortalama IoU, 30 karenin 7'si 0,99 altında).
+        Özyinelemeli döngünün \emph{yazma ucudur} -- hatası bankaya
+        gider ve geri okunur.
+  \item Görüntü kodlayıcı \textbf{yapısal olarak düşman değil,
+        kalibrasyona duyarlıdır}: min/maks kalibrasyon onu çökertirken
+        yüzdelik dilim kırpma (0,9930) ya da füzyon-modellenmiş
+        yerleştirme (0,9926) kurtarmaktadır.
+  \item Bütün-model INT8, parça sonuçlarının toplamı değildir.
+\end{itemize}
+
+\subsection{INT8 burada bir PyTorch simülasyonudur, TensorRT motoru değil}
+
+\texttt{analyze\_precision.py}'nin \texttt{fake\_quant\_int8*} kancaları
+her katmanın \emph{çıktısını} 8 bitlik bir ızgaraya yuvarlayıp geri
+float'a çevirir, aksi halde fp32 olan bir ileri geçiş içinde. Yalnızca
+etkinleşimler -- ağırlıklara dokunulmaz, hiçbir motor derlenmez.
+\texttt{build\_trt\_engines.py}'nin \texttt{PRECISION\_FLAGS}'ı şu anda
+yalnızca \texttt{fp16}/\texttt{bf16}/\texttt{fp32} tutmaktadır; bu
+depoda bir \texttt{--int8} yolu veya kalibrasyon önbelleği yoktur.
+Gerçek INT8 motoruyla ilgili plan \cref{sec:int8-gelecek}'te ele
+alınmaktadır.
+
+\section{Ön-İşleme: Derinlemesine Analiz}
+\label{sec:onisleme-analizi}
+
+Bu alt bölüm, projede karşılaşılan ve düzeltilen bir ölçüm hatasının tam
+kaydıdır -- rapora dahil edilmesinin nedeni, ``kare süresi'' gibi basit
+görünen bir ifadenin ne kadar kolay yanlış ölçülebileceğini
+göstermesidir.
+
+\subsection{İlk bulgu: ön-işleme küçük değil}
+
+\texttt{pre} ilk kez doğru ölçüldüğünde (kaynak kareyi görselleştirme
+için tekrar okumak değil, gerçek kırpma+ölçekleme+normalize), beklenenin
+çok üzerinde çıkmıştır:
+
+\begin{olcum}
+1024'te \texttt{pre} $\approx$ \textbf{30~ms}, 512'de $\approx$
+\textbf{17~ms} -- model süresine (26--33~ms) yakın.
+\end{olcum}
+
+Kaynağı çözme değildir; PIL'in yeniden ölçeklemesi ve
+\texttt{uint8 / 255.0}'ın NumPy tarafından \textbf{float64}'e
+yükseltilmesidir (1024'te kare başına 24~MB dönüşüm + 24~MB
+normalizasyon).
+
+\begin{yapisal}[title={CPU'da, yapısal -- 1280×720 JPEG, adım adım}]
+\begin{center}
+\begin{tabular}{lrr}
+  \toprule
+  Adım & → 1024² & → 512² \\
+  \midrule
+  PIL açma + RGB'ye çevirme (çözme) & 4,4~ms & 4,4~ms \\
+  PIL yeniden ölçekleme & 18,9~ms & 11,1~ms \\
+  \texttt{uint8/255.0} → float64 & 13,6~ms & 0,9~ms \\
+  Normalize (float64 üzerinde) & 28,3~ms & 1,3~ms \\
+  \midrule
+  \textbf{Toplam} & \textbf{$\approx$65~ms} & \textbf{$\approx$17,7~ms} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+Aynı işlemler bir dağıtımın yapacağı şekilde: 1024'e yeniden ölçekleme
+PIL'de 18,9~ms iken \texttt{cv2.resize} ile 0,6~ms (\textbf{30×});
+uint8→float dönüşümü float64'te 13,6~ms iken float32'de 1,9~ms
+(\textbf{7×}).
+\end{yapisal}
+
+\subsection{Ön-işleme yeniden yazıldı}
+
+Kaynak kare artık doğrudan (JPG önbelleği değil) okunur, kırpma varsa
+uygulanır, \texttt{cv2.resize} ile ölçeklenir, float32'de yerinde
+(in-place) normalize edilir.
+
+\begin{olcum}[title={Ölçüldü (cihazda, aynı makine ve klip, yalnızca ön-işleme farklı)}]
+\begin{center}
+\begin{tabular}{lrrr}
+  \toprule
+  Model girdisi & Önce & Sonra & \\
+  \midrule
+  1024² & 42,8~ms & \textbf{9,2~ms} & 4,7× \\
+  512² & 18,9~ms & \textbf{7,4~ms} & 2,6× \\
+  512² (512 merkez kırpmadan) & 5,2~ms & \textbf{5,4~ms} & (zaten yeniden ölçekleme yok) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\textbf{Doğruluk maliyeti:} model girdisi göreli L2 farkı 0,0063 (1024²)
+/ 0,0070 (512²); \textbf{maske IoU (eski/yeni), ortalama 0,9993, en düşük
+0,9985} -- fp16'nın fp32'ye karşı tüm klipte skorladığı sayının aynısı,
+ve görüntü kodlayıcının kendi fp16 hatasından (2,4e-02) $\sim$4× küçük.
+\end{olcum}
+
+\subsection{İkinci bulgu: dosya okuma/çözme de bütçenin dışında tutulmalı}
+
+Cihazda \texttt{pre} \textasciitilde40~ms'ye geldi -- ve \textbf{dört
+girdi konfigürasyonunun hepsinde} aynı kaldı (1024/512, tam/kırpılmış),
+oysa \texttt{inference} çözünürlükle beklendiği gibi ölçeklendi
+(26,5 → 8,0~ms). Yeniden ölçeklemeye bağlı hiçbir şey böyle
+davranamaz.
+
+\begin{olcum}[title={Ölçüldü (cihazda); 2048×1536 16-bit tek-kanallı TIFF ile doğrulandı}]
+\texttt{pre} 40,2~ms, bunun 35,8~ms'si \texttt{cv2.imread}. Aynı dosyada
+ayrıştırıldığında: bayt okuma 0,5~ms, \textbf{çözme 34,4~ms}. Yani hariç
+tutulan maliyet disk değil, \textbf{görüntü dosyası çözücüsüdür}.
+\end{olcum}
+
+Bu ayrım önemlidir çünkü ikisi farklı koşullarda kaybolur: hiçbir
+dağıtım diskten TIFF okumaz, ama sıkıştırılmış kare alan bir dağıtım
+yine de çözme öder. \texttt{read} artık \texttt{overlay}/kodlama ile
+aynı muameleyi görür: ölçülür, raporlanır, bütçeye yazılmaz --
+\cref{sec:read-disarida}'de tartışılan koşulla birlikte.
+
+\section{Çözünürlük: 1024'e Karşı 512}
+\label{sec:cozunurluk}
+
+\textbf{Soru.} Girdi çözünürlüğünü yarıya indirmek ne kazandırır, neye
+mal olur?
+
+\textbf{Yöntem.} \texttt{configs/edgetam\_trt\_512.yaml}, ayrı bir
+\texttt{models512/} motor kümesi (motorlar şekle özgüdür). 512, 32×32=1024
+uzamsal belirteç üretir -- 1024'teki 4096'ya karşı dört kat azalma.
+Karşılaştırma 512 TensorRT'i 512 PyTorch temeline karşı yapılmalıdır;
+aksi halde ölçülen şey TensorRT değil çözünürlük değişikliğidir.
+
+\begin{eksik}
+\texttt{tools/run\_experiment.py --outdir results/512 --engines models512/
+--config configs/edgetam\_trt\_512.yaml --baseline-config
+configs/edgetam\_512.yaml --reference-config configs/edgetam\_trt.yaml}
+komutuyla doldurulacak:
+
+\begin{center}
+\begin{tabular}{lrr}
+  \toprule
+  & 1024 & 512 \\
+  \midrule
+  ms/kare (TensorRT) & 26,40 & \\
+  FPS & 37,88 & \\
+  p99 & 39,90 & \\
+  Ortalama IoU (1024 motoruna karşı) & -- & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{eksik}
+
+\section{Komut Duyarlılığı}
+
+\textbf{Soru.} Hedef boyutu kare süresini değiştiriyor mu? Nesne sayısı?
+
+\textbf{Yöntem.} \texttt{tools/sweep\_prompt.py} -- her yapılandırma için
+ayrı, taze üretilmiş bir klip üzerinde izleme koşusu.
+
+\textbf{Beklenti.} Hedef boyutu düz olmalı: model her kareyi sabit bir
+girdiye ölçekler, 12~piksellik bir leke ile 120~piksellik bir leke aynı
+şekilli tensör üretir. Nesne sayısı artmalı: nesneler grup (batch)
+boyutudur.
+
+\begin{eksik}
+\texttt{tools/sweep\_prompt.py --radii 12,30,60,120 --objects 1,2,3}
+komutuyla doldurulacak (ms/kare, hedef yarıçapı × nesne sayısı ızgarası).
+\end{eksik}
+
+\section{Gerçek Kayıtlar Üzerinde Girdi Konfigürasyonu}
+\label{sec:gercek-kayitlar}
+
+\textbf{Soru.} Sentetik klip bunun çalışacağı gerçek veri değildir.
+Gerçek kayıtlarda her girdi konfigürasyonu neye mal olur, neyi kaybeder?
+
+\textbf{Yöntem.} \texttt{tools/run\_records.py} -- \texttt{frames/}
+altındaki her klasör dört şekilde izlenir:
+
+\begin{table}[H]
+  \centering
+  \caption{Dört girdi konfigürasyonu.}
+  \begin{tabular}{lll}
+    \toprule
+    Mod & Model & Girdi \\
+    \midrule
+    \texttt{full1024} & 1024² & tam kare, ölçeklenmiş \\
+    \texttt{crop1024} & 1024² & ortalanmış 1024×1024 pencere \\
+    \texttt{full512} & 512² & tam kare, ölçeklenmiş \\
+    \texttt{crop512} & 512² & ortalanmış 512×512 pencere \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\textbf{Kırpmanın yalnızca üçüncü bir çözünürlük olmadığı.} Dağıtım
+kamerası hedefini zaten ortalayıp odaklıyor, yani çerçevenin dışı iki kez
+ödenen bir arkaplandır -- bir kez ölçeklenirken, bir kez model üzerinden
+geçerken. Tam olarak model girdisine kırpmak ön-işlemeden yeniden
+ölçeklemeyi tamamen kaldırır.
+
+\begin{yapisal}[title={CPU'da, yapısal -- aynı klip, aynı 512 model, yalnızca girdi dönüşümü farklı}]
+\begin{center}
+\begin{tabular}{lrr}
+  \toprule
+  Girdi & \texttt{pre} medyan & \texttt{post} medyan \\
+  \midrule
+  Tam 1280×720 kare → 512² & 7,4~ms & 1,5~ms \\
+  Ortalanmış 512×512 kırpma, yeniden ölçekleme yok & \textbf{5,4~ms} & 0,7~ms \\
+  \bottomrule
+\end{tabular}
+\end{center}
+\end{yapisal}
+
+\textbf{Neye mal olur.} Kırpma, sahnenin 512×512'lik kısmını yerel
+çözünürlükte görür; 512 tam ölçekleme, sahnenin tamamını yarı
+çözünürlükte görür. Hedef ortalama pencereden çıkarsa \texttt{crop512}
+onu tamamen kaybeder.
+
+\begin{eksik}
+\texttt{tools/run\_records.py --records frames --out frame\_output}
+komutuyla, her kayıt için doldurulacak:
+
+\begin{center}
+\begin{tabular}{lrrrr}
+  \toprule
+  Mod & FPS & \texttt{pre} & \texttt{inference} & \texttt{post} \\
+  \midrule
+  \texttt{full1024} & & & & \\
+  \texttt{crop1024} & & & & \\
+  \texttt{full512} & & & & \\
+  \texttt{crop512} & & & & \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\gorselyertutucu{\texttt{frame\_output/<kayıt>/crop512/tracked.mp4}'ten
+alınmış, hedefin kırpma penceresi içinde kaldığını (ya da kaybedildiğini)
+gösteren kare(ler)}
+\end{eksik}

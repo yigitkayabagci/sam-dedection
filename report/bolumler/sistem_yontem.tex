@@ -1,0 +1,199 @@
+\chapter{Sistem ve Yöntem}
+\label{ch:sistem-yontem}
+
+\section{Donanım ve Araçlar}
+
+Tüm cihaz-üzeri ölçümler \textbf{NVIDIA Jetson AGX Orin}~\cite{nvidia2024orin}
+üzerinde alınmıştır. Orin'in CPU ve GPU'su tek bir paylaşımlı bellek
+baytı ve bant genişliği üzerinden çalışır -- bu, \cref{sec:reprod-tehlike}'de
+tekrar karşılaşılacak önemli bir kısıttır. Çıkarım motorları
+\textbf{TensorRT}~\cite{nvidia2024tensorrt} ile derlenmiş, fp16
+hassasiyetinde ve CUDA Graph tekrar oynatmasıyla çalıştırılmıştır.
+
+\section{Kare Başına Hesaplama ve Dört Motor Kararı}
+\label{sec:dort-motor}
+
+\Cref{sec:proje-eslesme}'de gösterildiği gibi kare başına dört modül
+çalışır: görüntü kodlayıcı, bellek dikkati, bellek kodlayıcı, SAM
+başlığı. Bunların \emph{neden} tek bir birleşik TensorRT motoru değil
+de dört ayrı motor olarak bırakıldığı gelişigüzel bir karar değildir --
+modüller, aralarına \textbf{Python'un girdiği} noktalardan ayrılmıştır:
+
+\begin{itemize}
+  \item \textbf{Görüntü kodlayıcı → bellek dikkati} arasında bellek
+        bankası derlenir. Bu banka kare indeksiyle anahtarlanmış bir
+        Python \texttt{dict}'tir; hangi geçmiş karelerin okunacağı her
+        karede \texttt{.get()} çağrısı ve en yakın adayları sıralayan bir
+        fonksiyonla (\texttt{select\_closest\_cond\_frames}) belirlenir.
+        Bir TensorRT motorunun ne \texttt{dict}'i, ne \texttt{.get()}'i,
+        ne de veriye bağlı bir dallanması vardır.
+  \item \textbf{SAM başlığı → bellek kodlayıcı} arasında bu karenin
+        maskesi aynı \texttt{dict}'e geri yazılır.
+  \item \textbf{Bellek dikkati → SAM başlığı} arasında ise hiçbir şey
+        yoktur; bu sınır zorunlu değildir.
+\end{itemize}
+
+Değişken uzunluklu bellek sorunu, sabit 7 yuvaya doldurma (padding) ve
+toplamsal bir dikkat maskesiyle işgal durumunu taşıma yoluyla
+çözülmüştür -- bunun değişken-uzunluklu yolla birebir eşdeğer olduğu
+testle kanıtlanmıştır (\texttt{test\_padded\_memory\_matches\_variable\_}
+\texttt{length}). Motora taşınamayan şey, \emph{hangi} karelerin bu
+yuvaları dolduracağına karar vermektir -- çünkü bu karar bir sözlük
+sorgusu ve bir sıralamadır.
+
+\subsection{Tek motora birleştirme mümkün müydü?}
+
+İlke olarak evet: birleşik bir motor \texttt{(görüntü, doldurulmuş banka,
+banka konumu, banka maskesi)} girdisini alıp \texttt{(maskeler, nesne
+göstericisi, yeni bellek, yeni bellek konumu)} döndürebilirdi. Banka
+derleme ve geri yazma yine motorun dışında kalırdı, çünkü bunlar bir
+Python \texttt{dict}'i okuyup yazar.
+
+Birleştirmenin kazandırabileceği tek şey, motor çağrıları arasındaki
+\textbf{başlatma boşluğudur} (launch gap) -- bir motorun dönüşü ile
+bir sonrakinin başlatılması arasındaki süre. Bu karar varsayıma değil
+doğrudan ölçüme bırakılmıştır; sonucu ve eşik kuralı
+\cref{sec:fuzyon-karari}'de sunulmaktadır.
+
+\section{Sabit Şekilli Bellek Bankası ve CUDA Graph}
+
+Bir CUDA Graph, kaydedildiği kernel çağrılarını \emph{aynı} cihaz
+adreslerine karşı tekrar oynatır -- bu nedenle her motor kalıcı girdi/çıktı
+arabellekleri tutar, adreslerini TensorRT'e bir kez verir, ısınır (TensorRT
+bazı bağlam kurulumlarını ilk \texttt{enqueue}'a erteler), yakalar ve o
+andan sonra her kare yalnızca arabelleklere kopyalama ile
+\texttt{graph.replay()} çağrısından ibarettir.
+
+Bunun çalışabilmesi için bellek bankasının \textbf{sabit şekilli}
+olması gerekir. Gerçek kontrol noktası üzerinde izlenen anahtar
+uzunluğu (\texttt{tools/analyze\_cost.py --trace-frames 24}), ilk 23
+karede \textbf{16 farklı} değer almıştır (1. karede 516 belirteç,
+7. karede 3612, 16. kareden sonra sabit 3648) -- her biri kendi CUDA
+Graph yakalamasını, kendi TensorRT bağlamını gerektirirdi. Çözüm,
+7 sabit yuvalı bir arabellek artı toplamsal bir dikkat maskesidir: boş
+yuvalar $-30000$ ile maskelenir, ki bu değer hem fp16 hem fp32'de
+$\exp(-30000) = 0$ altına taşarak softmax'ı canlı önek üzerinde
+hesaplananla bit-eşdeğer kılar (gerçek $-\infty$ yerine sonlu bir değer
+seçilmesinin nedeni, bir satırın tamamen maskelenmesi durumunda NaN
+üretmemektir).
+
+Bu doldurmanın zararsız olmasını sağlayan iki özellik: RoPE'nin
+yuva-konumundan bağımsız olması (aynı frekans tablosu her yuvaya
+kopyalanır, hangi yuvaların dolu olduğu tabloyu değiştirmez) ve zamansal
+konum kodlamasının çağıran tarafından zaten \texttt{memory\_pos} içine
+gömülmüş olması (yalnızca kopyalanır, yeniden hesaplanmaz).
+
+\section{fp16 Hassasiyet Seçimi}
+\label{sec:hassasiyet-secimi}
+
+Motorlar fp16'da derlenmiştir, bf16'da değil -- ve bu bir uzlaşma değil,
+Orin'in donanımının doğrudan sonucudur: bf16 aynı tensör çekirdeklerini
+aynı hızda kullanır ama fp16'nın 11 bit anlamlı basamağına karşı yalnızca
+8 bit taşır, ve TensorRT'in bf16 için daha az taktiği vardır. bf16'nın tek
+avantajı olan geniş dinamik aralık, yalnızca etkinleşimler (activations)
+fp16'yı taşırsa değer kazanır -- ölçüldü, taşmıyorlar
+(\cref{sec:hassasiyet}). INT8'in neden \emph{motor olarak} kapsam dışı
+bırakıldığı \cref{sec:int8-gelecek}'te ele alınmaktadır.
+
+\section{Ölçüm Metodolojisi}
+\label{sec:olcum-yontemi}
+
+Bu projede birden fazla ölçüm aracı vardır ve her biri farklı bir soruya
+cevap verir; ikisini karıştırmak yanıltıcı sonuçlara yol açar. Bu bölüm
+o ayrımı sabitler.
+
+\subsection{Bir karenin süresi neyi kapsar}
+\label{sec:kare-tanimi}
+
+Gerçek zamanlı bütçeye giren üç aşama, girmeyen bir aşama vardır:
+
+\begin{table}[H]
+  \centering
+  \caption{Bir karenin zamanının bileşenleri.}
+  \label{tab:kare-bilesenleri}
+  \begin{tabular}{lll}
+    \toprule
+    Aşama & Ne & Bütçede mi? \\
+    \midrule
+    \texttt{pre} & kırpma + model girdisine ölçekleme + normalize etme & Evet \\
+    \texttt{inference} & dört modül + EdgeTAM'ın Python defter tutması & Evet \\
+    \texttt{post} & maskeleri kaynak çözünürlüğe geri ölçekleme & Evet \\
+    \texttt{read} & kare dosyasını diskten okuma/çözme & \textbf{Hayır} -- ölçülür, hariç tutulur \\
+    overlay + mp4 & maskeyi çizip video kodlama & \textbf{Hayır} -- yalnızca demo \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Bu tanım iki gerçek hatanın düzeltilmesiyle ortaya çıkmıştır. Birincisi,
+\texttt{pre} başlangıçta ön-işleme değil, kaynak karenin görselleştirme
+için diskten \emph{tekrar} okunmasıydı -- gerçek ön-işleme
+\texttt{init\_state} içinde toplu yapılıyor, kurulum aşamasında kayboluyor
+ve hiçbir kare süresinde görünmüyordu. İkincisi, video kodlama başlangıçta
+ölçülen bölgenin içindeydi; artık akış halinde yazılıp ayrı ölçülmektedir.
+
+\subsection{\texttt{read}'in bütçeden çıkarılması: gerekçe ve koşul}
+\label{sec:read-disarida}
+
+Ön-işleme ilk kez doğru ölçüldüğünde 1024 çözünürlükte modelin kendisi
+kadar (\textasciitilde30~ms) pahalı çıkmıştır -- ayrıntılı çöküm
+\cref{sec:onisleme-analizi}'dedir. Bunun ezici çoğunluğu (\textasciitilde35~ms)
+görüntü dosyasının \emph{çözülmesi}dir, diskten okunması değil (aynı
+dosyada ayrıştırıldığında: bayt okuma 0,5~ms, çözme 34,4~ms). Bu ayrım
+önemlidir, çünkü ikisi farklı koşullarda ortadan kalkar: hiçbir dağıtım
+diskten TIFF okumaz, ama \emph{sıkıştırılmış} kare alan bir dağıtım yine
+de bir çözme işlemi öder.
+
+Bu nedenle \texttt{read} artık overlay/kodlama ile aynı muameleyi görür:
+ölçülür, raporlanır, bütçeye yazılmaz. Ancak bu çıkarımın geçerliliği
+\textbf{koşulludur} ve rapor bunu açıkça belirtmelidir: kareler bellekte
+ham geldiğinde yerine geçen maliyet ihmal edilebilir düzeydedir (bir
+arabelleği sarmalamak $\sim$0,001~ms, bir kez kopyalamak $\sim$1,4~ms);
+sıkıştırılmış geldiğinde ise bir çözme maliyeti geri döner -- daha ucuz,
+ama sıfır değil. Bu projenin hedef dağıtımı (Ethernet üzerinden ham kare)
+henüz kurulmadığından, bu koşul \cref{sec:ethernet-gelecek}'te açık bir
+gelecek çalışma olarak bırakılmıştır.
+
+\subsection{İki ``kare süresi'', ikisi de gerçek}
+
+\begin{table}[H]
+  \centering
+  \caption{İki farklı ölçüm aracının cevapladığı farklı sorular.}
+  \label{tab:iki-kare-suresi}
+  \begin{tabular}{p{3.2cm}p{5.3cm}p{4.8cm}}
+    \toprule
+    Araç & Neyi ölçer & Ne için kullanılır \\
+    \midrule
+    \texttt{benchmark\_tracking.py} & yalnızca model; kareler baştan
+      toplu çözülmüş & motor kümelerini veya çözünürlükleri birbirine
+      karşı karşılaştırmak \\
+    \texttt{cli.py} / \texttt{run\_records.py} & ön-işleme + model +
+      son-işleme, kare başına & \textbf{dağıtılabilir kare bütçesi} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Aradaki fark kare başına ön-işlemedir. Birini etiketsiz alıntılamak,
+aynı sistemin 37,88~FPS ve 23,0~FPS gibi çelişkili görünen -- aslında
+farklı şeyleri ölçen -- iki sayı vermesine yol açmıştır. Bu raporda her
+sayı hangi araçtan geldiği belirtilerek sunulur.
+
+\subsection{Yeniden Üretilebilirlik Tehlikeleri}
+\label{sec:reprod-tehlike}
+
+\begin{itemize}
+  \item \textbf{Sabitlenmemiş saat hızları $\pm$\%30 fark yaratır.} Aynı
+        yapılandırma iki ayrı koşuda 26,40~ms ve 33,40~ms ölçülmüştür.
+        Rapora giren her sayıdan önce
+        \texttt{sudo nvpmodel -m 0 \&\& sudo jetson\_clocks} çalıştırılmalı,
+        ve \texttt{tools/capture\_environment.py} bu durumu kaydetmelidir.
+  \item \textbf{İki adım aynı klibi kullanmalı.} Aksi halde biri diğerinden
+        farklı bir içerik üzerinde ölçüm yapar ve karşılaştırma anlamsızlaşır.
+  \item \textbf{\texttt{--offload-video} tüm araçlarda tutarlı olmalı.}
+        Aksi halde EdgeTAM her kareyi GPU'da fp32 olarak tutar --
+        500 kare için \textasciitilde6,3~GB -- ve Orin'in paylaşımlı
+        belleğinde bu modelin kendisini yavaşlatır.
+  \item \textbf{Biriktirilmiş kareler modelle bellek bant genişliği için
+        yarışır.} CPU ve GPU, Orin'de belleği \emph{ve} bant genişliğini
+        paylaşır; işlenmiş klibi bir listede tutmak, modelin bağımlı
+        olduğu kaynağı tüketmektir.
+\end{itemize}

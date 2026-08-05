@@ -1,0 +1,168 @@
+% ============================================================================
+% preamble.tex -- stil, yazı tipleri, paketler, renkler, kutu/tablo stilleri.
+% main.tex tarafından \input{preamble} ile çağrılır.
+% ============================================================================
+
+% ---- Sayfa düzeni ----------------------------------------------------------
+\KOMAoptions{
+  fontsize=11pt,
+  paper=a4,
+  DIV=12,
+  parskip=half,
+  headsepline=true,
+  footsepline=false,
+  numbers=noenddot,
+  chapterprefix=false,
+}
+
+% ---- Türkçe + yazı tipleri (XeLaTeX) ---------------------------------------
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setmainlanguage{turkish}
+
+% TeX Gyre ailesi: URW/Adobe klasik fontlarının serbestçe dağıtılabilir
+% OpenType karşılıkları. Herhangi bir TeX Live kurulumunda (texlive-fonts-extra
+% ya da tek başına fonts-texgyre paketiyle) bulunur; internetten ayrı bir
+% font indirmeye gerek yoktur.
+\setmainfont{TeX Gyre Pagella}                      % gövde metni (Palatino benzeri)
+\setsansfont{TeX Gyre Heros}                        % başlıklar (Helvetica benzeri)
+\setmonofont{TeX Gyre Cursor}[Scale=0.92]           % kod/komut satırları (Courier benzeri)
+
+% ---- Renkler ----------------------------------------------------------------
+% Deneyler.tex ve EXPERIMENT_LOG.md'deki grafiklerle aynı paletten:
+% koyu lacivert ana renk, mercan ikincil vurgu, nötr griler.
+\usepackage{xcolor}
+\definecolor{anarenk}{HTML}{1B3A6B}       % başlıklar, çizgiler
+\definecolor{vurgu}{HTML}{C8551A}         % dikkat çekilecek sayılar
+\definecolor{yesilvurgu}{HTML}{1E7A52}    % "ölçüldü / geçti" göstergeleri
+\definecolor{grimetin}{HTML}{4A4A46}
+\definecolor{acikgri}{HTML}{EDEBE4}
+\definecolor{kutucerceve}{HTML}{B9B6A9}
+
+% ---- Başlık stilleri ---------------------------------------------------------
+% (titlesec kasıtlı olarak kullanılmıyor: KOMA-Script kendi
+% \addtokomafont mekanizmasıyla stil veriyor, titlesec ile birlikte
+% yüklenmesi scrlayer-scrpage'le çakışıp uyarı üretiyordu.)
+\addtokomafont{chapter}{\color{anarenk}\sffamily}
+\addtokomafont{section}{\color{anarenk}\sffamily}
+\addtokomafont{subsection}{\color{anarenk}\sffamily}
+\addtokomafont{subsubsection}{\sffamily\bfseries}
+\addtokomafont{disposition}{\rmfamily}     % KOMA varsayılanını geçersiz kılıp yukarıdakileri kullan
+\addtokomafont{pagehead}{\sffamily\small\color{grimetin}}
+\addtokomafont{pagefoot}{\sffamily\small\color{grimetin}}
+
+% ---- Tablolar, şekiller, kod -------------------------------------------------
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{caption}
+\captionsetup{font=small, labelfont={sf,bf,color=anarenk}, margin=1em}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, fit, backgrounds, calc}
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  rulecolor=\color{kutucerceve},
+  backgroundcolor=\color{acikgri!45},
+  captionpos=b,
+}
+
+% ---- Vurgu/uyarı kutuları ----------------------------------------------------
+\usepackage[most]{tcolorbox}
+\tcbuselibrary{skins,breakable}
+
+% Ölçülmüş, alıntılanabilir sonuç kutusu.
+\newtcolorbox{olcum}[1][]{
+  enhanced, breakable, colback=acikgri!35, colframe=anarenk,
+  boxrule=0.6pt, left=2mm, right=2mm, top=1mm, bottom=1mm,
+  fonttitle=\sffamily\bfseries, coltitle=white,
+  colbacktitle=anarenk, title={Ölçüldü (cihazda)}, #1,
+}
+
+% CPU'da / yapısal olarak doğrulanmış, ama Orin'de henüz alınmamış.
+\newtcolorbox{yapisal}[1][]{
+  enhanced, breakable, colback=white, colframe=grimetin,
+  boxrule=0.5pt, left=2mm, right=2mm, top=1mm, bottom=1mm,
+  fonttitle=\sffamily\bfseries, coltitle=white,
+  colbacktitle=grimetin, title={CPU'da, yapısal}, #1,
+}
+
+% Henüz ölçülmemiş -- rapor tamamlanmadan doldurulması gereken yer.
+\newtcolorbox{eksik}[1][]{
+  enhanced, breakable, colback=vurgu!8, colframe=vurgu,
+  boxrule=0.6pt, left=2mm, right=2mm, top=1mm, bottom=1mm,
+  fonttitle=\sffamily\bfseries, coltitle=white,
+  colbacktitle=vurgu, title={TODO -- cihazda ölçülüp doldurulacak}, #1,
+}
+
+% Görsel/figür yer tutucusu: kullanıcı kendi görselini yerel olarak
+% ekleyecek, bu kutu onun yerini işaretler ve derlemeyi hiçbir zaman
+% bozmaz (eksik bir \includegraphics dosyası derleme hatası verirdi).
+\newcommand{\gorselyertutucu}[2][0.85\linewidth]{%
+  \begin{center}
+  \fbox{\begin{minipage}{#1}
+    \centering\vspace{2.2cm}
+    {\sffamily\bfseries\color{grimetin} GÖRSEL BURAYA}\\[2mm]
+    {\small\color{grimetin} #2}
+    \vspace{2.2cm}
+  \end{minipage}}
+  \end{center}
+}
+
+% ---- Bağlantılar, referanslar ------------------------------------------------
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=anarenk,
+  citecolor=yesilvurgu,
+  urlcolor=vurgu,
+  pdftitle={EdgeTAM'ın Jetson AGX Orin Üzerinde TensorRT ile Hızlandırılması},
+  pdfauthor={Yiğit Kaya Bağcı},
+}
+% english: cleveref'in kendi dahili Türkçe ad tablosu polyglossia'nın
+% Türkçe büyük/küçük harf kurallarıyla (noktasız ı / noktalı İ) çakışıp
+% \begin{document}'te "Undefined control sequence" hatası veriyordu --
+% bilinen bir cleveref+polyglossia-turkish etkileşim sorunu. english
+% seçeneği cleveref'in dahili tablosunu devre dışı bırakır; görünen adlar
+% zaten aşağıdaki \crefname tanımlarından geliyor.
+\usepackage[capitalize, nameinlink, english]{cleveref}
+\crefname{table}{Tablo}{Tablolar}
+\Crefname{table}{Tablo}{Tablolar}
+\crefname{figure}{Şekil}{Şekiller}
+\Crefname{figure}{Şekil}{Şekiller}
+\crefname{chapter}{Bölüm}{Bölümler}
+\Crefname{chapter}{Bölüm}{Bölümler}
+\crefname{section}{Bölüm}{Bölümler}
+\Crefname{section}{Bölüm}{Bölümler}
+
+% ---- Kaynakça -----------------------------------------------------------------
+\usepackage[
+  backend=biber,
+  style=numeric,
+  sorting=none,
+  giveninits=true,
+]{biblatex}
+\addbibresource{kaynaklar.bib}
+
+% ---- Matematik ------------------------------------------------------------
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% \theauthor / \thedate: \title, \author, \date içeriğine \maketitle
+% dışında da erişim (özel başlık sayfası için).
+\usepackage{titling}
+
+% ---- Üstbilgi/altbilgi ------------------------------------------------------
+\usepackage[automark]{scrlayer-scrpage}
+\pagestyle{scrheadings}
+\clearpairofpagestyles
+\ihead{\headmark}
+\ohead{\thepage}
+\ifoot{}
+\ofoot{EdgeTAM / TensorRT -- Jetson AGX Orin}

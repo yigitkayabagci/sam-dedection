@@ -1,0 +1,78 @@
+% ============================================================================
+% main.tex -- EdgeTAM'ın Jetson AGX Orin üzerinde TensorRT ile hızlandırılması
+%
+% Derleme (XeLaTeX + biblatex/biber gerektirir):
+%   latexmk -xelatex main.tex
+% veya elle:
+%   xelatex main.tex && biber main && xelatex main.tex && xelatex main.tex
+%
+% Ayrıntılı kurulum talimatları: report/README.md
+% ============================================================================
+\documentclass{scrreprt}
+\input{preamble}
+
+\title{EdgeTAM'ın Jetson AGX Orin Üzerinde\\TensorRT ile Hızlandırılması}
+\subtitle{fp16 Hassasiyette Dört Motorlu Bir Çıkarım Hattı}
+\author{Yiğit Kaya Bağcı}
+% \today, polyglossia'nın turkish modülüyle bile bu sınıf/paket
+% kombinasyonunda İngilizce ay adı üretiyordu (biblatex'in kendi
+% \today kullanımı doğru Türkçeleşiyor, ama titling paketinin
+% \thedate'i öyle değil) -- bu yüzden tarih burada elle yazılıyor.
+% Yeniden derlerken güncellemek için bu satırı değiştirin.
+\date{5 Ağustos 2026}
+
+\begin{document}
+
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\sffamily\bfseries\Huge\color{anarenk} EdgeTAM'ın Jetson AGX Orin\\[2mm]
+   Üzerinde TensorRT ile Hızlandırılması\par}
+  \vspace{0.6cm}
+  {\sffamily\Large\color{grimetin} fp16 Hassasiyette Dört Motorlu\\
+   Bir Çıkarım Hattı\par}
+  \vspace{2cm}
+  {\large \theauthor \par}
+  \vspace{0.3cm}
+  {\large \thedate \par}
+  \vfill
+  \begin{center}
+    \begin{tikzpicture}[
+        every node/.style={font=\sffamily\small, align=center, minimum height=8mm},
+        blok/.style={draw=anarenk, thick, rounded corners=1.5pt, fill=acikgri!45,
+                     minimum width=25mm, text width=20mm},
+        ok/.style={-{Latex[length=2mm]}, anarenk, thick},
+      ]
+      \node[blok] (enc) {Görüntü\\Kodlayıcı};
+      \node[blok, right=8mm of enc] (att) {Bellek\\Dikkati};
+      \node[blok, right=8mm of att] (head) {SAM\\Başlığı};
+      \node[blok, below=6mm of att] (mem) {Bellek\\Kodlayıcı};
+      \draw[ok] (enc) -- (att);
+      \draw[ok] (att) -- (head);
+      \draw[ok] (head.south) -- ++(0,-3mm) -| (mem.east);
+      \draw[ok] (mem.west) -| ++(-3mm,6mm) -- (att.south);
+    \end{tikzpicture}
+  \end{center}
+  \vspace{1cm}
+  {\small\color{grimetin} Dört TensorRT motoru, fp16, CUDA Graph tekrar oynatma\par}
+\end{titlepage}
+
+\pagenumbering{roman}
+\addchap{Özet}
+\input{bolumler/ozet}
+
+\tableofcontents
+
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+\input{bolumler/giris}
+\input{bolumler/arka_plan}
+\input{bolumler/sistem_yontem}
+\input{bolumler/deneyler}
+\input{bolumler/gelecek_calismalar}
+\input{bolumler/sonuc}
+
+\printbibliography[title={Kaynakça}]
+
+\end{document}

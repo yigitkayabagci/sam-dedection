@@ -1,0 +1,32 @@
+EdgeTAM, SAM 2'nin video nesne takibi görevini kenar (edge) cihazlarda
+gerçek zamanlı çalıştırabilmek için hafıza dikkat (memory attention)
+modülünü bir 2D Uzamsal Perceiver ile sıkıştıran bir mimaridir. Bu
+çalışma, EdgeTAM'ın kontrol noktasını (checkpoint) NVIDIA Jetson AGX Orin
+üzerinde çalışan, kare başına dört ayrı TensorRT motoruna (görüntü
+kodlayıcı, bellek dikkati, bellek kodlayıcı, SAM başlığı) fp16
+hassasiyetinde ve CUDA Graph tekrar oynatmasıyla taşımaktadır.
+
+Başlangıç varsayımı -- zamanın çoğunun görüntü kodlayıcıda geçtiği --
+ölçümle çürütülmüştür: kare başına işlem yükünün (FLOP) \%61,9'u bellek
+dikkatinde, yalnızca \%26,8'i görüntü kodlayıcıdadır. Bu nedenle
+çalışmanın kapsamı tek bir modülü değil, EdgeTAM'ın Python durum takibiyle
+(bellek bankası \texttt{dict}'i) ayrıştığı dört sınırı kapsayacak şekilde
+genişletilmiştir.
+
+Cihaz üzerinde ölçülen sonuçlar: uçtan uca çıkarım hızı stok PyTorch'ta
+88,30~ms/kare iken TensorRT + CUDA Graph ile 26,40~ms/kareye
+inmiş (\textbf{3,34×} hızlanma, 37,88~FPS), kuyruk gecikmesi
+(p99)~39,90~ms ile 40~ms hedefinin altında kalmıştır. 500 karelik bir
+klip boyunca fp16 motorlarının maskeleri fp32 referansına karşı
+\textbf{0,9993} ortalama IoU ile eşleşmiş ve hata klip boyunca
+birikmemiştir (−0,0012 IoU/1000 kare eğilim). Ayrıca ön-işleme
+adımının (kare boyutlandırma, normalize etme) gözden kaçırılmaması
+gerektiği; ölçülmediğinde 1024 çözünürlükte modelin kendisi kadar maliyetli
+olabildiği, doğru şekilde yeniden yazıldığında ise 4--5× ucuzlatılabildiği
+gösterilmiştir.
+
+Rapor; SAM'den SAM~2'ye ve EdgeTAM'a mimari evrimi, dört motorluk ayrışma
+kararının gerekçesini, ölçüm metodolojisini (hangi aracın gerçekte neyi
+ölçtüğü) ve cihaz üzerinde alınan tüm sonuçları kapsar. INT8 nicemleme ile
+NVIDIA TensorRT Model Optimizer kullanımı ve ham görüntülerin Ethernet
+üzerinden gerçek zamanlı işlenmesi gelecek çalışma olarak bırakılmıştır.

@@ -1,0 +1,102 @@
+\chapter{Gelecek Çalışmalar}
+\label{ch:gelecek-calismalar}
+
+Bu bölüm, kapsam dışı bırakılan ama üzerinde düşünülmüş iki konuyu ele
+alır: gerçek INT8 nicemleme ve ham görüntülerin bir ağ bağlantısı
+üzerinden gerçek zamanlı işlenmesi. İkisi de ``denenmedi'' olarak
+işaretlenmiştir -- aşağıdaki hiçbir sayı bir ölçüm değil, bir plandır.
+
+\section{Gerçek INT8 Nicemleme: NVIDIA TensorRT Model Optimizer}
+\label{sec:int8-gelecek}
+
+\Cref{sec:hassasiyet}'te sunulan INT8 sonuçları PyTorch içinde bir
+\textbf{simülasyondur}: her katmanın çıktısı 8 bitlik bir ızgaraya
+yuvarlanıp geri float'a çevrilir, yalnızca etkinleşimler üzerinde --
+ağırlıklara dokunulmaz ve hiçbir TensorRT motoru derlenmez. Bu, INT8'in
+vereceği zararın bir \textbf{alt sınırını} verir, bir tahmini değil.
+
+\textbf{Planlanan, henüz başlanmadı: NVIDIA TensorRT Model
+Optimizer}~\cite{nvidia2024modelopt} (\texttt{nvidia-modelopt}, eski adıyla
+AMMO). TensorRT'in doğrudan gerçek INT8 çekirdeklerine derleyebileceği bir
+ağ üretmek için NVIDIA'nın PyTorch tarafı PTQ/QAT aracı. Mekanik olarak:
+
+\begin{enumerate}
+  \item Her \texttt{nn.Linear} / \texttt{nn.Conv2d} vb.\ katmanı sahte-nicemleme
+        Q/DQ düğümleriyle sarmalar -- \textbf{ağırlıklar dahil}, kanal
+        başına;
+  \item her Q düğümünün ölçeğini, temsili girdi üzerinden kısa bir
+        geçişle (maks / entropi / yüzdelik dilim kalibratörleri)
+        \textbf{kalibre eder};
+  \item kalibre edilmiş modeli Q/DQ düğümleri gömülü halde ONNX'e aktarır;
+        TensorRT'in ayrıştırıcısı bu düğümleri doğrudan tanır (``açık
+        nicemleme'') ve etraflarına yerel INT8 çekirdekleri derler;
+  \item isteğe bağlı QAT: yalnızca PTQ yetersizse Q/DQ etkinken ince ayar
+        yapılır.
+\end{enumerate}
+
+\textbf{Durum: başlanmadı.} \texttt{pip install nvidia-modelopt}, bir
+kalibrasyon veri kümesi, bir Q/DQ ONNX'e aktarım, yeni motor derlemeleri
+ve bunlar hazır olduğunda bir \texttt{check\_trt\_parity.py} /
+\texttt{compare\_backends.py} koşusu gerektirir.
+
+\section{Ham Görüntülerin Ethernet Üzerinden Gerçek Zamanlı İşlenmesi}
+\label{sec:ethernet-gelecek}
+
+\Cref{sec:read-disarida}'da belirtildiği gibi, bu raporda alıntılanan
+kare bütçesi \textbf{kare zaten bellekteyken} tracker'ın maliyetidir --
+``model yeterince hızlı mı'' sorusunun doğru cevabıdır, ama henüz
+\textbf{ölçülmüş bir uçtan uca dağıtım rakamı değildir}. Hedeflenen
+kurulumda kareler bir kamera/ağ bağlantısından Orin'e Ethernet ile
+gelecektir; bu bağlantı henüz kurulmadığı için hariç tutulan
+\textasciitilde35~ms'lik dosya-çözme maliyetinin yerine gerçekte neyin
+geçeceği bir ölçüm değil bir tahmindir:
+
+\begin{table}[H]
+  \centering
+  \caption{Hariç tutulan maliyetin yerine geçmesi beklenen (ölçülmedi).}
+  \begin{tabular}{ll}
+    \toprule
+    Kareler nasıl gelirse & 34~ms'in yerine geçen \\
+    \midrule
+    Ham, bellekte & $\sim$0,001~ms (arabelleği sarmalama) / 1,4~ms (bir kez kopyalama) \\
+    Sıkıştırılmış & bir çözme -- libtiff'ten ucuz ama sıfır değil \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Seçim serbest değildir: 2048×1536, 16 bitte kare başına 6,3~MB'dir; 30
+FPS ham veri \textasciitilde1,5~Gbit/s gerektirir -- 1~GbE'nin
+taşıyabileceğinden fazla. Ya bağlantı 10~GbE olmalı, ya kareler
+sıkıştırılmalı, ya da her karenin daha azı gönderilmelidir (bu,
+\cref{sec:gercek-kayitlar}'daki \texttt{crop512} için ikinci bir
+gerekçedir: model kadar telin üzerinden geçmesi gerekeni de küçültür).
+Sıkıştırma seçilirse, Orin'in donanımsal NVJPG çözücüsü bu maliyeti
+CPU'dan alabilir -- ama bu da ölçülmesi gereken bir şeydir, varsayılacak
+değil.
+
+\textbf{Planlanan sonraki adım.} Ethernet bağlantısı kurulduğunda,
+soketten kareyi alıp modele verene kadar geçen süreyi
+\cref{sec:olcum-yontemi}'deki aynı disiplinle (ölçülür, raporlanır,
+gerekiyorsa ayrı kategoriye konur) ölçmek, ve bu sayıyı
+\cref{sec:uctan-uca-verim}'deki bütçeye ekleyerek gerçek uçtan uca
+rakamı elde etmek.
+
+\section{Diğer Açık Sorular}
+
+\begin{itemize}
+  \item \textbf{\texttt{--opt-level 5} bellek dikkatine yardımcı olur
+        mu?} Bellek dikkati FLOP'ların \%61,9'udur ve dört motor
+        arasında en düşük hızlanmaya (1,85×) sahiptir
+        (\cref{sec:motor-dogruluk-hiz}). Yalnızca o motoru bu seviyeyle
+        yeniden derlemek, TensorRT'in daha agresif bir arama
+        yapıp yapmadığını gösterir.
+  \item \textbf{Tek motora birleştirme yeniden değerlendirilmeli mi?}
+        \Cref{sec:fuzyon-karari}'de ölçülen 0,217~ms'lik başlatma
+        boşluğu şu an eşiğin altındadır; bu, mimari değişmediği sürece
+        sabit bir sonuçtur, ama farklı bir donanımda ya da motor
+        sayısı arttığında yeniden ölçülmeye değer.
+  \item \textbf{Gerçek kayıtlarda kırpma hedefi kaybediyor mu?}
+        \Cref{sec:gercek-kayitlar}'daki \texttt{crop512} videoları
+        izlenerek, IoU'ya değil gözle görülür başarısızlığa
+        bakılmalıdır.
+\end{itemize}
