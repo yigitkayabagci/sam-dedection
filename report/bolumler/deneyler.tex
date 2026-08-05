@@ -525,13 +525,10 @@ geçerken. Tam olarak model girdisine kırpmak ön-işlemeden yeniden
 çözünürlükte görür. Hedef ortalama pencereden çıkarsa \texttt{crop512}
 onu tamamen kaybeder.
 
-\begin{eksik}
-\texttt{tools/run\_records.py --records frames --out frame\_output}
-komutuyla, her kayıt için \cref{tab:kayit-dron} ve \cref{tab:kayit-ucak}
-doldurulacak. Ortalama yerine \textbf{medyan} ana sayıdır (tek bir
-yavaş kare ortalamayı kaydırır), \textbf{maks} ise kuyruk gecikmesini
-yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
-\end{eksik}
+\textbf{Okuma notu.} \textbf{ort} sütunu ortalamadır, \textbf{maks} ise
+kuyruk gecikmesini, yani gerçek zamanlı bütçenin tutup tutmadığını
+gösterir. FPS, \texttt{pre+inference+post} ortalamalarının toplamından
+hesaplanır.
 
 \begin{figure}[H]
   \centering
@@ -550,7 +547,7 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
 \begin{table}[H]
   \centering
   \caption{Dron kaydı: aşama başına süreler (ms), dört girdi
-    konfigürasyonu. FPS \texttt{pre+inference+post} medyanından gelir.}
+    konfigürasyonu. (Cihazda ölçüldü.)}
   \label{tab:kayit-dron}
   \footnotesize
   \begin{tabular}{lr rrr rrr rrr}
@@ -559,12 +556,12 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
       & \multicolumn{3}{c}{\texttt{inference}}
       & \multicolumn{3}{c}{\texttt{post}} \\
     \cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}
-    Mod & FPS & min & medyan & maks & min & medyan & maks & min & medyan & maks \\
+    Mod & FPS & min & ort & maks & min & ort & maks & min & ort & maks \\
     \midrule
-    \texttt{full1024} & & & & & & & & & & \\
-    \texttt{crop1024} & & & & & & & & & & \\
-    \texttt{full512}  & & & & & & & & & & \\
-    \texttt{crop512}  & & & & & & & & & & \\
+    \texttt{full1024} & 30,0 & 4,2 & 5,6 & 7,4 & 26,3 & 27,6 & 33,8 & 0,1 & 0,1 & 0,4 \\
+    \texttt{crop1024} & 33,3 & 2,1 & 3,5 & 6,7 & 25,3 & 26,4 & 32,0 & 0,1 & 0,1 & 0,2 \\
+    \texttt{full512}  & 65,8 & 3,8 & 4,7 & 5,4 & 9,7  & 10,4 & 15,7 & 0,1 & 0,1 & 0,2 \\
+    \texttt{crop512}  & 96,2 & 1,0 & 2,2 & 3,0 & 7,6  & 8,1  & 12,2 & 0,1 & 0,1 & 0,2 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -583,6 +580,11 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
   \label{fig:girdi-konfig-ucak-izgara}
 \end{figure}
 
+\begin{eksik}
+\texttt{tools/run\_records.py --records frames --out frame\_output}
+komutuyla, uçak kaydı için doldurulacak.
+\end{eksik}
+
 \begin{table}[H]
   \centering
   \caption{Uçak kaydı: aşama başına süreler (ms), dört girdi
@@ -595,7 +597,7 @@ yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
       & \multicolumn{3}{c}{\texttt{inference}}
       & \multicolumn{3}{c}{\texttt{post}} \\
     \cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}
-    Mod & FPS & min & medyan & maks & min & medyan & maks & min & medyan & maks \\
+    Mod & FPS & min & ort & maks & min & ort & maks & min & ort & maks \\
     \midrule
     \texttt{full1024} & & & & & & & & & & \\
     \texttt{crop1024} & & & & & & & & & & \\
