@@ -433,21 +433,55 @@ onu tamamen kaybeder.
 
 \begin{eksik}
 \texttt{tools/run\_records.py --records frames --out frame\_output}
-komutuyla, her kayıt için doldurulacak:
-
-\begin{center}
-\begin{tabular}{lrrrr}
-  \toprule
-  Mod & FPS & \texttt{pre} & \texttt{inference} & \texttt{post} \\
-  \midrule
-  \texttt{full1024} & & & & \\
-  \texttt{crop1024} & & & & \\
-  \texttt{full512} & & & & \\
-  \texttt{crop512} & & & & \\
-  \bottomrule
-\end{tabular}
-\end{center}
+komutuyla, her kayıt için \cref{tab:kayit-dron} ve \cref{tab:kayit-ucak}
+doldurulacak. Ortalama yerine \textbf{medyan} ana sayıdır (tek bir
+yavaş kare ortalamayı kaydırır), \textbf{maks} ise kuyruk gecikmesini
+yani gerçek zamanlı bütçenin tutup tutmadığını gösterir.
 \end{eksik}
+
+\begin{table}[H]
+  \centering
+  \caption{Dron kaydı: aşama başına süreler (ms), dört girdi
+    konfigürasyonu. FPS \texttt{pre+inference+post} medyanından gelir.}
+  \label{tab:kayit-dron}
+  \footnotesize
+  \begin{tabular}{lr rrr rrr rrr}
+    \toprule
+    & & \multicolumn{3}{c}{\texttt{pre}}
+      & \multicolumn{3}{c}{\texttt{inference}}
+      & \multicolumn{3}{c}{\texttt{post}} \\
+    \cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}
+    Mod & FPS & min & medyan & maks & min & medyan & maks & min & medyan & maks \\
+    \midrule
+    \texttt{full1024} & & & & & & & & & & \\
+    \texttt{crop1024} & & & & & & & & & & \\
+    \texttt{full512}  & & & & & & & & & & \\
+    \texttt{crop512}  & & & & & & & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Uçak kaydı: aşama başına süreler (ms), dört girdi
+    konfigürasyonu.}
+  \label{tab:kayit-ucak}
+  \footnotesize
+  \begin{tabular}{lr rrr rrr rrr}
+    \toprule
+    & & \multicolumn{3}{c}{\texttt{pre}}
+      & \multicolumn{3}{c}{\texttt{inference}}
+      & \multicolumn{3}{c}{\texttt{post}} \\
+    \cmidrule(lr){3-5}\cmidrule(lr){6-8}\cmidrule(lr){9-11}
+    Mod & FPS & min & medyan & maks & min & medyan & maks & min & medyan & maks \\
+    \midrule
+    \texttt{full1024} & & & & & & & & & & \\
+    \texttt{crop1024} & & & & & & & & & & \\
+    \texttt{full512}  & & & & & & & & & & \\
+    \texttt{crop512}  & & & & & & & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 Aynı anın dört girdi konfigürasyonunda nasıl göründüğünü karşılaştırmak
 için \cref{fig:girdi-konfig-dron} ve \cref{fig:girdi-konfig-ucak}

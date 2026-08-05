@@ -3,54 +3,80 @@
 
 \section{Problem}
 
-Video nesne takibi ve segmentasyonu, bir nesneyi bir kez işaretleyip
-video boyunca otomatik olarak takip ettirmektir. Güvenlik, robotik ve
-endüstriyel görü uygulamalarının ortak alt problemidir. Meta'nın
-\emph{Segment Anything Model 2} (SAM~2)~\cite{ravi2024sam2} bu görevi
-yüksek doğrulukla çözmüştür, ancak sunucu sınıfı bir GPU dışında
-pratik değildir; kenar cihazlarda saniyede tek kareye kadar
-düşebilmektedir. \emph{EdgeTAM}~\cite{zhou2025edgetam}, SAM~2'nin bellek
-mekanizmasını yeniden tasarlayarak bu maliyeti telefon sınıfı donanımda
-gerçek zamanlıya (iPhone 15 Pro Max'te 16~FPS) indiren mimaridir.
-Ayrıntıları \cref{ch:arka-plan}'da ele alınmaktadır.
+Nesne takibi görevlerinde Meta'nın \emph{Segment Anything Model 2}
+(SAM~2)~\cite{ravi2024sam2} yüksek doğruluk verir, ancak sunucu sınıfı
+bir GPU dışında pratik değildir; edge cihazlarda saniyede tek kareye
+kadar düşebilmektedir. \emph{EdgeTAM}~\cite{zhou2025edgetam}, SAM~2'nin
+memory mekanizmasını yeniden tasarlayarak bu maliyeti telefon sınıfı
+donanımda gerçek zamanlıya (iPhone 15 Pro Max'te 16~FPS) indirir.
+
+İki modeli ayıran şey bir doğruluk-hız takasıdır:
+\cref{fig:sam2-edgetam-takas}, EdgeTAM'ın SAM~2'ye yakın doğruluğu çok
+daha yüksek bir kare hızında verdiğini gösterir. Bu çalışmanın
+başlangıç noktası da budur: doğruluğu zaten kabul edilebilir olan bir
+mimariyi alıp hedef donanımda gerçekten o hızda çalıştırmak.
+
+\begin{figure}[H]
+  \centering
+  \gorselyertutucu{EdgeTAM makalesinden~\cite{zhou2025edgetam} alınan
+    doğruluk-hız takası grafiği: SAM~2 ve EdgeTAM varyantlarının
+    kare hızına karşı segmentasyon doğruluğu}
+  \caption{SAM~2 ve EdgeTAM arasındaki doğruluk-hız takası.}
+  \label{fig:sam2-edgetam-takas}
+\end{figure}
 
 Bu çalışmanın konusu EdgeTAM'ın kendisini değiştirmek değil, onun
-kontrol noktasını (checkpoint) \textbf{NVIDIA Jetson AGX Orin} üzerinde
-TensorRT ile gerçek zamanlı çalışacak şekilde dağıtmaktır. Başlangıçta
-yalnızca image encoder TensorRT'e taşınmıştı. Genellikle ilk
-hızlandırılan modül budur, çünkü tek bir sabit girdi/çıktı şekline
-sahip, durumsuz, saf ileri beslemeli bir evrişim yığınıdır ve hiçbir
-yeniden yazım gerektirmeden tek seferde ONNX'e aktarılır. Geri kalan üç
-modül ise PyTorch'ta kalmıştı.
+eğitilmiş kontrol noktasını (checkpoint) \textbf{NVIDIA Jetson AGX
+Orin} üzerinde TensorRT ile gerçek zamanlı çalışacak hale getirmektir.
+Hedef tek cümleyle: doğruluktan ödün vermeden kare başına \textbf{40~ms}
+(en az 25~FPS) bütçesinin altına inmek.
 
-\section{Amaç}
+Başlangıç durumu, bu tür bir hızlandırmanın tipik ilk adımıydı:
+yalnızca image encoder TensorRT'e taşınmış, diğer üç modül PyTorch'ta
+kalmıştı. İlk taşınan modülün image encoder olması tesadüf değildir,
+çünkü TensorRT'in istediği her özelliğe sahiptir: tek bir sabit
+girdi/çıktı şekli, çağrılar arasında saklanan hiçbir durum ve veriye
+bağlı hiçbir dallanma. Bu haliyle hiçbir yeniden yazım gerektirmeden
+tek seferde ONNX'e aktarılır. Diğer üç modülde bu özelliklerin neden
+bulunmadığı ve bunun nasıl çözüldüğü \cref{ch:sistem-yontem}'in
+konusudur.
 
-Hedef üç parçalıdır:
+\section{Başlangıç Varsayımı ve Neden Yanlış Çıktığı}
 
-\begin{enumerate}
-  \item \textbf{Kare başına 40~ms} bütçesi, yani en az 25~FPS, gerçek
-        zamanlı bir uygulamanın kabul edebileceği bir alt sınırdır;
-  \item bunu \textbf{doğruluktan ödün vermeden} yapmak, yani fp16/motor
-        geçişinin ürettiği maskelerin fp32 PyTorch referansından
-        ölçülebilir şekilde sapmaması;
-  \item ve bunu \textbf{iddia ederek değil ölçerek} kanıtlamak, yani bu
-        raporun her sayısının cihaz üzerinde alınmış bir ölçüm olması
-        ya da öyle olmadığının açıkça belirtilmesi
-        (\cref{sec:olcum-yontemi}).
-\end{enumerate}
+Yalnızca image encoder'ın hızlandırılmış olması, yaygın bir varsayımın
+sonucudur: en çok parametreyi taşıyan modül, zamanın çoğunu da harcıyor
+olmalıdır. SAM~2 üzerinde bu varsayımla çalışan önceki işler, daha
+küçük ve verimli bir image encoder tasarlamaya yoğunlaşmıştır. Sonuç
+şuna benzer: motoru güçlendirilmiş bir araba, ama trafikte beklediği
+için yine yavaş. Buradaki trafik memory attention'dır; geçerli kareyi
+hafızadaki tüm geçmiş karelerle karşılaştırma maliyeti, encoder ne
+kadar hızlanırsa hızlansın yerinde durur.
 
-\subsection{Başlangıç varsayımı, ve neden yanlış çıktığı}
+Bu çalışma varsayımı devralmak yerine ölçmüştür
+(\cref{sec:flop-dagilimi}): kare başına işlem yükünün (FLOP)
+\textbf{\%61,9}'u memory attention modülünde, yalnızca \textbf{\%26,8}'i
+image encoder'dadır. EdgeTAM makalesi de aynı noktayı vurgular; memory
+attention blokları bir gecikme darboğazıdır ve yalnızca image encoder'ı
+küçültmek beklenen hızlanmayı getirmez.
 
-``Zamanın çoğu image encoder'da geçiyordur'' varsayımı, bu çalışmanın
-ilk deneyiyle (\cref{sec:flop-dagilimi}) test edilmiş ve çürütülmüştür:
-kare başına işlem yükünün (FLOP) \%61,9'u \emph{memory attention}
-modülündedir, image encoder yalnızca \%26,8'ini oluşturur. Bu,
-EdgeTAM~\cite{zhou2025edgetam} makalesinin kendisinin de vurguladığı bir
-noktayla örtüşür: makale, memory attention bloklarının da gecikme
-darboğazı olduğunu ve yalnızca image encoder'ı küçültmenin beklenen
-hızlanmayı getirmediğini belirtir. Bu bulgu, çalışmanın kapsamını tek
-bir modülden EdgeTAM'ın \textbf{dört} ana hesaplama bloğunun tamamına
-genişletmiştir.
+\textbf{Neden bu ölçüm doğru sorunun cevabıdır.} Ölçülen şey süre
+değil, FLOP'tur: gerçek kontrol noktası üzerinde, gerçek 1024×1024
+girdi çözünürlüğünde, her modülün bir kare için yaptığı
+çarpma-toplama sayısı (\texttt{tools/analyze\_cost.py}, PyTorch'un
+kendi FLOP sayacıyla, CPU üzerinde). Bu tercih bilinçlidir. O aşamada
+image encoder zaten TensorRT'te, diğer üç modül PyTorch'ta çalışıyordu;
+kronometreyle yapılacak bir ölçüm büyük ölçüde \emph{hangi modülün
+hangi arka uçta olduğunu} yansıtırdı, hesabın gerçekte nerede
+yoğunlaştığını değil. Yani zaten hızlandırılmış modülün hızlı çıkması
+kaçınılmazdı ve bu, hangi modülü hızlandırmaya değeceği sorusunu
+cevaplamazdı. FLOP ise donanımdan, saat hızından, TensorRT sürümünden
+ve arka uç seçiminden bağımsızdır; mimarinin talep ettiği aritmetiği
+verir, dolayısıyla herhangi bir arka uçtan istenebilecek işin üst
+sınırıdır. Bu sayede soru, hızlandırma çalışmasına başlamadan
+\emph{önce} cevaplanabilmiştir.
+
+Bu bulgu, çalışmanın kapsamını tek bir modülden EdgeTAM'ın
+\textbf{dört} ana hesaplama bloğunun tamamına genişletmiştir.
 
 \section{Katkılar}
 
@@ -67,22 +93,9 @@ Bu rapor şu katkıları belgelemektedir:
         kazandıracağı sürenin doğrudan ölçülüp değmeyeceğine karar
         verilmesi (\cref{sec:fuzyon-karari});
   \item fp16'nın bf16'ya karşı hem doğruluk hem TensorRT desteği
-        açısından üstün olduğunun, ve INT8'in hangi modülde neden
-        başarısız olduğunun ölçülmesi (\cref{sec:hassasiyet});
-  \item bir ölçüm metodolojisi: ``kare süresi'' ifadesinin beş farklı
-        araçta beş farklı şeyi ölçtüğünün tespit edilip düzeltilmesi,
-        ve ön-işlemenin, özellikle dosyadan okuma/çözme adımının,
-        gerçek zamanlı bütçeye dahil edilip edilmemesi gerektiğinin
-        net bir kuralla ayrılması (\cref{sec:olcum-yontemi}).
+        açısından üstün olduğunun ölçülmesi (\cref{sec:hassasiyet});
+        INT8 bu raporda motor olarak kapsam dışıdır ve
+        \cref{sec:int8-gelecek}'te gelecek çalışma olarak ele alınır;
+  \item her sayının hangi araçtan geldiğini sabitleyen bir ölçüm
+        metodolojisi (\cref{sec:olcum-yontemi}).
 \end{itemize}
-
-\section{Raporun Yapısı}
-
-\Cref{ch:arka-plan}, SAM'den SAM~2'ye ve EdgeTAM'a mimari evrimi ve bu
-evrimin arkasındaki token matematiğini anlatır. \Cref{ch:sistem-yontem},
-bu projede EdgeTAM'ın nasıl dört TensorRT motoruna dönüştürüldüğünü ve
-ölçüm metodolojisini açıklar. \Cref{ch:deneyler}, cihaz üzerinde alınan
-doğruluk, hız, CUDA Graph katkısı, çözünürlük ve ön-işleme analizi gibi
-tüm sonuçları sunar. \Cref{ch:gelecek-calismalar}, kapsam dışı bırakılan
-gerçek INT8 nicemlemeyi ve tek motora birleştirme sorusunu gelecek
-çalışma olarak ele alır.
