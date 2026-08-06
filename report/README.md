@@ -31,7 +31,7 @@ make
 
 Bu, `latexmk -xelatex` çalıştırır -- XeLaTeX, biber ve gereken kadar
 tekrar geçişi otomatik sırayla yapar. Çıktı: `report/main.pdf`
-(27 sayfa, boş bir `report/` klasöründen test edilmiştir).
+(boş bir `report/` klasöründen test edilmiştir).
 
 Elle derlemek isterseniz:
 ```bash
@@ -64,20 +64,15 @@ report/
 
 ## Renkli kutuların anlamı
 
-Deneyler bölümünde her sonuç üç kutudan biriyle işaretlidir:
+Deneyler bölümünde her sonuç iki kutudan biriyle işaretlidir:
 
 - **Mavi (Ölçüldü, cihazda)**: Jetson AGX Orin'de gerçek bir koşudan,
   alıntılanabilir.
 - **Gri (CPU'da, yapısal)**: CUDA'sız bir makinede ölçülmüş; bir
   ilişkinin var olduğunu kanıtlar, cihazdaki mutlak maliyeti değil.
-- **Turuncu (TODO)**: Araç hazır, cihazda henüz çalıştırılmamış. İçindeki
-  komutu çalıştırıp tabloyu siz dolduracaksınız -- bu değerler kasıtlı
-  olarak boş bırakıldı, uydurulmadı.
 
-`docs/EXPERIMENT_LOG.md`'de "on-device results pending" diye işaretli
-deneylerden §4.9 çözünürlük karşılaştırması raporda hâlâ turuncu kutu
-olarak duruyor. İlgili komutu Orin'de çalıştırıp çıktıyı ilgili tabloya
-işleyin.
+Rapordaki tüm sayılar bu iki kategoriden birine girer; bekleyen (TODO)
+bir ölçüm kalmamıştır.
 
 ## Görsel eklemek
 

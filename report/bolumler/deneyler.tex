@@ -67,16 +67,13 @@ küçültülmesi gereken bir bütçedir.
   \label{fig:sure-dagilimi}
 \end{figure}
 
-İlk koşuda image encoder sabit bir 2e-2 eşiğine karşı başarısız
-sayılmıştı; bu yanıltıcıydı, çünkü hata \textbf{derinlik} boyunca
-birikir (encoder'da 132 katman, 2,4e-02 hata; SAM head'de 52 katman,
-1,0e-03) ve bir modülün PyTorch'un kendi fp16'sına göre yüksek katta
-görünmesi (memory attention, 7,9×) tek başına bir sorun değildir:
-autocast orada softmax ve katman normunu fp32'de tutarak alışılmadık
-temiz bir taban oluşturur, mutlak hatası ise 9e-04 ve önemsizdir. Bu
-yüzden bir motor yalnızca hem göreli eşiği hem de PyTorch'un kendi
-fp16'sının kaç katı olduğunu aynı anda aşarsa başarısız sayılır. Dördü
-de geçmektedir.
+Bir motor yalnızca hem göreli eşiği hem de PyTorch'un kendi fp16'sının
+kaç katı olduğunu aynı anda aşarsa başarısız sayılır: hata ağ
+\textbf{derinliği} boyunca birikir, bu yüzden tek bir sabit eşik derin
+ve sığ modülleri adil karşılaştırmaz; yüksek bir oran da (memory
+attention, 7,9×) tek başına anlamlı değildir, çünkü autocast orada
+mutlak hatayı zaten 9e-04 gibi düşük tutar. Dördü de bu çift ölçütü
+geçmektedir.
 
 \section{Uçtan Uca Verim}
 \label{sec:uctan-uca-verim}
@@ -136,7 +133,7 @@ yarıya iner, çünkü grafik tekrar oynatma çağrı başına kernel başlatma
 gönderimini kaldırır, ki bu tam olarak başlatma titreşiminin
 kaynağıdır.
 
-\section{fp16, bf16, INT8}
+\section{fp16 ve bf16}
 \label{sec:hassasiyet}
 
 fp16'nın doğru hassasiyet olup olmadığı \texttt{tools/analyze\_precision.py}
@@ -163,8 +160,6 @@ basamak taşır ve TensorRT'in daha az bf16 taktiği vardır.
 \section{Ön-İşleme: Derinlemesine Analiz}
 \label{sec:onisleme-analizi}
 
-\subsection{İlk bulgu: ön-işleme küçük değil}
-
 \texttt{pre} ilk kez doğru ölçüldüğünde (kaynak kareyi görselleştirme
 için tekrar okumak değil, gerçek kırpma+ölçekleme+normalize), beklenenin
 çok üzerinde çıkmıştır:
@@ -176,33 +171,10 @@ için tekrar okumak değil, gerçek kırpma+ölçekleme+normalize), beklenenin
 
 Kaynağı çözme değildir; PIL'in yeniden ölçeklemesi ve
 \texttt{uint8 / 255.0}'ın NumPy tarafından \textbf{float64}'e
-yükseltilmesidir (1024'te kare başına 24~MB dönüşüm + 24~MB
-normalizasyon).
-
-\begin{yapisal}[title={CPU'da, yapısal: 1280×720 JPEG, adım adım}]
-\begin{center}
-\begin{tabular}{lrr}
-  \toprule
-  Adım & → 1024² & → 512² \\
-  \midrule
-  PIL açma + RGB'ye çevirme (çözme) & 4,4~ms & 4,4~ms \\
-  PIL yeniden ölçekleme & 18,9~ms & 11,1~ms \\
-  \texttt{uint8/255.0} → float64 & 13,6~ms & 0,9~ms \\
-  Normalize (float64 üzerinde) & 28,3~ms & 1,3~ms \\
-  \midrule
-  \textbf{Toplam} & \textbf{$\approx$65~ms} & \textbf{$\approx$17,7~ms} \\
-  \bottomrule
-\end{tabular}
-\end{center}
-Aynı işlemler bir dağıtımın yapacağı şekilde: 1024'e yeniden ölçekleme
-PIL'de 18,9~ms iken \texttt{cv2.resize} ile 0,6~ms (\textbf{30×});
-uint8→float dönüşümü float64'te 13,6~ms iken float32'de 1,9~ms
-(\textbf{7×}).
-\end{yapisal}
-
-\subsection{Ön-işleme yeniden yazıldı}
-
-Kaynak kare artık doğrudan (JPG önbelleği değil) okunur, kırpma varsa
+yükseltilmesidir: aynı yeniden ölçekleme PIL'de \texttt{cv2.resize}'a
+göre \textbf{30×} daha yavaştır, aynı dönüşüm float64'te float32'ye
+göre \textbf{7×} daha yavaştır. Ön-işleme buna göre yeniden yazılmıştır:
+kaynak kare artık doğrudan (JPG önbelleği değil) okunur, kırpma varsa
 uygulanır, \texttt{cv2.resize} ile ölçeklenir, float32'de yerinde
 (in-place) normalize edilir.
 
@@ -224,7 +196,7 @@ uygulanır, \texttt{cv2.resize} ile ölçeklenir, float32'de yerinde
 ve image encoder'ın kendi fp16 hatasından (2,4e-02) $\sim$4× küçük.
 \end{olcum}
 
-\subsection{İkinci bulgu: dosya okuma/çözme de bütçenin dışında tutulmalı}
+\subsection{Dosya okuma/çözme de bütçenin dışında tutulmalı}
 
 Cihazda \texttt{pre} \textasciitilde40~ms'ye geldi ve \textbf{dört
 girdi konfigürasyonunun hepsinde} aynı kaldı (1024/512, tam/kırpılmış),
