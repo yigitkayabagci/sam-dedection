@@ -160,20 +160,8 @@ fp16 kazanır ve nedeni yapısaldır: Orin'de bf16 aynı tensör
 çekirdiklerini aynı hızda kullanırken 11 bite karşı 8 bit anlamlı
 basamak taşır ve TensorRT'in daha az bf16 taktiği vardır.
 
-INT8, modül bazında kalibrasyona duyarlıdır: memory encoder kırpma
-yanlılığını biriktirir (0,9397 ortalama IoU), image encoder ise
-min/maks kalibrasyonda çökerken yüzdelik dilim kırpma (0,9930) ya da
-füzyon-modellenmiş yerleştirme (0,9926) ile kurtarılabilir. Bu, gerçek
-bir kalibrasyon aracıyla INT8 motoru denemeyi (\cref{sec:int8-gelecek})
-değerli kılan bulgudur.
-
 \section{Ön-İşleme: Derinlemesine Analiz}
 \label{sec:onisleme-analizi}
-
-Bu bölüm, projede karşılaşılan ve düzeltilen bir ölçüm hatasının tam
-kaydıdır. Rapora dahil edilmesinin nedeni, ``kare süresi'' gibi basit
-görünen bir ifadenin ne kadar kolay yanlış ölçülebileceğini
-göstermesidir.
 
 \subsection{İlk bulgu: ön-işleme küçük değil}
 

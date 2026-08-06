@@ -8,16 +8,17 @@ tek motora birleştirmek.
 \section{Gerçek INT8 Nicemleme: NVIDIA TensorRT Model Optimizer}
 \label{sec:int8-gelecek}
 
-\Cref{sec:hassasiyet}'te sunulan INT8 sonuçları PyTorch içinde bir
-\textbf{simülasyondur}: her katmanın çıktısı 8 bitlik bir ızgaraya
-yuvarlanıp geri float'a çevrilir, yalnızca etkinleşimler üzerinde.
-Ağırlıklara dokunulmaz ve hiçbir TensorRT motoru derlenmez. Buradaki
-0,82 IoU gibi düşük sonuçlar, TensorRT'in varsayılan davranışına
-yakındır: min/maks'a göre kırpan, katman başına, kalibrasyonsuz bir
-nicemleme. Aynı deneyde (\cref{sec:hassasiyet}) yüzdelik dilim kırpma
-gibi daha iyi bir kalibrasyonla aynı modülün 0,99'un üzerine çıktığı da
-görüldü, yani sorun mimari değil kalibrasyon. Bu, gerçek bir
-kalibrasyon aracıyla nicemleme denemeye değer bir sonraki adım yapıyor.
+INT8 nicemleme, PyTorch içinde bir \textbf{simülasyon} olarak
+sınanmıştır: her katmanın çıktısı 8 bitlik bir ızgaraya yuvarlanıp geri
+float'a çevrilir, yalnızca etkinleşimler üzerinde. Ağırlıklara
+dokunulmaz ve hiçbir TensorRT motoru derlenmez. Ölçülen sonuç modül
+bazında kalibrasyona duyarlıdır: memory encoder kırpma yanlılığını
+biriktirir (0,9397 ortalama IoU), image encoder ise TensorRT'in
+varsayılan davranışına yakın olan min/maks kalibrasyonda çökerken,
+yüzdelik dilim kırpma (0,9930) ya da füzyon-modellenmiş yerleştirme
+(0,9926) ile 0,99'un üzerine kurtarılabilmektedir. Yani sorun mimari
+değil kalibrasyon. Bu, gerçek bir kalibrasyon aracıyla nicemleme
+denemeye değer bir sonraki adım yapıyor.
 
 \textbf{Planlanan deney: NVIDIA TensorRT Model
 Optimizer}~\cite{nvidia2024modelopt} (\texttt{nvidia-modelopt}, eski adıyla
@@ -43,7 +44,7 @@ fp16'ya yakın bir doğruluk hedefler.
     \draw[ok] (naif) -- (i1);
     \node[below=1mm of naif, text width=27mm, align=center,
           font=\sffamily\footnotesize\bfseries, color=vurgu]
-      {ölçüldü: 0,82 IoU};
+      {ölçüldü: çöküyor};
 
     \node[kutu, below=18mm of m1] (m2) {fp32 model};
     \node[kutu, right=9mm of m2] (mopt) {Model Optimizer\\(kalibrasyon + Q/DQ, ağırlık dahil)};
@@ -58,16 +59,16 @@ fp16'ya yakın bir doğruluk hedefler.
     \node[above=1mm of i2, font=\sffamily\footnotesize\color{grimetin}] {aynı donanım hızı};
   \end{tikzpicture}
   \caption{İki INT8 yolu, aynı hedef donanım: TensorRT'in varsayılan
-    kırpması hızı verir ama doğruluğu ölçülen 0,82 IoU'ya düşürür
-    (\S\ref{sec:hassasiyet}); Model Optimizer'ın kalibrasyonu aynı hızda,
-    fp16'ya yakın doğruluk hedefler. \S\ref{sec:hassasiyet}'teki kalibre
-    edilmiş varyantların (0,99+) zaten gösterdiği yön budur.}
+    min/maks kırpması hızı verir ama ölçülen doğruluğu çökertir; Model
+    Optimizer'ın kalibrasyonu aynı hızda, fp16'ya yakın doğruluk
+    hedefler. Yukarıdaki kalibre edilmiş varyantların (0,99+) zaten
+    gösterdiği yön budur.}
   \label{fig:modelopt-mantik}
 \end{figure}
 
-Mekanik olarak Model Optimizer, \cref{sec:hassasiyet}'te elle yapılan
-kalibrasyon denemesinin (yüzdelik dilim kırpma, füzyon-modellenmiş
-yerleştirme) üretim aracıdır: her katmanı Q/DQ düğümleriyle sarar
+Mekanik olarak Model Optimizer, yukarıda elle yapılan kalibrasyon
+denemesinin (yüzdelik dilim kırpma, füzyon-modellenmiş yerleştirme)
+üretim aracıdır: her katmanı Q/DQ düğümleriyle sarar
 (ağırlıklar dahil, kanal başına), ölçekleri temsili veri üzerinden
 kalibre eder, ve kalibre edilmiş modeli TensorRT'in doğrudan derleyebileceği
 bir ONNX'e aktarır.
