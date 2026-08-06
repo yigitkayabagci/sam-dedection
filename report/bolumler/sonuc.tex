@@ -4,8 +4,8 @@
 EdgeTAM'ın checkpoint'i, Jetson AGX Orin üzerinde dört ayrı TensorRT
 motoruna (image encoder, memory attention, memory encoder, SAM head),
 fp16 hassasiyetinde ve CUDA Graph tekrar oynatmasıyla
-taşınmıştır. Başlangıç hedefleri ölçümle karşılanmıştır: uçtan uca
-inference 88,30~ms/kareden 26,40~ms/kareye inmiş (\textbf{3,34×}), kuyruk
+taşınmıştır. Başlangıç hedefleri ölçümle karşılanmıştır: inference
+88,30~ms/kareden 26,40~ms/kareye inmiş (\textbf{3,34×}), kuyruk
 gecikmesi (p99) 40~ms bütçesinin altında kalmış (39,90~ms), ve fp16
 motorları 500 karelik bir klip boyunca fp32 referansına karşı
 \textbf{0,9993} ortalama IoU ile eşleşip hata biriktirmemiştir.

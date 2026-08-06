@@ -13,7 +13,7 @@ attention'da, yalnızca \%26,8'i image encoder'dadır. Bu nedenle
 (memory bank \texttt{dict}'i) ayrıştığı dört sınırı kapsayacak şekilde
 genişletilmiştir.
 
-Cihaz üzerinde ölçülen sonuçlar: uçtan uca inference hızı stok PyTorch'ta
+Cihaz üzerinde ölçülen sonuçlar: inference hızı stok PyTorch'ta
 88,30~ms/kare iken TensorRT + CUDA Graph ile 26,40~ms/kareye
 inmiş (\textbf{3,34×} hızlanma, 37,88~FPS), kuyruk gecikmesi
 (p99)~39,90~ms ile 40~ms hedefinin altında kalmıştır. Sentetik olarak
