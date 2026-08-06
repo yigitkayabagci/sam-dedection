@@ -43,4 +43,4 @@ Kayıt/çözünürlük karşılaştırma görselleri şu kalıbı izler:
 - `-crop`: opsiyonel, ortalanmış kırpma modunu işaretler (yoksa tam kare)
 - `<içerik>`: görselin ne gösterdiği (örn. `latency`)
 
-Örnek: `ucak-crop-1024-latency.png`.
+Örnek: `ucak-1024-crop-latency.png`.
