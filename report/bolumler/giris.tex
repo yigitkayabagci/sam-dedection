@@ -42,6 +42,7 @@ bulunmadığı ve bunun nasıl çözüldüğü \cref{ch:sistem-yontem}'in
 konusudur.
 
 \section{Başlangıç Varsayımı ve Neden Yanlış Çıktığı}
+\label{sec:proje-eslesme}
 
 Yalnızca image encoder'ın hızlandırılmış olması, yaygın bir varsayımın
 sonucudur: en çok parametreyi taşıyan modül zamanın da çoğunu harcıyor
@@ -52,8 +53,34 @@ maliyeti olan memory attention, encoder ne kadar hızlanırsa hızlansın
 yerinde durur.
 
 Bu çalışma varsayımı devralmak yerine ölçmüştür
-(\cref{sec:proje-eslesme}): kare başına işlem yükünün (FLOP)
-\textbf{\%61,9}'u memory attention modülünde, yalnızca \textbf{\%26,8}'i
-image encoder'dadır; EdgeTAM makalesi de aynı noktayı vurgular. Bu
-bulgu, çalışmanın kapsamını tek bir modülden EdgeTAM'ın \textbf{dört}
-ana hesaplama bloğunun tamamına genişletmiştir.
+(\texttt{tools/analyze\_cost.py}): EdgeTAM checkpoint'inin dört
+hesaplama bloğunun, gerçek checkpoint üzerinde 1024×1024 çözünürlükte,
+tek nesneyle ölçülen işlem yükü (FLOP) ve parametre sayıları böyledir:
+
+\begin{table}[H]
+  \centering
+  \caption{Kare başına hesaplama dağılımı, gerçek checkpoint,
+    1024×1024. \emph{(CPU'da, yapısal, çünkü FLOP donanımdan
+    bağımsızdır.)}}
+  \label{tab:flop-dagilimi-arkaplan}
+  \begin{tabular}{lrrr}
+    \toprule
+    Modül & GFLOP/kare & Pay & Parametre (M) \\
+    \midrule
+    image encoder & 38,7 & \%26,8 & 4,92 \\
+    \textbf{memory attention} & \textbf{89,3} & \textbf{\%61,9} & 2,96 \\
+    memory encoder + Perceiver & 12,6 & \%8,8 & 1,62 \\
+    SAM head & 3,6 & \%2,5 & 4,41 \\
+    \midrule
+    \textbf{Toplam} & \textbf{144,4} & & 13,9 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Dikkat çekici nokta parametre sütunudur: memory attention ağırlıkların
+yalnızca \%21'ini oluşturur ama işlem yükünün \%62'sidir; model
+boyutu, zamanın nereye gittiğinin güvenilir bir göstergesi değildir.
+EdgeTAM makalesi de aynı noktayı vurgular. Bu bulgu, çalışmanın
+kapsamını tek bir modülden EdgeTAM'ın \textbf{dört} ana hesaplama
+bloğunun tamamına genişletmiştir; dört motora neden ihtiyaç duyulduğu
+\cref{ch:sistem-yontem}'de ele alınmaktadır.
