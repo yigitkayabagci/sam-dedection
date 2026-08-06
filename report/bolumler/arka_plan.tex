@@ -88,6 +88,43 @@ EdgeTAM makalesinin de doğrudan tespit ettiği nokta: yalnızca image
 encoder'ı küçültmek beklenen hızlanmayı getirmez, çünkü darboğaz orada
 değildir.
 
+\subsection{Ölçülen Maliyet Dağılımı}
+\label{sec:proje-eslesme}
+
+Yukarıdaki karmaşıklık analizi teoriktir; bu çalışma bunu
+\texttt{tools/analyze\_cost.py} ile gerçek checkpoint üzerinde
+doğrulamıştır: EdgeTAM checkpoint'inin dört hesaplama bloğunun,
+1024×1024 çözünürlükte, tek nesneyle ölçülen işlem yükü (FLOP) ve
+parametre sayıları böyledir:
+
+\begin{table}[H]
+  \centering
+  \caption{Kare başına hesaplama dağılımı, gerçek checkpoint,
+    1024×1024. \emph{(CPU'da, yapısal, çünkü FLOP donanımdan
+    bağımsızdır.)}}
+  \label{tab:flop-dagilimi-arkaplan}
+  \begin{tabular}{lrrr}
+    \toprule
+    Modül & GFLOP/kare & Pay & Parametre (M) \\
+    \midrule
+    image encoder & 38,7 & \%26,8 & 4,92 \\
+    \textbf{memory attention} & \textbf{89,3} & \textbf{\%61,9} & 2,96 \\
+    memory encoder + Perceiver & 12,6 & \%8,8 & 1,62 \\
+    SAM head & 3,6 & \%2,5 & 4,41 \\
+    \midrule
+    \textbf{Toplam} & \textbf{144,4} & & 13,9 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Dikkat çekici nokta parametre sütunudur: memory attention ağırlıkların
+yalnızca \%21'ini oluşturur ama işlem yükünün \%62'sidir; model
+boyutu, zamanın nereye gittiğinin güvenilir bir göstergesi değildir.
+Bu ölçüm, çalışmanın kapsamını tek bir modülden EdgeTAM'ın
+\textbf{dört} ana hesaplama bloğunun tamamına genişletmiştir -- ve tam
+olarak bu maliyet profilini hedef alan mimari, sıradaki bölümün
+konusudur.
+
 \section{EdgeTAM: 2D Spatial Perceiver ile Memory Sıkıştırma}
 \label{sec:edgetam-perceiver}
 
