@@ -80,21 +80,39 @@ class RealtimeSource:
     Seconds spent blocked in `get` are appended to `wait_s` so the caller can
     take them back out of its frame budget: waiting for a camera is not work the
     model did.
+
+    Seconds of staleness at pickup -- how long ago the frame handed over was
+    actually due -- go into `lag_s`. This is the number that proves the
+    mechanism rather than just describing it: the item sitting in a one-slot
+    queue is always the most recent one produced before pickup, so its age at
+    pickup is bounded by one source period no matter how far behind the
+    consumer's *throughput* is. A model twice, five times, ten times too slow
+    still only ever picks up a frame less than `1/fps` old; only the drop rate
+    changes. `lag_s` climbing past that bound on a real run is the one number
+    that says the mechanism itself is broken, as opposed to merely dropping a
+    lot of frames, which is expected.
     """
 
     def __init__(self, frame_count: int, fps: float, start: int = 0,
-                 wait_s: list[float] | None = None) -> None:
+                 wait_s: list[float] | None = None,
+                 lag_s: list[float] | None = None) -> None:
         if fps <= 0:
             raise ValueError(f"realtime fps must be positive, got {fps}")
         self.frame_count = frame_count
         self.fps = fps
         self.start = start
         self.wait_s = wait_s if wait_s is not None else []
+        self.lag_s = lag_s if lag_s is not None else []
         self.delivered = 0
         self._queue = LatestFrameQueue()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._produce, name="frame-source",
                                         daemon=True)
+        # Set in __enter__, before the producer thread starts, so both threads
+        # agree on frame 0's due time without a lock: the main thread finishes
+        # writing it before the producer (or a consumer calling __iter__) can
+        # possibly read it.
+        self._t0 = 0.0
 
     @property
     def dropped(self) -> int:
@@ -102,11 +120,10 @@ class RealtimeSource:
 
     def _produce(self) -> None:
         period = 1.0 / self.fps
-        t0 = time.perf_counter()
         for offset, idx in enumerate(range(self.start, self.frame_count)):
-            # Against `t0` rather than the previous frame, so a late wake-up
+            # Against `_t0` rather than the previous frame, so a late wake-up
             # does not push every frame after it late as well.
-            due = t0 + offset * period
+            due = self._t0 + offset * period
             # `Event.wait` doubles as an interruptible sleep: True means the
             # consumer left early and there is nobody to deliver to.
             if self._stop.wait(max(due - time.perf_counter(), 0.0)):
@@ -115,6 +132,7 @@ class RealtimeSource:
         self._queue.close()
 
     def __enter__(self) -> "RealtimeSource":
+        self._t0 = time.perf_counter()
         self._thread.start()
         return self
 
@@ -124,11 +142,15 @@ class RealtimeSource:
         self._thread.join(timeout=1.0)
 
     def __iter__(self) -> Iterator[int]:
+        period = 1.0 / self.fps
         while True:
             waiting_from = time.perf_counter()
             idx = self._queue.get()
-            self.wait_s.append(time.perf_counter() - waiting_from)
+            now = time.perf_counter()
+            self.wait_s.append(now - waiting_from)
             if idx is None:
                 return
             self.delivered += 1
+            due = self._t0 + (idx - self.start) * period
+            self.lag_s.append(max(now - due, 0.0))
             yield idx

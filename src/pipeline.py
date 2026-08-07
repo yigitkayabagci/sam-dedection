@@ -442,6 +442,23 @@ def _report_timing(
         print(f"[pipeline] real-time source at {source.fps:.1f} FPS: tracked "
               f"{source.delivered} of {offered} frames, dropped {source.dropped} "
               f"({share:.1f}%) as stale")
+        # The number that verifies the mechanism, not just describes it: a
+        # one-slot queue's item is always the most recent one produced before
+        # pickup, so its age there is bounded by one source period no matter
+        # how far behind the model's throughput is -- only the drop rate above
+        # changes. This exceeding the period on a real run is the one thing
+        # that would mean the queue itself is misbehaving, not just busy.
+        lag_ms = sorted(s * 1000.0 for s in source.lag_s)
+        period_ms = 1000.0 / source.fps
+        if lag_ms:
+            p50 = lag_ms[len(lag_ms) // 2]
+            p99 = lag_ms[min(len(lag_ms) - 1, int(0.99 * len(lag_ms)))]
+            worst = lag_ms[-1]
+            verdict = "bounded as expected" if worst <= period_ms + 1.0 else \
+                "OVER the source period -- the queue is not behaving as a one-slot mailbox"
+            print(f"[pipeline] frame staleness at pickup: p50 {p50:.1f} · "
+                  f"p99 {p99:.1f} · max {worst:.1f} ms (source period "
+                  f"{period_ms:.1f} ms): {verdict}")
 
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.

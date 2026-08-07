@@ -88,6 +88,33 @@ class TestRealtimeSource(unittest.TestCase):
         with RealtimeSource(frame_count=5, fps=200.0, start=2) as source:
             self.assertEqual(list(source), [2, 3, 4])
 
+    def test_staleness_at_pickup_does_not_grow_over_the_run(self):
+        # The mechanism's actual guarantee: a one-slot queue's item is always
+        # the most recent one produced before pickup, so staleness at pickup
+        # does not grow as the run goes on, however slow the consumer is --
+        # only the drop rate does. A buffering queue's lag instead grows
+        # roughly linearly with elapsed time as its backlog piles up, so
+        # comparing the run's second half against its first tells the two
+        # apart without pinning an exact ceiling, which real thread scheduling
+        # jitter (a few ms, more under CI contention) would make flaky.
+        fps, period_s = 50.0, 1.0 / 50.0
+        with RealtimeSource(frame_count=120, fps=fps) as source:
+            for _ in source:
+                time.sleep(0.06)  # 3x too slow: guarantees real dropping
+        self.assertGreater(source.dropped, 0, "the slow case must actually be dropping")
+        self.assertEqual(len(source.lag_s), source.delivered)
+        half = len(source.lag_s) // 2
+        first_half = sum(source.lag_s[:half]) / half
+        second_half = sum(source.lag_s[half:]) / (len(source.lag_s) - half)
+        self.assertLess(second_half, first_half + period_s,
+                        "staleness grew over the run -- that is a backlog "
+                        "building up, not a bounded one-slot queue")
+
+    def test_a_fast_consumer_has_near_zero_staleness(self):
+        with RealtimeSource(frame_count=10, fps=200.0) as source:
+            list(source)
+        self.assertLess(max(source.lag_s), 0.01)
+
     def test_leaving_early_stops_the_producer(self):
         source = RealtimeSource(frame_count=10_000, fps=100.0)
         with source:
