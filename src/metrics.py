@@ -59,7 +59,12 @@ def fps_summary(per_frame_dt: list[float], warmup: int = 0,
     out["p50_ms"] = _percentile(ordered, 0.50) if ordered else 0.0
     out["p95_ms"] = _percentile(ordered, 0.95) if ordered else 0.0
     out["p99_ms"] = _percentile(ordered, 0.99) if ordered else 0.0
+    out["p999_ms"] = _percentile(ordered, 0.999) if ordered else 0.0
     out["max_ms"] = ordered[-1] if ordered else 0.0
+    # Nearest rank lands on the last sample whenever q * n >= n - 1, so p99.9
+    # is literally the max until a run is longer than 1/(1 - 0.999) frames.
+    # Callers use this to decide whether quoting it says anything max did not.
+    out["p999_meaningful"] = len(ordered) > 1000
     out["deadline_ms"] = deadline_ms
     out["missed"] = (sum(1 for ms in ordered if ms > deadline_ms)
                      if deadline_ms else 0)

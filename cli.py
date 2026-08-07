@@ -136,6 +136,13 @@ def main(argv: list[str] | None = None) -> int:
                         "newest. Without it the clip waits for the model and every "
                         "frame is tracked, which measures throughput; with it the "
                         "model chases the clock, which is what a camera does.")
+    p.add_argument("--deadline-ms", type=float, default=None,
+                   help="Per-frame ceiling to judge the run against: reports how "
+                        "many frames went over it. Defaults to the --realtime-fps "
+                        "slot when that is set, but they are separate targets -- a "
+                        "30 FPS source gives each frame 33.3 ms, and 'no frame over "
+                        "35 ms' is a different (and checkable) question. Works "
+                        "without --realtime-fps.")
     p.add_argument("--fps-warmup", type=int, default=0,
                    help="Exclude the first N frames (model load / CUDA warm-up) from the "
                         "average FPS report.")
@@ -166,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--center-crop applies to --frames-dir mode only.")
     if args.realtime_fps is not None and args.realtime_fps <= 0:
         raise SystemExit("--realtime-fps must be positive.")
+    if args.deadline_ms is not None and args.deadline_ms <= 0:
+        raise SystemExit("--deadline-ms must be positive.")
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
     if args.offload_video is not None:
@@ -201,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         fps_chart=Path(args.fps_chart) if args.fps_chart else None,
         stage_chart=Path(args.stage_chart) if args.stage_chart else None,
         realtime_fps=args.realtime_fps,
+        deadline_ms=args.deadline_ms,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")

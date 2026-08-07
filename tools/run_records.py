@@ -131,6 +131,11 @@ def main(argv: list[str] | None = None) -> int:
                         "per frame) and a drop count to the summary. Off by "
                         "default: every frame is tracked, which is the right "
                         "measurement for comparing modes against each other.")
+    p.add_argument("--deadline-ms", type=float, default=None,
+                   help="Per-frame ceiling every mode is judged against, e.g. 35. "
+                        "Adds a column counting the frames that went over it. "
+                        "Independent of --realtime-fps, and the more direct way "
+                        "to ask 'does this mode ever exceed X ms'.")
     p.add_argument("--no-video", action="store_true",
                    help="Measure only. The overlay and the mp4 are already "
                         "outside the reported frame budget, but they still run "
@@ -188,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
                 cmd += ["--center-crop", crop]
             if args.realtime_fps:
                 cmd += ["--realtime-fps", args.realtime_fps]
+            if args.deadline_ms:
+                cmd += ["--deadline-ms", args.deadline_ms]
 
             ok, text = run_step(f"{record.name} — {mode}", cmd, outdir / "run.txt")
             if not ok:
@@ -207,7 +214,8 @@ def main(argv: list[str] | None = None) -> int:
                 # its slowest frames do. p99 and max are the two that decide it.
                 "p99": find(r"p99 ([\d.]+) ·", text) or "-",
                 "max": find(r"max ([\d.]+) ms", text) or "-",
-                "deadline": find(r"ms/frame: (met|\d+ over \([\d.]+%\))", text) or "-",
+                "deadline": find(r"ms (?:ceiling|[\d.]+ FPS slot): "
+                                 r"(met|\d+ over \([\d.]+%\))", text) or "-",
                 "dropped": find(r"dropped (\d+ \([\d.]+%\)) as stale", text) or "-",
             }
 
@@ -240,11 +248,14 @@ def main(argv: list[str] | None = None) -> int:
         "",
     ]
     realtime = args.realtime_fps is not None
+    ceiling = args.deadline_ms or (1000.0 / args.realtime_fps if realtime else None)
     for name, per_mode in rows.items():
         head = ["mode", "model input from", "FPS", "median ms: pre / inference / post",
                 "p99 ms", "max ms"]
+        if ceiling:
+            head.append(f"over {ceiling:.1f} ms")
         if realtime:
-            head += [f"{args.realtime_fps:g} FPS deadline", "dropped"]
+            head.append("dropped")
         head.append("overlay + mp4 (excluded)")
         lines += [
             f"## {name}",
@@ -258,8 +269,10 @@ def main(argv: list[str] | None = None) -> int:
                 lines.append(f"| `{mode}` | did not run " + "| - " * (len(head) - 2) + "|")
                 continue
             cells = [f"`{mode}`", r["input"], r["fps"], r["stages"], r["p99"], r["max"]]
+            if ceiling:
+                cells.append(r["deadline"])
             if realtime:
-                cells += [r["deadline"], r["dropped"]]
+                cells.append(r["dropped"])
             cells.append(f"{r['demo']} ms")
             lines.append("| " + " | ".join(cells) + " |")
         lines += ["", f"Videos and charts: `{name}/<mode>/`", ""]

@@ -355,6 +355,12 @@ class PipelineConfig:
     # the rate the deployment has to sustain -- usually the source's own fps.
     # None = off: every frame is tracked, however long that takes.
     realtime_fps: float | None = None
+    # Per-frame ceiling in ms to judge the run against, and count the frames
+    # that went over. Independent of `realtime_fps` on purpose: a 30 FPS source
+    # gives every frame a 33.3 ms slot, but the target being chased may be
+    # tighter (or looser) than the slot. Defaults to the slot when only
+    # `realtime_fps` is set, and to no verdict when neither is.
+    deadline_ms: float | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -385,7 +391,10 @@ def _report_timing(
     """Print FPS stats (with warm-up exclusion) and optionally write charts."""
     if not per_frame_dt:
         return
-    deadline = 1000.0 / cfg.realtime_fps if cfg.realtime_fps else None
+    # An explicit ceiling wins over the source's slot: "every frame under 35 ms"
+    # and "keep up with 30 FPS" are different targets, and the tighter one is
+    # usually the one being chased.
+    deadline = cfg.deadline_ms or (1000.0 / cfg.realtime_fps if cfg.realtime_fps else None)
     stats = fps_summary(per_frame_dt, warmup=cfg.fps_warmup, deadline_ms=deadline)
     print(f"[pipeline] tracked {stats['frames']} frames in {stats['total_s']:.2f}s "
           f"({stats['avg_fps_all']:.1f} FPS all)")
@@ -396,14 +405,20 @@ def _report_timing(
     # Whether a frame rate holds is a question about the slowest frames, not the
     # average one -- so print the tail next to it rather than only drawing it on
     # a chart nobody parses.
-    print(f"[pipeline] per-frame budget: p50 {stats['p50_ms']:.1f} · "
-          f"p95 {stats['p95_ms']:.1f} · p99 {stats['p99_ms']:.1f} · "
-          f"max {stats['max_ms']:.1f} ms")
+    tail = [f"p50 {stats['p50_ms']:.1f}", f"p95 {stats['p95_ms']:.1f}",
+            f"p99 {stats['p99_ms']:.1f}"]
+    # Below ~1000 frames p99.9 is the max by construction, so printing both
+    # would dress one number up as two.
+    if stats["p999_meaningful"]:
+        tail.append(f"p99.9 {stats['p999_ms']:.1f}")
+    tail.append(f"max {stats['max_ms']:.1f} ms")
+    print("[pipeline] per-frame budget: " + " · ".join(tail))
     if deadline is not None:
         share = 100.0 * stats["missed"] / stats["kept_frames"] if stats["kept_frames"] else 0.0
         verdict = "met" if stats["missed"] == 0 else f"{stats['missed']} over ({share:.1f}%)"
-        print(f"[pipeline] {cfg.realtime_fps:.1f} FPS deadline is {deadline:.1f} "
-              f"ms/frame: {verdict}")
+        source_of = ("ceiling" if cfg.deadline_ms
+                     else f"{cfg.realtime_fps:.1f} FPS slot")
+        print(f"[pipeline] {deadline:.1f} ms {source_of}: {verdict}")
 
     # The FPS above is how fast the model ran. On a real-time source that is no
     # longer the same question as how much of the clip it saw, so say both.
