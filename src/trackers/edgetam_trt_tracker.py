@@ -30,7 +30,6 @@ we want to replace four leaves of it, not fork it.
 """
 from __future__ import annotations
 
-from collections import deque
 from pathlib import Path
 
 from ._trt_layout import MASKED_LOGIT, MemoryLayout
@@ -44,12 +43,6 @@ ENGINE_KEYS = {
     "memory_encoder": "memory_encoder_engine",
     "sam_head": "sam_head_engine",
 }
-
-# How many recent frames' object_score_logits get averaged before the
-# is_obj_appearing = object_score_logits > 0 gate in sam2_base.py sees them.
-# A single hard frame no longer flips the gate and poisons memory with
-# no_obj_ptr on its own -- the drop has to hold across the window.
-SCORE_SMOOTHING_WINDOW = 5
 
 
 def _connected_components_available() -> bool:
@@ -116,7 +109,6 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         self._layout: MemoryLayout | None = None
         self._patched = False
         self._warned: set[str] = set()
-        self._score_hist: deque = deque(maxlen=SCORE_SMOOTHING_WINDOW)
 
     # ------------------------------------------------------------ loading
 
@@ -378,8 +370,6 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         perceiver.forward = lambda x, pos=None: (x, pos)
 
     def _patch_sam_head(self, engine) -> None:
-        import torch
-
         predictor = self._predictor
         fallback = predictor._forward_sam_heads
 
@@ -432,19 +422,6 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
                 # are read again when later frames build their memory bank.
                 clone=("low_res_masks", "obj_ptr", "object_score_logits"),
             )
-            # Smoothed over SCORE_SMOOTHING_WINDOW frames before sam2_base's
-            # `is_obj_appearing = object_score_logits > 0` gate sees it -- see
-            # the module-level comment. Only the propagation path (this engine
-            # branch) feeds the window; prompted frames go through
-            # run_fallback() below and keep the model's raw, immediate score.
-            self._score_hist.append(out["object_score_logits"])
-            smoothed_score = torch.stack(list(self._score_hist)).mean(dim=0)
-            # TEMP DEBUG: remove once the drop-out frame is understood. Only
-            # prints near the gate boundary, not every frame.
-            if (out["object_score_logits"] <= 0).any() or (smoothed_score <= 0).any():
-                print(f"[edgetam_trt] DEBUG object_score_logits "
-                      f"raw={out['object_score_logits'].flatten().tolist()} "
-                      f"smoothed={smoothed_score.flatten().tolist()}")
             # Position 1 is `high_res_multimasks`. `track_step` and
             # `_use_mask_as_output` are the only callers and both discard it,
             # so materialising [B, 3, 1024, 1024] would be pure waste. A future
@@ -456,7 +433,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
                 out["low_res_masks"],
                 out["high_res_masks"],
                 out["obj_ptr"],
-                smoothed_score,
+                out["object_score_logits"],
             )
 
         predictor._forward_sam_heads = forward_sam_heads

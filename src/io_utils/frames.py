@@ -37,36 +37,6 @@ def _to_uint8(img: np.ndarray) -> np.ndarray:
     return out.astype(np.uint8)
 
 
-_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-
-# Mean per-pixel channel difference below this is "no real chroma signal" --
-# catches both true single-channel sources and mono content that was already
-# saved as a 3-channel file (R=G=B baked in upstream, e.g. by whatever
-# exported the JPGs). A couple of units of headroom absorbs JPEG's own
-# lossy-compression chroma noise, which is never exactly zero even for a
-# genuinely flat source.
-_GRAY_TOL = 3.0
-
-
-def _is_effectively_gray(bgr: np.ndarray) -> bool:
-    b, g, r = (bgr[..., i].astype(np.float32) for i in range(3))
-    return max(np.abs(r - g).mean(), np.abs(g - b).mean(), np.abs(r - b).mean()) < _GRAY_TOL
-
-
-def _pseudo_color(gray: np.ndarray) -> np.ndarray:
-    """CLAHE + a colormap instead of a flat grayscale-to-RGB repeat.
-
-    EdgeTAM/SAM2 were trained on real color video; a repeated channel
-    (R=G=B) carries no cross-channel signal for whatever chroma-sensitive
-    filters it learned. CLAHE recovers local contrast lost to sensor dynamic
-    range or overexposure, then the colormap gives three channels that
-    actually differ from each other.
-    """
-    gray = _CLAHE.apply(gray)
-    colored = cv2.applyColorMap(gray, cv2.COLORMAP_INFERNO)
-    return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-
-
 def to_rgb8(img: np.ndarray) -> np.ndarray:
     """8-bit RGB from a decoded frame of any bit depth or channel count.
 
@@ -74,20 +44,13 @@ def to_rgb8(img: np.ndarray) -> np.ndarray:
     do this *after* the resize: on a 16-bit mono frame it is a full-frame
     min/max pass followed by tripling the data, and both are far cheaper at the
     model's input size than at the sensor's.
-
-    Colorless content goes through `_pseudo_color` regardless of how many
-    channels the file itself reports: a true single-channel source (ndim==2)
-    obviously has none, but a mono source someone already replicated to 3
-    (or 4) channels upstream looks identical to real RGB by shape alone --
-    `_is_effectively_gray` catches that case by content instead.
     """
     img = _to_uint8(img)
     if img.ndim == 2:
-        return _pseudo_color(img)
-    bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR) if img.shape[2] == 4 else img
-    if _is_effectively_gray(bgr):
-        return _pseudo_color(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY))
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 def decode_frame(path: str | Path) -> np.ndarray:
