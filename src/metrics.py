@@ -18,9 +18,26 @@ _GRID = "#e1e0d9"
 _AXIS = "#c3c2b7"
 
 
-def fps_summary(per_frame_dt: list[float], warmup: int = 0) -> dict:
+def _percentile(ordered: list[float], q: float) -> float:
+    """`q`-quantile of an already-sorted list, by nearest rank."""
+    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+
+
+def fps_summary(per_frame_dt: list[float], warmup: int = 0,
+                deadline_ms: float | None = None) -> dict:
     """Compute FPS stats from per-frame durations, optionally dropping the
-    first `warmup` frames (which include model load / CUDA warm-up)."""
+    first `warmup` frames (which include model load / CUDA warm-up).
+
+    Reports the tail alongside the average, because they answer different
+    questions and only one of them is about real time. An average says how much
+    work the pipeline got through; whether it holds a frame rate is decided by
+    the slowest frames, since those are the ones that overrun their slot. A run
+    averaging 30 FPS with a 60 ms worst frame does not hold 30 FPS.
+
+    `deadline_ms` names the slot to measure against -- 33.3 at 30 FPS -- and
+    turns that into a count of frames that missed it. Without it the tail is
+    still reported, just not judged.
+    """
     n = len(per_frame_dt)
     total = sum(per_frame_dt)
     out = {
@@ -37,6 +54,15 @@ def fps_summary(per_frame_dt: list[float], warmup: int = 0) -> dict:
     out["warmup"] = w
     out["kept_frames"] = len(kept)
     out["avg_fps_post_warmup"] = (len(kept) / ksum) if ksum > 0 else 0.0
+
+    ordered = sorted(ms * 1000.0 for ms in kept)
+    out["p50_ms"] = _percentile(ordered, 0.50) if ordered else 0.0
+    out["p95_ms"] = _percentile(ordered, 0.95) if ordered else 0.0
+    out["p99_ms"] = _percentile(ordered, 0.99) if ordered else 0.0
+    out["max_ms"] = ordered[-1] if ordered else 0.0
+    out["deadline_ms"] = deadline_ms
+    out["missed"] = (sum(1 for ms in ordered if ms > deadline_ms)
+                     if deadline_ms else 0)
     return out
 
 

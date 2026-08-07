@@ -124,6 +124,13 @@ def main(argv: list[str] | None = None) -> int:
                         "yourself, one command at a time, against one selection "
                         "-- picking separately per command would give each mode a "
                         "different box and make them incomparable.")
+    p.add_argument("--realtime-fps", type=float, default=None,
+                   help="Feed each run from a source at this rate and drop the "
+                        "frames that arrive while the model is busy, instead of "
+                        "letting the clip wait. Adds a deadline verdict (1/fps "
+                        "per frame) and a drop count to the summary. Off by "
+                        "default: every frame is tracked, which is the right "
+                        "measurement for comparing modes against each other.")
     p.add_argument("--no-video", action="store_true",
                    help="Measure only. The overlay and the mp4 are already "
                         "outside the reported frame budget, but they still run "
@@ -179,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
             if crop:
                 cmd += ["--center-crop", crop]
+            if args.realtime_fps:
+                cmd += ["--realtime-fps", args.realtime_fps]
 
             ok, text = run_step(f"{record.name} — {mode}", cmd, outdir / "run.txt")
             if not ok:
@@ -194,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
                 # What the crop actually came out as: clamped to the frame, so
                 # a source shorter than the crop still gets resized on that axis.
                 "input": find(r"centre crop (\d+x\d+) at", text) or "whole frame",
+                # The tail, not the average: a mode holds a frame rate only if
+                # its slowest frames do. p99 and max are the two that decide it.
+                "p99": find(r"p99 ([\d.]+) ·", text) or "-",
+                "max": find(r"max ([\d.]+) ms", text) or "-",
+                "deadline": find(r"ms/frame: (met|\d+ over \([\d.]+%\))", text) or "-",
+                "dropped": find(r"dropped (\d+ \([\d.]+%\)) as stale", text) or "-",
             }
 
     if args.pick_only:
@@ -218,22 +233,35 @@ def main(argv: list[str] | None = None) -> int:
         "back to source resolution. Drawing the overlay and encoding the mp4 are "
         "excluded from it and reported separately.",
         "",
+        "Read `p99` and `max` before `FPS`. Holding a frame rate is decided by "
+        "the slowest frames, not the average one: at 30 FPS every frame has a "
+        "33.3 ms slot, and a mode averaging 30 FPS with a 60 ms worst frame does "
+        "not hold it.",
+        "",
     ]
+    realtime = args.realtime_fps is not None
     for name, per_mode in rows.items():
+        head = ["mode", "model input from", "FPS", "median ms: pre / inference / post",
+                "p99 ms", "max ms"]
+        if realtime:
+            head += [f"{args.realtime_fps:g} FPS deadline", "dropped"]
+        head.append("overlay + mp4 (excluded)")
         lines += [
             f"## {name}",
             "",
-            "| mode | model input from | FPS | median ms: pre / inference / post "
-            "| overlay + mp4 (excluded) |",
-            "|---|---|---|---|---|",
+            "| " + " | ".join(head) + " |",
+            "|" + "---|" * len(head),
         ]
         for mode in modes:
             r = per_mode.get(mode)
             if r is None:
-                lines.append(f"| `{mode}` | - | did not run | - | - |")
+                lines.append(f"| `{mode}` | did not run " + "| - " * (len(head) - 2) + "|")
                 continue
-            lines.append(f"| `{mode}` | {r['input']} | {r['fps']} | {r['stages']} "
-                         f"| {r['demo']} ms |")
+            cells = [f"`{mode}`", r["input"], r["fps"], r["stages"], r["p99"], r["max"]]
+            if realtime:
+                cells += [r["deadline"], r["dropped"]]
+            cells.append(f"{r['demo']} ms")
+            lines.append("| " + " | ".join(cells) + " |")
         lines += ["", f"Videos and charts: `{name}/<mode>/`", ""]
 
     if failed:

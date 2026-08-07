@@ -205,6 +205,29 @@ class TestFpsMetrics(unittest.TestCase):
         self.assertAlmostEqual(s["avg_fps_post_warmup"], 10.0, places=6)  # 4 / 0.4
         self.assertLess(s["avg_fps_all"], s["avg_fps_post_warmup"])
 
+    def test_tail_is_reported_and_excludes_warmup(self):
+        from src.metrics import fps_summary
+
+        # A slow warm-up frame, then a steady band with one 60 ms spike.
+        dt = [1.0] + [0.030] * 97 + [0.060, 0.032]
+        s = fps_summary(dt, warmup=1)
+        self.assertAlmostEqual(s["max_ms"], 60.0, places=6)
+        self.assertAlmostEqual(s["p50_ms"], 30.0, places=6)
+        # The 1000 ms warm-up frame must not be the max; that is the whole
+        # reason the tail is computed on the post-warmup slice.
+        self.assertLess(s["max_ms"], 100.0)
+
+    def test_deadline_counts_only_the_frames_that_missed_it(self):
+        from src.metrics import fps_summary
+
+        dt = [0.030] * 8 + [0.040, 0.050]  # 33.3 ms slot at 30 FPS
+        s = fps_summary(dt, warmup=0, deadline_ms=1000.0 / 30.0)
+        self.assertEqual(s["missed"], 2)
+        self.assertAlmostEqual(s["deadline_ms"], 33.333333, places=4)
+        # No deadline given -> the tail is still measured, just not judged.
+        self.assertEqual(fps_summary(dt)["missed"], 0)
+        self.assertAlmostEqual(fps_summary(dt)["max_ms"], 50.0, places=6)
+
     def test_warmup_clamped_and_zero(self):
         from src.metrics import fps_summary
 
