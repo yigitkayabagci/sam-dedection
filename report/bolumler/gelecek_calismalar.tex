@@ -1,9 +1,9 @@
 \chapter{Gelecek Çalışmalar}
 \label{ch:gelecek-calismalar}
 
-Bu bölümdeki hiçbir sayı bir ölçüm değildir; ikisi de henüz denenmemiş,
-üzerinde düşünülmüş iki konudur: gerçek INT8 nicemleme ve dört motoru
-tek motora birleştirmek.
+Bu bölümdeki hiçbir sayı bir ölçüm değildir; üçü de henüz denenmemiş,
+üzerinde düşünülmüş konulardır: gerçek INT8 nicemleme, dört motoru tek
+motora birleştirmek, ve zor karelerden sonra toparlanma.
 
 \section{Gerçek INT8 Nicemleme: NVIDIA TensorRT Model Optimizer}
 \label{sec:int8-gelecek}
@@ -93,3 +93,37 @@ geri yazma yine Python \texttt{dict} okuyup yazdığı için motorun dışında
 kalır (\cref{sec:dort-motor}). Bu boşluk ölçüldü: 0,217~ms, karenin
 \%0,5'i, şu an değmeyecek kadar küçük. Motor sayısı artarsa ya da farklı
 bir donanımda çalışılırsa yeniden ölçülüp değerlendirilebilir.
+
+\section{Zor Karede Hafıza Kirlenmesinden Toparlanma}
+\label{sec:hafiza-toparlanma}
+
+SAM~2/EdgeTAM'ın hafıza mekanizması her karede bir
+\texttt{object\_score\_logits} üretir; bu değer 0'ın altına düşerse
+(\texttt{third\_party/EdgeTAM/sam2/modeling/sam2\_base.py}) o karenin
+maskesi sıfırlanır ve hafızaya gerçek bir nesne temsili yerine sabit
+bir ``nesne yok'' vektörü (\texttt{no\_obj\_ptr}) yazılır. Sorun bunun
+kalıcı olmasıdır: sonraki kareler bu kirlenmiş hafızaya bakar, tek bir
+zor karenin (ani kontrast değişimi, hareket bulanıklığı) etkisi
+kendiliğinden düzelmez. Bu davranış yeni bir kayıt üzerindeki ön
+denemede gözlemlenmiştir.
+
+İki yayınlanmış, eğitimsiz (checkpoint'e dokunmayan) çalışma tam bu
+sorunu hedefliyor:
+
+\begin{itemize}
+  \item \textbf{SAMURAI}~\cite{yang2024samurai}: hangi karenin hafızaya
+        yazılacağını sabit pencere yerine hareket sinyalleriyle
+        seçen bir mekanizma; hafıza kalitesini değerlendirip zayıf
+        kareleri filtreler.
+  \item \textbf{SAM2Long}~\cite{ding2024sam2long}: tek, bozulabilir bir
+        hafıza yolu yerine sınırlı sayıda aday segmentasyon yolu tutan,
+        kısıtlı ağaç araması ile en güvenilir yolu seçen bir yaklaşım;
+        uzun video benchmark'larında (SA-V, LVOS) SAM~2'yi eğitim
+        gerektirmeden geçtiğini raporluyor.
+\end{itemize}
+
+İkisi de inference-time wrapper, retraining gerektirmiyor.
+\textbf{Durum: başlanmadı.} İlk adım her ikisinin resmi deposunu bu
+projenin EdgeTAM checkpoint'i ve kendi kayıtları (\texttt{frames/})
+üzerinde denemek, sonra TensorRT motorlarına nasıl entegre
+edilebileceğine bakmak olurdu.
