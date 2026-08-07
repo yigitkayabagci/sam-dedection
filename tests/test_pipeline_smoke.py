@@ -512,5 +512,83 @@ class TestFrameSkipping(unittest.TestCase):
         self.assertEqual(len(captured["per_frame_dt"]), source.delivered)
 
 
+class TestFixedFrameStride(unittest.TestCase):
+    """`frame_stride`: a fixed pattern, no clock, no queue -- the same frames
+    skipped on every run regardless of how long any of them took."""
+
+    class _Tracker:
+        name, precision = "fake", "float32"
+
+        def __init__(self, shape):
+            self.shape = shape
+            self.tracked: list[int] = []
+
+        def prepare(self, _root): pass
+
+        def set_prompts(self, _p): pass
+
+        def reset(self): pass
+
+        def propagate(self):
+            raise AssertionError("frame_stride must route through propagate_frames")
+
+        def propagate_frames(self, frame_indices):
+            from src.trackers import TrackingResult
+
+            for idx in frame_indices:
+                self.tracked.append(idx)
+                mask = np.zeros(self.shape, dtype=bool)
+                mask[1:3, 1:3] = True
+                yield TrackingResult(frame_idx=idx, masks={1: mask})
+
+    def _run(self, frames, stride, **cfg_kwargs):
+        from contextlib import contextmanager
+        import cv2
+        import src.pipeline as P
+
+        written: list[int] = []
+        real_writer = P.open_video_writer
+        tracker = self._Tracker((8, 12))
+
+        @contextmanager
+        def counting_writer(*_a, **_k):
+            yield lambda frame: written.append(1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(frames):
+                cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
+                            np.full((8, 12, 3), (10 * i) % 256, dtype=np.uint8))
+            P.open_video_writer = counting_writer
+            try:
+                P.run(tracker,
+                      PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
+                                     frame_pattern="*.tif*", frame_stride=stride,
+                                     **cfg_kwargs))
+            finally:
+                P.open_video_writer = real_writer
+        return tracker, written
+
+    def test_only_every_nth_frame_reaches_the_model(self):
+        tracker, _written = self._run(frames=10, stride=2)
+        self.assertEqual(tracker.tracked, [0, 2, 4, 6, 8])
+
+    def test_skipped_frames_still_reach_the_video_holding_the_last_mask(self):
+        frames = 10
+        _tracker, written = self._run(frames=frames, stride=2)
+        # Same contract as realtime_fps: one written frame per source frame,
+        # not per tracked one, or the mp4 would play back faster than the clip.
+        self.assertEqual(len(written), frames)
+
+    def test_stride_one_is_equivalent_to_off(self):
+        tracker, _written = self._run(frames=6, stride=1)
+        self.assertEqual(tracker.tracked, list(range(6)))
+
+    def test_combining_with_realtime_fps_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._run(frames=6, stride=2, realtime_fps=30.0)
+
+
 if __name__ == "__main__":
     unittest.main()

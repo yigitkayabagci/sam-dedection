@@ -136,6 +136,13 @@ def main(argv: list[str] | None = None) -> int:
                         "newest. Without it the clip waits for the model and every "
                         "frame is tracked, which measures throughput; with it the "
                         "model chases the clock, which is what a camera does.")
+    p.add_argument("--frame-stride", type=int, default=None,
+                   help="Track every Nth frame starting at the first prompt frame; "
+                        "the rest are skipped entirely -- never decoded, never reach "
+                        "the model. Fixed and clock-free: e.g. --frame-stride 2 tracks "
+                        "0, 2, 4, ... every run, regardless of how long any given frame "
+                        "took. Mutually exclusive with --realtime-fps, which instead "
+                        "adapts to measured latency; pick one.")
     p.add_argument("--deadline-ms", type=float, default=None,
                    help="Per-frame ceiling to judge the run against: reports how "
                         "many frames went over it. Defaults to the --realtime-fps "
@@ -175,6 +182,12 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--realtime-fps must be positive.")
     if args.deadline_ms is not None and args.deadline_ms <= 0:
         raise SystemExit("--deadline-ms must be positive.")
+    if args.frame_stride is not None and args.frame_stride < 1:
+        raise SystemExit("--frame-stride must be >= 1.")
+    if args.frame_stride is not None and args.realtime_fps is not None:
+        raise SystemExit("--frame-stride and --realtime-fps are two different "
+                         "frame-skip mechanisms (fixed pattern vs. adapting to "
+                         "measured latency); pick one.")
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
     if args.offload_video is not None:
@@ -211,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         stage_chart=Path(args.stage_chart) if args.stage_chart else None,
         realtime_fps=args.realtime_fps,
         deadline_ms=args.deadline_ms,
+        frame_stride=args.frame_stride,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")

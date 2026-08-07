@@ -136,6 +136,11 @@ def main(argv: list[str] | None = None) -> int:
                         "Adds a column counting the frames that went over it. "
                         "Independent of --realtime-fps, and the more direct way "
                         "to ask 'does this mode ever exceed X ms'.")
+    p.add_argument("--frame-stride", type=int, default=None,
+                   help="Track every Nth frame, skipping the rest entirely -- fixed, "
+                        "clock-free frame skipping, as opposed to --realtime-fps's "
+                        "adapt-to-measured-latency queue. Mutually exclusive with "
+                        "--realtime-fps; pick one.")
     p.add_argument("--no-video", action="store_true",
                    help="Measure only. The overlay and the mp4 are already "
                         "outside the reported frame budget, but they still run "
@@ -157,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
     for m in modes:
         if m not in MODES:
             raise SystemExit(f"Unknown mode {m!r}; pick from {', '.join(MODES)}")
+    if args.frame_stride is not None and args.realtime_fps is not None:
+        raise SystemExit("--frame-stride and --realtime-fps are two different "
+                         "frame-skip mechanisms; pick one.")
 
     out_root = Path(args.out)
     rows: dict[str, dict[str, dict]] = {}
@@ -195,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
                 cmd += ["--realtime-fps", args.realtime_fps]
             if args.deadline_ms:
                 cmd += ["--deadline-ms", args.deadline_ms]
+            if args.frame_stride:
+                cmd += ["--frame-stride", args.frame_stride]
 
             ok, text = run_step(f"{record.name} — {mode}", cmd, outdir / "run.txt")
             if not ok:
@@ -203,6 +213,17 @@ def main(argv: list[str] | None = None) -> int:
                 r"median per frame: pre ([\d.]+) \+ inference ([\d.]+) \+ post ([\d.]+) ms",
                 text,
             )
+            # Same idea, two mechanisms: --realtime-fps drops a measured count
+            # ("dropped N (%) as stale"); --frame-stride skips a fixed, known
+            # count ("tracked T of M (%)"). Whichever ran, fold it into one
+            # "skipped" figure so the table has a single column for it.
+            skipped = find(r"dropped (\d+ \([\d.]+%\)) as stale", text)
+            if skipped is None:
+                stride = re.search(r"fixed stride \d+: tracked (\d+) of (\d+) "
+                                   r"frames \(([\d.]+)%\)", text)
+                if stride:
+                    tracked, total, pct = int(stride[1]), int(stride[2]), float(stride[3])
+                    skipped = f"{total - tracked} ({100.0 - pct:.1f}%)"
             rows[record.name][mode] = {
                 "fps": find(r"avg ([\d.]+) FPS over", text) or "-",
                 "stages": "  /  ".join(stages.groups()) if stages else "-",
@@ -216,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
                 "max": find(r"max ([\d.]+) ms", text) or "-",
                 "deadline": find(r"ms (?:ceiling|[\d.]+ FPS slot): "
                                  r"(met|\d+ over \([\d.]+%\))", text) or "-",
-                "dropped": find(r"dropped (\d+ \([\d.]+%\)) as stale", text) or "-",
+                "skipped": skipped or "-",
             }
 
     if args.pick_only:
@@ -247,15 +268,16 @@ def main(argv: list[str] | None = None) -> int:
         "not hold it.",
         "",
     ]
-    realtime = args.realtime_fps is not None
-    ceiling = args.deadline_ms or (1000.0 / args.realtime_fps if realtime else None)
+    skipping = args.realtime_fps is not None or args.frame_stride is not None
+    ceiling = args.deadline_ms or (1000.0 / args.realtime_fps if args.realtime_fps else None)
+    skipped_label = "skipped (fixed stride)" if args.frame_stride else "dropped (stale)"
     for name, per_mode in rows.items():
         head = ["mode", "model input from", "FPS", "median ms: pre / inference / post",
                 "p99 ms", "max ms"]
         if ceiling:
             head.append(f"over {ceiling:.1f} ms")
-        if realtime:
-            head.append("dropped")
+        if skipping:
+            head.append(skipped_label)
         head.append("overlay + mp4 (excluded)")
         lines += [
             f"## {name}",
@@ -271,8 +293,8 @@ def main(argv: list[str] | None = None) -> int:
             cells = [f"`{mode}`", r["input"], r["fps"], r["stages"], r["p99"], r["max"]]
             if ceiling:
                 cells.append(r["deadline"])
-            if realtime:
-                cells.append(r["dropped"])
+            if skipping:
+                cells.append(r["skipped"])
             cells.append(f"{r['demo']} ms")
             lines.append("| " + " | ".join(cells) + " |")
         lines += ["", f"Videos and charts: `{name}/<mode>/`", ""]

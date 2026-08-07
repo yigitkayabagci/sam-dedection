@@ -283,10 +283,13 @@ def _frame_stream(tracker, cfg: "PipelineConfig", prompts: PromptSet, frame_coun
                   wait_s: list[float], preprocess_s: list[float], read_s: list[float]):
     """Yield `(results, source)`: the tracker's output, and what paced it.
 
-    Without `realtime_fps` that is `propagate()` over the whole clip and
-    `source` is None -- every frame reaches the model because nothing is
-    competing with it for time. With it, `cfg.fps_warmup` frames run first, at
-    full speed, before the real-time clock starts.
+    Three modes. Neither `realtime_fps` nor `frame_stride` set: `propagate()`
+    over the whole clip, `source` is None -- every frame reaches the model
+    because nothing is competing with it for time. `frame_stride` set: a fixed
+    `range(start, frame_count, stride)`, no clock, no queue -- deterministic
+    and clip-independent, the same frames skipped on every run regardless of
+    how long any of them took. `realtime_fps` set: `cfg.fps_warmup` frames run
+    first, at full speed, before the real-time clock starts.
 
     That ordering matters on a short clip. CUDA graph capture and kernel
     autotuning happen on a model's first few calls regardless of backend, and
@@ -312,8 +315,11 @@ def _frame_stream(tracker, cfg: "PipelineConfig", prompts: PromptSet, frame_coun
     """
     prompted = [p.frame_idx for p in prompts.boxes] + [p.frame_idx for p in prompts.points]
     start = min(prompted, default=0)
-    if cfg.realtime_fps is None:
+    if cfg.realtime_fps is None and cfg.frame_stride is None:
         yield tracker.propagate(), None
+        return
+    if cfg.frame_stride is not None:
+        yield tracker.propagate_frames(range(start, frame_count, cfg.frame_stride)), None
         return
 
     warmup = max(0, min(cfg.fps_warmup, frame_count - start - 1))
@@ -341,6 +347,23 @@ def _emitted(previous: TrackingResult | None, result: TrackingResult):
         for idx in range(previous.frame_idx + 1, result.frame_idx):
             yield idx, previous.masks
     yield result.frame_idx, result.masks
+
+
+def _emit_tail(previous: TrackingResult | None, frame_count: int):
+    """`(frame_idx, masks)` for the frames after the *last* tracked one.
+
+    `_emitted` only fills gaps between two tracked results, which is enough
+    when the last one tracked always lands on `frame_count - 1` -- true for
+    `realtime_fps`, where the source's own last index is always eventually
+    delivered. `frame_stride` has no such guarantee: `range(0, 10, 2)` ends at
+    8, not 9, so without this the clip's last frame (and every stride-skipped
+    frame after the last tracked one) would simply never be written and the
+    video would come out short instead of holding the final mask to the end.
+    """
+    if previous is None:
+        return
+    for idx in range(previous.frame_idx + 1, frame_count):
+        yield idx, previous.masks
 
 
 @contextmanager
@@ -402,6 +425,13 @@ class PipelineConfig:
     # tighter (or looser) than the slot. Defaults to the slot when only
     # `realtime_fps` is set, and to no verdict when neither is.
     deadline_ms: float | None = None
+    # Track every `frame_stride`-th frame starting at the first prompt frame,
+    # skipping the rest entirely -- they are never decoded, never reach the
+    # model. Fixed and clock-free, unlike `realtime_fps`: the skip pattern is
+    # the same on every run regardless of how fast any given frame goes,
+    # rather than adapting to measured latency. Mutually exclusive with
+    # `realtime_fps` -- pick one mechanism. None/1 = off, every frame tracked.
+    frame_stride: int | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -493,6 +523,12 @@ def _report_timing(
                   f"p99 {p99:.1f} · max {worst:.1f} ms (source period "
                   f"{period_ms:.1f} ms): {verdict}")
 
+    if cfg.frame_stride is not None and meta is not None:
+        total = meta.frame_count
+        print(f"[pipeline] fixed stride {cfg.frame_stride}: tracked {stats['frames']} "
+              f"of {total} frames ({100.0 * stats['frames'] / total:.1f}%), "
+              f"{total - stats['frames']} never reached the model")
+
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.
     if infer_ms:
@@ -581,6 +617,12 @@ def run(tracker: VideoTracker, prompts: PromptSet, cfg: PipelineConfig) -> Path 
       jpg mode: extract all frames to JPGs first, then track. Slower start,
                 but works without `decord`.
     """
+    if cfg.frame_stride is not None and cfg.realtime_fps is not None:
+        raise ValueError("frame_stride and realtime_fps are two different frame-skip "
+                         "mechanisms (fixed pattern vs. adapting to measured latency); "
+                         "pick one.")
+    if cfg.frame_stride is not None and cfg.frame_stride < 1:
+        raise ValueError(f"frame_stride must be >= 1, got {cfg.frame_stride}")
     if cfg.frames_dir is not None:
         frames_dir = Path(cfg.frames_dir).resolve()
         if not frames_dir.is_dir():
@@ -669,6 +711,11 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                 previous = result
                 t0 = time.perf_counter()
                 progress.update(1)
+            if emit is not None:
+                for idx, masks in _emit_tail(previous, len(frame_files)):
+                    rgb = view(load_frame_rgb8(frame_files[idx]))
+                    emit(overlay_masks(rgb, masks, alpha=cfg.mask_alpha,
+                                       draw_bbox=cfg.draw_bbox))
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms, source)
@@ -738,6 +785,18 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
                 previous = result
                 t0 = time.perf_counter()
                 progress.update(1)
+            if emit is not None and not drained:
+                for idx, masks in _emit_tail(previous, meta.frame_count):
+                    while cursor < idx:
+                        cap.read()
+                        cursor += 1
+                    ok, bgr = cap.read()
+                    if not ok:
+                        break
+                    cursor += 1
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    emit(overlay_masks(rgb, masks, alpha=cfg.mask_alpha,
+                                       draw_bbox=cfg.draw_bbox))
     finally:
         progress.close()
         cap.release()
@@ -791,6 +850,12 @@ def _run_jpg(tracker, prompts, cfg, video_path):
                 previous = result
                 t0 = time.perf_counter()
                 progress.update(1)
+            if emit is not None:
+                for idx, masks in _emit_tail(previous, len(frame_files)):
+                    bgr = cv2.imread(str(frame_files[idx]))
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    emit(overlay_masks(rgb, masks, alpha=cfg.mask_alpha,
+                                       draw_bbox=cfg.draw_bbox))
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms, source)
