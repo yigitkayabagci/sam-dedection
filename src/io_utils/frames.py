@@ -37,6 +37,9 @@ def _to_uint8(img: np.ndarray) -> np.ndarray:
     return out.astype(np.uint8)
 
 
+_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+
 def to_rgb8(img: np.ndarray) -> np.ndarray:
     """8-bit RGB from a decoded frame of any bit depth or channel count.
 
@@ -44,10 +47,19 @@ def to_rgb8(img: np.ndarray) -> np.ndarray:
     do this *after* the resize: on a 16-bit mono frame it is a full-frame
     min/max pass followed by tripling the data, and both are far cheaper at the
     model's input size than at the sensor's.
+
+    Single-channel sources go through CLAHE + a colormap instead of a flat
+    grayscale-to-RGB repeat. EdgeTAM/SAM2 were trained on real color video;
+    a repeated channel (R=G=B) carries no cross-channel signal for whatever
+    chroma-sensitive filters it learned. CLAHE recovers local contrast lost
+    to sensor dynamic range or overexposure, then the colormap gives three
+    channels that actually differ from each other.
     """
     img = _to_uint8(img)
     if img.ndim == 2:
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        img = _CLAHE.apply(img)
+        colored = cv2.applyColorMap(img, cv2.COLORMAP_INFERNO)
+        return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
     if img.shape[2] == 4:
         return cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
