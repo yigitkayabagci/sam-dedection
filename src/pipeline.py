@@ -259,6 +259,20 @@ def _shift_prompts(prompts: PromptSet, dx: int, dy: int) -> PromptSet:
     )
 
 
+def _written_path(emit, cfg: "PipelineConfig") -> Path | None:
+    """Where the video actually landed, not just what was asked for.
+
+    `open_video_writer`'s fallback chain can swap the container (mp4v -> MJPG
+    in .avi) when the requested codec's writer will not open on this machine,
+    so the two can differ. `getattr` covers callers standing in a bare
+    `write(frame)` callable with no `.path` -- tests, mainly -- by falling
+    back to the requested path.
+    """
+    if emit is None:
+        return None
+    return getattr(emit, "path", Path(cfg.output_path)).resolve()
+
+
 def _median(values: list[float], warmup: int) -> float:
     kept = sorted(values[warmup:] or values)
     return kept[len(kept) // 2] if kept else 0.0
@@ -607,7 +621,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms, source)
-        return Path(cfg.output_path).resolve() if cfg.output_path else None
+        return _written_path(emit, cfg)
     finally:
         tracker.reset()
         if not cfg.keep_frames and cfg.frames_cache is None:
@@ -679,7 +693,7 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
 
     _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms, source)
-    return Path(cfg.output_path).resolve() if cfg.output_path else None
+    return _written_path(emit, cfg)
 
 
 def _run_jpg(tracker, prompts, cfg, video_path):
@@ -727,7 +741,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms, source)
-        return Path(cfg.output_path).resolve() if cfg.output_path else None
+        return _written_path(emit, cfg)
     finally:
         tracker.reset()
         if not cfg.keep_frames and cfg.frames_cache is None:

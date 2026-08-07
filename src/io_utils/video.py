@@ -76,6 +76,19 @@ def extract_frames(video_path: str | Path, out_dir: str | Path) -> VideoMetadata
     return meta
 
 
+# The first entry keeps `out_path` exactly as given -- this is the existing
+# behaviour and the common case works first try. The rest are the fallback,
+# each forcing its own container: some ARM builds (observed: a headless
+# Jetson whose FFmpeg maps H.264-family fourccs to the `h264_v4l2m2m`
+# hardware encoder) have no software MPEG-4/H.264 encoder registered at all
+# and no accessible /dev/video encode node either, so mp4v's `isOpened()`
+# comes back False with nothing on stderr to explain why. MJPG and XVID in an
+# .avi container are the two that were confirmed to actually open there, in
+# that order because MJPG is the more widely playable of the two, at the cost
+# of a larger file.
+_FOURCC_FALLBACKS = (("mp4v", None), ("MJPG", ".avi"), ("XVID", ".avi"))
+
+
 @contextmanager
 def open_video_writer(out_path: str | Path, fps: float, size: tuple[int, int]):
     """Yield a `write(frame_rgb)` callable that encodes straight to disk.
@@ -85,15 +98,43 @@ def open_video_writer(out_path: str | Path, fps: float, size: tuple[int, int]):
     where CPU and GPU share both the memory and its bandwidth -- that is not
     free: it competes with the model for exactly the resource the model is
     bound by.
+
+    `write_video.path` on the yielded callable is where the video actually
+    landed. Usually that is `out_path` unchanged; it differs only after a
+    fallback swapped the container, and a caller that reports "wrote X" needs
+    to say what was actually written, not what was asked for.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, size)
-    if not writer.isOpened():
-        raise RuntimeError(f"Could not open writer for {out_path}")
+
+    writer, used_path, used_fourcc, failed = None, None, None, []
+    for fourcc, suffix in _FOURCC_FALLBACKS:
+        candidate = out_path if suffix is None else out_path.with_suffix(suffix)
+        w = cv2.VideoWriter(str(candidate), cv2.VideoWriter_fourcc(*fourcc), fps, size)
+        if w.isOpened():
+            writer, used_path, used_fourcc = w, candidate, fourcc
+            break
+        w.release()
+        failed.append(fourcc)
+
+    if writer is None:
+        raise RuntimeError(
+            f"Could not open a video writer for {out_path} -- tried "
+            f"{', '.join(f for f, _ in _FOURCC_FALLBACKS)}, none of which "
+            "cv2.VideoWriter would open. Check `ffmpeg -encoders` for a "
+            "software MPEG-4 or MJPEG encoder on this build."
+        )
+    if failed:
+        print(f"[video] {'/'.join(failed)} would not open a writer for "
+              f"{out_path.name} on this machine; wrote {used_path.name} "
+              f"instead, using {used_fourcc}.")
+
+    def write(frame_rgb):
+        return writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+
+    write.path = used_path
     try:
-        yield lambda frame_rgb: writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+        yield write
     finally:
         writer.release()
 
