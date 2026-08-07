@@ -439,6 +439,12 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             # run_fallback() below and keep the model's raw, immediate score.
             self._score_hist.append(out["object_score_logits"])
             smoothed_score = torch.stack(list(self._score_hist)).mean(dim=0)
+            # TEMP DEBUG: remove once the drop-out frame is understood. Only
+            # prints near the gate boundary, not every frame.
+            if (out["object_score_logits"] <= 0).any() or (smoothed_score <= 0).any():
+                print(f"[edgetam_trt] DEBUG object_score_logits "
+                      f"raw={out['object_score_logits'].flatten().tolist()} "
+                      f"smoothed={smoothed_score.flatten().tolist()}")
             # Position 1 is `high_res_multimasks`. `track_step` and
             # `_use_mask_as_output` are the only callers and both discard it,
             # so materialising [B, 3, 1024, 1024] would be pure waste. A future
