@@ -260,8 +260,8 @@ class TestEncodeStaysOutOfTheBudget(unittest.TestCase):
         captured = {}
 
         def capture(cfg, tracker, meta, prompts, per_frame_dt, pre, infer, post,
-                    encode=None, read=None):
-            captured.update(per_frame_dt=per_frame_dt, encode=encode)
+                    encode=None, read=None, source=None):
+            captured.update(per_frame_dt=per_frame_dt, encode=encode, source=source)
 
         real_writer, real_report = P.open_video_writer, P._report_timing
 
@@ -300,6 +300,115 @@ class TestEncodeStaysOutOfTheBudget(unittest.TestCase):
         # writer never having been called at all.
         self.assertGreater(min(slow["encode"]), delay_ms)
         self.assertLess(max(fast["encode"]), delay_ms)
+
+
+class TestFrameSkipping(unittest.TestCase):
+    """`realtime_fps` must cost frames, not correctness.
+
+    A tracker slower than the source has to leave frames untracked -- that is
+    the point -- but the run still has to end on the last frame of the clip and
+    the mp4 still has to come out the length of the clip. Those two are what
+    separate dropping stale frames from simply falling behind.
+    """
+
+    class _SlowTracker:
+        """A tracker that takes `work_s` per frame and records what it saw."""
+
+        name, precision = "fake", "float32"
+
+        def __init__(self, shape, work_s):
+            self.shape, self.work_s = shape, work_s
+            self.tracked: list[int] = []
+
+        def prepare(self, _root): pass
+
+        def set_prompts(self, _p): pass
+
+        def reset(self): pass
+
+        def propagate(self):
+            raise AssertionError("realtime_fps must route through propagate_frames")
+
+        def propagate_frames(self, frame_indices):
+            import time as _time
+            from src.trackers import TrackingResult
+
+            for idx in frame_indices:
+                _time.sleep(self.work_s)
+                self.tracked.append(idx)
+                mask = np.zeros(self.shape, dtype=bool)
+                mask[1:3, 1:3] = True
+                yield TrackingResult(frame_idx=idx, masks={1: mask})
+
+    def _run(self, frames=24, fps=300.0, work_s=0.01):
+        from contextlib import contextmanager
+        import cv2
+        import src.pipeline as P
+
+        written: list[int] = []
+        captured = {}
+        real_writer, real_report = P.open_video_writer, P._report_timing
+
+        @contextmanager
+        def counting_writer(*_a, **_k):
+            yield lambda frame: written.append(1)
+
+        def capture(cfg, tracker, meta, prompts, per_frame_dt, pre, infer, post,
+                    encode=None, read=None, source=None):
+            captured.update(per_frame_dt=per_frame_dt, source=source)
+
+        tracker = self._SlowTracker((8, 12), work_s)
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(frames):
+                cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
+                            np.full((8, 12, 3), 10 * i, dtype=np.uint8))
+            P.open_video_writer, P._report_timing = counting_writer, capture
+            try:
+                P.run(tracker,
+                      PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
+                                     frame_pattern="*.tif*", realtime_fps=fps))
+            finally:
+                P.open_video_writer, P._report_timing = real_writer, real_report
+        return tracker, written, captured
+
+    def test_slow_tracker_drops_frames_but_still_finishes_on_the_last_one(self):
+        frames = 24
+        tracker, _written, captured = self._run(frames=frames)
+
+        self.assertLess(len(tracker.tracked), frames, "nothing was dropped")
+        self.assertEqual(tracker.tracked, sorted(set(tracker.tracked)))
+        # Falling behind would end somewhere in the middle of the clip; keeping
+        # only the freshest frame ends on the frame the source stopped at.
+        self.assertEqual(tracker.tracked[-1], frames - 1)
+
+        source = captured["source"]
+        self.assertEqual(source.delivered, len(tracker.tracked))
+        self.assertEqual(source.delivered + source.dropped, frames)
+
+    def test_dropped_frames_still_reach_the_video_holding_the_last_mask(self):
+        frames = 24
+        tracker, written, _ = self._run(frames=frames)
+        self.assertLess(len(tracker.tracked), frames)
+        # One written frame per source frame, not per tracked frame -- otherwise
+        # the mp4 would be shorter than the clip and play back fast.
+        self.assertEqual(len(written), frames)
+
+    def test_a_fast_tracker_keeps_every_frame_and_is_not_charged_for_waiting(self):
+        frames = 6
+        # A rate the whole loop clears with room to spare -- the tracker costs
+        # nothing here, but reading and overlaying each frame still does.
+        fps = 20.0
+        tracker, written, captured = self._run(frames=frames, fps=fps, work_s=0.0)
+
+        self.assertEqual(tracker.tracked, list(range(frames)))
+        self.assertEqual(len(written), frames)
+        self.assertEqual(captured["source"].dropped, 0)
+        # Each frame spent ~1/fps idle waiting for the source. Charging that to
+        # the model would report it as exactly as fast as the source; the budget
+        # has to stay near the work actually done.
+        self.assertLess(max(captured["per_frame_dt"]), 0.5 / fps)
 
 
 if __name__ == "__main__":

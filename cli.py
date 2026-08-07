@@ -129,6 +129,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep-frames", action="store_true", help="Do not delete extracted frames (jpg mode).")
     p.add_argument("--no-bbox", action="store_true", help="Disable bounding-box overlay.")
     p.add_argument("--alpha", type=float, default=0.5, help="Mask overlay alpha.")
+    p.add_argument("--realtime-fps", type=float, default=None,
+                   help="Feed the tracker from a source running at this rate "
+                        "(usually the clip's own fps) and drop every frame that "
+                        "arrives while the model is still busy, keeping only the "
+                        "newest. Without it the clip waits for the model and every "
+                        "frame is tracked, which measures throughput; with it the "
+                        "model chases the clock, which is what a camera does.")
     p.add_argument("--fps-warmup", type=int, default=0,
                    help="Exclude the first N frames (model load / CUDA warm-up) from the "
                         "average FPS report.")
@@ -157,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--output is required (or pass --no-video to measure only).")
     if args.center_crop and not args.frames_dir:
         raise SystemExit("--center-crop applies to --frames-dir mode only.")
+    if args.realtime_fps is not None and args.realtime_fps <= 0:
+        raise SystemExit("--realtime-fps must be positive.")
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
     if args.offload_video is not None:
@@ -191,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         fps_warmup=args.fps_warmup,
         fps_chart=Path(args.fps_chart) if args.fps_chart else None,
         stage_chart=Path(args.stage_chart) if args.stage_chart else None,
+        realtime_fps=args.realtime_fps,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")

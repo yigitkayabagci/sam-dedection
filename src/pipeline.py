@@ -25,7 +25,8 @@ from .io_utils import (
 from .io_utils.video import read_metadata
 from .metrics import format_benchmark_note, fps_summary, write_latency_chart, write_stage_chart
 from .prompts import PromptSet
-from .trackers import VideoTracker
+from .realtime import RealtimeSource
+from .trackers import TrackingResult, VideoTracker
 from .visualize import overlay_masks
 
 
@@ -198,8 +199,8 @@ def _postprocess_timer(tracker):
             vars(predictor).pop("_get_orig_video_res_output", None)
 
 
-def _split_frame(total_s, preprocess_s, post_s, read_s, pre_ms, infer_ms, post_ms,
-                 read_ms) -> float:
+def _split_frame(total_s, preprocess_s, post_s, read_s, wait_s, pre_ms, infer_ms,
+                 post_ms, read_ms) -> float:
     """Attribute one frame's elapsed time, and return the budget in seconds.
 
     `preprocess_s`, `read_s` and `post_s` are appended to by the instrumented
@@ -217,16 +218,24 @@ def _split_frame(total_s, preprocess_s, post_s, read_s, pre_ms, infer_ms, post_m
     `pre`. It is still measured and still reported, like the overlay and the
     encode; it is just not charged to the frame.
 
-    `read_s` empty (mp4 mode, or a tracker with no instrumented loader) means
+    Idling on a real-time source (`wait_s`) comes back out for the same reason,
+    and it matters more: a model twice as fast as the camera spends half of
+    every frame doing nothing, and charging that to the budget would report it
+    as exactly as fast as the camera.
+
+    `read_s` empty (mp4 mode, or a tracker with no instrumented loader) and
+    `wait_s` empty (no frame skipping, or a model that never gets ahead) mean
     nothing is subtracted and this behaves as it always did.
     """
     read = sum(read_s) * 1000.0
     read_s.clear()
+    wait = sum(wait_s) * 1000.0
+    wait_s.clear()
     pre = sum(preprocess_s) * 1000.0 - read  # the loader timed read + transform
     preprocess_s.clear()
     post = sum(post_s) * 1000.0
     post_s.clear()
-    budget = total_s * 1000.0 - read
+    budget = total_s * 1000.0 - read - wait
     read_ms.append(read)
     pre_ms.append(max(pre, 0.0))
     post_ms.append(post)
@@ -253,6 +262,44 @@ def _shift_prompts(prompts: PromptSet, dx: int, dy: int) -> PromptSet:
 def _median(values: list[float], warmup: int) -> float:
     kept = sorted(values[warmup:] or values)
     return kept[len(kept) // 2] if kept else 0.0
+
+
+@contextmanager
+def _frame_stream(tracker, cfg: "PipelineConfig", prompts: PromptSet, frame_count: int,
+                  wait_s: list[float]):
+    """Yield `(results, source)`: the tracker's output, and what paced it.
+
+    Without `realtime_fps` that is `propagate()` over the whole clip and
+    `source` is None -- every frame reaches the model because nothing is
+    competing with it for time. With it, a `RealtimeSource` delivers indices on
+    a clock and the tracker only sees the ones it was free for.
+
+    Starting the source at the first prompted frame mirrors `propagate()`,
+    which begins at the earliest conditioning frame rather than at zero.
+    """
+    if cfg.realtime_fps is None:
+        yield tracker.propagate(), None
+        return
+    prompted = [p.frame_idx for p in prompts.boxes] + [p.frame_idx for p in prompts.points]
+    with RealtimeSource(frame_count, cfg.realtime_fps, start=min(prompted, default=0),
+                        wait_s=wait_s) as source:
+        yield tracker.propagate_frames(source), source
+
+
+def _emitted(previous: TrackingResult | None, result: TrackingResult):
+    """`(frame_idx, masks)` pairs the video should show for one tracked frame.
+
+    Just the frame itself, unless frames were dropped since the last result:
+    those are written too, carrying the masks that were still current while
+    they arrived. That is what a consumer downstream of the tracker actually
+    sees -- the mask holds, then jumps -- and it keeps the mp4 the length of
+    the clip. Writing only tracked frames instead would produce a video that
+    plays back at however many times real speed the skipping saved.
+    """
+    if previous is not None:
+        for idx in range(previous.frame_idx + 1, result.frame_idx):
+            yield idx, previous.masks
+    yield result.frame_idx, result.masks
 
 
 @contextmanager
@@ -303,6 +350,11 @@ class PipelineConfig:
     # Per-frame breakdown: preprocess (decode + resize to model input), model
     # inference, postprocess (masks back to source resolution).
     stage_chart: Path | None = None
+    # Deliver frames on a clock at this rate instead of on demand, and drop the
+    # ones that arrive while the model is busy (see src/realtime.py). Set it to
+    # the rate the deployment has to sustain -- usually the source's own fps.
+    # None = off: every frame is tracked, however long that takes.
+    realtime_fps: float | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -328,6 +380,7 @@ def _report_timing(
     post_ms: list[float],
     encode_ms: list[float] | None = None,
     read_ms: list[float] | None = None,
+    source: RealtimeSource | None = None,
 ) -> None:
     """Print FPS stats (with warm-up exclusion) and optionally write charts."""
     if not per_frame_dt:
@@ -338,6 +391,15 @@ def _report_timing(
     if stats["warmup"] > 0:
         print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
               f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
+
+    # The FPS above is how fast the model ran. On a real-time source that is no
+    # longer the same question as how much of the clip it saw, so say both.
+    if source is not None:
+        offered = source.delivered + source.dropped
+        share = 100.0 * source.dropped / offered if offered else 0.0
+        print(f"[pipeline] real-time source at {source.fps:.1f} FPS: tracked "
+              f"{source.delivered} of {offered} frames, dropped {source.dropped} "
+              f"({share:.1f}%) as stale")
 
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.
@@ -486,32 +548,37 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
+        wait_s: list[float] = []
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
         _install_realtime_preprocess(tracker, frame_files, preprocess_s, view, read_s)
 
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
-        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
+        previous = None
+        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s, \
+                _frame_stream(tracker, cfg, prompts, len(frame_files), wait_s) as (results, source):
             t0 = time.perf_counter()
-            for result in tracker.propagate():
+            for result in results:
                 t1 = time.perf_counter()
                 per_frame_dt.append(_split_frame(
-                    t1 - t0, preprocess_s, post_s, read_s,
+                    t1 - t0, preprocess_s, post_s, read_s, wait_s,
                     pre_ms, infer_ms, post_ms, read_ms))
                 if emit is not None:
                     # Overlay and encoding are how a demo video gets made, not
                     # part of tracking; timed separately, outside the budget.
                     e0 = time.perf_counter()
-                    rgb = view(load_frame_rgb8(frame_files[result.frame_idx]))
-                    emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                       draw_bbox=cfg.draw_bbox))
+                    for idx, masks in _emitted(previous, result):
+                        rgb = view(load_frame_rgb8(frame_files[idx]))
+                        emit(overlay_masks(rgb, masks, alpha=cfg.mask_alpha,
+                                           draw_bbox=cfg.draw_bbox))
                     encode_ms.append((time.perf_counter() - e0) * 1000.0)
+                previous = result
                 t0 = time.perf_counter()
                 progress.update(1)
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
-                       post_ms, encode_ms, read_ms)
+                       post_ms, encode_ms, read_ms, source)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
@@ -537,35 +604,44 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
     # be separated from the transform here; nothing is subtracted in mp4 mode.
     read_ms: list[float] = []
     read_s: list[float] = []
+    wait_s: list[float] = []
     preprocess_s: list[float] = []
     if not _install_realtime_preprocess_mp4(tracker, video_path, preprocess_s):
         print("[pipeline] WARNING: could not install per-frame preprocessing timing "
               "for mp4 mode -- decode+resize cost will be folded into 'inference' "
               "rather than reported as 'pre'. Total frame time is still correct.")
     cursor = 0
+    drained = False
+    previous = None
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:
-        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
+        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s, \
+                _frame_stream(tracker, cfg, prompts, meta.frame_count, wait_s) as (results, source):
             t0 = time.perf_counter()
-            for result in tracker.propagate():
+            for result in results:
                 t1 = time.perf_counter()
                 per_frame_dt.append(_split_frame(
-                    t1 - t0, preprocess_s, post_s, read_s,
+                    t1 - t0, preprocess_s, post_s, read_s, wait_s,
                     pre_ms, infer_ms, post_ms, read_ms))
                 if emit is not None:
                     e0 = time.perf_counter()
-                    # Sequential read; propagate yields frames in order.
-                    while cursor < result.frame_idx:
-                        cap.read()
+                    # Sequential read; `_emitted` yields indices in order.
+                    for idx, masks in _emitted(previous, result):
+                        while cursor < idx:
+                            cap.read()
+                            cursor += 1
+                        ok, bgr = cap.read()
+                        if not ok:
+                            drained = True
+                            break
                         cursor += 1
-                    ok, bgr = cap.read()
-                    if not ok:
-                        break
-                    cursor += 1
-                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                       draw_bbox=cfg.draw_bbox))
+                        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        emit(overlay_masks(rgb, masks, alpha=cfg.mask_alpha,
+                                           draw_bbox=cfg.draw_bbox))
                     encode_ms.append((time.perf_counter() - e0) * 1000.0)
+                    if drained:
+                        break
+                previous = result
                 t0 = time.perf_counter()
                 progress.update(1)
     finally:
@@ -574,7 +650,7 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
         tracker.reset()
 
     _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
-                       post_ms, encode_ms, read_ms)
+                       post_ms, encode_ms, read_ms, source)
     return Path(cfg.output_path).resolve() if cfg.output_path else None
 
 
@@ -596,28 +672,33 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
+        wait_s: list[float] = []
         _install_realtime_preprocess(tracker, frame_files, preprocess_s,
                                      read_timer=read_s)
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
-        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
+        previous = None
+        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s, \
+                _frame_stream(tracker, cfg, prompts, len(frame_files), wait_s) as (results, source):
             t0 = time.perf_counter()
-            for result in tracker.propagate():
+            for result in results:
                 t1 = time.perf_counter()
                 per_frame_dt.append(_split_frame(
-                    t1 - t0, preprocess_s, post_s, read_s,
+                    t1 - t0, preprocess_s, post_s, read_s, wait_s,
                     pre_ms, infer_ms, post_ms, read_ms))
                 if emit is not None:
                     e0 = time.perf_counter()
-                    bgr = cv2.imread(str(frame_files[result.frame_idx]))
-                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                       draw_bbox=cfg.draw_bbox))
+                    for idx, masks in _emitted(previous, result):
+                        bgr = cv2.imread(str(frame_files[idx]))
+                        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        emit(overlay_masks(rgb, masks, alpha=cfg.mask_alpha,
+                                           draw_bbox=cfg.draw_bbox))
                     encode_ms.append((time.perf_counter() - e0) * 1000.0)
+                previous = result
                 t0 = time.perf_counter()
                 progress.update(1)
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
-                       post_ms, encode_ms, read_ms)
+                       post_ms, encode_ms, read_ms, source)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()

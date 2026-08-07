@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from contextlib import ExitStack, nullcontext
+import sys
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import numpy as np
 
@@ -156,19 +157,69 @@ class EdgeTAMTracker(VideoTracker):
                     labels=labels,
                 )
 
+    def _to_result(self, frame_idx, obj_ids, mask_logits) -> TrackingResult:
+        # mask_logits: [N, 1, H, W] on the model's device.
+        # .float() is important when autocast returned bf16/fp16 logits.
+        logits_np = mask_logits.detach().float().cpu().numpy()
+        masks: dict[int, np.ndarray] = {
+            int(obj_id): logits_np[i, 0] > self.mask_threshold
+            for i, obj_id in enumerate(obj_ids)
+        }
+        return TrackingResult(frame_idx=int(frame_idx), masks=masks)
+
     def propagate(self) -> Iterator[TrackingResult]:
         if self._state is None:
             raise RuntimeError("Call prepare() and set_prompts() before propagate().")
         with self._inference_ctx():
-            for frame_idx, obj_ids, mask_logits in self._predictor.propagate_in_video(self._state):
-                # mask_logits: [N, 1, H, W] on the model's device.
-                # .float() is important when autocast returned bf16/fp16 logits.
-                logits_np = mask_logits.detach().float().cpu().numpy()
-                masks: dict[int, np.ndarray] = {
-                    int(obj_id): logits_np[i, 0] > self.mask_threshold
-                    for i, obj_id in enumerate(obj_ids)
-                }
-                yield TrackingResult(frame_idx=int(frame_idx), masks=masks)
+            for output in self._predictor.propagate_in_video(self._state):
+                yield self._to_result(*output)
+
+    def propagate_frames(self, frame_indices: Iterable[int]) -> Iterator[TrackingResult]:
+        """Track exactly the frames named, in the order given, gaps and all.
+
+        `propagate_in_video` walks the clip on its own clock, so it cannot be
+        handed a sequence with holes in it -- but it can be restarted at any
+        frame, and `max_frame_num_to_track=0` makes its processing order the
+        single frame at `start_frame_idx`. Stepping it that way is still the
+        public API driving the real tracking step; the alternative was calling
+        `_run_single_frame_inference` and re-implementing the output bookkeeping
+        around it, which would fork upstream's loop to save a function call.
+
+        A skipped frame is simply never written to the memory bank.
+        `_prepare_memory_conditioned_features` looks its previous frames up by
+        index and drops the misses, so a gap costs memory entries rather than
+        correctness -- that lost temporal context, not the arithmetic, is the
+        accuracy side of the frame-skip trade.
+        """
+        if self._state is None:
+            raise RuntimeError("Call prepare() and set_prompts() before propagate_frames().")
+        with self._inference_ctx(), self._quiet_progress():
+            for frame_idx in frame_indices:
+                for output in self._predictor.propagate_in_video(
+                    self._state,
+                    start_frame_idx=int(frame_idx),
+                    max_frame_num_to_track=0,
+                ):
+                    yield self._to_result(*output)
+
+    @contextmanager
+    def _quiet_progress(self):
+        """Mute `propagate_in_video`'s own tqdm bar for the duration.
+
+        It is scoped to one call, which in `propagate_frames` is one frame, so
+        leaving it alone would draw a fresh single-frame progress bar for every
+        frame in the clip. The caller already has a bar over the whole run.
+        """
+        module = sys.modules.get(type(self._predictor).__module__)
+        if module is None or not hasattr(module, "tqdm"):
+            yield
+            return
+        original = module.tqdm
+        module.tqdm = lambda iterable, **_: iterable
+        try:
+            yield
+        finally:
+            module.tqdm = original
 
     def reset(self) -> None:
         if self._predictor is not None and self._state is not None:
