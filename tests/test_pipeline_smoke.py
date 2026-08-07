@@ -363,7 +363,42 @@ class TestFrameSkipping(unittest.TestCase):
                 mask[1:3, 1:3] = True
                 yield TrackingResult(frame_idx=idx, masks={1: mask})
 
-    def _run(self, frames=24, fps=300.0, work_s=0.01):
+    class _ColdStartTracker:
+        """Slow for its first `cold_frames` calls, fast after -- a stand-in for
+        CUDA graph capture / kernel autotuning on a real backend's first calls."""
+
+        name, precision = "fake", "float32"
+
+        def __init__(self, shape, cold_frames, cold_work_s, hot_work_s):
+            self.shape = shape
+            self.cold_frames, self.cold_work_s, self.hot_work_s = (
+                cold_frames, cold_work_s, hot_work_s)
+            self.tracked: list[int] = []
+            self.calls = 0
+
+        def prepare(self, _root): pass
+
+        def set_prompts(self, _p): pass
+
+        def reset(self): pass
+
+        def propagate(self):
+            raise AssertionError("realtime_fps must route through propagate_frames")
+
+        def propagate_frames(self, frame_indices):
+            import time as _time
+            from src.trackers import TrackingResult
+
+            for idx in frame_indices:
+                _time.sleep(self.cold_work_s if self.calls < self.cold_frames
+                            else self.hot_work_s)
+                self.calls += 1
+                self.tracked.append(idx)
+                mask = np.zeros(self.shape, dtype=bool)
+                mask[1:3, 1:3] = True
+                yield TrackingResult(frame_idx=idx, masks={1: mask})
+
+    def _run(self, frames=24, fps=300.0, work_s=0.01, fps_warmup=0, tracker=None):
         from contextlib import contextmanager
         import cv2
         import src.pipeline as P
@@ -380,18 +415,19 @@ class TestFrameSkipping(unittest.TestCase):
                     encode=None, read=None, source=None):
             captured.update(per_frame_dt=per_frame_dt, source=source)
 
-        tracker = self._SlowTracker((8, 12), work_s)
+        tracker = tracker if tracker is not None else self._SlowTracker((8, 12), work_s)
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             for i in range(frames):
                 cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
-                            np.full((8, 12, 3), 10 * i, dtype=np.uint8))
+                            np.full((8, 12, 3), (10 * i) % 256, dtype=np.uint8))
             P.open_video_writer, P._report_timing = counting_writer, capture
             try:
                 P.run(tracker,
                       PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
                       PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
-                                     frame_pattern="*.tif*", realtime_fps=fps))
+                                     frame_pattern="*.tif*", realtime_fps=fps,
+                                     fps_warmup=fps_warmup))
             finally:
                 P.open_video_writer, P._report_timing = real_writer, real_report
         return tracker, written, captured
@@ -432,6 +468,48 @@ class TestFrameSkipping(unittest.TestCase):
         # the model would report it as exactly as fast as the source; the budget
         # has to stay near the work actually done.
         self.assertLess(max(captured["per_frame_dt"]), 0.5 / fps)
+
+    def test_warmup_runs_before_the_clock_so_cold_start_is_not_charged_as_drops(self):
+        # A model that is 20x too slow for its first 5 calls (cold: CUDA graph
+        # capture, kernel autotuning) but comfortably fast after must not lose
+        # most of a short clip to that cold start. Racing the clock from frame
+        # 0 would: 5 * 200ms = 1s of real time at 100 FPS is ~100 frame
+        # opportunities gone before the model is even warm.
+        frames, fps, warmup = 60, 100.0, 5
+        tracker = self._ColdStartTracker((8, 12), cold_frames=warmup,
+                                         cold_work_s=0.02, hot_work_s=0.001)
+        tracker, _written, captured = self._run(frames=frames, fps=fps,
+                                                fps_warmup=warmup, tracker=tracker)
+
+        # The warm-up frames ran: frames 0..warmup-1, in order, before anything
+        # paced by the source.
+        self.assertEqual(tracker.tracked[:warmup], list(range(warmup)))
+        source = captured["source"]
+        # The source only starts once the model is hot, so a fast hot model
+        # keeps essentially everything from there on -- nothing close to the
+        # ~100-frame wipeout racing the clock from frame 0 would cause.
+        self.assertGreater(source.delivered, frames - warmup - 3)
+        self.assertEqual(source.delivered + source.dropped, frames - warmup)
+
+        # And the report reflects only the hot steady state: the ~20ms cold
+        # calls must not appear in what gets measured at all.
+        self.assertLess(max(captured["per_frame_dt"]), 0.01)
+
+    def test_warmup_is_not_subtracted_twice_from_a_realtime_report(self):
+        # Regression: fps_warmup used to be re-applied by _report_timing on top
+        # of frames _frame_stream had already run untimed and excluded before
+        # the source ever started, silently stripping that many *more* off an
+        # already-warmup-free list. On a short, heavily-skipped run that could
+        # collapse the reported sample down to one point.
+        frames, fps, warmup = 30, 50.0, 5
+        tracker = self._ColdStartTracker((8, 12), cold_frames=warmup,
+                                         cold_work_s=0.01, hot_work_s=0.001)
+        _tracker, _written, captured = self._run(frames=frames, fps=fps,
+                                                 fps_warmup=warmup, tracker=tracker)
+        source = captured["source"]
+        # Every delivered (post-warmup) frame must still be in the report --
+        # none of them silently dropped a second time by warm-up accounting.
+        self.assertEqual(len(captured["per_frame_dt"]), source.delivered)
 
 
 if __name__ == "__main__":

@@ -280,22 +280,49 @@ def _median(values: list[float], warmup: int) -> float:
 
 @contextmanager
 def _frame_stream(tracker, cfg: "PipelineConfig", prompts: PromptSet, frame_count: int,
-                  wait_s: list[float]):
+                  wait_s: list[float], preprocess_s: list[float], read_s: list[float]):
     """Yield `(results, source)`: the tracker's output, and what paced it.
 
     Without `realtime_fps` that is `propagate()` over the whole clip and
     `source` is None -- every frame reaches the model because nothing is
-    competing with it for time. With it, a `RealtimeSource` delivers indices on
-    a clock and the tracker only sees the ones it was free for.
+    competing with it for time. With it, `cfg.fps_warmup` frames run first, at
+    full speed, before the real-time clock starts.
 
-    Starting the source at the first prompted frame mirrors `propagate()`,
-    which begins at the earliest conditioning frame rather than at zero.
+    That ordering matters on a short clip. CUDA graph capture and kernel
+    autotuning happen on a model's first few calls regardless of backend, and
+    if the clock is already running while that happens, the one-time cost gets
+    charged against it: a model that takes two seconds to reach full speed,
+    racing a 30 FPS source for those two seconds, loses most of a short clip to
+    warm-up rather than to steady-state slowness, and the drop count and
+    staleness numbers this function's caller reports end up describing the
+    warm-up instead of the thing being measured. A real deployment warms up
+    once before its camera feed is judged in real time; running the warm-up
+    frames untimed first, then starting the source after them, makes the
+    measurement match that.
+
+    `preprocess_s`/`read_s` are cleared right after: `_install_realtime_preprocess`
+    patches them in before this function is ever called and they keep
+    recording regardless of who is asking, so without this the warm-up frames'
+    decode time would land in the first *measured* frame's numbers instead of
+    nowhere.
+
+    Starting at the first prompted frame -- for the warm-up prefix and the
+    real-time portion after it alike -- mirrors `propagate()`, which begins at
+    the earliest conditioning frame rather than at zero.
     """
+    prompted = [p.frame_idx for p in prompts.boxes] + [p.frame_idx for p in prompts.points]
+    start = min(prompted, default=0)
     if cfg.realtime_fps is None:
         yield tracker.propagate(), None
         return
-    prompted = [p.frame_idx for p in prompts.boxes] + [p.frame_idx for p in prompts.points]
-    with RealtimeSource(frame_count, cfg.realtime_fps, start=min(prompted, default=0),
+
+    warmup = max(0, min(cfg.fps_warmup, frame_count - start - 1))
+    if warmup:
+        for _ in tracker.propagate_frames(range(start, start + warmup)):
+            pass  # priming the model and its memory bank; deliberately not measured
+        preprocess_s.clear()
+        read_s.clear()
+    with RealtimeSource(frame_count, cfg.realtime_fps, start=start + warmup,
                         wait_s=wait_s) as source:
         yield tracker.propagate_frames(source), source
 
@@ -409,7 +436,13 @@ def _report_timing(
     # and "keep up with 30 FPS" are different targets, and the tighter one is
     # usually the one being chased.
     deadline = cfg.deadline_ms or (1000.0 / cfg.realtime_fps if cfg.realtime_fps else None)
-    stats = fps_summary(per_frame_dt, warmup=cfg.fps_warmup, deadline_ms=deadline)
+    # On a real-time source, `_frame_stream` already ran `cfg.fps_warmup` frames
+    # before the clock started and never put them in `per_frame_dt` at all --
+    # applying the same exclusion again here would strip that many *more*
+    # frames off an already-warmup-free list, which on a short, heavily-skipped
+    # run can collapse the whole report to a single sample.
+    effective_warmup = 0 if cfg.realtime_fps is not None else cfg.fps_warmup
+    stats = fps_summary(per_frame_dt, warmup=effective_warmup, deadline_ms=deadline)
     print(f"[pipeline] tracked {stats['frames']} frames in {stats['total_s']:.2f}s "
           f"({stats['avg_fps_all']:.1f} FPS all)")
     if stats["warmup"] > 0:
@@ -463,7 +496,7 @@ def _report_timing(
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.
     if infer_ms:
-        w = min(cfg.fps_warmup, max(len(infer_ms) - 1, 0))
+        w = min(effective_warmup, max(len(infer_ms) - 1, 0))
         line = (f"[pipeline] median per frame: pre {_median(pre_ms, w):.1f} + "
                 f"inference {_median(infer_ms, w):.1f} + "
                 f"post {_median(post_ms, w):.1f} ms")
@@ -501,13 +534,13 @@ def _report_timing(
     label = getattr(tracker, "name", None)
     if cfg.fps_chart is not None:
         per_frame_ms = [dt * 1000.0 for dt in per_frame_dt]
-        out = write_latency_chart(per_frame_ms, cfg.fps_chart, warmup=cfg.fps_warmup,
+        out = write_latency_chart(per_frame_ms, cfg.fps_chart, warmup=effective_warmup,
                                    note=note, label=label)
         if out:
             print(f"[pipeline] wrote latency chart -> {out}")
     if cfg.stage_chart is not None:
         out = write_stage_chart(pre_ms, infer_ms, post_ms, cfg.stage_chart,
-                                 warmup=cfg.fps_warmup, note=note, label=label,
+                                 warmup=effective_warmup, note=note, label=label,
                                  encode_ms=encode_ms)
         if out:
             print(f"[pipeline] wrote stage chart -> {out}")
@@ -615,8 +648,9 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
 
         progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
         previous = None
-        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s, \
-                _frame_stream(tracker, cfg, prompts, len(frame_files), wait_s) as (results, source):
+        with _frame_stream(tracker, cfg, prompts, len(frame_files), wait_s,
+                           preprocess_s, read_s) as (results, source), \
+                _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in results:
                 t1 = time.perf_counter()
@@ -674,8 +708,9 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
     previous = None
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:
-        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s, \
-                _frame_stream(tracker, cfg, prompts, meta.frame_count, wait_s) as (results, source):
+        with _frame_stream(tracker, cfg, prompts, meta.frame_count, wait_s,
+                           preprocess_s, read_s) as (results, source), \
+                _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in results:
                 t1 = time.perf_counter()
@@ -736,8 +771,9 @@ def _run_jpg(tracker, prompts, cfg, video_path):
                                      read_timer=read_s)
         progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
         previous = None
-        with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s, \
-                _frame_stream(tracker, cfg, prompts, len(frame_files), wait_s) as (results, source):
+        with _frame_stream(tracker, cfg, prompts, len(frame_files), wait_s,
+                           preprocess_s, read_s) as (results, source), \
+                _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in results:
                 t1 = time.perf_counter()
