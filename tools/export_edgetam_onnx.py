@@ -123,12 +123,12 @@ def _plan_memory_encoder(model, batch: int) -> ExportPlan:
     )
 
 
-def _plan_sam_head(model, batch: int) -> ExportPlan:
+def _plan_sam_head(model, batch: int, all_pointers: bool = False) -> ExportPlan:
     side = model.image_size // model.backbone_stride
     dim = model.hidden_dim
     return ExportPlan(
         "sam_head",
-        SamHeadGraph(model),
+        SamHeadGraph(model, emit_all_pointers=all_pointers),
         {
             "pix_feat": torch.randn(batch, dim, side, side),
             "high_res_0": torch.randn(batch, dim // 8, side * 4, side * 4),
@@ -141,7 +141,7 @@ def _plan_sam_head(model, batch: int) -> ExportPlan:
             "high_res_masks",
             "obj_ptr",
             "object_score_logits",
-        ],
+        ] + (["obj_ptr_all"] if all_pointers else []),
     )
 
 
@@ -387,6 +387,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run each graph through onnxruntime (CPU) and assert parity with PyTorch.",
     )
+    p.add_argument(
+        "--all-pointers",
+        action="store_true",
+        help="Add an `obj_ptr_all` output to the SAM head: every candidate "
+        "mask's object pointer, not just the winner's. Required by "
+        "src/trackers/samurai.py, which chooses the mask on motion grounds and "
+        "so needs the pointer that goes with *its* choice. Costs one extra "
+        "pass of a 256-wide MLP over three tokens.",
+    )
     args = p.parse_args(argv)
 
     checkpoint = args.checkpoint or None
@@ -416,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         elif name == "memory_encoder":
             plan = _plan_memory_encoder(model, args.batch)
         else:
-            plan = _plan_sam_head(model, args.batch)
+            plan = _plan_sam_head(model, args.batch, args.all_pointers)
         export_plan(plan, outdir, args.opset, not args.static_batch, args.verify)
 
     print(f">> Done. Next: python tools/build_trt_engines.py --outdir {outdir}")

@@ -1,0 +1,398 @@
+"""Motion-aware mask selection and the memory gate.
+
+Numpy and torch only. The two claims worth pinning are:
+
+* **a permissive configuration is exactly stock SAM 2** -- so this can be
+  switched off, and so a regression shows up as a behaviour change rather than
+  as a slightly different number;
+* **a poisoned frame never enters the memory bank** -- the failure this exists
+  to fix, expressed as a test rather than as an anecdote.
+"""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+import numpy as np
+import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.trackers.samurai import (  # noqa: E402
+    FrameRecord,
+    KalmanBoxTracker,
+    MotionAwareMemory,
+    Samurai,
+    SamuraiConfig,
+    _filtered_memory,
+    boxes_from_masks,
+    mask_boxes,
+    xyah_to_xyxy,
+    xyxy_to_xyah,
+)
+
+SIZE = 64
+PERMISSIVE = SamuraiConfig(kf_weight=0.0, stable_frames=0, memory_iou=-1.0,
+                           memory_obj_score=float("-inf"), memory_kf_score=-1.0)
+
+
+def mask_at(box, size=SIZE, logit=8.0):
+    """Mask logits that are positive exactly inside `box`."""
+    out = np.full((size, size), -logit, dtype=np.float32)
+    x0, y0, x1, y1 = (int(v) for v in box)
+    out[y0:y1, x0:x1] = logit
+    return out
+
+
+def candidates(boxes):
+    """Mask logits for each box, as the SAM head would emit them."""
+    return np.stack([mask_at(b) for b in boxes])
+
+
+def boxes_of(boxes):
+    """The same candidates, reduced to boxes the way `rescore` does on device."""
+    return mask_boxes(torch.from_numpy(candidates(boxes))[None])[0].numpy()
+
+
+class TestBoxConversions(unittest.TestCase):
+    def test_roundtrip(self):
+        box = np.array([10.0, 20.0, 30.0, 60.0])
+        np.testing.assert_allclose(xyah_to_xyxy(xyxy_to_xyah(box)), box, atol=1e-6)
+
+    def test_aspect_is_width_over_height(self):
+        state = xyxy_to_xyah(np.array([0.0, 0.0, 20.0, 40.0]))
+        self.assertAlmostEqual(state[2], 0.5)
+        self.assertAlmostEqual(state[3], 40.0)
+
+
+class TestKalmanBoxTracker(unittest.TestCase):
+    def test_it_learns_a_constant_velocity(self):
+        kf = KalmanBoxTracker()
+        kf.initiate(np.array([0.0, 0.0, 20.0, 20.0]))
+        for step in range(1, 15):
+            kf.predict()
+            kf.update(np.array([step * 5.0, 0.0, step * 5.0 + 20, 20.0]))
+
+        predicted = kf.predict()
+        # After 14 frames at 5 px/frame the next centre should be near 15*5+10.
+        self.assertAlmostEqual(float((predicted[0] + predicted[2]) / 2), 85.0, delta=3.0)
+
+    def test_prediction_before_initiation_is_none(self):
+        self.assertIsNone(KalmanBoxTracker().predict())
+        self.assertFalse(KalmanBoxTracker().ready)
+
+    def test_update_on_a_fresh_filter_initiates_it(self):
+        kf = KalmanBoxTracker()
+        kf.update(np.array([1.0, 2.0, 3.0, 4.0]))
+        self.assertTrue(kf.ready)
+
+    def test_reset_clears_the_track(self):
+        kf = KalmanBoxTracker()
+        kf.initiate(np.array([0.0, 0.0, 10.0, 10.0]))
+        kf.reset()
+        self.assertFalse(kf.ready)
+
+    def test_it_stays_finite_on_a_degenerate_box(self):
+        kf = KalmanBoxTracker()
+        kf.initiate(np.array([5.0, 5.0, 5.0, 5.0]))  # zero area
+        for _ in range(5):
+            kf.predict()
+            kf.update(np.array([5.0, 5.0, 5.0, 5.0]))
+        self.assertTrue(np.isfinite(kf.mean).all())
+
+
+class TestBoxesFromMasks(unittest.TestCase):
+    def test_positive_logits_become_a_box(self):
+        boxes = boxes_from_masks(candidates([(10, 10, 20, 30)]))
+        np.testing.assert_allclose(boxes[0], [10, 10, 20, 30])
+
+    def test_an_all_negative_mask_is_nan(self):
+        empty = np.full((1, SIZE, SIZE), -5.0, dtype=np.float32)
+        self.assertTrue(np.isnan(boxes_from_masks(empty)).all())
+
+    def test_the_on_device_extractor_agrees_with_the_numpy_reference(self):
+        # `rescore` uses the torch path so it moves 3 boxes across the bus
+        # instead of 3 masks. It has to be the same answer.
+        masks = candidates([(10, 10, 20, 30), (0, 0, 1, 1), (40, 5, 63, 60)])
+        np.testing.assert_allclose(
+            mask_boxes(torch.from_numpy(masks)[None])[0].numpy(),
+            boxes_from_masks(masks),
+        )
+
+    def test_the_on_device_extractor_marks_an_empty_candidate_nan(self):
+        masks = np.stack([mask_at((10, 10, 20, 20)),
+                          np.full((SIZE, SIZE), -5.0, dtype=np.float32)])
+        boxes = mask_boxes(torch.from_numpy(masks)[None])[0].numpy()
+
+        np.testing.assert_allclose(boxes[0], [10, 10, 20, 20])
+        self.assertTrue(np.isnan(boxes[1]).all())
+
+
+class TestSelection(unittest.TestCase):
+    def _warm(self, memory, box=(10, 10, 20, 20), frames=20, step=2):
+        """Track a steadily moving target until the filter is trusted."""
+        x0, y0, x1, y1 = box
+        for i in range(frames):
+            memory.select(boxes_of([(x0 + i * step, y0, x1 + i * step, y1)]),
+                          np.array([0.9]))
+        return memory
+
+    def test_appearance_alone_decides_during_warm_up(self):
+        memory = MotionAwareMemory(SamuraiConfig(stable_frames=15))
+        selection = memory.select(boxes_of([(0, 0, 10, 10), (40, 40, 50, 50)]),
+                                  np.array([0.4, 0.8]))
+        self.assertEqual(selection.index, 1)
+
+    def test_motion_breaks_a_tie_once_the_filter_is_trusted(self):
+        memory = self._warm(MotionAwareMemory(SamuraiConfig(stable_frames=8)))
+        # Two candidates the IoU head cannot separate: one continues the track,
+        # one has jumped across the frame.
+        on_track = (10 + 20 * 2, 10, 20 + 20 * 2, 20)
+        jumped = (0, 45, 10, 55)
+        selection = memory.select(boxes_of([jumped, on_track]), np.array([0.7, 0.7]))
+        self.assertEqual(selection.index, 1)
+        self.assertGreater(selection.kf_score, 0.0)
+
+    def test_a_small_kf_weight_does_not_overrule_a_clear_appearance_win(self):
+        # Appearance is usually right; the motion term is there to break ties
+        # and to veto, not to take over.
+        memory = self._warm(MotionAwareMemory(SamuraiConfig(stable_frames=8,
+                                                            kf_weight=0.15)))
+        on_track = (10 + 20 * 2, 10, 20 + 20 * 2, 20)
+        elsewhere = (0, 45, 10, 55)
+        selection = memory.select(boxes_of([elsewhere, on_track]),
+                                  np.array([0.99, 0.30]))
+        self.assertEqual(selection.index, 0)
+
+    def test_kf_weight_zero_reproduces_the_stock_argmax(self):
+        memory = self._warm(MotionAwareMemory(SamuraiConfig(kf_weight=0.0,
+                                                            stable_frames=0)))
+        ious = np.array([0.2, 0.9, 0.5])
+        selection = memory.select(boxes_of([(0, 0, 5, 5), (30, 30, 40, 40),
+                                              (50, 50, 60, 60)]), ious)
+        self.assertEqual(selection.index, int(np.argmax(ious)))
+        np.testing.assert_allclose(selection.weighted, ious)
+
+    def test_warm_up_restarts_when_the_tracker_and_the_filter_disagree(self):
+        # A filter fed its own disagreements would converge on the wrong track
+        # and then be trusted, which is worse than not using one.
+        memory = MotionAwareMemory(SamuraiConfig(stable_frames=15, stable_iou=0.3))
+        memory.select(boxes_of([(10, 10, 20, 20)]), np.array([0.9]))
+        memory.select(boxes_of([(12, 10, 22, 20)]), np.array([0.9]))
+        self.assertEqual(memory.stable, 2)
+        memory.select(boxes_of([(14, 10, 24, 20)]), np.array([0.1]))
+        self.assertEqual(memory.stable, 0)
+
+    def test_an_empty_candidate_does_not_poison_the_filter(self):
+        memory = self._warm(MotionAwareMemory(SamuraiConfig(stable_frames=5)))
+        before = memory.kalman.mean.copy()
+        memory.select(np.full((1, 4), np.nan), np.array([0.1]))
+        self.assertTrue(np.isfinite(memory.kalman.mean).all())
+        self.assertFalse(np.allclose(before, 0))
+
+
+class TestMemoryGate(unittest.TestCase):
+    def test_a_good_frame_is_kept(self):
+        memory = MotionAwareMemory()
+        memory.record(5, iou=0.8, object_score=2.0, kf_score=0.7)
+        self.assertTrue(memory.keep(5))
+
+    def test_a_frame_where_the_object_score_went_negative_is_refused(self):
+        # This is the failure: a negative object score writes `no_obj_ptr` into
+        # the bank, and the next seven frames read it back.
+        memory = MotionAwareMemory()
+        memory.record(5, iou=0.8, object_score=-0.4, kf_score=0.7)
+        self.assertFalse(memory.keep(5))
+
+    def test_each_threshold_can_reject_on_its_own(self):
+        cases = {
+            "iou": dict(iou=0.1, object_score=2.0, kf_score=0.7),
+            "object_score": dict(iou=0.8, object_score=-1.0, kf_score=0.7),
+            "kf_score": dict(iou=0.8, object_score=2.0, kf_score=-0.1),
+        }
+        for name, kwargs in cases.items():
+            memory = MotionAwareMemory()
+            memory.record(1, **kwargs)
+            self.assertFalse(memory.keep(1), f"{name} did not reject")
+
+    def test_an_unrecorded_frame_is_kept(self):
+        # A prompted frame, or one tracked before this was installed, has not
+        # failed anything. Keeping it is both the safe and the honest default.
+        self.assertTrue(MotionAwareMemory().keep(99))
+
+    def test_the_newest_acceptable_frames_are_returned_oldest_first(self):
+        samurai = Samurai()
+        for frame in range(10):
+            samurai.state(0).record(frame, iou=0.8, object_score=1.0, kf_score=0.7)
+        samurai.state(0).record(8, iou=0.8, object_score=-1.0, kf_score=0.7)  # poisoned
+        self.assertEqual(samurai.acceptable(list(range(10)), 3), [6, 7, 9])
+
+    def test_a_permissive_config_rejects_nothing(self):
+        memory = MotionAwareMemory(PERMISSIVE)
+        memory.record(1, iou=0.0, object_score=-100.0, kf_score=0.0)
+        self.assertTrue(memory.keep(1))
+        self.assertTrue(PERMISSIVE.permissive)
+
+
+class TestFilteredMemory(unittest.TestCase):
+    def _dict(self, frames):
+        return {"cond_frame_outputs": {0: "prompt"},
+                "non_cond_frame_outputs": {f: f"out{f}" for f in frames}}
+
+    def _samurai(self, rejected=()):
+        samurai = Samurai()
+        for frame in range(20):
+            bad = frame in rejected
+            samurai.state(0).record(frame, iou=0.1 if bad else 0.8,
+                                    object_score=1.0, kf_score=0.7)
+        return samurai
+
+    def test_nothing_rejected_leaves_the_dict_untouched(self):
+        output_dict = self._dict(range(10))
+        self.assertIs(_filtered_memory(output_dict, self._samurai(), 10, 7, 1),
+                      output_dict)
+
+    def test_a_rejected_frame_is_replaced_by_an_older_good_one(self):
+        # Backfilling is the point: after a bad patch the bank stays full of
+        # frames that were actually good, instead of running short.
+        filtered = _filtered_memory(self._dict(range(12)), self._samurai({9, 10, 11}),
+                                    12, 7, 1)
+        kept = filtered["non_cond_frame_outputs"]
+
+        self.assertEqual(len(kept), 6)  # num_maskmem - 1
+        self.assertNotIn("out9", kept.values())
+        self.assertIn("out8", kept.values())
+        self.assertIn("out3", kept.values())
+
+    def test_backfilled_frames_land_on_the_indices_upstream_looks_up(self):
+        # Renumbering is what lets SAM 2's own stride arithmetic run untouched;
+        # none of it is duplicated here.
+        filtered = _filtered_memory(self._dict(range(12)), self._samurai({11}), 12, 7, 1)
+        self.assertEqual(sorted(filtered["non_cond_frame_outputs"]), [6, 7, 8, 9, 10, 11])
+
+    def test_conditioning_frames_are_never_filtered(self):
+        # They carry the user's prompt; they are ground truth, not a prediction.
+        filtered = _filtered_memory(self._dict(range(12)), self._samurai(set(range(12))),
+                                    12, 7, 1)
+        self.assertEqual(filtered["cond_frame_outputs"], {0: "prompt"})
+
+    def test_everything_rejected_leaves_an_empty_bank_rather_than_bad_memory(self):
+        filtered = _filtered_memory(self._dict(range(12)), self._samurai(set(range(12))),
+                                    12, 7, 1)
+        self.assertEqual(filtered["non_cond_frame_outputs"], {})
+
+    def test_a_non_unit_stride_filters_without_renumbering(self):
+        # Renumbering assumes upstream asks for consecutive indices. Under a
+        # different stride it does not, so bad frames are dropped but not
+        # backfilled: the bank runs shorter rather than wrong.
+        filtered = _filtered_memory(self._dict(range(12)), self._samurai({10}), 12, 7, 2)
+        kept = filtered["non_cond_frame_outputs"]
+        self.assertNotIn(10, kept)
+        self.assertIn(9, kept)
+
+    def test_future_frames_are_never_candidates(self):
+        filtered = _filtered_memory(self._dict(range(20)), self._samurai({5}), 8, 7, 1)
+        self.assertTrue(all(f < 8 for f in filtered["non_cond_frame_outputs"]))
+
+
+class TestSamurai(unittest.TestCase):
+    def test_rescore_rewrites_the_scores_so_upstreams_argmax_picks_its_choice(self):
+        # The whole integration rests on this: SAM 2 derives the mask, the
+        # object pointer and the memory write from one argmax over these
+        # values, so moving them moves all three together.
+        samurai = Samurai(SamuraiConfig(stable_frames=0, kf_weight=1.0))
+        masks = torch.from_numpy(candidates([(10, 10, 20, 20)])[None])
+        samurai.rescore(masks, torch.tensor([[0.9]]), torch.tensor([[2.0]]))
+
+        moved = torch.from_numpy(candidates([(0, 40, 10, 50), (12, 10, 22, 20)])[None])
+        scores = samurai.rescore(moved, torch.tensor([[0.8, 0.2]]),
+                                 torch.tensor([[2.0]]))
+        self.assertEqual(int(scores.argmax(dim=-1)), 1)
+
+    def test_a_single_candidate_frame_still_updates_the_filter(self):
+        # The prompted frame can be single-mask. Returning early there would
+        # leave the filter blind to it, and the scores are unchanged either way
+        # because there is nothing to choose between.
+        samurai = Samurai(SamuraiConfig(stable_frames=0))
+        ious = torch.tensor([[0.7]])
+        masks = torch.from_numpy(candidates([(10, 10, 20, 20)])[None])
+
+        self.assertIs(samurai.rescore(masks, ious, torch.tensor([[1.0]])), ious)
+        self.assertTrue(samurai.states[0].kalman.ready)
+
+    def test_each_tracked_object_gets_its_own_filter(self):
+        samurai = Samurai()
+        masks = torch.from_numpy(np.stack([candidates([(10, 10, 20, 20)])[0],
+                                           candidates([(40, 40, 50, 50)])[0]])[:, None])
+        samurai.rescore(masks.repeat(1, 2, 1, 1), torch.tensor([[0.9, 0.1], [0.9, 0.1]]),
+                        torch.tensor([[2.0], [2.0]]))
+        self.assertEqual(len(samurai.states), 2)
+        self.assertIsNot(samurai.states[0].kalman, samurai.states[1].kalman)
+
+    def test_a_frame_bad_for_any_object_is_not_remembered(self):
+        # The bank stores one entry per frame for every row at once, so the
+        # gate has to be shared. Conservative is the right direction.
+        samurai = Samurai()
+        samurai.state(0).record(4, iou=0.9, object_score=2.0, kf_score=0.8)
+        samurai.state(1).record(4, iou=0.9, object_score=-1.0, kf_score=0.8)
+        self.assertFalse(samurai.keep(4))
+
+    def test_reset_clears_every_object(self):
+        samurai = Samurai()
+        samurai.state(0).record(1, iou=0.9, object_score=1.0, kf_score=0.9)
+        samurai.frame_idx = 12
+        samurai.reset()
+        self.assertEqual(samurai.states, [])
+        self.assertEqual(samurai.frame_idx, 0)
+
+    def test_object_score_is_taken_from_the_model_not_the_mask(self):
+        samurai = Samurai(SamuraiConfig(stable_frames=0))
+        masks = torch.from_numpy(candidates([(10, 10, 20, 20)])[None]).repeat(1, 2, 1, 1)
+        samurai.frame_idx = 3
+        samurai.rescore(masks, torch.tensor([[0.9, 0.1]]), torch.tensor([[-2.5]]))
+        self.assertAlmostEqual(samurai.states[0].records[3].object_score, -2.5, places=4)
+        self.assertFalse(samurai.keep(3))
+
+
+class TestConfig(unittest.TestCase):
+    def test_defaults_match_the_published_values(self):
+        cfg = SamuraiConfig()
+        self.assertAlmostEqual(cfg.kf_weight, 0.15)
+        self.assertEqual(cfg.stable_frames, 15)
+        self.assertAlmostEqual(cfg.stable_iou, 0.3)
+        self.assertAlmostEqual(cfg.memory_iou, 0.5)
+
+    def test_an_unknown_option_is_rejected_at_startup(self):
+        from src.trackers.edgetam_tracker import _samurai_config
+
+        with self.assertRaises(ValueError) as ctx:
+            _samurai_config({"kf_wieght": 0.2})
+        self.assertIn("kf_wieght", str(ctx.exception))
+
+    def test_disabled_and_absent_both_mean_stock_behaviour(self):
+        from src.trackers.edgetam_tracker import _samurai_config
+
+        self.assertIsNone(_samurai_config(None))
+        self.assertIsNone(_samurai_config({}))
+        self.assertIsNone(_samurai_config({"enabled": False}))
+
+    def test_a_valid_block_is_accepted(self):
+        from src.trackers.edgetam_tracker import _samurai_config
+
+        cfg = _samurai_config({"kf_weight": 0.25, "memory_iou": 0.4})
+        self.assertAlmostEqual(cfg.kf_weight, 0.25)
+        self.assertAlmostEqual(cfg.memory_iou, 0.4)
+
+
+class TestFrameRecord(unittest.TestCase):
+    def test_acceptability_is_a_conjunction(self):
+        cfg = SamuraiConfig()
+        self.assertTrue(FrameRecord(0.9, 1.0, 0.9).acceptable(cfg))
+        self.assertFalse(FrameRecord(0.9, 1.0, -0.1).acceptable(cfg))
+
+
+if __name__ == "__main__":
+    unittest.main()

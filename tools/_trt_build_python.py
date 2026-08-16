@@ -18,12 +18,26 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def _network_flags(trt):
-    """Explicit batch: a flag on TensorRT 8/9, the only option on 10."""
+def _network_flags(trt, precision: str = "fp16"):
+    """Explicit batch, plus strong typing for a Q/DQ graph.
+
+    A calibrated INT8 graph already says, per tensor, what precision it wants.
+    STRONGLY_TYPED makes TensorRT obey that instead of re-deciding layer by
+    layer -- which is the whole reason the scales were calibrated. It is a
+    network-creation flag, not a builder flag, so it has to be set here.
+    """
     flags = getattr(trt, "NetworkDefinitionCreationFlag", None)
-    if flags is not None and hasattr(flags, "EXPLICIT_BATCH"):
-        return 1 << int(flags.EXPLICIT_BATCH)
-    return 0
+    if flags is None:
+        return 0
+    mask = 1 << int(flags.EXPLICIT_BATCH) if hasattr(flags, "EXPLICIT_BATCH") else 0
+    if precision == "int8":
+        if not hasattr(flags, "STRONGLY_TYPED"):
+            raise SystemExit(
+                "This TensorRT build has no STRONGLY_TYPED network flag; INT8 "
+                "from a Q/DQ graph needs TensorRT 10. Use --precision fp16."
+            )
+        mask |= 1 << int(flags.STRONGLY_TYPED)
+    return mask
 
 
 def _io_dtype(trt, precision: str):
@@ -54,7 +68,7 @@ def build_engine(
 
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(_network_flags(trt))
+    network = builder.create_network(_network_flags(trt, precision))
     parser = trt.OnnxParser(network, logger)
 
     blob = onnx_path.read_bytes()
@@ -89,8 +103,10 @@ def build_engine(
     config.add_optimization_profile(profile)
 
     # Force the IO precision so TensorRT does not wrap every engine in fp32
-    # reformat kernels. LINEAR is trtexec's "chw".
-    if io_reduced and precision != "fp32":
+    # reformat kernels. LINEAR is trtexec's "chw". A strongly-typed network
+    # takes its IO types from the graph and rejects overrides, so INT8 is
+    # excluded -- `build_trt_engines.py` already turns io_reduced off there.
+    if io_reduced and precision not in ("fp32", "int8"):
         dtype = _io_dtype(trt, precision)
         linear = 1 << int(trt.TensorFormat.LINEAR)
         for i in range(network.num_inputs):

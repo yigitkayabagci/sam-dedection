@@ -1,0 +1,51 @@
+# EdgeTAM at 512x512 with calibrated INT8 engines (Orin AGX).
+#
+# Built from Q/DQ ONNX graphs that tools/quantize_edgetam.py produced, not from
+# TensorRT's own implicit calibration. That distinction is the whole point:
+# min/max calibration is what took the image encoder from IoU 0.9999 to 0.8170
+# in docs/tensorrt_fp16.md, and it is TensorRT's default.
+#
+# The engine set is deliberately MIXED. Every engine here is independent, so a
+# module whose INT8 fails its accuracy gate goes back to fp16 on its own while
+# the others keep their speedup. tools/quantize_edgetam.py records the choice
+# per module in <outdir>/quantization_plan.json and in each spec.
+#
+# Build ON THE ORIN, after capturing real calibration data:
+#   1) python tools/export_edgetam_onnx.py --outdir models512/ --image-size 512 \
+#          --checkpoint checkpoints/edgetam_thermal_512.pt --verify
+#   2) python tools/quantize_edgetam.py capture --data <anti-uav410> \
+#          --calib outputs/calib/ --image-size 512
+#   3) python tools/quantize_edgetam.py quantize --outdir models512/ \
+#          --qdq-outdir models512_int8/ --calib outputs/calib/
+#   4) python tools/build_trt_engines.py --outdir models512_int8/ \
+#          --precision auto --max-batch 4
+#   5) python tools/check_trt_parity.py --outdir models512_int8/ --image-size 512
+#
+# Compare against configs/edgetam_trt_512.yaml (the same graphs at fp16), never
+# against the PyTorch baseline -- otherwise the measurement mixes the backend
+# change in with the precision change.
+image_encoder_engine:    models512_int8/edgetam_image_encoder.engine
+memory_attention_engine: models512_int8/edgetam_memory_attention.engine
+memory_encoder_engine:   models512_int8/edgetam_memory_encoder.engine
+sam_head_engine:         models512_int8/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_thermal_512.pt
+image_size: 512                           # must match how the engines were exported
+device: cuda
+# The PyTorch fallback path still runs in fp16; the engines carry their own
+# precision from their Q/DQ nodes.
+precision: float16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+strict: false                             # true = refuse silent PyTorch fallback
+use_cuda_graph: true                      # replay engines from a captured graph
+fill_hole_area: null
+
+# Set to a directory to record what every engine is fed, for a re-calibration
+# taken on the device. Leave null in normal use -- it copies every input tensor.
+calibration_dir: null
+calibration_limit: 512
+calibration_stride: 2

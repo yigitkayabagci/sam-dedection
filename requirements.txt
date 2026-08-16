@@ -16,3 +16,20 @@ timm>=1.0
 
 # EdgeTAM itself is installed from source via scripts/setup_edgetam.sh
 # (it pulls in hydra-core, iopath, etc.).
+
+# ---------------------------------------------------------------------------
+# Not needed to track. Install per task; none of them are imported at module
+# level, so the tracking pipeline runs without any of them.
+# ---------------------------------------------------------------------------
+#
+# Fine-tuning and INT8 (notebooks/, src/training/) -- on Colab, not the Orin:
+#   pip install "transformers>=4.56"      # SAM 2.1 teacher for pseudo-mask labels.
+#                                         # Deliberately NOT facebookresearch/sam2:
+#                                         # that installs as `sam2` and collides
+#                                         # with EdgeTAM, which is a fork of it.
+#   pip install "nvidia-modelopt[onnx]"   # calibrated INT8 PTQ/QAT
+#   pip install onnx onnxruntime          # export verification
+#
+# Nothing new is required for SAMURAI (src/trackers/samurai.py) or for
+# size-adaptive inference (src/trackers/adaptive.py): both are numpy over
+# tensors the model already produces.

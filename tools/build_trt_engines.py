@@ -95,10 +95,18 @@ def shape_arg(spec: dict, batch: int) -> str:
 
 # trtexec flag and IO dtype per precision. bf16 needs TensorRT >= 9 and an
 # Ampere-class GPU or newer; Orin (sm_87) qualifies.
+#
+# int8 is different in kind from the others: it is not a builder hint but an
+# instruction to obey the Q/DQ nodes `tools/quantize_edgetam.py` put in the
+# graph. `--stronglyTyped` is what makes TensorRT respect them exactly instead
+# of re-deciding precision layer by layer -- which is the entire point of
+# having calibrated the scales. It also means the graph's own IO types win, so
+# the fp16 boundary the other precisions use is not available here.
 PRECISION_FLAGS = {
     "fp16": (["--fp16"], "fp16"),
     "bf16": (["--bf16"], "bf16"),
     "fp32": ([], "fp32"),
+    "int8": (["--stronglyTyped"], "fp32"),
 }
 
 
@@ -124,6 +132,19 @@ def build_one(
     engine = outdir / spec["engine"]
     if not onnx.exists():
         raise SystemExit(f"{spec['module']}: ONNX missing at {onnx}; re-run the exporter.")
+
+    if precision == "auto":
+        # `quantize_edgetam.py` records what it did to each graph, so one build
+        # command produces a mixed set: the modules whose INT8 was calibrated
+        # get Q/DQ, and the ones held back stay fp16 instead of silently
+        # falling to fp32 under --stronglyTyped.
+        precision = spec.get("precision", "fp16")
+    if precision == "int8":
+        # A strongly-typed network takes its IO types from the graph, which the
+        # exporter writes as fp32. That reintroduces the boundary reformat
+        # kernels the fp16 build removed -- a real cost, worth naming rather
+        # than discovering in a profile.
+        io_reduced = False
 
     print(f"\n>> {spec['module']} [{precision}]: {onnx.name} -> {engine.name}")
     if spec.get("dynamic_batch"):
@@ -230,8 +251,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--precision",
         default="fp16",
-        choices=tuple(PRECISION_FLAGS),
-        help="Engine precision (default: fp16). On Orin, bf16 runs on the same "
+        choices=tuple(PRECISION_FLAGS) + ("auto",),
+        help="Engine precision (default: fp16). `int8` obeys the Q/DQ nodes "
+        "tools/quantize_edgetam.py wrote; `auto` reads the per-module choice "
+        "that tool recorded in each spec, so one command builds a mixed set. "
+        "On Orin, bf16 runs on the same "
         "tensor cores at the same rate as fp16 but carries 8 bits of significand "
         "to fp16's 11, and TensorRT has fewer bf16 tactics -- so it is a "
         "strictly worse trade here unless activations overflow fp16, which "

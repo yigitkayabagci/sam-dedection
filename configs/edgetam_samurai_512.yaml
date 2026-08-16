@@ -1,0 +1,40 @@
+# EdgeTAM at 512x512 with SAMURAI motion-aware memory (PyTorch backend).
+#
+# Targets one specific failure, observed on a real recording: when
+# object_score_logits drops below 0 on a hard frame, EdgeTAM zeroes the mask and
+# writes a constant "no object" vector into the memory bank instead of a real
+# appearance. The next seven frames read that back, and nothing ever undoes it.
+#
+# SAMURAI is training-free -- the checkpoint is untouched -- and costs
+# essentially nothing on the accelerated path, because the memory bookkeeping it
+# changes is the part this project deliberately left in PyTorch
+# (docs/tensorrt_fp16.md). No engine changes shape.
+#
+# Remove the `samurai:` block entirely, or set `enabled: false`, and this file
+# is configs/edgetam_512.yaml.
+model_cfg: configs/edgetam.yaml
+checkpoint: checkpoints/edgetam_thermal_512.pt
+image_size: 512
+device: cuda
+precision: bfloat16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+samurai:
+  enabled: true
+  # How much the motion model may overrule the IoU head when choosing among
+  # the three candidate masks. Small on purpose: appearance is usually right,
+  # and the motion score is here to break ties and to veto a candidate that
+  # jumped across the frame.
+  kf_weight: 0.15
+  # The filter has to agree with the tracker for this many frames before it is
+  # trusted. One initialised on a single box has no velocity estimate.
+  stable_frames: 15
+  stable_iou: 0.3
+  # The memory gate, and the half that matters here: a frame enters the bank
+  # only if all three agree it was a good one. memory_obj_score: 0.0 is exactly
+  # the threshold at which EdgeTAM starts writing no_obj_ptr.
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0

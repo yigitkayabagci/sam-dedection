@@ -84,6 +84,11 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         use_cuda_graph: bool = True,
         fill_hole_area: int | None = None,
         image_size: int | None = None,
+        calibration_dir: str | None = None,
+        calibration_limit: int = 512,
+        calibration_stride: int = 1,
+        samurai: dict | None = None,
+        sam2long: dict | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -94,6 +99,8 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             offload_video_to_cpu=offload_video_to_cpu,
             offload_state_to_cpu=offload_state_to_cpu,
             image_size=image_size,
+            samurai=samurai,
+            sam2long=sam2long,
         )
         self.engine_paths = {
             # `engine_path` is the pre-multi-engine config key for the image encoder.
@@ -105,6 +112,13 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         self.strict = strict
         self.use_cuda_graph = use_cuda_graph
         self.fill_hole_area = fill_hole_area
+        # Set to a directory to record what every engine is fed, for INT8
+        # calibration. Three of the four take internal activations whose
+        # distributions cannot be guessed, so they have to come from a real run.
+        self.calibration_dir = calibration_dir
+        self.calibration_limit = calibration_limit
+        self.calibration_stride = calibration_stride
+        self._calibration: dict[str, object] = {}
         self._engines: dict[str, object] = {}
         self._layout: MemoryLayout | None = None
         self._patched = False
@@ -148,6 +162,32 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
                 if self.strict:
                     raise
                 print(f"[edgetam_trt] {name}: engine load failed ({exc}); using PyTorch.")
+
+    def _start_calibration(self) -> None:
+        """Wrap the loaded engines so every input they see is kept.
+
+        Wrapping happens before patching, so the tracker's own packing code --
+        padded memory slots, the additive mask, the fp16 buffers -- is what
+        produces the recorded tensors. Calibrating on anything reconstructed
+        afterwards would be calibrating a different network.
+        """
+        if not self.calibration_dir or not self._engines:
+            return
+        from .calibration import wrap_engines
+
+        self._calibration = wrap_engines(
+            self._engines, self.calibration_limit, self.calibration_stride
+        )
+        print(f"[edgetam_trt] recording calibration data for "
+              f"{', '.join(sorted(self._calibration))} -> {self.calibration_dir}")
+
+    def save_calibration(self) -> list[Path]:
+        """Write one `.npz` per engine. Call after tracking, before `reset`."""
+        written = []
+        for name, store in self._calibration.items():
+            written.append(store.save(Path(self.calibration_dir) / f"{name}.npz"))
+            print(f"[edgetam_trt] {name}: {store.summary()}")
+        return written
 
     # ----------------------------------------------------------- patching
 
@@ -369,6 +409,54 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         # next, so make that a no-op. The fallback above runs it itself.
         perceiver.forward = lambda x, pos=None: (x, pos)
 
+    def _reselect(self, engine, out):
+        """Let SAMURAI override the engine's own `argmax(ious)` mask choice.
+
+        The engine picks a candidate internally and derives the mask, the
+        high-res mask and the object pointer from it. Overriding the choice on
+        the Python side means all three have to be re-derived from the chosen
+        candidate -- especially the pointer, which is what gets written to the
+        memory bank and therefore has to describe the mask that was kept.
+
+        Needs an engine exported with `--all-pointers`. Without it the choice
+        cannot be made consistently, so it is not made at all: the memory gate
+        (the half that stops a bad frame being remembered) still applies.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        if "obj_ptr_all" not in engine.output_names:
+            self._warn("samurai:no_ptrs",
+                       "sam_head engine has no obj_ptr_all output, so SAMURAI's "
+                       "mask re-selection is off (its memory gate still applies). "
+                       "Re-export with tools/export_edgetam_onnx.py --all-pointers.")
+            return out
+
+        scores = self._samurai.rescore(
+            out["low_res_multimasks"], out["ious"], out["object_score_logits"]
+        )
+        best = scores.argmax(dim=-1)
+        if bool((best == out["ious"].argmax(dim=-1)).all()):
+            return out  # same candidate the engine chose; nothing to redo
+
+        masks = out["low_res_multimasks"]
+        index = best.reshape(-1, 1, 1, 1).expand(-1, 1, *masks.shape[-2:])
+        low_res = torch.gather(masks, 1, index).clone()
+        return {
+            **out,
+            "ious": scores,
+            "low_res_masks": low_res,
+            # One bilinear upsample of the chosen candidate, ~0.2 ms at 512.
+            # Cheaper than making the engine emit all three at full size.
+            "high_res_masks": F.interpolate(
+                low_res, size=(self._predictor.image_size,) * 2,
+                mode="bilinear", align_corners=False),
+            "obj_ptr": torch.gather(
+                out["obj_ptr_all"], 1,
+                best.reshape(-1, 1, 1).expand(-1, 1, out["obj_ptr_all"].shape[-1]),
+            )[:, 0].clone(),
+        }
+
     def _patch_sam_head(self, engine) -> None:
         predictor = self._predictor
         fallback = predictor._forward_sam_heads
@@ -422,6 +510,8 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
                 # are read again when later frames build their memory bank.
                 clone=("low_res_masks", "obj_ptr", "object_score_logits"),
             )
+            if self._samurai is not None:
+                out = self._reselect(engine, out)
             # Position 1 is `high_res_multimasks`. `track_step` and
             # `_use_mask_as_output` are the only callers and both discard it,
             # so materialising [B, 3, 1024, 1024] would be pure waste. A future
@@ -465,6 +555,13 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         self._ensure_predictor()
         self._apply_fill_hole_policy()
         self._load_engines()
+        self._start_calibration()
+        # Before patching: `install` wraps the mask decoder, which the sam_head
+        # engine replaces. When that engine is present `_reselect` applies the
+        # same policy at the engine's boundary instead; when it is not, the
+        # decoder wrapper is what runs. Either way the memory gate is the same
+        # patch, because the memory bookkeeping never left PyTorch.
+        self._install_samurai()
         self._patch()
         with self._inference_ctx():
             self._state = self._predictor.init_state(

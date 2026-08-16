@@ -460,10 +460,20 @@ class SamHeadGraph(nn.Module):
         high_res_masks       [B, 1, img, img]
         obj_ptr              [B, C]
         object_score_logits  [B, 1]
+        obj_ptr_all          [B, M, C]        (only with `emit_all_pointers`)
+
+    `obj_ptr_all` exists for motion-aware selection (`src/trackers/samurai.py`).
+    The engine picks its mask by `argmax(ious)` internally, so a caller that
+    wants a *different* candidate needs that candidate's object pointer too --
+    the pointer written to the memory bank has to describe the mask that was
+    kept. Emitting all of them costs one extra pass of a 256-wide MLP over
+    three tokens and keeps the choice on the Python side, where the motion
+    model already lives.
     """
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, emit_all_pointers: bool = False) -> None:
         super().__init__()
+        self.emit_all_pointers = bool(emit_all_pointers)
         if not model.pred_obj_scores:
             raise ValueError("Expected pred_obj_scores=True.")
         if model.soft_no_obj_ptr:
@@ -550,7 +560,7 @@ class SamHeadGraph(nn.Module):
         appearing = is_obj.to(obj_ptr.dtype)
         obj_ptr = appearing * obj_ptr + (1.0 - appearing) * self.no_obj_ptr
 
-        return (
+        outputs = (
             low_res_multimasks,
             ious,
             low_res_masks,
@@ -558,3 +568,11 @@ class SamHeadGraph(nn.Module):
             obj_ptr,
             object_score_logits,
         )
+        if not self.emit_all_pointers:
+            return outputs
+        # Every candidate's pointer, blended the same way, so a caller that
+        # overrides the mask choice can take the matching one. `obj_ptr` above
+        # is row `argmax(ious)` of this, by construction.
+        all_ptrs = self.obj_ptr_proj(sam_tokens)
+        appearing = is_obj.to(all_ptrs.dtype)[..., None]
+        return outputs + (appearing * all_ptrs + (1.0 - appearing) * self.no_obj_ptr,)

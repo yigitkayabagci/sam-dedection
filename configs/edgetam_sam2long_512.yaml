@@ -1,0 +1,57 @@
+# EdgeTAM at 512x512 with SAM2Long: N competing memory pathways.
+#
+# EXPERIMENTAL, and offered next to SAMURAI rather than instead of it. SAMURAI
+# is the recommended answer to memory poisoning because it costs essentially
+# nothing; this costs real milliseconds and exists so the accuracy question can
+# be settled by measurement.
+#
+# The cost is not small and is not hidden: memory attention is 61.9% of a
+# frame's arithmetic (docs/tensorrt_fp16.md) and it runs once per pathway.
+# Three pathways puts a measured ~10 ms frame near ~22 ms -- inside the
+# 20-30 ms ceiling, but spending most of it here.
+#
+# How it works: SAM 2 already gives every batch row its own memory bank, object
+# pointer and object score, so N pathways are N identically-prompted objects.
+# The tracker replicates the prompt, the rows diverge only on frames where the
+# head is genuinely unsure, and the output collapses to the best-scoring row.
+#
+# On TensorRT the engines must accept the wider batch:
+#   python tools/build_trt_engines.py --outdir models512/ --max-batch 12
+#   (pathways x objects, so 3 pathways x 4 objects = 12)
+#
+# Both blocks can be on at once. They compose: SAMURAI chooses within a
+# pathway and filters what it remembers; SAM2Long chooses between pathways.
+model_cfg: configs/edgetam.yaml
+checkpoint: checkpoints/edgetam_thermal_512.pt
+image_size: 512
+device: cuda
+precision: bfloat16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+sam2long:
+  enabled: true
+  # Competing memory banks per tracked object. Each one costs another pass of
+  # the memory path.
+  pathways: 3
+  # A frame is uncertain when the best two candidates are within this of each
+  # other. Below it there is nothing to disagree about and branching would only
+  # add noise.
+  uncertainty_margin: 0.05
+  # Also uncertain when the object score is this low -- the case where SAM 2 is
+  # about to write no_obj_ptr and being wrong is most expensive.
+  object_score_floor: 1.0
+  # How much the object score counts towards a pathway's running total,
+  # against mask quality.
+  score_weight: 1.0
+
+# Recommended: leave SAMURAI on underneath. Comment out to isolate SAM2Long.
+samurai:
+  enabled: true
+  kf_weight: 0.15
+  stable_frames: 15
+  stable_iou: 0.3
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0

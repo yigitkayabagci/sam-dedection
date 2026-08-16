@@ -1,0 +1,44 @@
+# EdgeTAM at 512x512 on TensorRT, with SAMURAI motion-aware memory.
+#
+# This is the recommended deployment configuration once the engines are built:
+# configs/edgetam_trt_512.yaml plus the `samurai:` block, and nothing else
+# changes. No engine changes shape -- SAMURAI modifies the memory-bank
+# bookkeeping, which this project deliberately kept in PyTorch
+# (docs/tensorrt_fp16.md, "what stays in PyTorch").
+#
+# One export flag matters. The sam_head engine picks its own candidate mask
+# internally, so overriding that choice needs every candidate's object pointer:
+#
+#   python tools/export_edgetam_onnx.py --outdir models512/ --image-size 512 \
+#       --checkpoint checkpoints/edgetam_thermal_512.pt --all-pointers --verify
+#   python tools/build_trt_engines.py --outdir models512/ --max-batch 4
+#
+# Without --all-pointers the tracker says so once and disables the mask
+# re-selection ONLY; the memory gate -- the half that stops a bad frame
+# poisoning the bank -- keeps working. So existing engines still benefit.
+image_encoder_engine:    models512/edgetam_image_encoder.engine
+memory_attention_engine: models512/edgetam_memory_attention.engine
+memory_encoder_engine:   models512/edgetam_memory_encoder.engine
+sam_head_engine:         models512/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml
+checkpoint: checkpoints/edgetam_thermal_512.pt
+image_size: 512
+device: cuda
+precision: float16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+strict: false
+use_cuda_graph: true
+fill_hole_area: null
+
+samurai:
+  enabled: true
+  kf_weight: 0.15
+  stable_frames: 15
+  stable_iou: 0.3
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0

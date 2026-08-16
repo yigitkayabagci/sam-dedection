@@ -163,6 +163,81 @@ def test_patched_tracker_matches_pytorch(frames_dir, num_objects):
             )
 
 
+PERMISSIVE_SAMURAI = {
+    "kf_weight": 0.0,
+    "stable_frames": 0,
+    "memory_iou": -1.0,
+    "memory_obj_score": -1e9,
+    "memory_kf_score": -1.0,
+}
+
+
+def test_samurai_with_a_permissive_config_is_stock_edgetam(frames_dir):
+    """Switched off, SAMURAI has to be *exactly* nothing.
+
+    Thresholds that reject nothing and a zero motion weight mean every decision
+    falls back to the one SAM 2 already makes. If the masks move at all, the
+    integration is changing something it should not -- and that would be
+    invisible in a run where SAMURAI is also supposed to help.
+    """
+    prompts = _prompts(1)
+    reference_tracker = EdgeTAMTracker(
+        model_cfg="configs/edgetam.yaml", checkpoint="unused",
+        device="cpu", precision="float32",
+    )
+    reference_tracker._predictor = build_model()
+    reference = run_tracker(reference_tracker, frames_dir, prompts)
+
+    samurai_tracker = EdgeTAMTracker(
+        model_cfg="configs/edgetam.yaml", checkpoint="unused",
+        device="cpu", precision="float32", samurai=PERMISSIVE_SAMURAI,
+    )
+    samurai_tracker._predictor = build_model()
+    got = run_tracker(samurai_tracker, frames_dir, prompts)
+
+    assert samurai_tracker._samurai is not None, "SAMURAI was never installed"
+    for (ref_idx, ref_masks), (got_idx, got_masks) in zip(reference, got):
+        assert ref_idx == got_idx
+        for obj_id, ref_mask in ref_masks.items():
+            assert int(np.logical_xor(ref_mask, got_masks[obj_id]).sum()) == 0, (
+                f"frame {ref_idx}: a permissive SAMURAI changed the mask"
+            )
+
+
+def test_samurai_refuses_to_remember_a_frame_it_marked_bad(frames_dir):
+    """The memory gate keeps a poisoned frame out of the bank.
+
+    The failure being fixed: one negative `object_score_logits` writes
+    `no_obj_ptr` into memory and the next frames read it back. Here every
+    frame's object score is forced negative, so the gate must reject all of
+    them -- and the tracker must keep running with an empty bank rather than
+    with a poisoned one.
+    """
+    tracker = EdgeTAMTracker(
+        model_cfg="configs/edgetam.yaml", checkpoint="unused",
+        device="cpu", precision="float32",
+        samurai={"stable_frames": 0, "memory_obj_score": 0.0},
+    )
+    model = build_model()
+    with torch.no_grad():
+        model.sam_mask_decoder.pred_obj_score_head.layers[-1].bias.fill_(-50.0)
+    tracker._predictor = model
+
+    # Deliberately not through `run_tracker`: its `reset()` clears exactly the
+    # state being inspected.
+    tracker.prepare(frames_dir)
+    tracker.set_prompts(_prompts(1))
+    for _ in tracker.propagate():
+        pass
+
+    records = tracker._samurai.states[0].records
+    assert records, "no frame was ever assessed"
+    assert all(not record.acceptable(tracker._samurai.config)
+               for record in records.values())
+    assert tracker._samurai.rejected, "nothing was flagged for exclusion"
+    tracker.reset()
+
+
 def test_patched_tracker_survives_a_second_video(frames_dir):
     """reset() then prepare() again must not leak state through the buffers."""
     tracker = make_trt_tracker(build_model(), batch=1)

@@ -271,6 +271,45 @@ def test_sam_head_graph_matches(model):
     torch.testing.assert_close(score, ref_score)
 
 
+def test_sam_head_graph_emits_every_candidates_pointer(model):
+    """`obj_ptr_all` row `argmax(ious)` is the `obj_ptr` the graph already returns.
+
+    SAMURAI picks its mask on motion grounds, which can differ from the
+    engine's own `argmax`, and the pointer written to the memory bank has to
+    describe the mask that was kept. That only holds if the extra output is the
+    same computation applied to every candidate.
+    """
+    pix_feat, hi0, hi1 = _sam_head_inputs(model)
+    with torch.no_grad():
+        graph = SamHeadGraph(model, emit_all_pointers=True).eval()
+        low_multi, ious, _low, _high, ptr, _score, all_ptrs = graph(pix_feat, hi0, hi1)
+
+    assert all_ptrs.shape[:2] == ious.shape
+    best = ious.argmax(dim=-1)
+    chosen = all_ptrs[torch.arange(all_ptrs.shape[0]), best]
+    torch.testing.assert_close(chosen, ptr)
+
+
+def test_sam_head_graph_omits_all_pointers_by_default(model):
+    """Existing engines keep their exact output list."""
+    pix_feat, hi0, hi1 = _sam_head_inputs(model)
+    with torch.no_grad():
+        assert len(SamHeadGraph(model).eval()(pix_feat, hi0, hi1)) == 6
+
+
+def test_all_candidate_pointers_are_no_obj_when_the_object_is_absent(model):
+    """The occluded branch replaces every pointer, not just the winner's."""
+    pix_feat, hi0, hi1 = _sam_head_inputs(model, seed=11)
+    graph = SamHeadGraph(model, emit_all_pointers=True).eval()
+    with torch.no_grad():
+        model.sam_mask_decoder.pred_obj_score_head.layers[-1].bias.fill_(-50.0)
+        all_ptrs = graph(pix_feat, hi0, hi1)[6]
+        model.sam_mask_decoder.pred_obj_score_head.layers[-1].bias.fill_(0.0)
+
+    expected = model.no_obj_ptr.detach().expand_as(all_ptrs)
+    torch.testing.assert_close(all_ptrs, expected)
+
+
 def test_sam_head_graph_matches_when_object_absent(model):
     """The occluded branch (object_score_logits <= 0) takes a different path."""
     pix_feat, hi0, hi1 = _sam_head_inputs(model, seed=7)
