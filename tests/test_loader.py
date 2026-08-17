@@ -124,6 +124,53 @@ class TestPrefetch(unittest.TestCase):
         np.testing.assert_array_equal(expected.exist.numpy(), got.exist.numpy())
         self.assertEqual(got.images.shape, (2, 3, 3, SIZE, SIZE))
 
+    def test_an_executor_collates_the_same_batch_a_plain_loop_would(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from src.training.clip_loop import collate
+
+        chunk = next(batch_clips(self.clips, 3, seed=0))
+        stores = [self.stores[c.sequence.name] for c in chunk]
+        serial = collate(chunk, stores, "cpu")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            parallel = collate(chunk, stores, "cpu", pool)
+
+        np.testing.assert_array_equal(serial.images.numpy(), parallel.images.numpy())
+        np.testing.assert_array_equal(serial.boxes.numpy(), parallel.boxes.numpy())
+        for a, b in zip(serial.masks, parallel.masks):
+            self.assertEqual(a is None, b is None)
+            if a is not None:
+                np.testing.assert_array_equal(a.numpy(), b.numpy())
+
+    def test_only_depth_batches_are_ever_assembled_ahead(self):
+        # The bound is batches, not threads. A batch of 64 clips is 1.6 GB, so
+        # a queue sized by the worker count is how the host runs out of memory.
+        import threading
+
+        live, peak, lock = 0, 0, threading.Lock()
+
+        def counted(chunk, stores, device="cpu", executor=None):
+            nonlocal live, peak
+            from src.training.clip_loop import collate as real
+            with lock:
+                live += 1
+                peak = max(peak, live)
+            try:
+                return real(chunk, stores, device, executor)
+            finally:
+                with lock:
+                    live -= 1
+
+        import src.training.loader as loader
+        real_collate = loader.collate
+        loader.collate = counted
+        try:
+            chunks = list(batch_clips(self.clips, 2, seed=0, limit=6))
+            list(prefetch(chunks, self.stores, device="cpu", workers=8, depth=2))
+        finally:
+            loader.collate = real_collate
+        self.assertLessEqual(peak, 2)
+
     def test_an_empty_stream_is_not_an_error(self):
         self.assertEqual(list(prefetch([], self.stores, device="cpu")), [])
 

@@ -8,7 +8,10 @@ pure Python and OpenCV against ~0.15 s of compute, so the accelerator idles for
 two thirds of every step and a bigger GPU makes the run *no* faster. `prefetch`
 moves that work onto threads -- `cv2.imread` and the numpy arithmetic around it
 both release the GIL, so this is real parallelism, not concurrency theatre --
-and hands the training thread batches that are already assembled.
+and hands the training thread batches that are already assembled. The threads
+work *inside* a batch rather than on several at once, because host memory is
+the thing that runs out first: 64 clips of 8 frames at 512x512 float32 is
+1.6 GB, and a queue of those sized by the thread count is tens of gigabytes.
 
 **The batch size is a property of the machine, not of the recipe.** Clip-mode
 activation memory scales with batch x clip length x resolution, and the numbers
@@ -73,30 +76,42 @@ def prefetch(
     chunks: Iterable[list[Clip]],
     stores: Mapping[str, Mapping[int, np.ndarray]],
     device: str = "cuda",
-    workers: int = 6,
+    workers: int = 8,
     depth: int = 2,
 ) -> Iterator[Batch]:
     """Collate `chunks` on worker threads; yield them, in order, on `device`.
 
-    At most `workers * depth` batches are ever in flight, so a slow training
-    step cannot make the loader read the whole dataset into RAM ahead of it.
-    Order is preserved: the futures are consumed from a queue rather than as
-    they complete, which keeps a run reproducible from its seed.
+    **`workers` and `depth` are different knobs on purpose.** `workers` is how
+    many clips are read at once, and wants to be around the core count.
+    `depth` is how many *batches* may exist in host memory ahead of the
+    training step, and wants to stay at two or three whatever `workers` is: a
+    batch of 64 clips is 1.6 GB, so tying the queue length to the thread count
+    would put 25 GB of pinned-down JPEG decode in front of a card that is
+    perfectly happy with two.
+
+    Two pools rather than one because a task that submits to the pool it is
+    running on deadlocks the moment that pool is full. Batch assembly runs on
+    its own small pool and blocks on the clip pool, which submits nothing.
+
+    Order is preserved -- futures are consumed from a queue rather than as they
+    complete -- so a run stays reproducible from its seed.
     """
     source = iter(chunks)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as clip_pool, \
+            ThreadPoolExecutor(max_workers=max(depth, 1)) as batch_pool:
         pending: deque = deque()
 
         def submit() -> bool:
             chunk = next(source, None)
             if chunk is None:
                 return False
-            pending.append(pool.submit(
-                collate, chunk, [stores[c.sequence.name] for c in chunk], "cpu"
+            pending.append(batch_pool.submit(
+                collate, chunk, [stores[c.sequence.name] for c in chunk], "cpu",
+                clip_pool,
             ))
             return True
 
-        for _ in range(max(workers * depth, 1)):
+        for _ in range(max(depth, 1)):
             if not submit():
                 break
         while pending:

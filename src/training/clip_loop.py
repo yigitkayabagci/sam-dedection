@@ -195,9 +195,18 @@ class Batch:
         )
 
 
-def collate(clips: list[Clip], stores: list[dict], device: str = "cuda") -> Batch:
-    """Build a `Batch` by reading the clips' pixels and their pseudo-masks."""
-    rows = [clip_masks(c, s) for c, s in zip(clips, stores)]
+def collate(clips: list[Clip], stores: list[dict], device: str = "cuda",
+            executor=None) -> Batch:
+    """Build a `Batch` by reading the clips' pixels and their pseudo-masks.
+
+    `executor` spreads the per-clip reads across a thread pool. That is where
+    the parallelism belongs once batches get large: sixty-four clips is 512
+    JPEGs, and assembling whole batches concurrently instead would need a copy
+    of each one in host memory at the same time.
+    """
+    mapper = map if executor is None else executor.map
+    rows = list(mapper(clip_masks, clips, stores))
+    frames = list(mapper(lambda c: clip_tensor(c, device), clips))
     size = clips[0].size
 
     masks: list[torch.Tensor | None] = []
@@ -212,7 +221,7 @@ def collate(clips: list[Clip], stores: list[dict], device: str = "cuda") -> Batc
         masks.append(torch.from_numpy(stacked).to(device))
 
     return Batch(
-        images=torch.stack([clip_tensor(c, device) for c in clips]),
+        images=torch.stack(frames),
         boxes=torch.from_numpy(np.stack([c.boxes for c in clips])).to(device).float(),
         exist=torch.from_numpy(np.stack([c.exist for c in clips])).to(device).float(),
         masks=masks,
