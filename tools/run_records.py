@@ -37,6 +37,11 @@ Usage:
         --prompt point --multi
     python tools/run_records.py --records frames --out frame_output \\
         --modes crop512 --box 700,300,830,430
+
+    # Same records, half the inferences: results land in <mode>_skip2/ next to
+    # the baseline, off the same saved prompt, so the two are comparable.
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full1024 --frame-skip
 """
 from __future__ import annotations
 
@@ -107,6 +112,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="Playback fps for the output mp4 (a sequence has none).")
     p.add_argument("--warmup", type=int, default=20,
                    help="Frames excluded from every reported statistic.")
+    p.add_argument("--frame-skip", "--frameskip", dest="frame_skip", type=int,
+                   nargs="?", const=2, default=1, metavar="N",
+                   help="Infer one frame in N and hold that mask over the rest "
+                        "(bare flag = 2). The clip still comes out at full length; "
+                        "what halves is the inferences behind it, so each one gets N "
+                        "frame periods instead of one. Results go to <mode>_skipN/ so "
+                        "a baseline run is never overwritten, and the saved prompt is "
+                        "shared with it -- same target, same frames, one variable.")
     p.add_argument("--prompt", choices=("box", "point"), default="box",
                    help="How to select the target interactively, when no "
                         "prompts.json and no --box is available. Needs a display.")
@@ -166,7 +179,10 @@ def main(argv: list[str] | None = None) -> int:
 
         for mode in modes:
             config, crop = MODES[mode]
-            outdir = out_root / record.name / mode
+            # A skipped run is a different measurement of the same mode, not a
+            # replacement for it, so it gets its own folder next to the baseline.
+            outdir = out_root / record.name / (mode if args.frame_skip == 1
+                                               else f"{mode}_skip{args.frame_skip}")
             outdir.mkdir(parents=True, exist_ok=True)
 
             cmd = [PY, "cli.py", "--tracker", "edgetam_trt", "--config", config,
@@ -179,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
             if crop:
                 cmd += ["--center-crop", crop]
+            if args.frame_skip > 1:
+                cmd += ["--frame-skip", args.frame_skip]
 
             ok, text = run_step(f"{record.name} — {mode}", cmd, outdir / "run.txt")
             if not ok:
@@ -189,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             rows[record.name][mode] = {
                 "fps": find(r"avg ([\d.]+) FPS over", text) or "-",
+                # Under a skip, FPS counts inferences; this is the frame rate
+                # they cover, which is what has to clear the source's.
+                "source_fps": find(r"\(([\d.]+) source FPS\)", text) or "-",
                 "stages": "  /  ".join(stages.groups()) if stages else "-",
                 "demo": find(r"overlay \+ mp4 encoding: ([\d.]+) ms/frame", text) or "-",
                 # What the crop actually came out as: clamped to the frame, so
@@ -206,8 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         "full512": "| `full512` | 512x512 | whole frame, resized |",
         "crop512": "| `crop512` | 512x512 | centred 512x512 window |",
     }
+    skip = args.frame_skip
+    title = f"# Recorded clips — {len(records)} record(s), {len(modes)} mode(s)"
     lines = [
-        f"# Recorded clips — {len(records)} record(s), {len(modes)} mode(s)",
+        title + (f", frame skip {skip}" if skip > 1 else ""),
         "",
         "| mode | model | input |",
         "|---|---|---|",
@@ -219,22 +242,40 @@ def main(argv: list[str] | None = None) -> int:
         "excluded from it and reported separately.",
         "",
     ]
+    if skip > 1:
+        lines += [
+            f"Frame skip {skip}: one frame in {skip} is inferred and its mask held "
+            f"over the rest, so the clip still comes out at full length on 1/{skip} "
+            "of the inferences. FPS below counts inferences; source FPS is the frame "
+            f"rate they cover. At {args.fps:g} fps in, each inference has "
+            f"{1000.0 * skip / args.fps:.1f} ms instead of {1000.0 / args.fps:.1f} ms "
+            "-- that threshold, not the average, is what this run is testing, so read "
+            "the tail off `latency.png` rather than the median.",
+            "",
+        ]
+    columns = ["mode", "model input from", "FPS"]
+    if skip > 1:
+        columns.append("source FPS")
+    columns += ["median ms: pre / inference / post", "overlay + mp4 (excluded)"]
     for name, per_mode in rows.items():
         lines += [
             f"## {name}",
             "",
-            "| mode | model input from | FPS | median ms: pre / inference / post "
-            "| overlay + mp4 (excluded) |",
-            "|---|---|---|---|---|",
+            "| " + " | ".join(columns) + " |",
+            "|" + "---|" * len(columns),
         ]
         for mode in modes:
             r = per_mode.get(mode)
             if r is None:
-                lines.append(f"| `{mode}` | - | did not run | - | - |")
-                continue
-            lines.append(f"| `{mode}` | {r['input']} | {r['fps']} | {r['stages']} "
-                         f"| {r['demo']} ms |")
-        lines += ["", f"Videos and charts: `{name}/<mode>/`", ""]
+                cells = ["-", "did not run"] + ["-"] * (len(columns) - 3)
+            else:
+                cells = [r["input"], r["fps"]]
+                if skip > 1:
+                    cells.append(r["source_fps"])
+                cells += [r["stages"], f"{r['demo']} ms"]
+            lines.append(f"| `{mode}` | " + " | ".join(cells) + " |")
+        suffix = "" if skip == 1 else f"_skip{skip}"
+        lines += ["", f"Videos and charts: `{name}/<mode>{suffix}/`", ""]
 
     if failed:
         lines += [f"> **Did not complete: {', '.join(failed)}** — see their `run.txt`.", ""]
