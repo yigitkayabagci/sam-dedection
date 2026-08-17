@@ -302,5 +302,153 @@ class TestEncodeStaysOutOfTheBudget(unittest.TestCase):
         self.assertLess(max(fast["encode"]), delay_ms)
 
 
+class TestFrameSkip(unittest.TestCase):
+    """A skipped frame must never reach the model.
+
+    The point of the flag is that inference does not run on the frames it drops.
+    A version that ran them and threw the masks away would be indistinguishable
+    from the outside -- same video, same masks -- while costing exactly as much,
+    so these tests ask the tracker what it was actually handed rather than
+    inspecting the output.
+    """
+
+    class _Result:
+        def __init__(self, idx, mask):
+            self.frame_idx, self.masks = idx, {1: mask}
+
+    class _Tracker:
+        """Tracks whatever `prepare()` found, the way init_state does."""
+        name, precision = "fake", "float32"
+
+        def __init__(self, shape):
+            self.shape, self.seen, self.prompt_frames = shape, [], []
+
+        def prepare(self, root):
+            self.seen = sorted(Path(root).glob("*.jpg"))
+
+        def set_prompts(self, prompts):
+            self.prompt_frames = [b.frame_idx for b in prompts.boxes]
+
+        def reset(self): pass
+
+        def propagate(self):
+            for i in range(len(self.seen)):
+                mask = np.zeros(self.shape, dtype=bool)
+                mask[1:3, 1:3] = True
+                yield TestFrameSkip._Result(i, mask)
+
+    def _run(self, stride, frames=6, prompt_frame=0):
+        """Track `frames` constant-valued frames (frame i is all i*40)."""
+        import cv2
+        import src.pipeline as P
+
+        rendered = []
+        tracker = self._Tracker((8, 12))
+        real_overlay, real_report = P.overlay_masks, P._report_timing
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(frames):
+                cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
+                            np.full((8, 12, 3), i * 40, dtype=np.uint8))
+            # The overlay is handed the source frame for a tracked index, so its
+            # pixel value names which source frame came back.
+            P.overlay_masks = lambda rgb, *a, **k: (rendered.append(int(rgb[0, 0, 0])),
+                                                    real_overlay(rgb, *a, **k))[1]
+            P._report_timing = lambda *a, **k: None
+            try:
+                P.run(tracker,
+                      PromptSet(boxes=[BoxPrompt(1, prompt_frame, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
+                                     frame_pattern="*.tif*", frame_stride=stride))
+            finally:
+                P.overlay_masks, P._report_timing = real_overlay, real_report
+        return tracker, rendered
+
+    def test_every_other_frame_reaches_the_model(self):
+        tracker, rendered = self._run(stride=2, frames=6)
+        self.assertEqual(len(tracker.seen), 3, "model was given more than half the clip")
+        # ...and they are frames 0, 2, 4 of the source, not the first three.
+        self.assertEqual(rendered, [0, 80, 160])
+
+    def test_stride_one_leaves_the_clip_alone(self):
+        tracker, rendered = self._run(stride=1, frames=6)
+        self.assertEqual(len(tracker.seen), 6)
+        self.assertEqual(rendered, [0, 40, 80, 120, 160, 200])
+
+    def test_odd_stride_keeps_the_last_partial_group(self):
+        # 6 frames at stride 4 -> frames 0 and 4; the tail must not be dropped.
+        tracker, rendered = self._run(stride=4, frames=6)
+        self.assertEqual(len(tracker.seen), 2)
+        self.assertEqual(rendered, [0, 160])
+
+    def test_prompt_lands_on_the_frame_it_was_drawn_on(self):
+        # A prompt on source frame 4 must reach the model as tracked frame 2,
+        # which is that same image -- not frame 4 of the decimated clip.
+        tracker, _ = self._run(stride=2, frames=6, prompt_frame=4)
+        self.assertEqual(tracker.prompt_frames, [2])
+
+    def test_untracked_prompt_frame_snaps_backwards(self):
+        from src.pipeline import _decimate_prompts
+
+        ps = PromptSet(boxes=[BoxPrompt(1, 5, (0, 0, 1, 1))],
+                       points=[PointPrompt(2, 4, (1, 1), 1)])
+        out = _decimate_prompts(ps, 2)
+        self.assertEqual(out.boxes[0].frame_idx, 2)   # frame 5 -> 4 -> tracked 2
+        self.assertEqual(out.points[0].frame_idx, 2)
+        # Everything else about the prompt is untouched.
+        self.assertEqual(out.boxes[0].xyxy, (0, 0, 1, 1))
+
+    def test_renumber_cache_leaves_a_consecutive_run(self):
+        import cv2
+        from src.pipeline import _renumber_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(6):
+                cv2.imwrite(str(d / f"{i:05d}.jpg"),
+                            np.full((8, 12, 3), i * 40, dtype=np.uint8))
+            files = sorted(d.glob("*.jpg"))
+            out = _renumber_cache(d, files[::2])
+            self.assertEqual([p.name for p in out],
+                             ["00000.jpg", "00001.jpg", "00002.jpg"])
+            self.assertEqual(sorted(p.name for p in d.glob("*.jpg")),
+                             [p.name for p in out])
+            # Renaming must not have reshuffled the content: 0, 2, 4 in order.
+            values = [int(cv2.imread(str(p))[0, 0, 0]) for p in out]
+            for got, want in zip(values, [0, 80, 160]):
+                self.assertLess(abs(got - want), 6, f"{values} is not [0, 80, 160]")
+
+    def test_jpg_mode_decimates_the_extracted_cache(self):
+        # The other input path: extract_frames dumps every frame, so the skipped
+        # ones have to leave the cache before init_state reads the directory.
+        import cv2
+        import src.pipeline as P
+        from src.io_utils import open_video_writer
+
+        tracker = self._Tracker((32, 32))
+        real_report = P._report_timing
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            with open_video_writer(d / "in.mp4", 30.0, (32, 32)) as emit:
+                for i in range(6):
+                    emit(np.full((32, 32, 3), i * 40, dtype=np.uint8))
+            P._report_timing = lambda *a, **k: None
+            try:
+                P.run(tracker, PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", video_path=d / "in.mp4",
+                                     video_mode="jpg", frame_stride=2))
+            finally:
+                P._report_timing = real_report
+        self.assertEqual(len(tracker.seen), 3, "model was given more than half the clip")
+        self.assertEqual([p.name for p in tracker.seen],
+                         ["00000.jpg", "00001.jpg", "00002.jpg"])
+
+    def test_direct_mp4_mode_rejects_frame_skip(self):
+        cfg = PipelineConfig(video_path=Path("foo.mp4"), output_path=Path("/tmp/out.mp4"),
+                             video_mode="mp4", frame_stride=2)
+        with self.assertRaises((ValueError, RuntimeError)):
+            _resolve_video_mode(cfg)
+
+
 if __name__ == "__main__":
     unittest.main()

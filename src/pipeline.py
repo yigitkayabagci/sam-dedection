@@ -250,6 +250,75 @@ def _shift_prompts(prompts: PromptSet, dx: int, dy: int) -> PromptSet:
     )
 
 
+def _decimate_prompts(prompts: PromptSet, stride: int) -> PromptSet:
+    """Move prompts from source-frame onto tracked-frame numbering.
+
+    Source frame `i` is tracked frame `i // stride`. A prompt on a frame that
+    is not tracked snaps back to the last one that is -- the nearest frame the
+    model will actually encode -- and says so, because a prompt silently landing
+    on a different image than the user drew it on is the one way frame skipping
+    can be wrong rather than merely coarser.
+    """
+    if stride <= 1:
+        return prompts
+    missed = sorted({p.frame_idx for p in (*prompts.boxes, *prompts.points)
+                     if p.frame_idx % stride})
+    if missed:
+        print(f"[pipeline] frame skip {stride}: prompt frame(s) {missed} are not "
+              f"tracked; snapped back to {[i - i % stride for i in missed]}")
+    return PromptSet(
+        boxes=[replace(b, frame_idx=b.frame_idx // stride) for b in prompts.boxes],
+        points=[replace(p, frame_idx=p.frame_idx // stride) for p in prompts.points],
+    )
+
+
+def _apply_frame_skip(frame_files: list[Path], prompts: PromptSet,
+                      stride: int) -> tuple[list[Path], PromptSet]:
+    """Keep one source frame in `stride`; return the clip the model will see.
+
+    This is the whole of frame skipping. The tracker is handed a shorter clip
+    and never learns frames were dropped: `init_state` counts these frames,
+    `propagate_in_video` iterates over them, the memory bank stores them, and
+    `_LazyFrames` decodes them. A skipped frame is not inferred cheaply -- it is
+    not inferred at all, and nothing but the decode it never gets is saved.
+
+    What that buys is deadline, not speed: a frame still costs what it cost,
+    but at `stride` source frames per model step a 30 fps camera allows
+    `stride` x 33.3 ms for it. It costs temporal resolution in exchange --
+    consecutive tracked frames are `stride` source frames apart, so apparent
+    motion between them is `stride` times larger and the memory bank spans
+    `stride` times more real time.
+    """
+    if stride <= 1:
+        return frame_files, prompts
+    kept = frame_files[::stride]
+    print(f"[pipeline] frame skip {stride}: tracking {len(kept)} of "
+          f"{len(frame_files)} frames (one in {stride})")
+    return kept, _decimate_prompts(prompts, stride)
+
+
+def _renumber_cache(cache_root: Path, keep: list[Path]) -> list[Path]:
+    """Reduce the JPG cache to `keep`, renamed 00000.jpg, 00001.jpg, ...
+
+    `init_state` is given the directory, not the list, so in jpg mode the frames
+    the model must not see have to leave it, and the survivors have to stay
+    consecutively numbered. Dropped files go first and the renames run in
+    ascending order, so every target index is at or below its source index and
+    no rename can land on a file still needed.
+    """
+    kept = set(keep)
+    for path in cache_root.glob("*.jpg"):
+        if path not in kept:
+            path.unlink()
+    out = []
+    for idx, path in enumerate(keep):
+        target = cache_root / f"{idx:05d}.jpg"
+        if path != target:
+            path.rename(target)
+        out.append(target)
+    return out
+
+
 def _median(values: list[float], warmup: int) -> float:
     kept = sorted(values[warmup:] or values)
     return kept[len(kept) // 2] if kept else 0.0
@@ -265,7 +334,12 @@ def _video_sink(cfg: "PipelineConfig", meta):
     if cfg.output_path is None:
         yield None
         return
-    with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
+    # Only tracked frames are written, so the frame rate drops with them: the
+    # clip keeps its real-time duration and plays alongside an unskipped run of
+    # the same source, just at a coarser frame rate -- which is what the
+    # consumer of these masks would see.
+    fps = meta.fps / max(cfg.frame_stride, 1)
+    with open_video_writer(cfg.output_path, fps, (meta.width, meta.height)) as emit:
         yield emit
 
 
@@ -288,6 +362,12 @@ class PipelineConfig:
     center_crop: int | None = None
     # Output frame rate for frames mode (an image sequence has no inherent fps).
     fps: float = 30.0
+    # Track one source frame in `frame_stride` and skip the rest (1 = every
+    # frame). The skipped frames never reach the model, so this does not make a
+    # frame cheaper -- it gives each tracked frame `frame_stride` frame periods
+    # to finish in, at the cost of `frame_stride`x the motion between the frames
+    # the memory bank sees.
+    frame_stride: int = 1
     # "auto" -> hand mp4 directly to EdgeTAM if decord is available (no JPG dump);
     # "mp4"  -> require direct mp4 path (fail if decord is missing);
     # "jpg"  -> always extract JPGs first (legacy, works without decord).
@@ -338,6 +418,19 @@ def _report_timing(
     if stats["warmup"] > 0:
         print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
               f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
+
+    # Every number above counts tracked frames, which under a skip is not what
+    # the camera produces. State both, and state the deadline explicitly: that
+    # is the only thing skipping actually changes.
+    if cfg.frame_stride > 1:
+        print(f"[pipeline] frame skip {cfg.frame_stride}: {stats['frames']} tracked "
+              f"frames cover {stats['frames'] * cfg.frame_stride} source frames "
+              f"({stats['avg_fps_post_warmup'] * cfg.frame_stride:.1f} source FPS)")
+        if meta is not None and meta.fps > 0:
+            budget = 1000.0 * cfg.frame_stride / meta.fps
+            print(f"[pipeline]   a {meta.fps:.1f} fps source gives each tracked frame "
+                  f"{budget:.1f} ms (was {budget / cfg.frame_stride:.1f} ms) -- "
+                  "a frame does not get cheaper, its deadline moves")
 
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.
@@ -410,10 +503,17 @@ def _resolve_video_mode(cfg: PipelineConfig) -> str:
         if not _decord_available():
             raise RuntimeError("video_mode=mp4 needs `decord` (or eva-decord). "
                                "pip install eva-decord  or use video_mode=jpg.")
+        if cfg.frame_stride > 1:
+            raise ValueError("video_mode=mp4 hands the whole file to decord, which "
+                             "leaves no frame list to decimate; frame skipping needs "
+                             "video_mode=jpg (or --frames-dir).")
         return "mp4"
     # auto
     if suffix == ".mp4" and _decord_available():
-        return "mp4"
+        if cfg.frame_stride == 1:
+            return "mp4"
+        print("[pipeline] frame skip: falling back to jpg mode -- the direct-mp4 "
+              "path hands the whole file to decord and cannot be decimated.")
     return "jpg"
 
 
@@ -427,6 +527,9 @@ def run(tracker: VideoTracker, prompts: PromptSet, cfg: PipelineConfig) -> Path 
       jpg mode: extract all frames to JPGs first, then track. Slower start,
                 but works without `decord`.
     """
+    if cfg.frame_stride < 1:
+        raise ValueError(f"frame_stride must be >= 1 (got {cfg.frame_stride})")
+
     if cfg.frames_dir is not None:
         frames_dir = Path(cfg.frames_dir).resolve()
         if not frames_dir.is_dir():
@@ -456,6 +559,12 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
     """
     frame_files = list_frame_files(frames_dir, cfg.frame_pattern)
     meta = frames_metadata(frames_dir, cfg.frame_pattern, fps=cfg.fps)
+    # Decimate before anything reads the list: the JPG cache is built from it,
+    # so the cache, the clip `init_state` counts, the lazy loader that replaces
+    # it, the overlay source and the progress bar all agree on one timeline.
+    # `meta` deliberately keeps the source frame count and fps -- that is what
+    # the frame budget is measured against.
+    frame_files, prompts = _apply_frame_skip(frame_files, prompts, cfg.frame_stride)
 
     # Cropping here, in the pass that already reads every frame, means the crop
     # is what lands in the JPG cache -- so it is the source for the model, the
@@ -584,10 +693,13 @@ def _run_jpg(tracker, prompts, cfg, video_path):
     cache_root.mkdir(parents=True, exist_ok=True)
     try:
         meta = extract_frames(video_path, cache_root)
+        frame_files, prompts = _apply_frame_skip(
+            sorted(cache_root.glob("*.jpg")), prompts, cfg.frame_stride)
+        if cfg.frame_stride > 1:
+            frame_files = _renumber_cache(cache_root, frame_files)
         tracker.prepare(cache_root)
         tracker.set_prompts(prompts)
 
-        frame_files = sorted(cache_root.glob("*.jpg"))
         per_frame_dt: list[float] = []
         pre_ms: list[float] = []
         infer_ms: list[float] = []
