@@ -106,6 +106,16 @@ def main(argv: list[str] | None = None) -> int:
                         "full-frame coordinates and are shifted for you.")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Output FPS for --frames-dir mode (image sequences have no inherent fps).")
+    p.add_argument("--frame-skip", "--frameskip", dest="frame_skip", type=int,
+                   nargs="?", const=2, default=1, metavar="N",
+                   help="Track one source frame in N and skip the rest (bare flag = 2, "
+                        "i.e. process a frame, skip a frame). Skipped frames never reach "
+                        "the model, so this does not make a frame faster -- it gives each "
+                        "tracked frame N frame periods to finish in: at 30 fps, 66.7 ms "
+                        "instead of 33.3. The cost is temporal resolution: consecutive "
+                        "tracked frames are N frames apart, so the target moves N times "
+                        "further between them. Not available with --video-mode mp4 "
+                        "(decord gets the whole file; use jpg mode or --frames-dir).")
     p.add_argument("--output", default=None, help="Output video (.mp4) path. Omit "
                                                   "with --no-video to measure only.")
     p.add_argument("--no-video", action="store_true",
@@ -157,6 +167,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--output is required (or pass --no-video to measure only).")
     if args.center_crop and not args.frames_dir:
         raise SystemExit("--center-crop applies to --frames-dir mode only.")
+    if args.frame_skip < 1:
+        raise SystemExit(f"--frame-skip takes 1 (every frame) or more, got {args.frame_skip}.")
+    if args.frame_skip > 1 and args.video_mode == "mp4":
+        raise SystemExit("--frame-skip cannot decimate the direct-mp4 path; use "
+                         "--video-mode jpg or --frames-dir.")
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
     if args.offload_video is not None:
@@ -184,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         frame_pattern=args.frame_pattern,
         center_crop=args.center_crop,
         fps=args.fps,
+        frame_stride=args.frame_skip,
         video_mode=args.video_mode,
         keep_frames=args.keep_frames,
         draw_bbox=not args.no_bbox,
