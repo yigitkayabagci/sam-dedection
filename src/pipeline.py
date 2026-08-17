@@ -317,6 +317,51 @@ def _covered_frames(tracked_idx: int, stride: int, total: int) -> range:
     return range(start, min(start + stride, total))
 
 
+def _spread_over_source(values: list[float], stride: int, total: int,
+                        share: bool = True) -> list[float]:
+    """Re-index a per-inference series onto the source timeline.
+
+    Every entry becomes ms per *source* frame, so a skipped run's chart has the
+    same length, the same x axis and the same unit as an unskipped one and the
+    two can be read against each other -- and against the source frame period,
+    which is the line the whole pipeline has to stay under.
+
+    `share` is which cadence the measured work runs at. Inference happens once
+    per `stride` frames, so its cost is divided over the frames it carries
+    (a 60 ms inference covering 2 frames is 30 ms of each frame's budget).
+    The overlay and encode happen once per written frame and are already per
+    frame, so they repeat instead.
+
+    What this view cannot show is the tail: a 60 ms spike reads as 30 ms here.
+    That is why `_report_timing` prints the slowest single inference against
+    its own deadline separately -- the chart answers "is it keeping up", the
+    printed line answers "did any one frame miss".
+    """
+    if stride <= 1:
+        return values
+    out: list[float] = []
+    for idx, value in enumerate(values):
+        span = len(_covered_frames(idx, stride, total))
+        if span <= 0:
+            break
+        out.extend([value / span if share else value] * span)
+    return out
+
+
+def _source_frame_count(per_frame_dt: list[float], stride: int, meta) -> int:
+    """How many source frames the run covered.
+
+    From `meta` when it is consistent with the inference count, since the last
+    group can be partial; otherwise from the inferences themselves, so a video
+    container lying about its frame count cannot distort the chart.
+    """
+    n = len(per_frame_dt)
+    total = int(getattr(meta, "frame_count", 0) or 0)
+    if (n - 1) * stride < total <= n * stride:
+        return total
+    return n * stride
+
+
 def _tracked_cache(cache_root: Path, keep: list[Path]) -> Path:
     """A directory holding just `keep`, renumbered 00000.jpg, 00001.jpg, ...
 
@@ -452,6 +497,16 @@ def _report_timing(
             print(f"[pipeline]   a {meta.fps:.1f} fps source gives each inference "
                   f"{budget:.1f} ms (was {budget / cfg.frame_stride:.1f} ms) -- "
                   "a frame does not get cheaper, its deadline moves")
+            # The charts plot the amortised cost, where a spike is divided by
+            # the frames it carries. That is the right view of "is it keeping
+            # up" and the wrong one for "did any single frame miss", so the
+            # worst inference is stated raw, against the deadline it had.
+            w = min(cfg.fps_warmup, max(len(per_frame_dt) - 1, 0))
+            worst = max(per_frame_dt[w:] or per_frame_dt) * 1000.0
+            verdict = "within" if worst <= budget else "OVER"
+            print(f"[pipeline]   slowest inference {worst:.1f} ms -- {verdict} its "
+                  f"{budget:.1f} ms; per source frame that is "
+                  f"{worst / cfg.frame_stride:.1f} of {1000.0 / meta.fps:.1f} ms")
 
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.
@@ -492,16 +547,31 @@ def _report_timing(
         return
     note = _benchmark_note(tracker, meta, prompts)
     label = getattr(tracker, "name", None)
+
+    # Both charts are drawn on the source timeline, not the inference one: 500
+    # source frames stay 500 points whether they took 500 inferences or 250, so
+    # a skipped run and a baseline are the same plot of the same clip and can be
+    # laid over each other. At stride 1 this is the identity.
+    stride = cfg.frame_stride
+    total = _source_frame_count(per_frame_dt, stride, meta)
+    spread = lambda v, share=True: _spread_over_source(v, stride, total, share)  # noqa: E731
+    chart_warmup = cfg.fps_warmup * stride
+    if stride > 1:
+        note += (f"  ·  frame skip {stride}: per source frame, each inference "
+                 f"shared over the {stride} frames it carries")
+
     if cfg.fps_chart is not None:
-        per_frame_ms = [dt * 1000.0 for dt in per_frame_dt]
-        out = write_latency_chart(per_frame_ms, cfg.fps_chart, warmup=cfg.fps_warmup,
+        per_frame_ms = spread([dt * 1000.0 for dt in per_frame_dt])
+        out = write_latency_chart(per_frame_ms, cfg.fps_chart, warmup=chart_warmup,
                                    note=note, label=label)
         if out:
             print(f"[pipeline] wrote latency chart -> {out}")
     if cfg.stage_chart is not None:
-        out = write_stage_chart(pre_ms, infer_ms, post_ms, cfg.stage_chart,
-                                 warmup=cfg.fps_warmup, note=note, label=label,
-                                 encode_ms=encode_ms)
+        out = write_stage_chart(spread(pre_ms), spread(infer_ms), spread(post_ms),
+                                 cfg.stage_chart, warmup=chart_warmup, note=note,
+                                 label=label,
+                                 encode_ms=spread(encode_ms, share=False) if encode_ms
+                                 else encode_ms)
         if out:
             print(f"[pipeline] wrote stage chart -> {out}")
 

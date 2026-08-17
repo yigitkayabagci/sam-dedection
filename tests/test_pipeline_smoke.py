@@ -487,6 +487,61 @@ class TestFrameSkip(unittest.TestCase):
         self.assertEqual(count, 6)
         self.assertAlmostEqual(fps, 30.0, places=3)
 
+    def test_spread_shares_a_cost_without_inventing_or_losing_any(self):
+        from src.pipeline import _spread_over_source
+
+        # 3 inferences carrying 2 source frames each.
+        out = _spread_over_source([60.0, 40.0, 50.0], 2, 6)
+        self.assertEqual(out, [30.0, 30.0, 20.0, 20.0, 25.0, 25.0])
+        self.assertAlmostEqual(sum(out), 150.0)  # no time created or lost
+        # A partial last group is shared over what it actually carries: 40 ms
+        # over 4 frames, then 40 ms over the 2 that are left.
+        self.assertEqual(_spread_over_source([40.0, 40.0], 4, 6),
+                         [10.0, 10.0, 10.0, 10.0, 20.0, 20.0])
+        # Per-written-frame work (overlay, encode) repeats instead of dividing.
+        self.assertEqual(_spread_over_source([2.0, 2.0], 2, 4, share=False),
+                         [2.0, 2.0, 2.0, 2.0])
+        # Stride 1 is the identity, so an unskipped run charts exactly as before.
+        self.assertEqual(_spread_over_source([10.0, 20.0], 1, 2), [10.0, 20.0])
+
+    def test_charts_are_drawn_on_the_source_timeline(self):
+        # The chart has to stay comparable with an unskipped run of the same
+        # clip: same number of points, same unit, same x axis.
+        import cv2
+        import src.pipeline as P
+
+        seen = {}
+        tracker = self._Tracker((8, 12))
+        real_latency, real_stage = P.write_latency_chart, P.write_stage_chart
+        P.write_latency_chart = lambda ms, path, **k: (
+            seen.update(latency=list(ms), warmup=k.get("warmup")), None)[1]
+        P.write_stage_chart = lambda pre, infer, post, path, **k: (
+            seen.update(infer=list(infer), encode=list(k.get("encode_ms") or [])), None)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(6):
+                cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
+                            np.full((8, 12, 3), i * 40, dtype=np.uint8))
+            try:
+                P.run(tracker, PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
+                                     frame_pattern="*.tif*", frame_stride=2,
+                                     fps_warmup=1, fps_chart=d / "lat.png",
+                                     stage_chart=d / "stg.png"))
+            finally:
+                P.write_latency_chart, P.write_stage_chart = real_latency, real_stage
+
+        # 3 inferences, 6 plotted points -- one per source frame, in pairs.
+        self.assertEqual(len(seen["latency"]), 6)
+        self.assertEqual(len(seen["infer"]), 6)
+        self.assertEqual(len(seen["encode"]), 6)
+        for i in (0, 2, 4):
+            self.assertEqual(seen["latency"][i], seen["latency"][i + 1],
+                             "an inference's cost is not shared evenly over its frames")
+        # The warm-up shading moves onto that timeline too, or it would mark the
+        # wrong frames.
+        self.assertEqual(seen["warmup"], 2)
+
     def test_direct_mp4_mode_rejects_frame_skip(self):
         cfg = PipelineConfig(video_path=Path("foo.mp4"), output_path=Path("/tmp/out.mp4"),
                              video_mode="mp4", frame_stride=2)
