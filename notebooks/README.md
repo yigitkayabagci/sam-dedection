@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Five notebooks, meant for Colab. Everything they orchestrate lives in `src/`
+Six notebooks, meant for Colab. Everything they orchestrate lives in `src/`
 and `tools/` and is unit-tested without a GPU — the notebooks are the recipe,
 not the implementation.
 
@@ -11,6 +11,7 @@ not the implementation.
 | 03 | `03_quantization_v2_int8.ipynb` | `models512_int8/` — calibrated Q/DQ graphs | 02 |
 | 04 | `04_samurai_long_video.ipynb` | SAMURAI thresholds + a before/after | **nothing** |
 | 05 | `05_adaptive_inference_sahi.ipynb` | whether the latency margin is worth spending | 01 for the data |
+| 06 | `06_lora_vs_finetune.ipynb` | LoRA against the partial fine-tune, scored on `test` | **nothing** — it labels and trains both |
 
 ## Three things to know before starting
 
@@ -36,6 +37,12 @@ different name; that is what lets one runtime both label and train.
 **Notebook 04 is independent.** SAMURAI is training-free, changes no weights and
 needs no new engine. If you want the fastest measurable result, start there.
 
+**Notebook 06 settles an argument.** `finetune.py` argues LoRA is the wrong tool
+here; nothing had measured it. 06 runs both through the same loop
+(`tools/train_thermal.py --method {finetune,lora}`) and scores them on the
+held-out test split. LoRA's adapters merge into the base weights, so both
+produce an ordinary EdgeTAM checkpoint and are evaluated identically.
+
 ## The decisions these encode
 
 Each is argued where it is made; this is the index.
@@ -44,7 +51,9 @@ Each is argued where it is made; this is the index.
 |---|---|---|
 | Anti-UAV410, not HIT-UAV or LSOTB-TIR | 01, 02 | 640×512 mono thermal video with a per-frame `exist` flag, and a 512 crop is native pixels |
 | a labelling stride, not fewer sequences | `src/training/labels.py` | a skipped frame keeps `exist` and its box; at 25 fps its mask was nearly its neighbour's |
-| partial fine-tune, not LoRA | 02, `src/training/finetune.py` | 13.9 M parameters is not memory-bound, and merged LoRA is just weights |
+| partial fine-tune, not LoRA | 02, `src/training/finetune.py` | the argument: 13.9 M parameters is not memory-bound, and merged LoRA is just weights |
+| …but measured rather than assumed | 06, `src/training/lora.py` | the risk is 60 scenes against 9.3 M moving parameters, and only the test split can say |
+| one loop, two methods | `src/training/schedule.py` | swapping the freeze and the save is the only honest way to compare them |
 | the memory path stays frozen | 02, `finetune.py` | it is the write port of a recurrent loop; error there accumulates |
 | training in `eval()` mode | 02, `src/training/clip_loop.py` | frozen batch-norm statistics keep the checkpoint matching its engines |
 | batch size measured, not chosen | 02, `src/training/loader.py` | forward *and* backward at each candidate; the graph is what fills the card |
@@ -60,7 +69,7 @@ Everything these notebooks call is tested on CPU with **nothing installed but
 numpy and torch** — no EdgeTAM, no GPU:
 
 ```bash
-python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410
+python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule
 ```
 
 `tests.test_loader` and the end-to-end labelling case in
