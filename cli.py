@@ -108,14 +108,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="Output FPS for --frames-dir mode (image sequences have no inherent fps).")
     p.add_argument("--frame-skip", "--frameskip", dest="frame_skip", type=int,
                    nargs="?", const=2, default=1, metavar="N",
-                   help="Track one source frame in N and skip the rest (bare flag = 2, "
-                        "i.e. process a frame, skip a frame). Skipped frames never reach "
-                        "the model, so this does not make a frame faster -- it gives each "
-                        "tracked frame N frame periods to finish in: at 30 fps, 66.7 ms "
-                        "instead of 33.3. The cost is temporal resolution: consecutive "
-                        "tracked frames are N frames apart, so the target moves N times "
-                        "further between them. Not available with --video-mode mp4 "
-                        "(decord gets the whole file; use jpg mode or --frames-dir).")
+                   help="Run inference on one source frame in N and hold that mask over "
+                        "the rest (bare flag = 2, i.e. infer a frame, skip a frame). "
+                        "Every source frame still gets a mask and the output clip keeps "
+                        "its full length -- a 500-frame clip stays 500 frames, decided by "
+                        "250 inferences. Skipped frames never reach the model, so this "
+                        "does not make a frame faster: it gives each inference N frame "
+                        "periods to finish in, 66.7 ms instead of 33.3 at 30 fps. The "
+                        "cost is temporal resolution: the target moves N times further "
+                        "between inferences, and a held mask is up to N-1 frames stale. "
+                        "Not available with --video-mode mp4 (decord gets the whole "
+                        "file; use jpg mode or --frames-dir).")
     p.add_argument("--output", default=None, help="Output video (.mp4) path. Omit "
                                                   "with --no-video to measure only.")
     p.add_argument("--no-video", action="store_true",

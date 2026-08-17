@@ -303,13 +303,14 @@ class TestEncodeStaysOutOfTheBudget(unittest.TestCase):
 
 
 class TestFrameSkip(unittest.TestCase):
-    """A skipped frame must never reach the model.
+    """Half the inferences, all of the frames.
 
-    The point of the flag is that inference does not run on the frames it drops.
-    A version that ran them and threw the masks away would be indistinguishable
-    from the outside -- same video, same masks -- while costing exactly as much,
-    so these tests ask the tracker what it was actually handed rather than
-    inspecting the output.
+    Two claims to pin, and only one of them is visible in the output. That the
+    output still covers every source frame can be read off the rendered frames;
+    that inference did not run on half of them cannot -- a version that inferred
+    everything and threw half the masks away would look identical while costing
+    exactly as much. So these tests also ask the tracker what `prepare()`
+    actually handed it.
     """
 
     class _Result:
@@ -333,12 +334,18 @@ class TestFrameSkip(unittest.TestCase):
 
         def propagate(self):
             for i in range(len(self.seen)):
+                # A mask whose area names the inference it came from, so a held
+                # frame can be told apart from a freshly inferred one.
                 mask = np.zeros(self.shape, dtype=bool)
-                mask[1:3, 1:3] = True
+                mask[1:2 + i, 1:2] = True
                 yield TestFrameSkip._Result(i, mask)
 
     def _run(self, stride, frames=6, prompt_frame=0):
-        """Track `frames` constant-valued frames (frame i is all i*40)."""
+        """Track `frames` constant-valued frames (frame i is all i*40).
+
+        Returns the tracker and, per written output frame, which source frame it
+        was drawn on and which inference's mask it carries.
+        """
         import cv2
         import src.pipeline as P
 
@@ -350,10 +357,11 @@ class TestFrameSkip(unittest.TestCase):
             for i in range(frames):
                 cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
                             np.full((8, 12, 3), i * 40, dtype=np.uint8))
-            # The overlay is handed the source frame for a tracked index, so its
-            # pixel value names which source frame came back.
-            P.overlay_masks = lambda rgb, *a, **k: (rendered.append(int(rgb[0, 0, 0])),
-                                                    real_overlay(rgb, *a, **k))[1]
+            # The overlay is handed the source frame and the masks drawn on it:
+            # the pixel value names the frame, the mask area names the inference.
+            P.overlay_masks = lambda rgb, masks, *a, **k: (
+                rendered.append((int(rgb[0, 0, 0]), int(masks[1].sum()))),
+                real_overlay(rgb, masks, *a, **k))[1]
             P._report_timing = lambda *a, **k: None
             try:
                 P.run(tracker,
@@ -364,43 +372,51 @@ class TestFrameSkip(unittest.TestCase):
                 P.overlay_masks, P._report_timing = real_overlay, real_report
         return tracker, rendered
 
-    def test_every_other_frame_reaches_the_model(self):
+    def test_half_the_inferences_cover_every_frame(self):
         tracker, rendered = self._run(stride=2, frames=6)
         self.assertEqual(len(tracker.seen), 3, "model was given more than half the clip")
-        # ...and they are frames 0, 2, 4 of the source, not the first three.
-        self.assertEqual(rendered, [0, 80, 160])
+        # Every source frame is still written, in order (0, 40, ... 200)...
+        self.assertEqual([value for value, _ in rendered], [0, 40, 80, 120, 160, 200])
+        # ...and the odd ones carry the mask of the inference before them, which
+        # is the whole point: 3 inferences, 6 decided frames, no mask invented
+        # for a frame the model never saw.
+        self.assertEqual([area for _, area in rendered], [1, 1, 2, 2, 3, 3])
 
     def test_stride_one_leaves_the_clip_alone(self):
         tracker, rendered = self._run(stride=1, frames=6)
         self.assertEqual(len(tracker.seen), 6)
-        self.assertEqual(rendered, [0, 40, 80, 120, 160, 200])
+        self.assertEqual([value for value, _ in rendered], [0, 40, 80, 120, 160, 200])
+        # One inference per frame: no mask is ever reused.
+        self.assertEqual([area for _, area in rendered], [1, 2, 3, 4, 5, 6])
 
-    def test_odd_stride_keeps_the_last_partial_group(self):
-        # 6 frames at stride 4 -> frames 0 and 4; the tail must not be dropped.
+    def test_last_group_is_not_dropped_when_it_is_partial(self):
+        # 6 frames at stride 4 -> inferences on 0 and 4; frames 5 has no
+        # inference of its own and must still come out, holding frame 4's.
         tracker, rendered = self._run(stride=4, frames=6)
         self.assertEqual(len(tracker.seen), 2)
-        self.assertEqual(rendered, [0, 160])
+        self.assertEqual([value for value, _ in rendered], [0, 40, 80, 120, 160, 200])
+        self.assertEqual([area for _, area in rendered], [1, 1, 1, 1, 2, 2])
 
     def test_prompt_lands_on_the_frame_it_was_drawn_on(self):
-        # A prompt on source frame 4 must reach the model as tracked frame 2,
+        # A prompt on source frame 4 must reach the model as inferred frame 2,
         # which is that same image -- not frame 4 of the decimated clip.
         tracker, _ = self._run(stride=2, frames=6, prompt_frame=4)
         self.assertEqual(tracker.prompt_frames, [2])
 
-    def test_untracked_prompt_frame_snaps_backwards(self):
+    def test_uninferred_prompt_frame_snaps_backwards(self):
         from src.pipeline import _decimate_prompts
 
         ps = PromptSet(boxes=[BoxPrompt(1, 5, (0, 0, 1, 1))],
                        points=[PointPrompt(2, 4, (1, 1), 1)])
         out = _decimate_prompts(ps, 2)
-        self.assertEqual(out.boxes[0].frame_idx, 2)   # frame 5 -> 4 -> tracked 2
+        self.assertEqual(out.boxes[0].frame_idx, 2)   # frame 5 -> 4 -> inferred 2
         self.assertEqual(out.points[0].frame_idx, 2)
         # Everything else about the prompt is untouched.
         self.assertEqual(out.boxes[0].xyxy, (0, 0, 1, 1))
 
-    def test_renumber_cache_leaves_a_consecutive_run(self):
+    def test_tracked_cache_holds_only_the_inferred_frames(self):
         import cv2
-        from src.pipeline import _renumber_cache
+        from src.pipeline import _tracked_cache
 
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
@@ -408,20 +424,20 @@ class TestFrameSkip(unittest.TestCase):
                 cv2.imwrite(str(d / f"{i:05d}.jpg"),
                             np.full((8, 12, 3), i * 40, dtype=np.uint8))
             files = sorted(d.glob("*.jpg"))
-            out = _renumber_cache(d, files[::2])
-            self.assertEqual([p.name for p in out],
+            out = _tracked_cache(d, files[::2])
+            self.assertEqual([p.name for p in sorted(out.glob("*.jpg"))],
                              ["00000.jpg", "00001.jpg", "00002.jpg"])
-            self.assertEqual(sorted(p.name for p in d.glob("*.jpg")),
-                             [p.name for p in out])
-            # Renaming must not have reshuffled the content: 0, 2, 4 in order.
-            values = [int(cv2.imread(str(p))[0, 0, 0]) for p in out]
+            # The full cache is untouched -- the overlay still needs every frame.
+            self.assertEqual(len(sorted(d.glob("*.jpg"))), 6)
+            # Renumbering must not reshuffle the content: 0, 2, 4 in order.
+            values = [int(cv2.imread(str(p))[0, 0, 0]) for p in sorted(out.glob("*.jpg"))]
             for got, want in zip(values, [0, 80, 160]):
                 self.assertLess(abs(got - want), 6, f"{values} is not [0, 80, 160]")
 
-    def test_jpg_mode_decimates_the_extracted_cache(self):
-        # The other input path: extract_frames dumps every frame, so the skipped
-        # ones have to leave the cache before init_state reads the directory.
-        import cv2
+    def test_jpg_mode_gives_the_model_only_the_inferred_frames(self):
+        # The other input path: extract_frames dumps every frame, and init_state
+        # reads a directory, so the skipped frames have to be out of the one it
+        # is given -- while staying available to the overlay.
         import src.pipeline as P
         from src.io_utils import open_video_writer
 
@@ -442,6 +458,34 @@ class TestFrameSkip(unittest.TestCase):
         self.assertEqual(len(tracker.seen), 3, "model was given more than half the clip")
         self.assertEqual([p.name for p in tracker.seen],
                          ["00000.jpg", "00001.jpg", "00002.jpg"])
+
+    def test_output_keeps_the_source_length_and_rate(self):
+        import cv2
+        import src.pipeline as P
+
+        tracker = self._Tracker((32, 32))
+        real_report = P._report_timing
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for i in range(6):
+                cv2.imwrite(str(d / f"frame_{i:06d}.tiff"),
+                            np.full((32, 32, 3), i * 40, dtype=np.uint8))
+            P._report_timing = lambda *a, **k: None
+            try:
+                P.run(tracker, PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=d / "out.mp4", frames_dir=d,
+                                     frame_pattern="*.tif*", fps=30.0, frame_stride=2))
+            finally:
+                P._report_timing = real_report
+            cap = cv2.VideoCapture(str(d / "out.mp4"))
+            try:
+                count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = float(cap.get(cv2.CAP_PROP_FPS))
+            finally:
+                cap.release()
+        # 3 inferences, but the clip is the source's: 6 frames at 30 fps.
+        self.assertEqual(count, 6)
+        self.assertAlmostEqual(fps, 30.0, places=3)
 
     def test_direct_mp4_mode_rejects_frame_skip(self):
         cfg = PipelineConfig(video_path=Path("foo.mp4"), output_path=Path("/tmp/out.mp4"),

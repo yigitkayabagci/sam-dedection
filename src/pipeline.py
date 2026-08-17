@@ -253,11 +253,11 @@ def _shift_prompts(prompts: PromptSet, dx: int, dy: int) -> PromptSet:
 def _decimate_prompts(prompts: PromptSet, stride: int) -> PromptSet:
     """Move prompts from source-frame onto tracked-frame numbering.
 
-    Source frame `i` is tracked frame `i // stride`. A prompt on a frame that
-    is not tracked snaps back to the last one that is -- the nearest frame the
-    model will actually encode -- and says so, because a prompt silently landing
-    on a different image than the user drew it on is the one way frame skipping
-    can be wrong rather than merely coarser.
+    Source frame `i` is inferred frame `i // stride`. A prompt on a frame that
+    is never inferred snaps back to the last one that is -- the nearest frame
+    the model will actually encode -- and says so, because a prompt silently
+    landing on a different image than the user drew it on is the one way frame
+    skipping can be wrong rather than merely coarser.
     """
     if stride <= 1:
         return prompts
@@ -265,7 +265,7 @@ def _decimate_prompts(prompts: PromptSet, stride: int) -> PromptSet:
                      if p.frame_idx % stride})
     if missed:
         print(f"[pipeline] frame skip {stride}: prompt frame(s) {missed} are not "
-              f"tracked; snapped back to {[i - i % stride for i in missed]}")
+              f"inferred; snapped back to {[i - i % stride for i in missed]}")
     return PromptSet(
         boxes=[replace(b, frame_idx=b.frame_idx // stride) for b in prompts.boxes],
         points=[replace(p, frame_idx=p.frame_idx // stride) for p in prompts.points],
@@ -276,46 +276,66 @@ def _apply_frame_skip(frame_files: list[Path], prompts: PromptSet,
                       stride: int) -> tuple[list[Path], PromptSet]:
     """Keep one source frame in `stride`; return the clip the model will see.
 
-    This is the whole of frame skipping. The tracker is handed a shorter clip
-    and never learns frames were dropped: `init_state` counts these frames,
-    `propagate_in_video` iterates over them, the memory bank stores them, and
-    `_LazyFrames` decodes them. A skipped frame is not inferred cheaply -- it is
-    not inferred at all, and nothing but the decode it never gets is saved.
+    This is the inference half of frame skipping. The tracker is handed a
+    shorter clip and never learns frames were dropped: `init_state` counts
+    these frames, `propagate_in_video` iterates over them, the memory bank
+    stores them, and `_LazyFrames` decodes them. A skipped frame is not
+    inferred cheaply -- it is not inferred at all.
+
+    The source clip keeps its full length regardless: every frame still gets a
+    mask, the skipped ones get the last one the model produced (`_covered_frames`
+    is the other half). So this does not shorten the video or thin the output,
+    it halves the inferences behind it.
 
     What that buys is deadline, not speed: a frame still costs what it cost,
-    but at `stride` source frames per model step a 30 fps camera allows
+    but one model step per `stride` source frames means a 30 fps camera allows
     `stride` x 33.3 ms for it. It costs temporal resolution in exchange --
-    consecutive tracked frames are `stride` source frames apart, so apparent
-    motion between them is `stride` times larger and the memory bank spans
-    `stride` times more real time.
+    consecutive inferred frames are `stride` source frames apart, so apparent
+    motion between them is `stride` times larger, the memory bank spans
+    `stride` times more real time, and a held mask is up to `stride - 1`
+    frames stale.
     """
     if stride <= 1:
         return frame_files, prompts
     kept = frame_files[::stride]
-    print(f"[pipeline] frame skip {stride}: tracking {len(kept)} of "
-          f"{len(frame_files)} frames (one in {stride})")
+    print(f"[pipeline] frame skip {stride}: inferring {len(kept)} of "
+          f"{len(frame_files)} frames; the other {len(frame_files) - len(kept)} "
+          "hold the previous mask")
     return kept, _decimate_prompts(prompts, stride)
 
 
-def _renumber_cache(cache_root: Path, keep: list[Path]) -> list[Path]:
-    """Reduce the JPG cache to `keep`, renamed 00000.jpg, 00001.jpg, ...
+def _covered_frames(tracked_idx: int, stride: int, total: int) -> range:
+    """Source frames that carry inferred frame `tracked_idx`'s masks.
 
-    `init_state` is given the directory, not the list, so in jpg mode the frames
-    the model must not see have to leave it, and the survivors have to stay
-    consecutively numbered. Dropped files go first and the renames run in
-    ascending order, so every target index is at or below its source index and
-    no rename can land on a file still needed.
+    The inferred frame itself, then the skipped ones that follow it. Holding
+    the mask forwards -- never backwards -- is not a rendering convenience: a
+    mask cannot exist before the inference that produced it, so this is the
+    only ordering a real-time consumer could actually see. At `stride` 1 the
+    range is the single frame, i.e. exactly what the pipeline did before.
     """
-    kept = set(keep)
-    for path in cache_root.glob("*.jpg"):
-        if path not in kept:
-            path.unlink()
-    out = []
-    for idx, path in enumerate(keep):
-        target = cache_root / f"{idx:05d}.jpg"
-        if path != target:
-            path.rename(target)
-        out.append(target)
+    start = tracked_idx * stride
+    return range(start, min(start + stride, total))
+
+
+def _tracked_cache(cache_root: Path, keep: list[Path]) -> Path:
+    """A directory holding just `keep`, renumbered 00000.jpg, 00001.jpg, ...
+
+    `init_state` is handed a directory, not a list, so in jpg mode the frames
+    the model must not see have to be out of it -- while the overlay still needs
+    every one of them to render the held frames. Hence a second directory of
+    hard links rather than deleting or moving anything: an inode each, no
+    pixels copied. Falls back to a copy on a filesystem that refuses the link.
+    """
+    out = cache_root / "tracked"
+    out.mkdir(exist_ok=True)
+    for idx, src in enumerate(keep):
+        dst = out / f"{idx:05d}.jpg"
+        if dst.exists():
+            dst.unlink()
+        try:
+            dst.hardlink_to(src)
+        except OSError:
+            shutil.copy2(src, dst)
     return out
 
 
@@ -334,12 +354,11 @@ def _video_sink(cfg: "PipelineConfig", meta):
     if cfg.output_path is None:
         yield None
         return
-    # Only tracked frames are written, so the frame rate drops with them: the
-    # clip keeps its real-time duration and plays alongside an unskipped run of
-    # the same source, just at a coarser frame rate -- which is what the
-    # consumer of these masks would see.
-    fps = meta.fps / max(cfg.frame_stride, 1)
-    with open_video_writer(cfg.output_path, fps, (meta.width, meta.height)) as emit:
+    # Source frame rate even under a frame skip: every source frame is written,
+    # the skipped ones carrying the last mask the model produced. The output is
+    # the same clip either way, so a skipped run can be played against an
+    # unskipped one frame for frame.
+    with open_video_writer(cfg.output_path, meta.fps, (meta.width, meta.height)) as emit:
         yield emit
 
 
@@ -362,11 +381,12 @@ class PipelineConfig:
     center_crop: int | None = None
     # Output frame rate for frames mode (an image sequence has no inherent fps).
     fps: float = 30.0
-    # Track one source frame in `frame_stride` and skip the rest (1 = every
-    # frame). The skipped frames never reach the model, so this does not make a
-    # frame cheaper -- it gives each tracked frame `frame_stride` frame periods
-    # to finish in, at the cost of `frame_stride`x the motion between the frames
-    # the memory bank sees.
+    # Infer one source frame in `frame_stride` and hold that mask over the rest
+    # (1 = infer every frame). Every source frame still gets a mask and the
+    # output clip keeps its full length; what halves at stride 2 is the number
+    # of inferences behind it. So this does not make a frame cheaper -- it gives
+    # each inferred frame `frame_stride` frame periods to finish in, at the cost
+    # of `frame_stride`x the motion between the frames the memory bank sees.
     frame_stride: int = 1
     # "auto" -> hand mp4 directly to EdgeTAM if decord is available (no JPG dump);
     # "mp4"  -> require direct mp4 path (fail if decord is missing);
@@ -419,16 +439,17 @@ def _report_timing(
         print(f"[pipeline] avg {stats['avg_fps_post_warmup']:.1f} FPS over "
               f"{stats['kept_frames']} frames (excluded first {stats['warmup']} warm-up)")
 
-    # Every number above counts tracked frames, which under a skip is not what
-    # the camera produces. State both, and state the deadline explicitly: that
-    # is the only thing skipping actually changes.
+    # Every number above counts inferred frames, which under a skip is not what
+    # the camera delivers or what the output contains. State the source rate
+    # too, and state the deadline explicitly: that is the only thing skipping
+    # actually changes.
     if cfg.frame_stride > 1:
-        print(f"[pipeline] frame skip {cfg.frame_stride}: {stats['frames']} tracked "
-              f"frames cover {stats['frames'] * cfg.frame_stride} source frames "
+        print(f"[pipeline] frame skip {cfg.frame_stride}: {stats['frames']} inferences "
+              f"carry {stats['frames'] * cfg.frame_stride} source frames "
               f"({stats['avg_fps_post_warmup'] * cfg.frame_stride:.1f} source FPS)")
         if meta is not None and meta.fps > 0:
             budget = 1000.0 * cfg.frame_stride / meta.fps
-            print(f"[pipeline]   a {meta.fps:.1f} fps source gives each tracked frame "
+            print(f"[pipeline]   a {meta.fps:.1f} fps source gives each inference "
                   f"{budget:.1f} ms (was {budget / cfg.frame_stride:.1f} ms) -- "
                   "a frame does not get cheaper, its deadline moves")
 
@@ -559,12 +580,12 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
     """
     frame_files = list_frame_files(frames_dir, cfg.frame_pattern)
     meta = frames_metadata(frames_dir, cfg.frame_pattern, fps=cfg.fps)
-    # Decimate before anything reads the list: the JPG cache is built from it,
-    # so the cache, the clip `init_state` counts, the lazy loader that replaces
-    # it, the overlay source and the progress bar all agree on one timeline.
-    # `meta` deliberately keeps the source frame count and fps -- that is what
-    # the frame budget is measured against.
-    frame_files, prompts = _apply_frame_skip(frame_files, prompts, cfg.frame_stride)
+    # Two lists from here on, and the difference is the feature: `tracked` is
+    # what the model is given -- the JPG cache is transcoded from it, so it is
+    # also what `init_state` counts and what the lazy loader decodes -- while
+    # `frame_files` stays the whole source, because every frame still gets a
+    # mask and lands in the output.
+    tracked, prompts = _apply_frame_skip(frame_files, prompts, cfg.frame_stride)
 
     # Cropping here, in the pass that already reads every frame, means the crop
     # is what lands in the JPG cache -- so it is the source for the model, the
@@ -580,7 +601,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
     cache_root = Path(cfg.frames_cache) if cfg.frames_cache else Path(tempfile.mkdtemp(prefix="frames_"))
     cache_root.mkdir(parents=True, exist_ok=True)
     try:
-        for idx, src in enumerate(tqdm(frame_files, desc="transcoding", unit="frame")):
+        for idx, src in enumerate(tqdm(tracked, desc="transcoding", unit="frame")):
             rgb = view(load_frame_rgb8(src))
             cv2.imwrite(str(cache_root / f"{idx:05d}.jpg"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
@@ -598,9 +619,9 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
-        _install_realtime_preprocess(tracker, frame_files, preprocess_s, view, read_s)
+        _install_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
 
-        progress = tqdm(total=len(frame_files), desc="tracking [frames]", unit="frame")
+        progress = tqdm(total=len(tracked), desc="tracking [frames]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
@@ -611,11 +632,16 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                 if emit is not None:
                     # Overlay and encoding are how a demo video gets made, not
                     # part of tracking; timed separately, outside the budget.
+                    # Under a skip this writes the inferred frame and the ones
+                    # holding its mask, so the cost stays per written frame.
                     e0 = time.perf_counter()
-                    rgb = view(load_frame_rgb8(frame_files[result.frame_idx]))
-                    emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                       draw_bbox=cfg.draw_bbox))
-                    encode_ms.append((time.perf_counter() - e0) * 1000.0)
+                    span = _covered_frames(result.frame_idx, cfg.frame_stride,
+                                           len(frame_files))
+                    for src_idx in span:
+                        rgb = view(load_frame_rgb8(frame_files[src_idx]))
+                        emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                           draw_bbox=cfg.draw_bbox))
+                    encode_ms.append((time.perf_counter() - e0) * 1000.0 / max(len(span), 1))
                 t0 = time.perf_counter()
                 progress.update(1)
         progress.close()
@@ -693,11 +719,12 @@ def _run_jpg(tracker, prompts, cfg, video_path):
     cache_root.mkdir(parents=True, exist_ok=True)
     try:
         meta = extract_frames(video_path, cache_root)
-        frame_files, prompts = _apply_frame_skip(
-            sorted(cache_root.glob("*.jpg")), prompts, cfg.frame_stride)
-        if cfg.frame_stride > 1:
-            frame_files = _renumber_cache(cache_root, frame_files)
-        tracker.prepare(cache_root)
+        frame_files = sorted(cache_root.glob("*.jpg"))
+        tracked, prompts = _apply_frame_skip(frame_files, prompts, cfg.frame_stride)
+        # The model gets a directory of only the inferred frames; the overlay
+        # keeps reading the full cache, which is why they are separate dirs.
+        tracker.prepare(_tracked_cache(cache_root, tracked)
+                        if cfg.frame_stride > 1 else cache_root)
         tracker.set_prompts(prompts)
 
         per_frame_dt: list[float] = []
@@ -708,9 +735,9 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
-        _install_realtime_preprocess(tracker, frame_files, preprocess_s,
+        _install_realtime_preprocess(tracker, tracked, preprocess_s,
                                      read_timer=read_s)
-        progress = tqdm(total=len(frame_files), desc="tracking [jpg]", unit="frame")
+        progress = tqdm(total=len(tracked), desc="tracking [jpg]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
@@ -720,11 +747,14 @@ def _run_jpg(tracker, prompts, cfg, video_path):
                     pre_ms, infer_ms, post_ms, read_ms))
                 if emit is not None:
                     e0 = time.perf_counter()
-                    bgr = cv2.imread(str(frame_files[result.frame_idx]))
-                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
-                                       draw_bbox=cfg.draw_bbox))
-                    encode_ms.append((time.perf_counter() - e0) * 1000.0)
+                    span = _covered_frames(result.frame_idx, cfg.frame_stride,
+                                           len(frame_files))
+                    for src_idx in span:
+                        bgr = cv2.imread(str(frame_files[src_idx]))
+                        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        emit(overlay_masks(rgb, result.masks, alpha=cfg.mask_alpha,
+                                           draw_bbox=cfg.draw_bbox))
+                    encode_ms.append((time.perf_counter() - e0) * 1000.0 / max(len(span), 1))
                 t0 = time.perf_counter()
                 progress.update(1)
         progress.close()
