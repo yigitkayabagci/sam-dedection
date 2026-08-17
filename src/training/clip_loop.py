@@ -177,6 +177,23 @@ class Batch:
     def frames(self) -> int:
         return int(self.images.shape[1])
 
+    def to(self, device: str) -> "Batch":
+        """The same batch on another device.
+
+        Collating on the CPU and moving here is what lets the loader assemble
+        the next batch on a worker thread while the GPU is still busy with this
+        one: decoding JPEGs straight into device memory would put every worker
+        on the CUDA stream the training step is using.
+        """
+        return Batch(
+            images=self.images.to(device, non_blocking=True),
+            boxes=self.boxes.to(device, non_blocking=True),
+            exist=self.exist.to(device, non_blocking=True),
+            masks=[None if m is None else m.to(device, non_blocking=True)
+                   for m in self.masks],
+            clips=self.clips,
+        )
+
 
 def collate(clips: list[Clip], stores: list[dict], device: str = "cuda") -> Batch:
     """Build a `Batch` by reading the clips' pixels and their pseudo-masks."""

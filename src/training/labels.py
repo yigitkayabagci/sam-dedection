@@ -28,6 +28,8 @@ the only interface between them either way.
 from __future__ import annotations
 
 import json
+import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,17 +199,61 @@ def save_masks(path: str | Path, shape: tuple[int, int], masks: dict[int, np.nda
     return path
 
 
-def load_masks(path: str | Path) -> tuple[tuple[int, int], dict[int, np.ndarray]]:
-    """`(shape, {frame_idx: mask})`. Absent frames are simply absent from the
-    dict -- the training loop reads that as "no mask supervision here"."""
+class MaskStore(Mapping):
+    """One sequence's accepted masks, decoded on demand.
+
+    A `Mapping` rather than a dict because the decoded form is what costs: a
+    512x640 boolean frame is 328 KB, so a training set of thirty thousand
+    labelled frames is ~10 GB of RAM held for the whole run -- more than a Colab
+    runtime has, and all of it to store a few hundred lit pixels per frame. The
+    runs are ~100 bytes each and decoding one is a handful of slice
+    assignments, so expanding inside the data loader (off the training thread,
+    see `src/training/loader.py`) costs nothing measurable and turns the store
+    into a few megabytes.
+
+    Frames the teacher could not label are absent, exactly as in the dict
+    `load_masks` returns -- `clip_masks` reads a missing key as "no mask
+    supervision here", which is a different thing from an empty mask.
+    """
+
+    def __init__(self, shape: tuple[int, int], runs: np.ndarray,
+                 offsets: np.ndarray, frames: np.ndarray) -> None:
+        self.shape = shape
+        self._runs = runs
+        self._offsets = offsets
+        self._index = {int(frame): i for i, frame in enumerate(frames)}
+
+    def __getitem__(self, frame: int) -> np.ndarray:
+        i = self._index[int(frame)]
+        return rle_decode(self._runs[self._offsets[i]:self._offsets[i + 1]], self.shape)
+
+    def __iter__(self):
+        return iter(self._index)
+
+    def __len__(self) -> int:
+        return len(self._index)
+
+
+def open_masks(path: str | Path) -> MaskStore:
+    """A `MaskStore` over one `.npz`, holding the runs rather than the masks."""
     with np.load(path) as data:
-        shape = tuple(int(v) for v in data["shape"])
-        runs, offsets, frames = data["runs"], data["offsets"], data["frames"]
-        masks = {
-            int(frame): rle_decode(runs[offsets[i]:offsets[i + 1]], shape)
-            for i, frame in enumerate(frames)
-        }
-    return shape, masks
+        return MaskStore(
+            shape=tuple(int(v) for v in data["shape"]),
+            runs=data["runs"],
+            offsets=data["offsets"],
+            frames=data["frames"],
+        )
+
+
+def load_masks(path: str | Path) -> tuple[tuple[int, int], dict[int, np.ndarray]]:
+    """`(shape, {frame_idx: mask})`, every mask decoded up front.
+
+    Convenient for looking at one sequence; use `open_masks` for a training run,
+    where holding thousands of decoded frames is what runs the machine out of
+    memory.
+    """
+    store = open_masks(path)
+    return store.shape, {frame: store[frame] for frame in store}
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +283,10 @@ class Sam2Teacher:
         self.model = Sam2Model.from_pretrained(
             model_id, dtype=getattr(torch, dtype)
         ).to(device).eval()
+        # Flipped to False the first time a batched call fails, so a
+        # `transformers` version whose processor will not take a list degrades
+        # to the per-crop path instead of taking the labelling run down with it.
+        self._batched = True
 
     def mask_for(self, crop_rgb: np.ndarray, box: np.ndarray) -> tuple[np.ndarray, float]:
         """`(mask, teacher_iou)` for one box, in the crop's own coordinates."""
@@ -259,6 +309,76 @@ class Sam2Teacher:
         best = int(scores.argmax())
         return masks.reshape(-1, *masks.shape[-2:])[best].numpy() > 0, float(scores[best])
 
+    def masks_for(
+        self, crops: list[np.ndarray], boxes: list[np.ndarray]
+    ) -> list[tuple[np.ndarray, float]]:
+        """`mask_for` over several crops in one forward pass.
+
+        This is the whole cost of labelling: the teacher resizes every crop to
+        its own 1024 input regardless of how small the crop was, so a 6-pixel
+        drone costs exactly as much as a full frame and the only lever is how
+        many go through at once. Crops of different sizes batch fine -- the
+        processor resizes each and `post_process_masks` puts each mask back at
+        its own `original_sizes` -- so nothing about the result changes, only
+        how long it takes.
+        """
+        import torch
+
+        if len(crops) == 1 or not self._batched:
+            return [self.mask_for(crop, box) for crop, box in zip(crops, boxes)]
+
+        try:
+            inputs = self.processor(
+                images=list(crops),
+                input_boxes=[[[float(v) for v in box]] for box in boxes],
+                return_tensors="pt",
+            ).to(self.device)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            per_image = self.processor.post_process_masks(
+                outputs.pred_masks.float().cpu(), inputs["original_sizes"]
+            )
+            scores = outputs.iou_scores.float().cpu()
+        except Exception as exc:  # noqa: BLE001 -- any API mismatch, once
+            self._batched = False
+            warnings.warn(
+                f"Batched teacher call failed ({exc!r}); falling back to one crop "
+                "at a time for the rest of this run. Labelling will be slower "
+                "but identical.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return [self.mask_for(crop, box) for crop, box in zip(crops, boxes)]
+
+        out = []
+        for i in range(len(crops)):
+            masks = per_image[i]
+            masks = masks.reshape(-1, *masks.shape[-2:])
+            row = scores[i].reshape(-1)
+            best = int(row.argmax())
+            out.append((masks[best].numpy() > 0, float(row[best])))
+        return out
+
+
+def frames_to_label(
+    sequence, stride: int = 1, max_frames: int | None = None
+) -> np.ndarray:
+    """Which of a sequence's annotated frames the teacher is asked about.
+
+    `stride > 1` is the one honest way to trade labelling time for supervision:
+    the skipped frames keep their `exist` flag and their box, so they still
+    train the object-score head and still contribute a box-projection term --
+    they just do not get a mask. Anti-UAV410 is 25 fps video of a drone that
+    mostly drifts, so consecutive frames carry nearly the same mask anyway, and
+    the teacher costs a full 1024x1024 encode per frame either way.
+    """
+    indices = sequence.labels.visible_indices()
+    if stride > 1:
+        indices = indices[::stride]
+    if max_frames is not None:
+        indices = indices[:max_frames]
+    return indices
+
 
 def label_sequence(
     sequence,
@@ -268,11 +388,14 @@ def label_sequence(
     zoom: float = 4.0,
     min_size: int = 128,
     frame_size: tuple[int, int] | None = None,
+    stride: int = 1,
+    max_frames: int | None = None,
+    batch_size: int = 1,
 ) -> dict:
     """Run the teacher over one sequence and write its accepted masks.
 
-    Returns the acceptance report: how many frames were labelled, and for the
-    ones that were not, which gate stopped them.
+    Returns the acceptance report: how many frames were attempted, how many
+    survived the gates, and for the ones that did not, which gate stopped them.
     """
     from .antiuav import frame_shape, load_window
 
@@ -280,30 +403,40 @@ def label_sequence(
     masks: dict[int, np.ndarray] = {}
     rejected: dict[str, int] = {}
     height, width = frame_size[::-1] if frame_size else frame_shape(sequence.frames[0])
+    indices = frames_to_label(sequence, stride, max_frames)
 
-    for index in sequence.labels.visible_indices():
-        box = sequence.labels.boxes[index]
-        x0, y0, w, h = zoom_window(box, (width, height), zoom, min_size)
-        crop = load_window(sequence.frames[int(index)], (x0, y0), (w, h), w)
-        local_box = np.array([box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0])
+    for start in range(0, len(indices), max(batch_size, 1)):
+        chunk = indices[start:start + max(batch_size, 1)]
+        crops, local_boxes, windows = [], [], []
+        for index in chunk:
+            box = sequence.labels.boxes[index]
+            x0, y0, w, h = zoom_window(box, (width, height), zoom, min_size)
+            crops.append(load_window(sequence.frames[int(index)], (x0, y0), (w, h), w))
+            local_boxes.append(
+                np.array([box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0])
+            )
+            windows.append((x0, y0, w, h))
 
-        crop_mask, teacher_iou = teacher.mask_for(crop, local_box)
-        reason = reject_reason(measure(crop_mask, local_box, teacher_iou), gates)
-        if reason is not None:
-            rejected[reason] = rejected.get(reason, 0) + 1
-            continue
+        for index, (crop_mask, teacher_iou), local_box, (x0, y0, w, h) in zip(
+            chunk, teacher.masks_for(crops, local_boxes), local_boxes, windows
+        ):
+            reason = reject_reason(measure(crop_mask, local_box, teacher_iou), gates)
+            if reason is not None:
+                rejected[reason] = rejected.get(reason, 0) + 1
+                continue
+            full = np.zeros((height, width), dtype=bool)
+            full[y0:y0 + h, x0:x0 + w] = crop_mask[:h, :w]
+            masks[int(index)] = full
 
-        full = np.zeros((height, width), dtype=bool)
-        full[y0:y0 + h, x0:x0 + w] = crop_mask[:h, :w]
-        masks[int(index)] = full
-
-    visible = int(sequence.labels.exist.sum())
+    attempted = len(indices)
     report = {
         "sequence": sequence.name,
         "frames": len(sequence),
-        "visible": visible,
+        "visible": int(sequence.labels.exist.sum()),
+        "attempted": attempted,
+        "stride": stride,
         "accepted": len(masks),
-        "acceptance_rate": (len(masks) / visible) if visible else 0.0,
+        "acceptance_rate": (len(masks) / attempted) if attempted else 0.0,
         "rejected": rejected,
         "shape": [height, width],
     }
@@ -314,8 +447,13 @@ def label_sequence(
 
 
 def summarise(reports: list[dict]) -> str:
-    """One markdown table over every sequence's acceptance report."""
-    visible = sum(r["visible"] for r in reports)
+    """One markdown table over every sequence's acceptance report.
+
+    The denominator is frames *attempted*, not frames annotated: with a
+    labelling stride those differ, and dividing by the annotated count would
+    report the stride as if it were the teacher failing.
+    """
+    attempted = sum(r.get("attempted", r["visible"]) for r in reports)
     accepted = sum(r["accepted"] for r in reports)
     reasons: dict[str, int] = {}
     for r in reports:
@@ -323,13 +461,13 @@ def summarise(reports: list[dict]) -> str:
             reasons[name] = reasons.get(name, 0) + count
 
     lines = [
-        f"{len(reports)} sequence(s), {visible} annotated frames, "
-        f"{accepted} accepted ({accepted / max(visible, 1):.1%}).",
+        f"{len(reports)} sequence(s), {attempted} frames attempted, "
+        f"{accepted} accepted ({accepted / max(attempted, 1):.1%}).",
         "",
         "| gate that rejected | frames | share of rejects |",
         "|---|---:|---:|",
     ]
-    total_rejected = max(visible - accepted, 1)
+    total_rejected = max(attempted - accepted, 1)
     for name, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
         lines.append(f"| `{name}` | {count} | {count / total_rejected:.1%} |")
     return "\n".join(lines)

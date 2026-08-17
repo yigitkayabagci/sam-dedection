@@ -30,8 +30,11 @@ değiştirmiyor, yeni engine istemiyor. Veri indirmesi uzarsa ya da en hızlı
 
 [github.com/HwangBo94/Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) —
 410 termal-kızılötesi video, 438K elle etiketlenmiş kutu, **640×512**,
-train/val/test ayrımlı. İndirme yazarların Google Drive / Baidu linki üzerinden
-(Baidu kodu `a410`); herkese açık doğrudan URL yok.
+train/val/test ayrımlı. Yazarların Google Drive'ındaki tek bir 8.7 GB'lık zip;
+`tools/fetch_antiuav410.py --dest /content/data` onu indirir, açar ve çıkan
+yerleşimi doğrular. Dataset eğitimi yapan makinenin **yerel diskine** iner,
+Drive'a değil: eğitim yüz binlerce küçük JPEG'i rastgele sırayla okur ve Drive
+FUSE mount'u bunları GPU'nun tükettiğinden bir mertebe yavaş servis eder.
 
 ### Neden bu dataset
 
