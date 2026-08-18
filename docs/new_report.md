@@ -30,8 +30,11 @@ değiştirmiyor, yeni engine istemiyor. Veri indirmesi uzarsa ya da en hızlı
 
 [github.com/HwangBo94/Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) —
 410 termal-kızılötesi video, 438K elle etiketlenmiş kutu, **640×512**,
-train/val/test ayrımlı. İndirme yazarların Google Drive / Baidu linki üzerinden
-(Baidu kodu `a410`); herkese açık doğrudan URL yok.
+train/val/test ayrımlı. Yazarların Google Drive'ındaki tek bir 8.7 GB'lık zip;
+`tools/fetch_antiuav410.py --dest /content/data` onu indirir, açar ve çıkan
+yerleşimi doğrular. Dataset eğitimi yapan makinenin **yerel diskine** iner,
+Drive'a değil: eğitim yüz binlerce küçük JPEG'i rastgele sırayla okur ve Drive
+FUSE mount'u bunları GPU'nun tükettiğinden bir mertebe yavaş servis eder.
 
 ### Neden bu dataset
 
@@ -71,17 +74,57 @@ pixel value, not ndim") bu tuzağı bir kez yaşamış.
 
 ---
 
-## 2. Karar: kısmi fine-tuning, LoRA yok
+## 2. Karar: kısmi fine-tuning — LoRA ise artık ölçülüyor
 
 | | kısmi fine-tune | LoRA |
 |---|---|---|
 | bellek | EdgeTAM **toplam 13.9M parametre**. A100'de, hatta L4'te bellek sıkıntısı yok | var olmayan bir problemi çözüyor |
 | deployment | ağırlık değişir, ONNX grafiği aynı | merge edilmiş adapter zaten sadece ağırlık — hiçbir kazanç yok |
-| kapsama | her yere ulaşır | `nn.Linear` hedefler; domain kayması **konvolüsyonel RepViT trunk**'ında |
+| kapsama | her yere ulaşır | *bkz. aşağıdaki düzeltme* |
 | sonrasında QAT | aynı döngü + `mtq.quantize` | zaten gerçek ağırlık güncellemesi gerekir |
 
 LoRA'nın tek gerçek faydası (küçük tek-sınıf sette regularizasyon) **doğru
-modülleri dondurarak** daha ucuza alınıyor.
+modülleri dondurarak** daha ucuza alınıyor — **iddiası bu**, ve bu belgenin
+başındaki uyarı burada da geçerli: ölçülmedi.
+
+### Tablodaki bir satır yanlıştı
+
+"LoRA `nn.Linear` hedefler, domain kayması konvolüsyonel trunk'ta" — bu
+*Linear-only bir implementasyona* itiraz, yöntemin kendisine değil. `k × k` bir
+konvolüsyonun `1 × 1` ile bileşkesi yine `k × k` bir konvolüsyondur, yani
+düşük-ranklı çarpanlara ayırma RepViT trunk'ında da **tam** olarak geçerli.
+`src/training/lora.py` konvolüsyonları da adapte ediyor; sadece gruplu
+(depthwise) olanları atlıyor — onların ağırlığı blok-köşegen ve yoğun bir
+`B @ A` ona bir güncelleme temsil edemez. Kaç tanesini atladığını raporluyor.
+
+### Gerçek risk parametre sayısı değil, sahne çeşitliliği
+
+"410 video yetmez mi" sorusu yanlış soru: train split'i yüz binlerce etiketli
+kare, notebook 02'nin varsayılan alt kümesi bile ~60 000 klip. Küçük olan
+**sahne sayısı** — 60 dizi = 60 arka plan, tek sınıf, tek sensör. Buna karşılık
+fine-tune ikinci aşamada **13.9M'in 9.3M'ini** oynatıyor. Ölçülmesi gereken şey
+bu: "60 sahnede ağın üçte ikisini oynatmak, yüzde yarımını oynatmaktan daha mı
+iyi genelliyor".
+
+### Nasıl ölçülüyor
+
+`tools/train_thermal.py --method {finetune,lora}` iki yöntemi **tek koddan**
+çalıştırıyor: aynı klipler, aynı sıra, aynı loss, aynı iki aşama, aynı
+one-cycle, aynı EMA, aynı validation dilimi (`src/training/schedule.py`).
+`--method` yalnızca iki şeyi değiştiriyor — hangi parametrelerin gradyan aldığı
+ve checkpoint'in nasıl yazıldığı. LoRA yazarken adapter'ları merge ettiği için
+çıkan dosya sıradan bir EdgeTAM state dict: aynı config, aynı tracker, aynı
+export, aynı engine, aynı `eval_antiuav.py`. Aksi halde karşılaştırma iki
+eğitim yöntemini değil iki deployment'ı ölçerdi.
+
+Tek kasıtlı fark **learning rate**: LoRA `B = 0`'dan başlıyor, güncellemesinin
+gidecek yolu daha uzun; her yayınlanmış reçete ona bir mertebe fazla LR veriyor.
+İkisi de `tools/train_thermal.py:RATES` içinde, tek yerde.
+
+`notebooks/06_lora_vs_finetune.ipynb` ikisini arka arkaya koşturup **test
+split'inde** — hiçbirinin görmediği — state accuracy, success AUC ve dropout
+epizotlarını yan yana basıyor. Sonuç ne çıkarsa bu bölüm ona göre yeniden
+yazılacak.
 
 ### Hep donuk: tüm hafıza yolu
 

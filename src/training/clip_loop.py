@@ -177,10 +177,36 @@ class Batch:
     def frames(self) -> int:
         return int(self.images.shape[1])
 
+    def to(self, device: str) -> "Batch":
+        """The same batch on another device.
 
-def collate(clips: list[Clip], stores: list[dict], device: str = "cuda") -> Batch:
-    """Build a `Batch` by reading the clips' pixels and their pseudo-masks."""
-    rows = [clip_masks(c, s) for c, s in zip(clips, stores)]
+        Collating on the CPU and moving here is what lets the loader assemble
+        the next batch on a worker thread while the GPU is still busy with this
+        one: decoding JPEGs straight into device memory would put every worker
+        on the CUDA stream the training step is using.
+        """
+        return Batch(
+            images=self.images.to(device, non_blocking=True),
+            boxes=self.boxes.to(device, non_blocking=True),
+            exist=self.exist.to(device, non_blocking=True),
+            masks=[None if m is None else m.to(device, non_blocking=True)
+                   for m in self.masks],
+            clips=self.clips,
+        )
+
+
+def collate(clips: list[Clip], stores: list[dict], device: str = "cuda",
+            executor=None) -> Batch:
+    """Build a `Batch` by reading the clips' pixels and their pseudo-masks.
+
+    `executor` spreads the per-clip reads across a thread pool. That is where
+    the parallelism belongs once batches get large: sixty-four clips is 512
+    JPEGs, and assembling whole batches concurrently instead would need a copy
+    of each one in host memory at the same time.
+    """
+    mapper = map if executor is None else executor.map
+    rows = list(mapper(clip_masks, clips, stores))
+    frames = list(mapper(lambda c: clip_tensor(c, device), clips))
     size = clips[0].size
 
     masks: list[torch.Tensor | None] = []
@@ -195,7 +221,7 @@ def collate(clips: list[Clip], stores: list[dict], device: str = "cuda") -> Batc
         masks.append(torch.from_numpy(stacked).to(device))
 
     return Batch(
-        images=torch.stack([clip_tensor(c, device) for c in clips]),
+        images=torch.stack(frames),
         boxes=torch.from_numpy(np.stack([c.boxes for c in clips])).to(device).float(),
         exist=torch.from_numpy(np.stack([c.exist for c in clips])).to(device).float(),
         masks=masks,

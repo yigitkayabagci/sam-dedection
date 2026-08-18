@@ -25,8 +25,11 @@ from .antiuav import (
 )
 from .labels import (
     Gates,
+    MaskStore,
+    frames_to_label,
     label_sequence,
     load_masks,
+    open_masks,
     save_masks,
     summarise,
     zoom_window,
@@ -35,11 +38,13 @@ from .labels import (
 __all__ = [
     "Clip",
     "Gates",
+    "MaskStore",
     "Sequence",
     "SequenceLabels",
     "clip_tensor",
     "crop_window",
     "frame_shape",
+    "frames_to_label",
     "iter_clips",
     "label_sequence",
     "list_sequences",
@@ -47,6 +52,7 @@ __all__ = [
     "load_masks",
     "load_window",
     "map_boxes",
+    "open_masks",
     "sample_clips",
     "save_masks",
     "summarise",

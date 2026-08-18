@@ -1,0 +1,25 @@
+# EdgeTAM at 512x512, adapted to Anti-UAV410 thermal footage with LoRA.
+#
+# Byte-for-byte the same file as configs/edgetam_512_thermal.yaml except for the
+# checkpoint path, and that is the whole point: LoRA's adapters are merged into
+# the base weights before the checkpoint is written, so what lands here is an
+# ordinary EdgeTAM state dict. Same tracker, same exporter, same engines, same
+# evaluation command -- the only difference between this config and the
+# fine-tuned one is how the weights were arrived at.
+#
+# Produce it with:
+#   python tools/train_thermal.py --method lora --lora-r 16 \
+#       --data <anti-uav410> --labels <work>/labels \
+#       --out checkpoints/edgetam_lora_512.pt
+#
+# Compare against configs/edgetam_512_thermal.yaml (the partial fine-tune) and
+# configs/edgetam_512.yaml (the stock checkpoint at the same resolution).
+# notebooks/06_lora_vs_finetune.ipynb runs all three on the held-out test split.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_lora_512.pt
+image_size: 512                           # overrides the Hydra config's 1024
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
