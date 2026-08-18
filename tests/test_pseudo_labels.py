@@ -6,6 +6,7 @@ checkpoint. Everything around it is, which is the point of keeping the
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -20,7 +21,9 @@ if str(ROOT) not in sys.path:
 from src.training.labels import (  # noqa: E402
     Gates,
     Measurement,
+    frames_to_label,
     load_masks,
+    open_masks,
     reject_reason,
     rle_decode,
     rle_encode,
@@ -30,6 +33,12 @@ from src.training.labels import (  # noqa: E402
 )
 
 FRAME = (640, 512)
+
+try:
+    import cv2  # noqa: F401 -- only the end-to-end labelling test needs it
+    HAVE_CV2 = True
+except ImportError:  # pragma: no cover - environment, not logic
+    HAVE_CV2 = False
 
 
 def good() -> Measurement:
@@ -162,6 +171,165 @@ class TestMaskStore(unittest.TestCase):
 
         self.assertEqual(shape, (32, 32))
         self.assertEqual(loaded, {})
+
+
+class TestLazyMaskStore(unittest.TestCase):
+    """The store the training run actually opens: runs held, masks made to order."""
+
+    def _store(self, tmp: Path):
+        masks = {i: np.zeros((48, 64), dtype=bool) for i in (0, 3, 9)}
+        for i, mask in masks.items():
+            mask[i:i + 5, i:i + 7] = True
+        return save_masks(Path(tmp) / "m.npz", (48, 64), masks), masks
+
+    def test_decodes_the_same_masks_load_masks_returns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, masks = self._store(Path(tmp))
+            store = open_masks(path)
+            self.assertEqual(store.shape, (48, 64))
+            self.assertEqual(sorted(store), [0, 3, 9])
+            for frame, mask in masks.items():
+                np.testing.assert_array_equal(store[frame], mask)
+
+    def test_an_unlabelled_frame_is_absent_not_empty(self):
+        # clip_masks calls .get() and reads None as "no mask supervision here",
+        # which is a different instruction from an all-zero mask.
+        with tempfile.TemporaryDirectory() as tmp:
+            path, _ = self._store(Path(tmp))
+            store = open_masks(path)
+            self.assertIsNone(store.get(4))
+            self.assertNotIn(4, store)
+
+    def test_holds_the_runs_rather_than_the_frames(self):
+        # The point of the class: a 512x640 boolean frame is 328 KB and the
+        # training set has tens of thousands of them.
+        with tempfile.TemporaryDirectory() as tmp:
+            path, _ = self._store(Path(tmp))
+            store = open_masks(path)
+            held = store._runs.nbytes + store._offsets.nbytes
+            self.assertLess(held, 48 * 64 * len(store))
+
+
+class TestFramesToLabel(unittest.TestCase):
+    class FakeSequence:
+        def __init__(self, exist):
+            from src.training.antiuav import SequenceLabels
+            exist = np.asarray(exist, dtype=bool)
+            self.labels = SequenceLabels(
+                exist=exist, boxes=np.zeros((exist.size, 4), dtype=np.float32)
+            )
+
+    def test_only_annotated_frames_are_offered_to_the_teacher(self):
+        sequence = self.FakeSequence([1, 0, 1, 1, 0, 1])
+        np.testing.assert_array_equal(frames_to_label(sequence), [0, 2, 3, 5])
+
+    def test_stride_thins_the_annotated_frames_not_the_raw_ones(self):
+        sequence = self.FakeSequence([1, 0, 1, 1, 0, 1])
+        np.testing.assert_array_equal(frames_to_label(sequence, stride=2), [0, 3])
+
+    def test_max_frames_caps_the_cost_of_one_sequence(self):
+        sequence = self.FakeSequence([1] * 100)
+        self.assertEqual(len(frames_to_label(sequence, max_frames=10)), 10)
+
+
+@unittest.skipUnless(HAVE_CV2, "labelling reads pixels, which needs OpenCV")
+class TestLabelSequence(unittest.TestCase):
+    """`label_sequence` against a teacher that records how it was called.
+
+    The real teacher is a 2 GB checkpoint on a GPU. What is worth pinning here
+    is everything around it: that a stride reaches it, that crops arrive in
+    batches, that a rejected mask is counted rather than stored, and that the
+    report's denominator is what was attempted.
+    """
+
+    class FakeTeacher:
+        def __init__(self, accept=True):
+            self.accept = accept
+            self.calls: list[int] = []
+
+        def masks_for(self, crops, boxes):
+            self.calls.append(len(crops))
+            out = []
+            for crop, box in zip(crops, boxes):
+                mask = np.zeros(crop.shape[:2], dtype=bool)
+                if self.accept:
+                    x0, y0, x1, y1 = (int(round(v)) for v in box)
+                    mask[y0:y1, x0:x1] = True
+                out.append((mask, 0.95))
+            return out
+
+    def _sequence(self, tmp: Path, frames: int = 12):
+        import cv2
+
+        from src.training.antiuav import list_sequences
+
+        folder = Path(tmp) / "train" / "s0"
+        folder.mkdir(parents=True)
+        for i in range(frames):
+            image = np.full((48, 64), 20, dtype=np.uint8)
+            image[20:26, 30:38] = 250
+            cv2.imwrite(str(folder / f"{i}.jpg"), image)
+        (folder / "IR_label.json").write_text(json.dumps({
+            "exist": [1] * frames,
+            "gt_rect": [[30, 20, 8, 6]] * frames,
+        }))
+        return list_sequences(Path(tmp), "train")[0]
+
+    def test_accepted_masks_land_in_the_store_at_frame_coordinates(self):
+        from src.training.labels import label_sequence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sequence = self._sequence(Path(tmp))
+            teacher = self.FakeTeacher()
+            report = label_sequence(sequence, teacher, Path(tmp) / "labels",
+                                    frame_size=(64, 48), min_size=32, batch_size=4)
+
+            self.assertEqual(report["attempted"], 12)
+            self.assertEqual(report["accepted"], 12)
+            store = open_masks(Path(tmp) / "labels" / "s0" / "pseudo_masks.npz")
+            self.assertEqual(store.shape, (48, 64))
+            self.assertTrue(store[0][20:26, 30:38].all())
+
+    def test_crops_reach_the_teacher_in_batches(self):
+        from src.training.labels import label_sequence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sequence = self._sequence(Path(tmp))
+            teacher = self.FakeTeacher()
+            label_sequence(sequence, teacher, Path(tmp) / "labels",
+                           frame_size=(64, 48), min_size=32, batch_size=5)
+            self.assertEqual(teacher.calls, [5, 5, 2])
+
+    def test_stride_is_what_the_teacher_is_asked_about(self):
+        from src.training.labels import label_sequence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sequence = self._sequence(Path(tmp))
+            teacher = self.FakeTeacher()
+            report = label_sequence(sequence, teacher, Path(tmp) / "labels",
+                                    frame_size=(64, 48), min_size=32,
+                                    stride=3, batch_size=8)
+
+            self.assertEqual(sum(teacher.calls), 4)      # 12 // 3
+            self.assertEqual(report["attempted"], 4)
+            self.assertEqual(report["visible"], 12)      # the flag is still there
+            self.assertEqual(sorted(open_masks(
+                Path(tmp) / "labels" / "s0" / "pseudo_masks.npz")), [0, 3, 6, 9])
+
+    def test_a_rejected_mask_is_counted_and_not_stored(self):
+        from src.training.labels import label_sequence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sequence = self._sequence(Path(tmp))
+            report = label_sequence(sequence, self.FakeTeacher(accept=False),
+                                    Path(tmp) / "labels", frame_size=(64, 48),
+                                    min_size=32, batch_size=4)
+
+            self.assertEqual(report["accepted"], 0)
+            self.assertEqual(report["acceptance_rate"], 0.0)
+            self.assertEqual(sum(report["rejected"].values()), 12)
+            self.assertEqual(len(open_masks(
+                Path(tmp) / "labels" / "s0" / "pseudo_masks.npz")), 0)
 
 
 class TestSummarise(unittest.TestCase):
