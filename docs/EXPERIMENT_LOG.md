@@ -423,7 +423,7 @@ dataset, export to a Q/DQ ONNX, new engine builds, and a
 
 ---
 
-### 3.9 Resolution: 1024 vs 512
+### 3.9 Resolution: 1024 vs 768 vs 512
 
 **Question.** What does halving the input resolution buy, and cost?
 
@@ -456,6 +456,46 @@ which is what `--reference-config configs/edgetam_trt.yaml` does.
 
 **Status: engines and configs ready; on-device results pending.**
 
+**A third point at 768.** `configs/edgetam_768.yaml` and
+`configs/edgetam_trt_768.yaml` add the midpoint, for sources that carry more
+than 512×512 of real detail. Nothing in the code was special-cased for it — the
+resolution is one config field and every derived shape follows from it, which
+`tests/test_edgetam_graphs.py` already demonstrates at a *fourth* size
+(`image_size=256`, `q_sizes=[16,16]`, a full CPU forward pass through every
+module the export wraps).
+
+Why 768 divides cleanly, which is the whole question:
+
+| requirement | at 768 |
+|---|---|
+| stride-2 chains (trunk, neck, mask downsampler) must halve exactly | 768 = 3·2⁸ — eight exact halvings, deeper than anything in the model |
+| `image_size % backbone_stride` | 768/16 = 48 |
+| self-attention token count must be a perfect square | 48² = 2304 |
+| SAM head high-res levels (strides 8 and 4) | 96 and 192 |
+| memory (`k_sizes`) side | untouched — a fixed 16×16 latent grid, not a function of `image_size` |
+
+512 = 2⁹ and 1024 = 2¹⁰ pass the same checks; 720 does not (720/16 = 45, and
+the halving stops being exact there). `tests/test_hydra_overrides.py` pins this
+arithmetic and asserts it over every config in the repo, so a future
+`edgetam_720.yaml` fails in CI rather than at export.
+
+Cost sits where the token count puts it: 2304 tokens against 4096 at 1024 and
+1024 at 512, so ~56% of the 1024 spatial work. The image encoder scales with
+pixels (2.25× the 512 config), the memory attention's self-attention with
+tokens² (~5×), its cross-attention to the fixed memory bank with tokens (2.25×).
+
+**Where 768 does not belong.** Anti-UAV410 frames are 640×512, so 768
+*upsamples*: 2.25× the 512 token count for interpolated pixels carrying no new
+information, and a 6-pixel drone reaches 9 pixels — still inside one stride-16
+cell. `src/trackers/adaptive.py` buys 4–10× magnification at the 512
+price and is the right tool there. 768 is for the 1280×720 recordings.
+
+**Status: configs and tests ready; nothing exported or measured. The export's
+own guard is the first real check — `_CrossAttentionGraph.__init__` raises
+"Query RoPE table covers N tokens but the feature map has M" if `q_sizes` and
+the feature map disagree, and `--verify` runs every graph through onnxruntime
+against PyTorch.**
+
 ---
 
 ### 3.10 Prompt sensitivity
@@ -473,18 +513,21 @@ tensors. Object count should rise: objects are the batch dimension.
 
 ---
 
-### 3.11 Recorded clips: full 1024, full 512, centre-crop 512
+### 3.11 Recorded clips: full and centre-crop at each resolution
 
 **Question.** The synthetic clip is not what this will run on. On real
 recordings, what does each input configuration cost and lose?
 
-**Setup.** `tools/run_records.py` — every folder under `frames/` tracked three
-ways, results in `frame_output/<record>/<mode>/`:
+**Setup.** `tools/run_records.py` — every folder under `frames/` tracked once
+per mode, results in `frame_output/<record>/<mode>/`. Each mode needs its own
+engine set, so `--modes` runs the subset that has been built:
 
 | mode | model | input |
 |---|---|---|
 | `full1024` | 1024² | whole frame, resized |
 | `crop1024` | 1024² | centred 1024×1024 window |
+| `full768` | 768² | whole frame, resized |
+| `crop768` | 768² | centred 768×768 window |
 | `full512` | 512² | whole frame, resized |
 | `crop512` | 512² | centred 512×512 window |
 
@@ -911,7 +954,7 @@ python tools/sweep_prompt.py --radii 12,30,60,120 --objects 1,2,3 \
 # 5. Where the non-engine time goes (decides the fusion question).
 python tools/analyze_glue.py --frames 200 --offload-video
 
-# 5b. Real recordings, four input configurations each. The target is selected
+# 5b. Real recordings, one run per input configuration. The target is selected
 #     once per record (a window opens; --prompt point for clicks, --multi for
 #     several targets) and reused by every mode. --box skips the window.
 python tools/run_records.py --records frames --out frame_output
@@ -925,6 +968,16 @@ python tools/run_experiment.py --outdir results/512 \
     --baseline-config configs/edgetam_512.yaml \
     --reference-config configs/edgetam_trt.yaml \
     --image-size 512
+
+# 7. The same at 768, for sources with more than 512x512 of real detail.
+python tools/export_edgetam_onnx.py --outdir models768/ --image-size 768 --verify
+python tools/build_trt_engines.py   --outdir models768/ --max-batch 4
+python tools/run_experiment.py --outdir results/768 \
+    --engines models768/ \
+    --config configs/edgetam_trt_768.yaml \
+    --baseline-config configs/edgetam_768.yaml \
+    --reference-config configs/edgetam_trt.yaml \
+    --image-size 768
 ```
 
 `run_experiment.py` writes `SUMMARY.md` plus:
