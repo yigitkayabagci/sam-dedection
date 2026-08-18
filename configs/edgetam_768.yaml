@@ -1,0 +1,50 @@
+# Stock PyTorch EdgeTAM at 768x768 -- the midpoint between the 512 and 1024
+# configs, for sources that carry more than 512x512 of real detail.
+#
+# WHY 768 AND NOT SOME OTHER NUMBER. Two divisibility facts, and nothing else:
+#
+#   1) 768 = 3 * 2^8. Every stride-2 stage in the trunk, the neck and the
+#      memory encoder's mask downsampler halves the side exactly -- eight times
+#      over, which is deeper than anything in this model. So no stage ever hits
+#      an odd size, and the FPN's top-down 2x upsample always lands exactly on
+#      its skip connection. (512 = 2^9 and 1024 = 2^10 are fine for the same
+#      reason. A size like 720 is not: 720/16 = 45, and 45/2 is where it stops
+#      being exact.)
+#   2) 768 / 16 = 48, an integer, so the stride-16 feature map is 48x48 and
+#      `_hydra_overrides.py` can keep the memory attention's query RoPE table
+#      in lockstep with it. 48*48 = 2304 is a perfect square, which is what
+#      `_SelfAttentionGraph` requires of its token count.
+#
+# Nothing here is special-cased for 768. `image_size` below is the only knob;
+# every derived shape in the export path, the graphs and the TRT tracker is
+# computed from it. tests/test_edgetam_graphs.py already builds and runs the
+# whole module graph at a third size (image_size=256, q_sizes=[16,16]), which
+# is the standing evidence that "resolution" here is a parameter and not two
+# hardcoded configurations.
+#
+# WHAT IS STILL A MEASUREMENT, NOT A GIVEN. The checkpoint was trained at 1024.
+# 768 evaluates those weights off their training resolution -- less far off
+# than 512 does, but still off. Token count is 48x48 = 2304 against 4096 at
+# 1024 and 1024 at 512, so this is ~56% of the 1024 spatial work rather than
+# 25%. Whether that buys back accuracy the 512 config loses is the thing this
+# config exists to find out.
+#
+# WHEN 768 IS THE WRONG TOOL. On Anti-UAV410 the frames are 640x512, so 768
+# *upsamples* -- it pays 2.25x the 512 token count for interpolated pixels that
+# carry no new information, and a 6-pixel drone becomes a 9-pixel one, still
+# under a single stride-16 cell. Use `src/trackers/adaptive.py` for that case:
+# it crops a window around the target and magnifies it 4-10x at the 512 price.
+# 768 is for sources that genuinely have the detail -- the 1280x720 recordings,
+# not the thermal set.
+#
+# This is the baseline a 768 TensorRT run must be compared against, exactly as
+# edgetam_512.yaml is for the 512 engines. Comparing 768-TRT to a 512 or 1024
+# baseline measures the resolution change, not TensorRT.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+image_size: 768                           # overrides the Hydra config's 1024
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

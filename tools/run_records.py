@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Track every recorded frame folder three ways and collect the comparison.
+"""Track every recorded frame folder several ways and collect the comparison.
 
 `frames/<record>/` holds one recording as an image sequence. This runs each of
-them through the TensorRT backend in four input configurations and writes the
+them through the TensorRT backend in each input configuration and writes the
 results into `frame_output/<record>/<mode>/`:
 
   full1024   whole frame resized to 1024x1024   the reference configuration
   crop1024   centred 1024x1024 window           native pixels, cropped scene
+  full768    whole frame resized to 768x768     56% of the tokens, whole scene
+  crop768    centred 768x768 window             native pixels, cropped scene
   full512    whole frame resized to 512x512     4x fewer tokens, whole scene
   crop512    centred 512x512 window             native pixels, cropped scene
 
@@ -25,6 +27,11 @@ These are not equivalent inputs and the comparison is not only FPS: 512 sees
 the whole scene at half the detail, a crop sees part of the scene at full
 detail. If the target leaves the centre window, the crop modes lose it -- that
 is the trade being measured, and the mp4 is there to watch it happen.
+
+768 is the midpoint, and it only earns its place on sources that carry more
+than 512x512 of real detail -- on a 640x512 thermal frame it upsamples and pays
+2.25x the 512 token count for interpolated pixels. See configs/edgetam_768.yaml.
+Each mode needs its own engine set; `--modes` runs the subset you have built.
 
 Prompts are picked once per record, on the full frame, and reused by every
 mode (crop modes shift them automatically). They come from, in order:
@@ -63,6 +70,8 @@ from tools.run_experiment import PY, find, run_step  # noqa: E402
 MODES = {
     "full1024": ("configs/edgetam_trt.yaml", None),
     "crop1024": ("configs/edgetam_trt.yaml", 1024),
+    "full768": ("configs/edgetam_trt_768.yaml", None),
+    "crop768": ("configs/edgetam_trt_768.yaml", 768),
     "full512": ("configs/edgetam_trt_512.yaml", None),
     "crop512": ("configs/edgetam_trt_512.yaml", 512),
 }
@@ -224,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     described = {
         "full1024": "| `full1024` | 1024x1024 | whole frame, resized |",
         "crop1024": "| `crop1024` | 1024x1024 | centred 1024x1024 window |",
+        "full768": "| `full768` | 768x768 | whole frame, resized |",
+        "crop768": "| `crop768` | 768x768 | centred 768x768 window |",
         "full512": "| `full512` | 512x512 | whole frame, resized |",
         "crop512": "| `crop512` | 512x512 | centred 512x512 window |",
     }
