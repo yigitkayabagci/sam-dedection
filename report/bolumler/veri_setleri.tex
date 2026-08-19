@@ -56,6 +56,9 @@ mekanizmasıdır, tek karelik bir set onu ne eğitir ne ölçer.
     AeroVIS\hava\turetilmis & 2026 · arXiv & RGB & kaynak setlere göre değişken &
       Video & \textbf{Örnek maskesi + kimlik izi}, 9 sınıf &
       117 video / 49\,204 kare, 8\,279 iz \\
+    UAVScenes\hava\turetilmis & 2025 · ICCV & RGB (+LiDAR) & 2448×2048 &
+      Video & Yoğun maske, 19 sınıf (\textbf{her kare}) &
+      23 dizi, 120\,K etiketli kare \\
     SegFly\hava\turetilmis & 2026 · ECCV & RGB+TIR &
       RGB 5472×3648; RGB-T çifti 640×512 & Statik &
       Yoğun maske, 15 sınıf & 20\,606 RGB, 15\,007 termal (hizalı çift) \\
@@ -67,8 +70,11 @@ mekanizmasıdır, tek karelik bir set onu ne eğitir ne ölçer.
       500 dizi, $\sim$1,7\,M kare çifti \\
     \midrule
     \multicolumn{7}{@{}l}{\textit{\color{grimetin} İkincil}}\\
-    VDD\hava\turetilmis & 2023 · arXiv & RGB & yüksek çöz. & Statik &
-      Yoğun maske, 7 sınıf & 400 görüntü \\
+    VDD\hava\turetilmis & 2023 · arXiv & RGB & 4000×3000 & Statik &
+      Yoğun maske, 7 sınıf & 400 görüntü, 50--120\,m \\
+    MESSI\hava & 2025 · TMLR & RGB & 5472×3648 &
+      Statik (+ iniş dizileri) & Yoğun maske, 16 sınıf &
+      2\,525 görüntü; 30/50/70/100\,m \\
     FlyAwareV2\hava\turetilmis & 2026 · SPIC & RGB + derinlik & --- & Statik &
       Yoğun maske + derinlik (sentetik + gerçek) &
       100\,K+ örnek, $\sim$296\,GB \\
@@ -83,7 +89,7 @@ Her iki bloktaki setler de ilk iki ölçütü geçer: hepsi açık, hepsi
 indirilebilir, hepsinde yoğun maske GT'si vardır. Blokları ayıran şey
 üçüncü ve dördüncü ölçüttür, yani bu projenin görevine uygunluk:
 EdgeTAM'ın ölçtüğü şey video üzerindeki hafıza mekanizmasıdır ve
-projenin girdisi termaldir. İkincil bloktaki üç setin her birinde
+projenin girdisi termaldir. İkincil bloktaki dört setin her birinde
 bunlardan biri eksiktir; eksiğin ne olduğu aşağıda tek tek yazılıdır.
 
 \section{Veri Setleri Hakkında Notlar}
@@ -135,6 +141,19 @@ kaynaklı (elle denetlenmiş ama elle çizilmemiş) ve RGB; termal yok.
 Kendi çekimi olmadığı için kaynak setleriyle çakışmaya dikkat
 (\cref{sec:ortak-kaynaklar}).
 
+\paragraph{UAVScenes~\cite{wang2025uavscenes}.}
+\textbf{Listedeki en yoğun zamansal etiketlemeye sahip set.} Diğer
+videolarda etiket seyrektir --- MVUAV'da 25, MVSeg'de 15 karede bir ---
+UAVScenes'te ise 23 uçuş dizisinin \textbf{her karesi} elle
+etiketlenmiştir: 120\,K kare, 2448×2048, 19 sınıf (16 durağan, 2
+hareketli, 1 arkaplan), 80--130\,m irtifa, dört ortam (kasaba, vadi,
+havalimanı, ada). Kareler ardışıktır, çünkü altındaki MARS-LVIG bir SLAM
+veri setidir; bu da J\&F'i kare atlamadan, gerçek bir klip boyunca
+hesaplamaya izin verir --- \cref{sec:hafiza-toparlanma}'deki hata
+birikimi sorusunun ölçülebileceği tek yer. \textbf{Zayıf yanı:} RGB
+(artı LiDAR), termal yok; ve ham veri kendi çekimi değil
+(\cref{sec:ortak-kaynaklar}).
+
 \paragraph{SegFly~\cite{segfly2026}.}
 Ölçek olarak listenin en büyüğü: 20\,606 RGB görüntü ve 15\,007 termal
 görüntü, 15 sınıf, 30/40/50\,m irtifa. \textbf{Çözünürlüğü tek bir
@@ -173,17 +192,32 @@ kümede ölçülür.
 
 \subsection*{İkincil}
 
-Aşağıdaki üçü \textbf{elenmiş değildir}; indirmeleri ve etiketleri
+Aşağıdaki dördü \textbf{elenmiş değildir}; indirmeleri ve etiketleri
 sorunsuzdur. Yalnızca bu projenin görevine daha uzak durdukları için
 ikinci sıradadırlar; her birinde eksik olan şey kalın yazılmıştır.
 
 \paragraph{VDD~\cite{cai2023vdd}.}
-\textbf{Eksik: video ve termal.} Yoğun etiketli, temiz, açık --- ama
-400 statik RGB görüntü. Bu hacim bir fine-tune için az, bir benchmark
-için sınırda ve hafıza mekanizmasını hiç ölçmez. UDD ve UAVid'in
+\textbf{Eksik: video ve termal.} Etiket kalitesi tartışmasız iyi:
+4000×3000 çözünürlük, 50--120\,m irtifa ve SegFly'ın karşılaştırma
+tablosunda~\cite{segfly2026} \emph{kentsel, endüstriyel ve kırsal}
+ortamların üçünü birden işaretleyen iki RGB setinden biri (diğeri
+SegFly'ın kendisi). Buna rağmen ikincil, çünkü 400 statik RGB görüntü
+bir fine-tune için az, bir benchmark için sınırda ve hafıza
+mekanizmasını hiç ölçmez. UDD ve UAVid'in
 yeniden etiketlenmiş halleriyle (IDD paketi) birlikte geldiği için asıl
 değeri tek başına değil, o üçlüyü tek etiket standardında toplaması ---
 ki bu aynı zamanda çakışma kaynağıdır (\cref{sec:ortak-kaynaklar}).
+
+\paragraph{MESSI~\cite{pinkovich2025messi}.}
+\textbf{Eksik: video ve termal.} 2\,525 görüntü, 5472×3648, 16 sınıf,
+tek bir kentsel bölge. Listeye girmesinin nedeni hacmi değil,
+\textbf{irtifa eksenini sistematik olarak değiştiren tek set olması}:
+aynı sahne 30, 50, 70 ve 100\,m'den, ayrıca 120\,m'den 10\,m'ye inen
+dikey diziler halinde çekilmiş. \Cref{sec:cozunurluk}'teki soru ---
+kaynak hangi irtifada 512×512'den fazla gerçek detay taşıyor, yani 768
+ne zaman yukarı ölçeklemeye başlıyor --- tam olarak bu eksende
+ölçülebilir. Ölçüm için değil, o kararı veriyle desteklemek için
+yararlı.
 
 \paragraph{FlyAwareV2~\cite{flyawarev2}.}
 100\,K'yı aşan örnek, dört hava koşulu (güneşli, yağmurlu, sisli, gece),
@@ -206,7 +240,7 @@ gerekir, bu da ölçülen maske kalitesini veri setinin kendi
 \section{Ortak Kaynaklar ve Çakışma Riski}
 \label{sec:ortak-kaynaklar}
 
-\Cref{tab:veri-setleri}'ndeki on setin beşi kendi çekimi değildir:
+\Cref{tab:veri-setleri}'ndeki on iki setin altısı kendi çekimi değildir:
 daha eski, halka açık veri setlerinin yeniden etiketlenmiş ya da
 yeniden paketlenmiş halleridir. Bu, tek başına bir kusur değil ---
 kutuyu maskeye çevirmek gerçek bir katkıdır --- ama iki set aynı ham
@@ -216,7 +250,7 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
 \begin{table}[H]
   \centering
   \caption{Türetilmiş veri setleri ve kaynakları. Tabloda $\dagger$ ile
-    işaretli satırlar bunlardır; kalan beş set kendi çekimidir
+    işaretli satırlar bunlardır; kalan altı set kendi çekimidir
     (Multi-View UAV'ın ``çekimi'' CARLA simülasyonudur).}
   \label{tab:veri-seti-kaynaklari}
   \footnotesize
@@ -243,6 +277,10 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
     MVSeg & OSU, INO, KAIST, RGBT234 &
       Mevcut RGB-T video kaynakları MVSS görevine uyarlanıp piksel
       düzeyinde yeniden etiketlenmiş. \\
+    UAVScenes & MARS-LVIG &
+      Ham çok-modlu uçuş verisi (kamera + LiDAR + GNSS) bir SLAM veri
+      setinden; UAVScenes 6-DoF pozları ve 120\,K karenin elle
+      semantik etiketlenmesini ekliyor. \\
     SegFly & OccuFly (CVPR 2026) &
       Ham hava görüntüsünün tamamı ve 50\,m'de elle etiketlenmiş 586
       RGB görüntü OccuFly'dan; SegFly bunları 3B'ye kaldırıp 30/40\,m
@@ -269,6 +307,9 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
         kameralar farklı, yani veri sızıntısı yok; ama ikisi de aynı
         render motorunun görsel imzasını taşır, dolayısıyla ikisinde de
         iyi çalışan bir model gerçek termal kayıtta aynı sonucu vermez.
+  \item \textbf{MARS-LVIG $\rightarrow$ UAVScenes.} Kaynak bir SLAM
+        veri seti; listedeki başka hiçbir set onu kullanmıyor, çakışma
+        yok.
   \item \textbf{OccuFly $\rightarrow$ SegFly.} SegFly'ın ham görüntüsü
         ve elle çizilmiş 586 etiketi OccuFly'dandır. Listedeki başka
         hiçbir set OccuFly kullanmıyor, yani bugün çakışma yok; ama
@@ -281,13 +322,13 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
 
 \subsection*{Sonuç: Öncelikli Blok Kendi İçinde Temiz}
 
-Öncelikli bloktaki yedi setin üçü türetilmedir --- AeroVIS, MVSeg ve
-SegFly --- ama kaynak aileleri \textbf{birbirinden tamamen ayrıktır}:
-AeroVIS VisDrone/UAVDT/SeaDronesSee'den, MVSeg OSU/INO/KAIST/RGBT234'ten,
-SegFly ise OccuFly'dan gelir. Kalan dördü (Kust4K, MVUAV, Caltech Aerial
+Öncelikli bloktaki sekiz setin dördü türetilmedir (AeroVIS, UAVScenes,
+SegFly, MVSeg), ama kaynak aileleri \textbf{birbirinden tamamen
+ayrıktır}: sırasıyla VisDrone/UAVDT/SeaDronesSee, MARS-LVIG, OccuFly ve
+OSU/INO/KAIST/RGBT234. Kalan dördü (Kust4K, MVUAV, Caltech Aerial
 RGB-T, VTUAV) kendi çekimidir. Yani \cref{tab:veri-setleri}'nin
-öncelikli yedisi \textbf{birlikte kullanılabilir}; aralarında paylaşılan
-tek bir kare yoktur.
+öncelikli sekizi \textbf{birlikte kullanılabilir}; aralarında
+paylaşılan tek bir kare yoktur.
 
 Çakışma, ikincil bloğa geçildiğinde başlar. Pratik kural: FlyAwareV2 ve
 VDD/IDD ile eğitim yapılacaksa, AeroVIS artık tarafsız bir
@@ -299,7 +340,7 @@ paylaşılan kare olmadığı için güvenlidir.
 \section{Elenen Bağlantılar}
 \label{sec:elenen-veri-setleri}
 
-Üç aday, yukarıdaki ölçütlerin ilk ikisinden geçemedi:
+Beş aday, yukarıdaki ölçütlerin ilk ikisinden geçemedi:
 
 \begin{itemize}
   \item \textbf{UAV-VisLoc}~\cite{uavvisloc2024} --- 6\,742 havadan
@@ -309,6 +350,16 @@ paylaşılan kare olmadığı için güvenlidir.
   \item \textbf{CPD-UAV}~\cite{cpduav2026} --- 1\,061 yüksek çözünürlüklü
         görüntü, ortamla görsel olarak kaynaşmış insanların tespiti.
         Etiket yalnızca kutu, hacim küçük, video yok.
+  \item \textbf{SkyScapes}~\cite{azimi2019skyscapes} --- 5616×3744
+        çözünürlük, 31 sınıf, çok yüksek etiket yoğunluğu; ama
+        \textbf{toplam 16 görüntü} ve 1000\,m irtifadan çekilmiş
+        harita üretimi (şerit çizgileri, HD-mapping) verisi. Ne hacim
+        ne de görüş açısı bir drone takipçisine uyuyor.
+  \item \textbf{CrossLoc}~\cite{yan2022crossloc} --- 7\,000'i aşan
+        geo-referanslı görüntü, ama görev yine görsel konumlandırma ve
+        semantik etiketler sentetik render'dan geliyor, elle
+        çizilmiyor. Çözünürlük 720×480, yani EdgeTAM'ın 512 girdisinin
+        altında.
   \item \textbf{Scilit kaydı} (\texttt{d95b5f3c\ldots}) --- sayfa
         erişime kapalı (HTTP 403) ve kayıt başka bir yerde
         eşleştirilemedi; hangi yayına işaret ettiği doğrulanamadığı için
