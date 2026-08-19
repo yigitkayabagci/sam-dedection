@@ -18,7 +18,7 @@ veremez.
 | [MVUAV](https://jiwei0921.github.io/MVUAV) ([NeurIPS](https://proceedings.neurips.cc/paper_files/paper/2024/hash/78e839f96568985d18463044a064ea0f-Abstract-Conference.html)) | 2024 · NeurIPS | 413 havadan RGB-T video, 53 828 kare, 2 183 etiketli kare, 36 sınıf, gündüz/gece |
 | [Caltech Aerial RGB-T](https://github.com/aerorobotics/caltech-aerial-rgbt-dataset) | 2024 · ECCV | 37 çekim (18'i havadan), 4 195 yoğun maske, FLIR ADK **640×512**, GPS+IMU senkron |
 | [AeroVIS / AeroTrack](https://github.com/Dmygithub/AeroTrack) | 2026 · arXiv | 117 video / 49 204 kare, **örnek maskesi + kimlik izi** (8 279 iz) — EdgeTAM'ın çıktı tipine en yakın set |
-| [SegFly](https://github.com/markus-42/SegFly) ([HF](https://huggingface.co/datasets/markus-42/SegFly)) | 2026 · ECCV | 20 606 RGB + 15 007 RGB-T çifti, 15 sınıf, termal 640×512 |
+| [SegFly](https://github.com/markus-42/SegFly) ([HF](https://huggingface.co/datasets/markus-42/SegFly)) | 2026 · ECCV | 20 606 RGB + 15 007 termal, 15 sınıf. İki platform: RGB-only sahneler 5472×3648 (Phantom 4), RGB-T sahneler 4000×3000 + 640×512 (Mavic 3 Thermal) — **hizalanmış çift 640×512** |
 | [MVSeg](https://jiwei0921.github.io/Multispectral-Video-Semantic-Segmentation/) | 2023 · CVPR | 738 RGB-T video, 3 545 maske, 26 sınıf — MVUAV'ın yer seviyesi kardeşi, aynı biçim |
 | [VTUAV (DUT-VTUAV)](https://zhang-pengyu.github.io/DUT-VTUAV/) | 2022 · CVPR | 500 dizi / ~1,7 M hizalı 1920×1080 RGB-T kare; **100 videoluk maske bölümü** ayrı indirilebilir, J&F için yeterli |
 
@@ -32,7 +32,7 @@ veremez.
 
 ## Ortak kaynaklar — çakışma riski
 
-On setin dördü kendi çekimi değil, daha eski açık setlerin yeniden
+On setin beşi kendi çekimi değil, daha eski açık setlerin yeniden
 etiketlenmiş hali. Detay: raporda Bölüm 5.4.
 
 | Set | Kaynak |
@@ -41,8 +41,9 @@ etiketlenmiş hali. Detay: raporda Bölüm 5.4.
 | FlyAwareV2 | gerçek: VisDrone (eğitim) + UAVid (test), ~2 K kare · sentetik: CARLA/SynDrone ~288 K kare |
 | VDD | kendi 400 görüntüsü özgün; birlikte gelen IDD paketi UDD ve UAVid'i yeniden etiketliyor |
 | MVSeg | OSU, INO, KAIST, RGBT234 |
+| SegFly | OccuFly (CVPR 2026) — ham görüntünün tamamı + elle çizilmiş 586 etiket |
 
-Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, SegFly, VTUAV
+Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, VTUAV
 (Multi-View UAV = CARLA sentetiği).
 
 **Çakışan ikililer:**
@@ -53,11 +54,15 @@ Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, SegFly, VTUAV
   testinde ölçmek aynı kareleri iki kez görmek.
 - **CARLA → FlyAwareV2 + Multi-View UAV** — kare değil simülatör ortak;
   sızıntı yok ama aynı render imzası.
+- **OccuFly → SegFly** — listedeki başka hiçbir set OccuFly kullanmıyor,
+  bugün çakışma yok; ama OccuFly değerlendirmeye alınırsa SegFly tarafsız
+  olmaktan çıkar.
 - **RGBT234 → MVSeg** — bugün zararsız; ileride RGBT234'te takip
   ölçülürse örtüşür.
 
-**Sonuç:** öncelikli bloktaki tek türetilmiş set AeroVIS ve kaynakları
-diğer altısına değmiyor → **öncelikli yedisi birlikte kullanılabilir.**
+**Sonuç:** öncelikli yedinin üçü türetilme (AeroVIS, MVSeg, SegFly) ama
+kaynak aileleri tamamen ayrık → **öncelikli yedisi birlikte
+kullanılabilir.**
 Güvenli kurulum: Kust4K + MVUAV'da eğitip J&F'i AeroVIS'te ölçmek.
 
 ## Elenenler

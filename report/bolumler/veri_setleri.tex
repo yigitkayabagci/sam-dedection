@@ -56,8 +56,9 @@ mekanizmasıdır, tek karelik bir set onu ne eğitir ne ölçer.
     AeroVIS\hava\turetilmis & 2026 · arXiv & RGB & kaynak setlere göre değişken &
       Video & \textbf{Örnek maskesi + kimlik izi}, 9 sınıf &
       117 video / 49\,204 kare, 8\,279 iz \\
-    SegFly\hava & 2026 · ECCV & RGB+TIR & 5472×3648 / 640×512 & Statik &
-      Yoğun maske, 15 sınıf & 20\,606 RGB + 15\,007 RGB-T çifti \\
+    SegFly\hava\turetilmis & 2026 · ECCV & RGB+TIR &
+      RGB 5472×3648; RGB-T çifti 640×512 & Statik &
+      Yoğun maske, 15 sınıf & 20\,606 RGB, 15\,007 termal (hizalı çift) \\
     MVSeg\turetilmis & 2023 · CVPR & RGB+TIR & karışık, $\leq$1280×720 & Video &
       Yoğun maske, 26 sınıf (15 karede bir) &
       738 video, 3\,545 maske \\
@@ -135,12 +136,19 @@ Kendi çekimi olmadığı için kaynak setleriyle çakışmaya dikkat
 (\cref{sec:ortak-kaynaklar}).
 
 \paragraph{SegFly~\cite{segfly2026}.}
-Ölçek olarak listenin en büyüğü: 20\,606 RGB görüntü ve 15\,007 hizalı
-RGB-T çifti, 15 sınıf, 30/40/50\,m irtifa. Termal yine 640×512.
-Etiketlerin yalnızca \%2,84'ü elle çizilmiş; kalanı 2D--3D--2D geometrik
-yayılımla üretilmiş --- bu yüzden hacim büyük ama etiket gürültüsü
-sıfır değil. \textbf{Zayıf yanı:} bağımsız hava fotoğrafları (video
-değil) ve CC BY-NC-SA (ticari kullanım yok).
+Ölçek olarak listenin en büyüğü: 20\,606 RGB görüntü ve 15\,007 termal
+görüntü, 15 sınıf, 30/40/50\,m irtifa. \textbf{Çözünürlüğü tek bir
+sayı değildir}, çünkü iki ayrı platformla uçulmuştur: 9 sahnenin beşi
+(1, 2, 6--8) Phantom~4 RTK ile, yalnızca RGB, 5472×3648; dördü (3--5, 9)
+Mavic~3 Thermal ile, 4000×3000 RGB artı 640×512 LWIR. Yani
+\textbf{5472×3648 hiçbir zaman termalle eşleşmez.} Dahası kayıt
+(registration) adımında RGB, termalin bozunum uzayına kırpılıp yeniden
+ölçeklenir; dolayısıyla \emph{hizalanmış RGB-T çifti 640×512'dir} ---
+projenin native çözünürlüğü. Etiketlerin yalnızca \%2,84'ü elle
+çizilmiş, kalanı 2D--3D--2D geometrik yayılımla üretilmiş; hacim büyük
+ama etiket gürültüsü sıfır değil. \textbf{Zayıf yanı:} bağımsız hava
+fotoğrafları (video değil), CC BY-NC-SA (ticari kullanım yok) ve ham
+görüntüler kendi çekimi değil (\cref{sec:ortak-kaynaklar}).
 
 \paragraph{MVSeg~\cite{ji2023mvseg}.}
 MVUAV'ın yer seviyesi kardeşi ve öncülü: 738 RGB-T video, 3\,545 maske,
@@ -198,7 +206,7 @@ gerekir, bu da ölçülen maske kalitesini veri setinin kendi
 \section{Ortak Kaynaklar ve Çakışma Riski}
 \label{sec:ortak-kaynaklar}
 
-\Cref{tab:veri-setleri}'ndeki on setin dördü kendi çekimi değildir:
+\Cref{tab:veri-setleri}'ndeki on setin beşi kendi çekimi değildir:
 daha eski, halka açık veri setlerinin yeniden etiketlenmiş ya da
 yeniden paketlenmiş halleridir. Bu, tek başına bir kusur değil ---
 kutuyu maskeye çevirmek gerçek bir katkıdır --- ama iki set aynı ham
@@ -208,7 +216,7 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
 \begin{table}[H]
   \centering
   \caption{Türetilmiş veri setleri ve kaynakları. Tabloda $\dagger$ ile
-    işaretli satırlar bunlardır; diğer altı set kendi çekimidir
+    işaretli satırlar bunlardır; kalan beş set kendi çekimidir
     (Multi-View UAV'ın ``çekimi'' CARLA simülasyonudur).}
   \label{tab:veri-seti-kaynaklari}
   \footnotesize
@@ -235,6 +243,11 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
     MVSeg & OSU, INO, KAIST, RGBT234 &
       Mevcut RGB-T video kaynakları MVSS görevine uyarlanıp piksel
       düzeyinde yeniden etiketlenmiş. \\
+    SegFly & OccuFly (CVPR 2026) &
+      Ham hava görüntüsünün tamamı ve 50\,m'de elle etiketlenmiş 586
+      RGB görüntü OccuFly'dan; SegFly bunları 3B'ye kaldırıp 30/40\,m
+      uçuşlara ve termale yayarak 35\,K'yı aşan etiketli görüntüye
+      çıkarıyor. \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -256,6 +269,11 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
         kameralar farklı, yani veri sızıntısı yok; ama ikisi de aynı
         render motorunun görsel imzasını taşır, dolayısıyla ikisinde de
         iyi çalışan bir model gerçek termal kayıtta aynı sonucu vermez.
+  \item \textbf{OccuFly $\rightarrow$ SegFly.} SegFly'ın ham görüntüsü
+        ve elle çizilmiş 586 etiketi OccuFly'dandır. Listedeki başka
+        hiçbir set OccuFly kullanmıyor, yani bugün çakışma yok; ama
+        OccuFly'ın kendisi değerlendirmeye alınırsa SegFly tarafsız
+        olmaktan çıkar.
   \item \textbf{RGBT234 $\rightarrow$ MVSeg.} RGBT234 aslında bir RGB-T
         \emph{takip} benchmark'ıdır. Bugün için zararsız, ama ileride
         takip doğruluğu RGBT234 üzerinde ölçülürse MVSeg ile örtüşür.
@@ -263,10 +281,11 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
 
 \subsection*{Sonuç: Öncelikli Blok Kendi İçinde Temiz}
 
-Kritik nokta şudur: öncelikli bloktaki tek türetilmiş set
-\textbf{AeroVIS}'tir ve onun kaynakları (VisDrone, UAVDT, SeaDronesSee)
-bloktaki diğer altı setin (Kust4K, MVUAV, Caltech Aerial RGB-T, SegFly,
-MVSeg, VTUAV) hiçbirine değmez. Yani \cref{tab:veri-setleri}'nin
+Öncelikli bloktaki yedi setin üçü türetilmedir --- AeroVIS, MVSeg ve
+SegFly --- ama kaynak aileleri \textbf{birbirinden tamamen ayrıktır}:
+AeroVIS VisDrone/UAVDT/SeaDronesSee'den, MVSeg OSU/INO/KAIST/RGBT234'ten,
+SegFly ise OccuFly'dan gelir. Kalan dördü (Kust4K, MVUAV, Caltech Aerial
+RGB-T, VTUAV) kendi çekimidir. Yani \cref{tab:veri-setleri}'nin
 öncelikli yedisi \textbf{birlikte kullanılabilir}; aralarında paylaşılan
 tek bir kare yoktur.
 
