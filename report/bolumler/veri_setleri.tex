@@ -75,6 +75,8 @@ mekanizmasıdır, tek karelik bir set onu ne eğitir ne ölçer.
     MESSI\hava & 2025 · TMLR & RGB & 5472×3648 &
       Statik (+ iniş dizileri) & Yoğun maske, 16 sınıf &
       2\,525 görüntü; 30/50/70/100\,m \\
+    SkyScapes\hava & 2019 · ICCV & RGB & 5616×3744 & Statik &
+      Yoğun maske, 31 sınıf & 16 görüntü; 5,7\,km², 13\,cm/piksel \\
     FlyAwareV2\hava\turetilmis & 2026 · SPIC & RGB + derinlik & --- & Statik &
       Yoğun maske + derinlik (sentetik + gerçek) &
       100\,K+ örnek, $\sim$296\,GB \\
@@ -89,7 +91,7 @@ Her iki bloktaki setler de ilk iki ölçütü geçer: hepsi açık, hepsi
 indirilebilir, hepsinde yoğun maske GT'si vardır. Blokları ayıran şey
 üçüncü ve dördüncü ölçüttür, yani bu projenin görevine uygunluk:
 EdgeTAM'ın ölçtüğü şey video üzerindeki hafıza mekanizmasıdır ve
-projenin girdisi termaldir. İkincil bloktaki dört setin her birinde
+projenin girdisi termaldir. İkincil bloktaki beş setin her birinde
 bunlardan biri eksiktir; eksiğin ne olduğu aşağıda tek tek yazılıdır.
 
 \section{Veri Setleri Hakkında Notlar}
@@ -192,7 +194,7 @@ kümede ölçülür.
 
 \subsection*{İkincil}
 
-Aşağıdaki dördü \textbf{elenmiş değildir}; indirmeleri ve etiketleri
+Aşağıdaki beşi \textbf{elenmiş değildir}; indirmeleri ve etiketleri
 sorunsuzdur. Yalnızca bu projenin görevine daha uzak durdukları için
 ikinci sıradadırlar; her birinde eksik olan şey kalın yazılmıştır.
 
@@ -219,6 +221,20 @@ ne zaman yukarı ölçeklemeye başlıyor --- tam olarak bu eksende
 ölçülebilir. Ölçüm için değil, o kararı veriyle desteklemek için
 yararlı.
 
+\paragraph{SkyScapes~\cite{azimi2019skyscapes}.}
+\textbf{Eksik: hacim.} Listenin en yoğun etiketlenmiş seti: 31 sınıf,
+13\,cm/piksel yer örnekleme aralığı, 5,7\,km²'lik alan --- 12'si şerit
+çizgisi alt sınıfı olmak üzere, birkaç piksel genişliğindeki ince
+yapılar dahil elle çizilmiş. Sorun görüş açısı değil (1000\,m'den de
+olsa havadan bir çekimdir), \textbf{toplam 16 görüntü} olmasıdır.
+Buna karşılık ``16 görüntü'' bu çözünürlükte göründüğünden azdır:
+5616×3744'ten kesilebilecek örtüşmeyen 512×512 pencere sayısı görüntü
+başına $\sim$77, yani toplam 1\,200'ü aşar. Bu haliyle eğitim seti ya
+da J\&F benchmark'ı değil, \textbf{ince ve küçük yapı stres testi}
+olarak değerlidir --- birkaç piksellik bir hedefin maskesini çıkarmak
+bu projenin temel zorluğudur ve SkyScapes bunun en zor örneklerini
+elle çizilmiş yer doğrusuyla veriyor.
+
 \paragraph{FlyAwareV2~\cite{flyawarev2}.}
 100\,K'yı aşan örnek, dört hava koşulu (güneşli, yağmurlu, sisli, gece),
 üç irtifa (20/50/120\,m), RGB + derinlik + semantik. \textbf{Eksik: gerçek veri ve termal.}
@@ -240,7 +256,7 @@ gerekir, bu da ölçülen maske kalitesini veri setinin kendi
 \section{Ortak Kaynaklar ve Çakışma Riski}
 \label{sec:ortak-kaynaklar}
 
-\Cref{tab:veri-setleri}'ndeki on iki setin altısı kendi çekimi değildir:
+\Cref{tab:veri-setleri}'ndeki on üç setin altısı kendi çekimi değildir:
 daha eski, halka açık veri setlerinin yeniden etiketlenmiş ya da
 yeniden paketlenmiş halleridir. Bu, tek başına bir kusur değil ---
 kutuyu maskeye çevirmek gerçek bir katkıdır --- ama iki set aynı ham
@@ -250,7 +266,7 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
 \begin{table}[H]
   \centering
   \caption{Türetilmiş veri setleri ve kaynakları. Tabloda $\dagger$ ile
-    işaretli satırlar bunlardır; kalan altı set kendi çekimidir
+    işaretli satırlar bunlardır; kalan yedi set kendi çekimidir
     (Multi-View UAV'ın ``çekimi'' CARLA simülasyonudur).}
   \label{tab:veri-seti-kaynaklari}
   \footnotesize
@@ -340,7 +356,7 @@ paylaşılan kare olmadığı için güvenlidir.
 \section{Elenen Bağlantılar}
 \label{sec:elenen-veri-setleri}
 
-Beş aday, yukarıdaki ölçütlerin ilk ikisinden geçemedi:
+Dört aday, yukarıdaki ölçütlerin ilk ikisinden geçemedi:
 
 \begin{itemize}
   \item \textbf{UAV-VisLoc}~\cite{uavvisloc2024} --- 6\,742 havadan
@@ -350,11 +366,6 @@ Beş aday, yukarıdaki ölçütlerin ilk ikisinden geçemedi:
   \item \textbf{CPD-UAV}~\cite{cpduav2026} --- 1\,061 yüksek çözünürlüklü
         görüntü, ortamla görsel olarak kaynaşmış insanların tespiti.
         Etiket yalnızca kutu, hacim küçük, video yok.
-  \item \textbf{SkyScapes}~\cite{azimi2019skyscapes} --- 5616×3744
-        çözünürlük, 31 sınıf, çok yüksek etiket yoğunluğu; ama
-        \textbf{toplam 16 görüntü} ve 1000\,m irtifadan çekilmiş
-        harita üretimi (şerit çizgileri, HD-mapping) verisi. Ne hacim
-        ne de görüş açısı bir drone takipçisine uyuyor.
   \item \textbf{CrossLoc}~\cite{yan2022crossloc} --- 7\,000'i aşan
         geo-referanslı görüntü, ama görev yine görsel konumlandırma ve
         semantik etiketler sentetik render'dan geliyor, elle

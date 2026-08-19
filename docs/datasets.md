@@ -29,12 +29,13 @@ veremez.
 |---|---|---|
 | [VDD](https://github.com/RussRobin/VDD) | 2023 · arXiv | 4000×3000, 50–120 m, kentsel+endüstriyel+kırsal üçünü birden kapsıyor; ama 400 statik RGB görüntü |
 | [MESSI](https://github.com/messi-dataset/messi-dataset) | 2025 · TMLR | 2 525 görüntü, 5472×3648, 16 sınıf. Değeri hacmi değil **irtifa ekseni**: aynı sahne 30/50/70/100 m + 120→10 m iniş dizileri |
+| [SkyScapes](https://www.dlr.de/en/eoc/about-us/remote-sensing-technology-institute/photogrammetry-and-image-analysis/public-datasets/dlr-skyscapes) | 2019 · ICCV | Listenin en yoğun etiketi: 31 sınıf, 13 cm/px, 5616×3744. Ama **16 görüntü** — eğitim seti değil, ince/küçük yapı stres testi (görüntü başına ~77 adet 512² pencere) |
 | [FlyAwareV2](https://github.com/LTTM/FlyAwareV2) | 2026 · SPIC | Büyük kısmı CARLA sentetiği, termal yok, tam sürüm ~296 GB |
 | [Multi-View UAV](https://huggingface.co/datasets/Peter341/Multi-View-UAV-Dataset) | 2025 · arXiv | 357 690 kare ama 400×300 (EdgeTAM'ın 512 girdisinin altında) ve tamamı CARLA |
 
 ## Ortak kaynaklar — çakışma riski
 
-On iki setin altısı kendi çekimi değil, daha eski açık setlerin yeniden
+On üç setin altısı kendi çekimi değil, daha eski açık setlerin yeniden
 etiketlenmiş hali. Detay: raporda Bölüm 5.4.
 
 | Set | Kaynak |
@@ -46,7 +47,7 @@ etiketlenmiş hali. Detay: raporda Bölüm 5.4.
 | SegFly | OccuFly (CVPR 2026) — ham görüntünün tamamı + elle çizilmiş 586 etiket |
 | UAVScenes | MARS-LVIG (SLAM veri seti) — ham uçuş verisi; UAVScenes pozları ve 120 K etiketi ekliyor |
 
-Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, VTUAV, MESSI
+Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, VTUAV, MESSI, SkyScapes
 (Multi-View UAV = CARLA sentetiği).
 
 **Çakışan ikililer:**
@@ -76,9 +77,6 @@ Güvenli kurulum: Kust4K + MVUAV'da eğitip J&F'i AeroVIS'te ölçmek.
   koordinatı; maske ya da kutu yok, görev görsel konumlandırma.
 - [CPD-UAV](https://www.mdpi.com/2504-446X/10/6/447) — 1 061 görüntü,
   yalnızca kutu, video yok.
-- [SkyScapes](https://www.dlr.de/en/eoc/about-us/remote-sensing-technology-institute/photogrammetry-and-image-analysis/public-datasets/dlr-skyscapes)
-  (ICCV '19) — 5616×3744, 31 sınıf, çok yoğun etiket; ama **toplam 16
-  görüntü** ve 1000 m'den HD-mapping verisi. Ne hacim ne görüş açısı uyuyor.
 - [CrossLoc](https://crossloc.github.io/) (CVPR '22) — 7 000+ görüntü ama
   görev görsel konumlandırma, semantik etiketler sentetik render'dan,
   çözünürlük 720×480 (EdgeTAM'ın 512 girdisinin altında).
