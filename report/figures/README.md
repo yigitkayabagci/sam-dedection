@@ -5,10 +5,14 @@ koyacağınız kendi görselleriniz (mimari ekran görüntüleri, `tracked.mp4`
 klplerinden alınmış kareler, `frame_output/`'taki `latency.png` /
 `stages.png` grafikleri, `results/`'taki `03_speed*.png` vb.) içindir.
 
-Şu an raporda hiçbir yer bir dosyaya bağlı `\includegraphics` çağrısı
-yapmıyor -- her görsel önce `\gorselyertutucu{...}` ile işaretli bir kutu
-olarak duruyor, böylece görselleri henüz eklemeseniz bile rapor hatasız
-derlenir. Bir görseli eklemek için, ilgili `deneyler.tex` içindeki
+Bu klasördeki PNG'ler depoya işlenmiyor, ama rapor onlar olmadan da
+hatasız derlenir: `preamble.tex` içindeki sarmalayıcı, `\includegraphics`
+çağrısının işaret ettiği dosya yoksa otomatik olarak "GÖRSEL BURAYA"
+kutusuna düşer ve eksik dosyanın adını yazar. Dosya yerindeyse hiçbir
+şey değişmez, gerçek görsel çizilir. Yani derleme hatası yerine, PDF'te
+hangi görselin eksik olduğunu gösteren bir kutu görürsünüz.
+
+Bir görseli eklemek için, ilgili `deneyler.tex` içindeki
 
 ```latex
 \gorselyertutucu{buraya-neyin-geleceğinin-açıklaması}

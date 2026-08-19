@@ -57,6 +57,7 @@ report/
 │   ├── arka_plan.tex      -- SAM→SAM2→EdgeTAM, token matematiği
 │   ├── sistem_yontem.tex  -- 4 motor kararı, ölçüm metodolojisi
 │   ├── deneyler.tex       -- EXPERIMENT_LOG'daki tüm ölçülmüş sonuçlar
+│   ├── veri_setleri.tex   -- aday veri setleri tablosu + J&F metriği
 │   ├── gelecek_calismalar.tex
 │   └── sonuc.tex
 └── figures/                -- kendi görselleriniz (bkz. figures/README.md)

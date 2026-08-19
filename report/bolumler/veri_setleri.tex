@@ -1,0 +1,318 @@
+\chapter{Veri Setleri ve Değerlendirme}
+\label{ch:veri-setleri}
+
+\section{Neden Bu Bölüm Var}
+\label{sec:neden-veri-seti}
+
+Raporun buraya kadarki doğruluk sayılarının tamamı bir \emph{parite}
+ölçümüdür: fp16 motorlarının çıktısı, aynı modelin fp32 çıktısına ne
+kadar yakın kaldı (\cref{sec:olcum-yontemi}). Bu, motorun doğru
+derlendiğini kanıtlar; modelin \emph{ne kadar iyi takip ettiğini}
+kanıtlamaz, çünkü karşılaştırılan referans modelin kendi çıktısıdır.
+Dışarıdan bir doğruluk sayısı için iki şey gerekir: bir veri seti ve o
+veri setinde kare başına bir \textbf{yer doğrusu} (ground truth, GT).
+
+Projede kullanılan Anti-UAV410~\cite{huang2023antiuav410} bu boşluğu
+yalnızca yarısına kadar doldurur: etiketleri \emph{kutu}dur. Kutu, IoU
+ve başarı eğrisi verir (\texttt{src/accuracy.py}), ama EdgeTAM'ın
+ürettiği şey bir \emph{maske}dir ve maskenin kalitesi kutuyla
+ölçülemez. Maske kalitesini ölçen standart metrik J\&F'tir
+(\cref{sec:jf-metrigi}) ve J\&F, kare başına \textbf{yoğun (piksel
+düzeyinde) maske GT'si} ister.
+
+Bu bölüm, aday veri setlerini tam olarak bu ölçütle eler:
+
+\begin{enumerate}
+  \item \textbf{Gerçekten indirilebilir mi?} Yayınlanmış bir bağlantı
+        değil, çalışan bir dağıtım (figshare / Hugging Face / Drive /
+        kurum arşivi) ve açık bir lisans.
+  \item \textbf{Yoğun maske GT'si var mı?} Kutu, GPS ya da sınıf
+        etiketi J\&F üretmez.
+  \item \textbf{Havadan mı?} Tabloda \hava\ ile işaretli.
+  \item \textbf{Video mu?} EdgeTAM'ın ölçtüğü şey hafıza mekanizmasıdır;
+        tek karelik bir set onu ne eğitir ne ölçer.
+\end{enumerate}
+
+\section{Aday Veri Setleri}
+\label{sec:aday-veri-setleri}
+
+\begin{table}[H]
+  \centering
+  \caption{İncelenen veri setleri. \hava\ = havadan (UAV) çekim.
+    ``Yoğun maske'' = piksel düzeyinde semantik/örnek maskesi;
+    parantez içindeki aralık, videolarda hangi karelerin etiketlendiğini
+    gösterir. HF = Hugging Face. Satırlar öncelik sırasına göre
+    gruplanmıştır.}
+  \label{tab:veri-setleri}
+  \footnotesize
+  \setlength{\tabcolsep}{3pt}
+  \renewcommand{\arraystretch}{1.18}
+  \begin{tabular}{@{}
+      >{\raggedright\arraybackslash}p{21mm}
+      >{\raggedright\arraybackslash}p{15mm}
+      >{\raggedright\arraybackslash}p{14mm}
+      >{\raggedright\arraybackslash}p{18mm}
+      >{\raggedright\arraybackslash}p{10mm}
+      >{\raggedright\arraybackslash}p{24mm}
+      >{\raggedright\arraybackslash}p{25mm}
+      >{\raggedright\arraybackslash}p{14mm}@{}}
+    \toprule
+    \textbf{Veri seti} & \textbf{Yıl · Yayın} & \textbf{Modalite} &
+    \textbf{Çözünürlük} & \textbf{Tip} & \textbf{Yer doğrusu (GT)} &
+    \textbf{Hacim} & \textbf{Erişim} \\
+    \midrule
+    \multicolumn{8}{@{}l}{\textit{\color{grimetin} Mevcut referans --- bu projede zaten kullanılıyor}}\\
+    Anti-UAV410\hava & 2023 · TPAMI & TIR & 640×512 & Video &
+      Kutu + görünürlük bayrağı & 410 video, 438\,K kutu & Drive \\
+    \midrule
+    \multicolumn{8}{@{}l}{\textit{\color{yesilvurgu} Öncelikli --- yoğun maske GT'si var, indirmesi doğrulandı}}\\
+    Kust4K\hava & 2025 · Sci.\ Data & RGB+TIR (hizalı) & 640×512 &
+      Statik çift & Yoğun maske, 8 sınıf & 4\,024 hizalı çift & figshare \\
+    MVUAV\hava & 2024 · NeurIPS & RGB+TIR & 1920×1080 & Video &
+      Yoğun maske, 36 sınıf (25 karede bir) &
+      413 video / 53\,828 kare çifti; 2\,183 etiketli & proje sayfası \\
+    Caltech Aerial RGB-T\hava & 2024 · ECCV & RGB+TIR & 960×600 /
+      640×512 & Video & Yoğun maske, 10 sınıf &
+      37 çekim (18'i havadan), 4\,195 maske & Caltech arşivi \\
+    AeroVIS\hava & 2026 · arXiv & RGB & kaynak setlere göre değişken &
+      Video & \textbf{Örnek maskesi + kimlik izi}, 9 sınıf &
+      117 video / 49\,204 kare, 8\,279 iz & Drive (MIT) \\
+    SegFly\hava & 2026 · ECCV & RGB+TIR & 5472×3648 / 640×512 & Statik &
+      Yoğun maske, 15 sınıf & 20\,606 RGB + 15\,007 RGB-T çifti & HF \\
+    MVSeg & 2023 · CVPR & RGB+TIR & karışık, $\leq$1280×720 & Video &
+      Yoğun maske, 26 sınıf (15 karede bir) &
+      738 video, 3\,545 maske & proje sayfası \\
+    \midrule
+    \multicolumn{8}{@{}l}{\textit{\color{grimetin} İkincil --- GT ya kutu, ya sentetik, ya da hacim/çözünürlük yetersiz}}\\
+    VTUAV\hava & 2022 · CVPR & RGB+TIR & 1920×1080 & Video &
+      Kutu (500 dizi) + maske (100 video) &
+      500 dizi, $\sim$1,7\,M kare çifti & Drive / Baidu \\
+    VDD\hava & 2023 · arXiv & RGB & yüksek çöz. & Statik &
+      Yoğun maske, 7 sınıf & 400 görüntü & HF \\
+    FlyAwareV2\hava & 2026 · SPIC & RGB + derinlik & --- & Statik &
+      Yoğun maske + derinlik (sentetik + gerçek) &
+      100\,K+ örnek, $\sim$296\,GB & resmî site, \mbox{GPL-3.0} \\
+    Multi-View UAV\hava & 2025 · arXiv & RGB + derinlik & 400×300 &
+      Statik (uçuş sıralı) & Yoğun maske + derinlik (CARLA) &
+      357\,690 kare (5 kamera), 140\,GB & HF (MIT) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Veri Setleri Hakkında Notlar}
+\label{sec:veri-seti-notlari}
+
+\subsection*{Öncelikli}
+
+\paragraph{Kust4K~\cite{kust4k2025}.}
+Bu listedeki tek veri seti, projenin girdi formatıyla \emph{birebir}
+aynı: 640×512 termal, RGB'siyle piksel düzeyinde hizalanmış. Aynı
+çözünürlük, \texttt{crop512} modunun sıfır yeniden boyutlandırmayla
+çalıştığı çözünürlüktür (\cref{sec:onisleme-analizi}) --- yani ön-işleme
+maliyeti ölçümü bozmaz. 4\,024 çift, 8 sınıf (yol, bina, motosiklet,
+araba, kamyon, ağaç, insan, trafik ekipmanı), değişken aydınlatma.
+\textbf{Zayıf yanı:} bağımsız kareler, video değil; hafıza mekanizmasını
+ölçemez, ama tek kare maske kalitesi ve termal alan uyumu için en temiz
+kaynak.
+
+\paragraph{MVUAV~\cite{ji2024mvuav}.}
+Havadan, eğik kuşbakışı RGB-T \emph{video}: 413 video, 53\,828 kare
+çifti, bunların 2\,183'ü 36 sınıfta piksel düzeyinde etiketli (25
+karede bir anahtar kare). Gündüz/gece, alacakaranlık ve zifiri karanlık
+sahneler içerir --- yani \cref{sec:hafiza-toparlanma}'deki hafıza
+kirlenmesi senaryosunun (ani kontrast değişimi) doğal olarak bulunduğu
+bir set. \textbf{Zayıf yanı:} etiketler zamanda seyrek; J\&F yalnızca
+anahtar karelerde hesaplanabilir, ki bu zaten MVSS literatürünün
+standardıdır.
+
+\paragraph{Caltech Aerial RGB-T~\cite{lee2024caltechrgbt}.}
+Termal kamerası \textbf{FLIR ADK, 640×512, 60\,Hz} --- yine projenin
+native çözünürlüğü. 37 çekimin 18'i havadan (çoğunlukla 40\,m irtifa),
+toplam 4\,195 yoğun maske, 10 sınıf, doğal ortamlar (göl, nehir, kıyı,
+çöl, orman). GPS ve IMU da senkron kayıtlı. \textbf{Güçlü yanı:} donanım
+senkronize RGB-T çiftleri + gerçek uçuş hareketi; CC BY-SA lisansıyla
+doğrudan indirilebiliyor. \textbf{Zayıf yanı:} sınıflar doğa odaklı,
+drone/araç gibi küçük hedef yok.
+
+\paragraph{AeroVIS~\cite{aerovis2026}.}
+\textbf{Bu listede EdgeTAM'ın görevine en yakın veri seti.} Diğerleri
+semantik segmentasyon (piksel $\rightarrow$ sınıf); AeroVIS ise
+\emph{örnek} segmentasyonu \emph{artı kimlik takibi} (piksel
+$\rightarrow$ nesne, nesne video boyunca aynı kimlikle) --- yani tam
+olarak EdgeTAM'ın ürettiği çıktı tipi. 117 video, 49\,204 kare, 9 UAV
+nesne kategorisi, 8\,279 geçerli iz, YTVIS biçiminde. VisDrone, UAVDT ve
+SeaDronesSee'nin elle çizilmiş kutuları SAM3 ile maskeye çevrilip elden
+geçirilerek üretilmiş. \textbf{Zayıf yanı:} maskeler otomatik üretim
+kaynaklı (elle denetlenmiş ama elle çizilmemiş) ve RGB; termal yok.
+
+\paragraph{SegFly~\cite{segfly2026}.}
+Ölçek olarak listenin en büyüğü: 20\,606 RGB görüntü ve 15\,007 hizalı
+RGB-T çifti, 15 sınıf, 30/40/50\,m irtifa. Termal yine 640×512.
+Etiketlerin yalnızca \%2,84'ü elle çizilmiş; kalanı 2D--3D--2D geometrik
+yayılımla üretilmiş --- bu yüzden hacim büyük ama etiket gürültüsü
+sıfır değil. \textbf{Zayıf yanı:} bağımsız hava fotoğrafları (video
+değil) ve CC BY-NC-SA (ticari kullanım yok).
+
+\paragraph{MVSeg~\cite{ji2023mvseg}.}
+MVUAV'ın yer seviyesi kardeşi ve öncülü: 738 RGB-T video, 3\,545 maske,
+26 sınıf, 15 karede bir etiket. Havadan \emph{değil} --- tabloda yıldızsız
+olmasının nedeni bu. Buna rağmen listede kalmasının nedeni pratik: MVUAV
+ile aynı ekipten, aynı biçimde ve aynı değerlendirme koduyla geliyor, yani
+ikisi tek bir işle birlikte kullanılabilir. OSU, INO, KAIST ve RGBT234'ten
+derlendiği için çözünürlük karışıktır.
+
+\subsection*{İkincil}
+
+\paragraph{VTUAV~\cite{zhang2022vtuav}.}
+Hacim olarak listenin devi: 500 dizi, $\sim$1,7 milyon hizalı 1920×1080
+RGB-T kare çifti. Ama ana etiketi \textbf{kutu}dur; maske yalnızca 100
+videoluk bir alt küme için var. Yani doğruluk ölçümü için değil,
+\emph{hız ve dayanıklılık} ölçümü için değerli: uzun diziler,
+\cref{sec:hafiza-toparlanma}'deki hafıza kirlenmesinin uzun videoda
+birikip birikmediğini görmek için doğal bir test yatağı.
+
+\paragraph{VDD~\cite{cai2023vdd}.}
+Yoğun etiketli, temiz, açık --- ama 400 görüntü ve yalnızca RGB. Bu
+hacim bir fine-tune için az, bir benchmark için sınırda. UDD ve UAVid'in
+yeniden etiketlenmiş halleriyle birlikte geldiği için asıl değeri
+tek başına değil, o üçlüyü tek etiket standardında toplaması.
+
+\paragraph{FlyAwareV2~\cite{flyawarev2}.}
+100\,K'yı aşan örnek, dört hava koşulu (güneşli, yağmurlu, sisli, gece),
+üç irtifa (20/50/120\,m), RGB + derinlik + semantik. \textbf{Sorun:}
+büyük kısmı CARLA ile üretilmiş sentetik veri, gerçek kısmı ise UAVid ve
+VisDrone'un artırılmış hali; ayrıca tam sürüm $\sim$296\,GB. Termal yok.
+Alan uyumu (domain gap) açısından, projenin gerçek termal kayıtlarına
+sentetik RGB'den daha uzak bir veri kaynağı.
+
+\paragraph{Multi-View UAV~\cite{multiviewuav2025}.}
+357\,690 kare kulağa çok geliyor ama kareler 400×300 ve tamamı CARLA
+simülasyonundan; her ``kare'' beş kameralı bir kurulumun tek görüntüsü.
+Semantik maske ve derinlik hazır, lisans MIT, ama 400×300 EdgeTAM'ın
+512 girdi çözünürlüğünün altında --- yani her karede yukarı ölçeklemek
+gerekir, bu da ölçülen maske kalitesini veri setinin kendi
+çözünürlüğüyle sınırlar.
+
+\section{Elenen Bağlantılar}
+\label{sec:elenen-veri-setleri}
+
+Üç aday, yukarıdaki ölçütlerin ilk ikisinden geçemedi:
+
+\begin{itemize}
+  \item \textbf{UAV-VisLoc}~\cite{uavvisloc2024} --- 6\,742 havadan
+        görüntü, 11 uydu haritası, 16,4\,GB. Açık ve indirilebilir, ama
+        yer doğrusu \emph{GPS koordinatı}; maske ya da kutu yok. Görev
+        görsel konumlandırma, segmentasyon değil.
+  \item \textbf{CPD-UAV}~\cite{cpduav2026} --- 1\,061 yüksek çözünürlüklü
+        görüntü, ortamla görsel olarak kaynaşmış insanların tespiti.
+        Etiket yalnızca kutu, hacim küçük, video yok.
+  \item \textbf{Scilit kaydı} (\texttt{d95b5f3c\ldots}) --- sayfa
+        erişime kapalı (HTTP 403) ve kayıt başka bir yerde
+        eşleştirilemedi; hangi yayına işaret ettiği doğrulanamadığı için
+        listeden çıkarıldı.
+\end{itemize}
+
+Ayrıca \textbf{Kust4K'nın figshare bağlantısı ile Nature Scientific
+Data makalesi aynı veri setidir}; ham listede iki ayrı satır olarak
+görünüyorlardı, tabloda tek satıra indirildi.
+
+\section{J\&F: Video Nesne Segmentasyonunun Standart Metriği}
+\label{sec:jf-metrigi}
+
+Yukarıdaki elemenin tamamı tek bir metriğin gereksinimlerinden çıkıyor,
+o yüzden metriğin kendisi burada tanımlanıyor. J\&F, DAVIS
+benchmark'ıyla~\cite{perazzi2016davis,ponttuset2017davis} birlikte
+gelmiş ve video nesne segmentasyonunun fiilî standardı olmuştur.
+Bu ailenin tamamı --- SAM~2, EdgeTAM, SAMURAI, SAM2Long ---
+doğruluğunu bu sayıyla raporlar; yani bu projenin sonuçlarını
+literatürle karşılaştırılabilir kılacak sayı da budur.
+
+İki yarımın ortalamasıdır. $M$ tahmin edilen maske, $G$ yer doğrusu
+maskesi olmak üzere:
+
+\paragraph{$\mathcal{J}$ --- bölge benzerliği (region similarity).}
+Maskelerin Jaccard indeksi, yani maske IoU'su:
+\begin{equation}
+  \mathcal{J} = \frac{|M \cap G|}{|M \cup G|}
+  \label{eq:jaccard}
+\end{equation}
+``Doğru pikselleri buldun mu?'' sorusunu ölçer.
+
+\paragraph{$\mathcal{F}$ --- kontur doğruluğu (contour accuracy).}
+Yalnızca maskelerin \emph{sınır} piksellerine bakar. Tahminin sınır
+noktaları, yer doğrusunun sınır noktalarıyla bir $\tau$ toleransı
+içinde eşleştirilir; eşleşenlerin oranı kesinliği $P_c$ ve
+duyarlılığı $R_c$ verir:
+\begin{equation}
+  \mathcal{F} = \frac{2\,P_c\,R_c}{P_c + R_c}
+  \label{eq:fmeasure}
+\end{equation}
+``Nesnenin kenarını doğru yerde çizdin mi?'' sorusunu ölçer. DAVIS'te
+tolerans görüntü köşegeninin \%0,8'idir (1920×1080 için
+$\approx$18~piksel).
+
+\paragraph{Birleşim.}
+\begin{equation}
+  \mathcal{J\&F} = \frac{\mathcal{J} + \mathcal{F}}{2}
+  \label{eq:jf}
+\end{equation}
+Kare başına hesaplanır ve klip boyunca ortalanır; komutun verildiği ilk
+kare hesaba katılmaz, çünkü orada maske zaten kullanıcıdan gelmiştir.
+
+\subsection*{Neden İki Yarım? Kısa Bir Örnek}
+
+$\mathcal{J}$ bir \emph{alan} ölçüsüdür ve nesne büyüklüğüne karşı
+tarafsız değildir. Aynı mutlak hata, nesne küçüldükçe çok daha ağır
+cezalandırılır. Tahminin yer doğrusuyla aynı şekilde ama 5~piksel kaymış
+olduğu iki durum:
+
+\begin{table}[H]
+  \centering
+  \caption{Aynı 5 piksellik kayma, iki farklı nesne boyutunda.}
+  \label{tab:jf-ornek}
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Nesne & Alan (px) & Kesişim & Birleşim & $\mathcal{J}$ \\
+    \midrule
+    Büyük kare, 100×100 & 10\,000 & 9\,500 & 10\,500 & \textbf{0,905} \\
+    Küçük kare, 20×20   &    400  &   300  &    500  & \textbf{0,600} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Hata birebir aynıdır; $\mathcal{J}$ 0,905'ten 0,600'e düşer. Bu,
+proje için teorik bir ayrıntı değil: uzaktaki bir drone karede birkaç
+yüz piksellik bir hedeftir, yani $\mathcal{J}$'nin acımasız olduğu
+rejimin tam içindedir.
+
+$\mathcal{F}$ ise ters yönde bir körlüğü kapatır. Tahminin, yer
+doğrusunun 5~piksel \emph{şişmiş} hali olduğunu düşünelim: nesne doğru
+yerde, doğru şekilde, sadece kenarları taşmış. $\mathcal{J}$ hâlâ
+yüksek çıkar (50~piksel yarıçaplı bir daire için $\approx$0,83), ama her
+sınır noktası olması gerektiği yerden tam 5~piksel uzaktadır ---
+tolerans 5'in altındaysa $\mathcal{F}=0$, üstündeyse $\mathcal{F}=1$.
+Yani $\mathcal{F}$, ``maskeyi kabaca doğru yere koydum ama kenarı
+dağınık'' hatasını yakalar; $\mathcal{J}$ bunu neredeyse hiç görmez.
+Bu hata, düşük çözünürlüklü maske logitlerinin kaynak çözünürlüğe geri
+ölçeklenmesinden (\texttt{post} aşaması,
+\cref{tab:kare-bilesenleri}) doğan tipik hatadır.
+
+\subsection*{Bu Projede Ne Anlama Geliyor}
+
+\begin{itemize}
+  \item Raporda geçen \textbf{0,9993 ortalama maske IoU} tam olarak
+        \cref{eq:jaccard}'teki $\mathcal{J}$'dir --- ama iki
+        \emph{kendi} çıktımız (fp16 ve fp32) arasında. Bir parite
+        ölçümüdür; J\&F değildir ve bir doğruluk sayısı olarak
+        okunmamalıdır.
+  \item Gerçek bir J\&F için dış bir yoğun maske GT'si şarttır.
+        Anti-UAV410'un kutu etiketleri bunu veremez;
+        \cref{tab:veri-setleri}'nin ``öncelikli'' bloğu tam da bu
+        eksiği kapatmak için seçilmiştir.
+  \item Küçük hedeflerde $\mathcal{J}$ ile $\mathcal{F}$ ters yönlere
+        gider: nesne küçüldükçe $\mathcal{J}$ sertleşir, sabit
+        toleranslı $\mathcal{F}$ ise görece cömertleşir. Bu yüzden
+        drone takibinde ortalamayı tek başına raporlamak yanıltıcıdır;
+        \textbf{iki yarımın ayrı ayrı verilmesi} daha bilgilendiricidir.
+\end{itemize}
