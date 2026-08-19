@@ -28,6 +28,12 @@
 \setsansfont{TeX Gyre Heros}                        % başlıklar (Helvetica benzeri)
 \setmonofont{TeX Gyre Cursor}[Scale=0.92]           % kod/komut satırları (Courier benzeri)
 
+% Uzun \texttt{} tanımlayıcıları (dosya yolları, fonksiyon adları) satır
+% sonunda bölünemez ve satırı marja taşırırdı. \emergencystretch, TeX'e
+% yalnızca taşacak olan paragraflarda kelime arasını biraz esnetme izni
+% verir; normal paragraflar etkilenmez.
+\setlength{\emergencystretch}{3em}
+
 % ---- Renkler ----------------------------------------------------------------
 % Deneyler.tex ve EXPERIMENT_LOG.md'deki grafiklerle aynı paletten:
 % koyu lacivert ana renk, mercan ikincil vurgu, nötr griler.

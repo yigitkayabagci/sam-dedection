@@ -10,7 +10,7 @@ düzeyinde) maske GT'si var mı, (3) havadan mı, (4) video mu. Gerekçe:
 J&F metriği yoğun maske GT'si ister; Anti-UAV410'un kutu etiketleri onu
 veremez.
 
-## Öncelikli — yoğun maske GT'si var, indirmesi doğrulandı
+## Öncelikli
 
 | Veri seti | Yıl · Yayın | Neden |
 |---|---|---|
@@ -20,12 +20,12 @@ veremez.
 | [AeroVIS / AeroTrack](https://github.com/Dmygithub/AeroTrack) | 2026 · arXiv | 117 video / 49 204 kare, **örnek maskesi + kimlik izi** (8 279 iz) — EdgeTAM'ın çıktı tipine en yakın set |
 | [SegFly](https://github.com/markus-42/SegFly) ([HF](https://huggingface.co/datasets/markus-42/SegFly)) | 2026 · ECCV | 20 606 RGB + 15 007 RGB-T çifti, 15 sınıf, termal 640×512 |
 | [MVSeg](https://jiwei0921.github.io/Multispectral-Video-Semantic-Segmentation/) | 2023 · CVPR | 738 RGB-T video, 3 545 maske, 26 sınıf — MVUAV'ın yer seviyesi kardeşi, aynı biçim |
+| [VTUAV (DUT-VTUAV)](https://zhang-pengyu.github.io/DUT-VTUAV/) | 2022 · CVPR | 500 dizi / ~1,7 M hizalı 1920×1080 RGB-T kare; **100 videoluk maske bölümü** ayrı indirilebilir, J&F için yeterli |
 
-## İkincil — GT ya kutu, ya sentetik, ya hacim/çözünürlük yetersiz
+## İkincil
 
 | Veri seti | Yıl · Yayın | Kısıt |
 |---|---|---|
-| [VTUAV (DUT-VTUAV)](https://zhang-pengyu.github.io/DUT-VTUAV/) | 2022 · CVPR | ~1,7 M RGB-T kare çifti ama ana etiket kutu; maske yalnızca 100 videoda |
 | [VDD](https://github.com/RussRobin/VDD) | 2023 · arXiv | Yoğun maske ama 400 görüntü, yalnızca RGB |
 | [FlyAwareV2](https://github.com/LTTM/FlyAwareV2) | 2026 · SPIC | Büyük kısmı CARLA sentetiği, termal yok, tam sürüm ~296 GB |
 | [Multi-View UAV](https://huggingface.co/datasets/Peter341/Multi-View-UAV-Dataset) | 2025 · arXiv | 357 690 kare ama 400×300 (EdgeTAM'ın 512 girdisinin altında) ve tamamı CARLA |
@@ -57,7 +57,7 @@ Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, SegFly, VTUAV
   ölçülürse örtüşür.
 
 **Sonuç:** öncelikli bloktaki tek türetilmiş set AeroVIS ve kaynakları
-diğer beşine değmiyor → **öncelikli altısı birlikte kullanılabilir.**
+diğer altısına değmiyor → **öncelikli yedisi birlikte kullanılabilir.**
 Güvenli kurulum: Kust4K + MVUAV'da eğitip J&F'i AeroVIS'te ölçmek.
 
 ## Elenenler
@@ -77,4 +77,6 @@ makalesi **aynı veri setidir** (Kust4K); tek satıra indirildi.
 
 [Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) (2023 · TPAMI) —
 410 termal video, 438 K kutu, 640×512. Projede zaten kullanılıyor;
-kutu etiketli olduğu için J&F üretemez (bkz. `docs/new_report.md`).
+kutu etiketli olduğu için J&F üretemez, bu yüzden raporun veri seti
+bölümünde yer almıyor (kod tarafındaki kullanımı için bkz.
+`docs/new_report.md`).

@@ -1,37 +1,20 @@
 \chapter{Veri Setleri ve Değerlendirme}
 \label{ch:veri-setleri}
 
-\section{Neden Bu Bölüm Var}
-\label{sec:neden-veri-seti}
+Raporun buraya kadarki doğruluk sayıları bir \emph{parite} ölçümüdür:
+fp16 motorlarının çıktısı fp32 çıktısına ne kadar yakın kaldı
+(\cref{sec:olcum-yontemi}). Bu, motorun doğru derlendiğini kanıtlar;
+modelin \emph{ne kadar iyi takip ettiğini} kanıtlamaz, çünkü
+karşılaştırılan referans modelin kendi çıktısıdır. Dışarıdan bir
+doğruluk sayısı için dış bir veri seti ve kare başına bir \textbf{yer
+doğrusu} (ground truth, GT) gerekir. Maske kalitesini ölçen standart
+metrik J\&F ise (\cref{sec:jf-metrigi}) yoğun, yani piksel düzeyinde
+maske GT'si ister.
 
-Raporun buraya kadarki doğruluk sayılarının tamamı bir \emph{parite}
-ölçümüdür: fp16 motorlarının çıktısı, aynı modelin fp32 çıktısına ne
-kadar yakın kaldı (\cref{sec:olcum-yontemi}). Bu, motorun doğru
-derlendiğini kanıtlar; modelin \emph{ne kadar iyi takip ettiğini}
-kanıtlamaz, çünkü karşılaştırılan referans modelin kendi çıktısıdır.
-Dışarıdan bir doğruluk sayısı için iki şey gerekir: bir veri seti ve o
-veri setinde kare başına bir \textbf{yer doğrusu} (ground truth, GT).
-
-Projede kullanılan Anti-UAV410~\cite{huang2023antiuav410} bu boşluğu
-yalnızca yarısına kadar doldurur: etiketleri \emph{kutu}dur. Kutu, IoU
-ve başarı eğrisi verir (\texttt{src/accuracy.py}), ama EdgeTAM'ın
-ürettiği şey bir \emph{maske}dir ve maskenin kalitesi kutuyla
-ölçülemez. Maske kalitesini ölçen standart metrik J\&F'tir
-(\cref{sec:jf-metrigi}) ve J\&F, kare başına \textbf{yoğun (piksel
-düzeyinde) maske GT'si} ister.
-
-Bu bölüm, aday veri setlerini tam olarak bu ölçütle eler:
-
-\begin{enumerate}
-  \item \textbf{Gerçekten indirilebilir mi?} Yayınlanmış bir bağlantı
-        değil, çalışan bir dağıtım (figshare / Hugging Face / Drive /
-        kurum arşivi) ve açık bir lisans.
-  \item \textbf{Yoğun maske GT'si var mı?} Kutu, GPS ya da sınıf
-        etiketi J\&F üretmez.
-  \item \textbf{Havadan mı?} Tabloda \hava\ ile işaretli.
-  \item \textbf{Video mu?} EdgeTAM'ın ölçtüğü şey hafıza mekanizmasıdır;
-        tek karelik bir set onu ne eğitir ne ölçer.
-\end{enumerate}
+Aday veri setleri dört ölçütle elenmiştir: (1) gerçekten indirilebilir
+ve açık mı, (2) yoğun maske GT'si var mı, (3) havadan mı
+(tabloda \hava), (4) video mu --- EdgeTAM'ın ölçtüğü şey hafıza
+mekanizmasıdır, tek karelik bir set onu ne eğitir ne ölçer.
 
 \section{Aday Veri Setleri}
 \label{sec:aday-veri-setleri}
@@ -41,64 +24,66 @@ Bu bölüm, aday veri setlerini tam olarak bu ölçütle eler:
   \caption{İncelenen veri setleri. \hava\ = havadan (UAV) çekim.
     ``Yoğun maske'' = piksel düzeyinde semantik/örnek maskesi;
     parantez içindeki aralık, videolarda hangi karelerin etiketlendiğini
-    gösterir. HF = Hugging Face. $\dagger$ = kendi çekimi değil, başka
-    veri setlerinden türetilmiş (\cref{sec:ortak-kaynaklar}).
-    Satırlar öncelik sırasına göre gruplanmıştır.}
+    gösterir. $\dagger$ = kendi çekimi değil, başka veri setlerinden
+    türetilmiş (\cref{sec:ortak-kaynaklar}). Hepsi açık ve
+    indirilebilir; bağlantılar kaynakçadadır.}
   \label{tab:veri-setleri}
   \footnotesize
-  \setlength{\tabcolsep}{3pt}
-  \renewcommand{\arraystretch}{1.18}
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.2}
   \begin{tabular}{@{}
-      >{\raggedright\arraybackslash}p{21mm}
+      >{\raggedright\arraybackslash}p{23mm}
+      >{\raggedright\arraybackslash}p{16mm}
       >{\raggedright\arraybackslash}p{15mm}
-      >{\raggedright\arraybackslash}p{14mm}
-      >{\raggedright\arraybackslash}p{18mm}
-      >{\raggedright\arraybackslash}p{10mm}
-      >{\raggedright\arraybackslash}p{24mm}
-      >{\raggedright\arraybackslash}p{25mm}
-      >{\raggedright\arraybackslash}p{14mm}@{}}
+      >{\raggedright\arraybackslash}p{21mm}
+      >{\raggedright\arraybackslash}p{12mm}
+      >{\raggedright\arraybackslash}p{26mm}
+      >{\raggedright\arraybackslash}p{27mm}@{}}
     \toprule
     \textbf{Veri seti} & \textbf{Yıl · Yayın} & \textbf{Modalite} &
     \textbf{Çözünürlük} & \textbf{Tip} & \textbf{Yer doğrusu (GT)} &
-    \textbf{Hacim} & \textbf{Erişim} \\
+    \textbf{Hacim} \\
     \midrule
-    \multicolumn{8}{@{}l}{\textit{\color{grimetin} Mevcut referans --- bu projede zaten kullanılıyor}}\\
-    Anti-UAV410\hava & 2023 · TPAMI & TIR & 640×512 & Video &
-      Kutu + görünürlük bayrağı & 410 video, 438\,K kutu & Drive \\
-    \midrule
-    \multicolumn{8}{@{}l}{\textit{\color{yesilvurgu} Öncelikli --- yoğun maske GT'si var, indirmesi doğrulandı}}\\
+    \multicolumn{7}{@{}l}{\textit{\color{yesilvurgu} Öncelikli}}\\
     Kust4K\hava & 2025 · Sci.\ Data & RGB+TIR (hizalı) & 640×512 &
-      Statik çift & Yoğun maske, 8 sınıf & 4\,024 hizalı çift & figshare \\
+      Statik çift & Yoğun maske, 8 sınıf & 4\,024 hizalı çift \\
     MVUAV\hava & 2024 · NeurIPS & RGB+TIR & 1920×1080 & Video &
       Yoğun maske, 36 sınıf (25 karede bir) &
-      413 video / 53\,828 kare çifti; 2\,183 etiketli & proje sayfası \\
+      413 video / 53\,828 kare çifti; 2\,183 etiketli \\
     Caltech Aerial RGB-T\hava & 2024 · ECCV & RGB+TIR & 960×600 /
       640×512 & Video & Yoğun maske, 10 sınıf &
-      37 çekim (18'i havadan), 4\,195 maske & Caltech arşivi \\
+      37 çekim (18'i havadan), 4\,195 maske \\
     AeroVIS\hava\turetilmis & 2026 · arXiv & RGB & kaynak setlere göre değişken &
       Video & \textbf{Örnek maskesi + kimlik izi}, 9 sınıf &
-      117 video / 49\,204 kare, 8\,279 iz & Drive (MIT) \\
+      117 video / 49\,204 kare, 8\,279 iz \\
     SegFly\hava & 2026 · ECCV & RGB+TIR & 5472×3648 / 640×512 & Statik &
-      Yoğun maske, 15 sınıf & 20\,606 RGB + 15\,007 RGB-T çifti & HF \\
+      Yoğun maske, 15 sınıf & 20\,606 RGB + 15\,007 RGB-T çifti \\
     MVSeg\turetilmis & 2023 · CVPR & RGB+TIR & karışık, $\leq$1280×720 & Video &
       Yoğun maske, 26 sınıf (15 karede bir) &
-      738 video, 3\,545 maske & proje sayfası \\
-    \midrule
-    \multicolumn{8}{@{}l}{\textit{\color{grimetin} İkincil --- GT ya kutu, ya sentetik, ya da hacim/çözünürlük yetersiz}}\\
+      738 video, 3\,545 maske \\
     VTUAV\hava & 2022 · CVPR & RGB+TIR & 1920×1080 & Video &
       Kutu (500 dizi) + maske (100 video) &
-      500 dizi, $\sim$1,7\,M kare çifti & Drive / Baidu \\
+      500 dizi, $\sim$1,7\,M kare çifti \\
+    \midrule
+    \multicolumn{7}{@{}l}{\textit{\color{grimetin} İkincil}}\\
     VDD\hava\turetilmis & 2023 · arXiv & RGB & yüksek çöz. & Statik &
-      Yoğun maske, 7 sınıf & 400 görüntü & HF \\
+      Yoğun maske, 7 sınıf & 400 görüntü \\
     FlyAwareV2\hava\turetilmis & 2026 · SPIC & RGB + derinlik & --- & Statik &
       Yoğun maske + derinlik (sentetik + gerçek) &
-      100\,K+ örnek, $\sim$296\,GB & resmî site, \mbox{GPL-3.0} \\
+      100\,K+ örnek, $\sim$296\,GB \\
     Multi-View UAV\hava & 2025 · arXiv & RGB + derinlik & 400×300 &
       Statik (uçuş sıralı) & Yoğun maske + derinlik (CARLA) &
-      357\,690 kare (5 kamera), 140\,GB & HF (MIT) \\
+      357\,690 kare (5 kamera), 140\,GB \\
     \bottomrule
   \end{tabular}
 \end{table}
+
+Her iki bloktaki setler de ilk iki ölçütü geçer: hepsi açık, hepsi
+indirilebilir, hepsinde yoğun maske GT'si vardır. Blokları ayıran şey
+üçüncü ve dördüncü ölçüttür, yani bu projenin görevine uygunluk:
+EdgeTAM'ın ölçtüğü şey video üzerindeki hafıza mekanizmasıdır ve
+projenin girdisi termaldir. İkincil bloktaki üç setin her birinde
+bunlardan biri eksiktir; eksiğin ne olduğu aşağıda tek tek yazılıdır.
 
 \section{Veri Setleri Hakkında Notlar}
 \label{sec:veri-seti-notlari}
@@ -166,27 +151,36 @@ ikisi tek bir işle birlikte kullanılabilir. OSU, INO, KAIST ve RGBT234'ten
 derlendiği için çözünürlük karışıktır ve setin tamamı
 türetilmedir (\cref{sec:ortak-kaynaklar}).
 
-\subsection*{İkincil}
-
 \paragraph{VTUAV~\cite{zhang2022vtuav}.}
 Hacim olarak listenin devi: 500 dizi, $\sim$1,7 milyon hizalı 1920×1080
-RGB-T kare çifti. Ama ana etiketi \textbf{kutu}dur; maske yalnızca 100
-videoluk bir alt küme için var. Yani doğruluk ölçümü için değil,
-\emph{hız ve dayanıklılık} ölçümü için değerli: uzun diziler,
+RGB-T kare çifti, hepsi kendi çekimi. Ana etiket kutudur, ama
+\textbf{100 videoluk maske bölümü} ayrı indirilebilir ve J\&F için
+yeterlidir --- havadan, termal, video ve yoğun maske dördünü birden
+sağlayan az sayıdaki kaynaktan biri. Kalan 400 dizi ise kutu etiketiyle
+başka bir işe yarar: uzun diziler,
 \cref{sec:hafiza-toparlanma}'deki hafıza kirlenmesinin uzun videoda
-birikip birikmediğini görmek için doğal bir test yatağı.
+birikip birikmediğini görmek için doğal bir test yatağıdır.
+\textbf{Dikkat:} maske bölümü 100 video, tam set değil; J\&F o alt
+kümede ölçülür.
+
+\subsection*{İkincil}
+
+Aşağıdaki üçü \textbf{elenmiş değildir}; indirmeleri ve etiketleri
+sorunsuzdur. Yalnızca bu projenin görevine daha uzak durdukları için
+ikinci sıradadırlar; her birinde eksik olan şey kalın yazılmıştır.
 
 \paragraph{VDD~\cite{cai2023vdd}.}
-Yoğun etiketli, temiz, açık --- ama 400 görüntü ve yalnızca RGB. Bu
-hacim bir fine-tune için az, bir benchmark için sınırda. UDD ve UAVid'in
+\textbf{Eksik: video ve termal.} Yoğun etiketli, temiz, açık --- ama
+400 statik RGB görüntü. Bu hacim bir fine-tune için az, bir benchmark
+için sınırda ve hafıza mekanizmasını hiç ölçmez. UDD ve UAVid'in
 yeniden etiketlenmiş halleriyle (IDD paketi) birlikte geldiği için asıl
 değeri tek başına değil, o üçlüyü tek etiket standardında toplaması ---
 ki bu aynı zamanda çakışma kaynağıdır (\cref{sec:ortak-kaynaklar}).
 
 \paragraph{FlyAwareV2~\cite{flyawarev2}.}
 100\,K'yı aşan örnek, dört hava koşulu (güneşli, yağmurlu, sisli, gece),
-üç irtifa (20/50/120\,m), RGB + derinlik + semantik. \textbf{Sorun:}
-büyük kısmı CARLA ile üretilmiş sentetik veri, gerçek kısmı ise yalnızca
+üç irtifa (20/50/120\,m), RGB + derinlik + semantik. \textbf{Eksik: gerçek veri ve termal.}
+Büyük kısmı CARLA ile üretilmiş sentetik, gerçek kısmı ise yalnızca
 $\sim$2\,K kare: VisDrone (eğitim) ve UAVid (test), hava koşulu
 artırımıyla çoğaltılmış. Tam sürüm $\sim$296\,GB, termal yok. Bu iki
 kaynak da başka setlerde geçiyor (\cref{sec:ortak-kaynaklar}).
@@ -194,8 +188,8 @@ Alan uyumu (domain gap) açısından, projenin gerçek termal kayıtlarına
 sentetik RGB'den daha uzak bir veri kaynağı.
 
 \paragraph{Multi-View UAV~\cite{multiviewuav2025}.}
-357\,690 kare kulağa çok geliyor ama kareler 400×300 ve tamamı CARLA
-simülasyonundan; her ``kare'' beş kameralı bir kurulumun tek görüntüsü.
+\textbf{Eksik: gerçek veri ve çözünürlük.} 357\,690 kare kulağa çok
+geliyor ama kareler 400×300 ve tamamı CARLA simülasyonundan; her ``kare'' beş kameralı bir kurulumun tek görüntüsü.
 Semantik maske ve derinlik hazır, lisans MIT, ama 400×300 EdgeTAM'ın
 512 girdi çözünürlüğünün altında --- yani her karede yukarı ölçeklemek
 gerekir, bu da ölçülen maske kalitesini veri setinin kendi
@@ -271,10 +265,10 @@ kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
 
 Kritik nokta şudur: öncelikli bloktaki tek türetilmiş set
 \textbf{AeroVIS}'tir ve onun kaynakları (VisDrone, UAVDT, SeaDronesSee)
-bloktaki diğer beş setin --- Kust4K, MVUAV, Caltech Aerial RGB-T,
-SegFly, MVSeg --- hiçbirine değmez. Yani
-\cref{tab:veri-setleri}'nin öncelikli altısı \textbf{birlikte
-kullanılabilir}; aralarında paylaşılan tek bir kare yoktur.
+bloktaki diğer altı setin (Kust4K, MVUAV, Caltech Aerial RGB-T, SegFly,
+MVSeg, VTUAV) hiçbirine değmez. Yani \cref{tab:veri-setleri}'nin
+öncelikli yedisi \textbf{birlikte kullanılabilir}; aralarında paylaşılan
+tek bir kare yoktur.
 
 Çakışma, ikincil bloğa geçildiğinde başlar. Pratik kural: FlyAwareV2 ve
 VDD/IDD ile eğitim yapılacaksa, AeroVIS artık tarafsız bir
@@ -396,8 +390,8 @@ Bu hata, düşük çözünürlüklü maske logitlerinin kaynak çözünürlüğe
         \emph{kendi} çıktımız (fp16 ve fp32) arasında. Bir parite
         ölçümüdür; J\&F değildir ve bir doğruluk sayısı olarak
         okunmamalıdır.
-  \item Gerçek bir J\&F için dış bir yoğun maske GT'si şarttır.
-        Anti-UAV410'un kutu etiketleri bunu veremez;
+  \item Gerçek bir J\&F için dış bir yoğun maske GT'si şarttır; kutu
+        etiketli hiçbir veri seti bunu veremez.
         \cref{tab:veri-setleri}'nin ``öncelikli'' bloğu tam da bu
         eksiği kapatmak için seçilmiştir.
   \item Küçük hedeflerde $\mathcal{J}$ ile $\mathcal{F}$ ters yönlere

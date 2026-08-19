@@ -3,24 +3,59 @@
 `docs/EXPERIMENT_LOG.md` ve `docs/tensorrt_fp16.md`'ye dayanan, Türkçe,
 LaTeX kaynaklı bir rapor. Tamamen yerelde (internet gerekmeden) derlenir.
 
-## Kurulum
+## Kurulum (minimal)
 
 XeLaTeX + KOMA-Script + polyglossia (Türkçe) + biblatex/biber + TeX Gyre
-fontları gerekir. Bunların hepsi standart bir TeX Live kurulumunda vardır.
+fontları gerekir. Aşağıdaki liste, bu raporun derlenirken gerçekten
+açtığı dosyalardan (`main.fls`) çıkarılmış ve paketler tek tek
+kaldırılıp yeniden derlenerek doğrulanmıştır. **Diskte toplam ~560 MB.**
+`texlive-full` (~5 GB) gerekmez.
 
 **Ubuntu / Debian:**
 ```bash
-sudo apt-get install texlive-xetex texlive-latex-extra texlive-fonts-extra \
-    texlive-fonts-recommended texlive-lang-european texlive-bibtex-extra \
-    biber latexmk fonts-texgyre
+sudo apt-get install --no-install-recommends \
+    texlive-xetex texlive-latex-recommended texlive-latex-extra \
+    texlive-bibtex-extra texlive-pictures texlive-plain-generic \
+    texlive-fonts-recommended texlive-lang-european \
+    fonts-texgyre biber latexmk
 ```
 
-**macOS (MacTeX):** [tug.org/mactex](https://tug.org/mactex/) tam kurulumu
-yeterlidir, hepsini içerir.
+`--no-install-recommends` önemli: onsuz `texlive-latex-extra` bir JRE,
+`texlive-pictures` ise ruby ve tk çeker; hiçbiri bu rapor için gerekli
+değildir (kaldırılıp derleme tekrar denenerek doğrulandı).
 
-**Windows (MiKTeX):** MiKTeX kurulduktan sonra eksik paketleri ilk
-derlemede otomatik indirir (`Settings → Install packages on the fly`
-açık olmalı); `biber`'i ayrıca MiKTeX Console'dan kurun.
+| paket | ne için | boyut |
+|---|---|---|
+| `texlive-xetex` | `xelatex`, fontspec | 15 MB |
+| `texlive-latex-recommended` | KOMA-Script, polyglossia, booktabs, listings, subcaption | 25 MB |
+| `texlive-latex-extra` | tcolorbox, cleveref, titling | 80 MB |
+| `texlive-bibtex-extra` | biblatex | 150 MB |
+| `texlive-pictures` | TikZ/PGF (Model Optimizer şeması) | 79 MB |
+| `texlive-lang-european` | Türkçe tireleme | 25 MB |
+| `texlive-plain-generic` + `texlive-fonts-recommended` | tek tek dosyalar, yukarıdakilerin ihtiyacı | 82 MB |
+| `fonts-texgyre` | Pagella / Heros / Cursor OTF | 13 MB |
+| `biber`, `latexmk` | kaynakça, derleme sürücüsü | 1 MB |
+
+(Üstüne `texlive-base` + `texlive-binaries` + `texlive-latex-base`
+bağımlılık olarak gelir, ~86 MB.)
+
+> **Yer sıkıntısı varsa dikkat edilecek tek paket `texlive-fonts-extra`:**
+> tek başına **1,7 GB** ve bu rapor ondan hiçbir dosya kullanmıyor.
+> Listeye yazmayın; hiçbir paket onu bağımlılık olarak da çekmiyor.
+
+**macOS:** tam MacTeX yerine **BasicTeX** (~100 MB) + eksikleri
+`tlmgr`'la kurmak yeterlidir:
+```bash
+brew install --cask basictex
+sudo tlmgr update --self
+sudo tlmgr install koma-script polyglossia fontspec booktabs caption \
+    subcaption tcolorbox cleveref biblatex biber pgf listings titling \
+    enumitem environ trimspaces etoolbox float latexmk tex-gyre
+```
+
+**Windows (MiKTeX):** kurulduktan sonra eksik paketleri ilk derlemede
+otomatik indirir (`Settings → Install packages on the fly` açık olmalı);
+`biber`'i ayrıca MiKTeX Console'dan kurun.
 
 ## Derleme
 

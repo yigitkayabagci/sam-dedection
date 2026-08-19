@@ -257,17 +257,21 @@ yönlü bir sıralama yoktur. Bu, modelin hedefi sabit bir girdiye
 Sentetik klip bunun çalışacağı gerçek veri değildir; gerçek
 kayıtlarda her girdi konfigürasyonunun neye mal olduğu, neyi kaybettiği
 \texttt{tools/run\_records.py} ile ölçülmüştür: \texttt{frames/}
-altındaki her klasör dört şekilde izlenir:
+altındaki her klasör, motoru derlenmiş her modda bir kez izlenir:
 
 \begin{table}[H]
   \centering
-  \caption{Dört girdi konfigürasyonu.}
+  \caption{Altı girdi konfigürasyonu. Aşağıdaki ölçümler 1024 ve 512
+    motorlarıyla alınmıştır; 768 motorları henüz derlenmemiştir
+    (\cref{sec:cozunurluk}).}
   \begin{tabular}{lll}
     \toprule
     Mod & Model & Girdi \\
     \midrule
     \texttt{full1024} & 1024² & tam kare, ölçeklenmiş \\
     \texttt{crop1024} & 1024² & ortalanmış 1024×1024 pencere \\
+    \texttt{full768} & 768² & tam kare, ölçeklenmiş \\
+    \texttt{crop768} & 768² & ortalanmış 768×768 pencere \\
     \texttt{full512} & 512² & tam kare, ölçeklenmiş \\
     \texttt{crop512} & 512² & ortalanmış 512×512 pencere \\
     \bottomrule
