@@ -496,8 +496,18 @@ def _report_timing(
         print(f"[pipeline] frame skip {cfg.frame_stride}: {stats['frames']} inferences "
               f"carry {covered} source frames "
               f"({stats['avg_fps_post_warmup'] * cfg.frame_stride:.1f} source FPS)")
-        if meta is not None and meta.fps > 0:
-            budget = 1000.0 * cfg.frame_stride / meta.fps
+
+    # Whether the run met its deadline, stated for every run and not only for a
+    # skipped one: an average hides the frame that missed, and a skipped run
+    # cannot be compared against a baseline that never said what its own worst
+    # frame cost. `frame_stride` frame periods is what one inference is allowed
+    # -- at stride 1 that is simply the frame period.
+    if meta is not None and meta.fps > 0 and per_frame_dt:
+        budget = 1000.0 * cfg.frame_stride / meta.fps
+        w = min(cfg.fps_warmup, max(len(per_frame_dt) - 1, 0))
+        worst = max(per_frame_dt[w:] or per_frame_dt) * 1000.0
+        verdict = "within" if worst <= budget else "OVER"
+        if cfg.frame_stride > 1:
             print(f"[pipeline]   a {meta.fps:.1f} fps source gives each inference "
                   f"{budget:.1f} ms (was {budget / cfg.frame_stride:.1f} ms) -- "
                   "a frame does not get cheaper, its deadline moves")
@@ -505,12 +515,12 @@ def _report_timing(
             # the frames it carries. That is the right view of "is it keeping
             # up" and the wrong one for "did any single frame miss", so the
             # worst inference is stated raw, against the deadline it had.
-            w = min(cfg.fps_warmup, max(len(per_frame_dt) - 1, 0))
-            worst = max(per_frame_dt[w:] or per_frame_dt) * 1000.0
-            verdict = "within" if worst <= budget else "OVER"
             print(f"[pipeline]   slowest inference {worst:.1f} ms -- {verdict} its "
                   f"{budget:.1f} ms; per source frame that is "
                   f"{worst / cfg.frame_stride:.1f} of {1000.0 / meta.fps:.1f} ms")
+        else:
+            print(f"[pipeline] slowest frame {worst:.1f} ms -- {verdict} the "
+                  f"{budget:.1f} ms a {meta.fps:.1f} fps source allows")
 
     # Otherwise these three only exist in the stage chart's title, which makes
     # the split unreadable without opening a PNG and unparseable by a caller.
