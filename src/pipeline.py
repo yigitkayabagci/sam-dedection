@@ -489,8 +489,12 @@ def _report_timing(
     # too, and state the deadline explicitly: that is the only thing skipping
     # actually changes.
     if cfg.frame_stride > 1:
+        # The last inference carries a full group only when the clip divides
+        # evenly, so count the frames rather than multiplying by the stride --
+        # 42 inferences over an 83-frame clip cover 83, not 84.
+        covered = _source_frame_count(per_frame_dt, cfg.frame_stride, meta)
         print(f"[pipeline] frame skip {cfg.frame_stride}: {stats['frames']} inferences "
-              f"carry {stats['frames'] * cfg.frame_stride} source frames "
+              f"carry {covered} source frames "
               f"({stats['avg_fps_post_warmup'] * cfg.frame_stride:.1f} source FPS)")
         if meta is not None and meta.fps > 0:
             budget = 1000.0 * cfg.frame_stride / meta.fps
