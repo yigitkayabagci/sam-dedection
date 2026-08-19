@@ -28,6 +28,12 @@
 \setsansfont{TeX Gyre Heros}                        % başlıklar (Helvetica benzeri)
 \setmonofont{TeX Gyre Cursor}[Scale=0.92]           % kod/komut satırları (Courier benzeri)
 
+% Uzun \texttt{} tanımlayıcıları (dosya yolları, fonksiyon adları) satır
+% sonunda bölünemez ve satırı marja taşırırdı. \emergencystretch, TeX'e
+% yalnızca taşacak olan paragraflarda kelime arasını biraz esnetme izni
+% verir; normal paragraflar etkilenmez.
+\setlength{\emergencystretch}{3em}
+
 % ---- Renkler ----------------------------------------------------------------
 % Deneyler.tex ve EXPERIMENT_LOG.md'deki grafiklerle aynı paletten:
 % koyu lacivert ana renk, mercan ikincil vurgu, nötr griler.
@@ -116,6 +122,26 @@
   \end{center}
 }
 
+% Eksik görsel koruması: figures/ klasöründeki PNG'ler depoya
+% işlenmiyor (yerel görseller), bu yüzden dosyaya bağlı bir
+% \includegraphics çağrısı başka bir makinede derlemeyi kırardı.
+% Aşağıdaki sarmalayıcı, dosya varsa gerçek görseli çizer; yoksa
+% \gorselyertutucu kutusuna düşer. Görseller yerinde olan makinede
+% davranış hiç değişmez.
+\let\gercekincludegraphics\includegraphics
+\renewcommand{\includegraphics}[2][width=\linewidth]{%
+  \IfFileExists{#2}%
+    {\gercekincludegraphics[#1]{#2}}%
+    {\gorselyertutucu{eksik dosya: {\scriptsize\texttt{\detokenize{#2}}}}}%
+}
+
+% Tabloda havadan (UAV) çekim yapan veri setlerini işaretleyen yıldız.
+\newcommand{\hava}{\textsuperscript{$\star$}}
+
+% Kendi çekimi olmayıp başka veri setlerinden türetilmiş setleri
+% işaretleyen hançer (bkz. veri_setleri.tex, "Ortak Kaynaklar").
+\newcommand{\turetilmis}{\textsuperscript{$\dagger$}}
+
 % Dört görseli 2x2 ızgarada, her birinin altında kendi kısa alt yazısıyla
 % gösteren şablon: crop/full karşılaştırması, dörtlü grafik sonuçları vb.
 % için tekrar kullanılabilir. Dosya yolu boş bırakılan hücreye
@@ -164,6 +190,8 @@
 \Crefname{chapter}{Bölüm}{Bölümler}
 \crefname{section}{Bölüm}{Bölümler}
 \Crefname{section}{Bölüm}{Bölümler}
+\crefname{equation}{Denklem}{Denklemler}
+\Crefname{equation}{Denklem}{Denklemler}
 
 % ---- Kaynakça -----------------------------------------------------------------
 \usepackage[

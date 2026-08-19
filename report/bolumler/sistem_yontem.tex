@@ -91,6 +91,81 @@ satırın tamamen maskelenmesi durumunda NaN üretmemektir.} Doldurmanın
 zararsız olması, RoPE'nin yuva-konumundan bağımsız olmasından ve
 zamansal konumun zaten \texttt{memory\_pos} içine gömülü olmasından gelir.
 
+\section{Girdi Çözünürlüğü: 1024, 768, 512}
+\label{sec:cozunurluk}
+
+Checkpoint 1024'te eğitilmiştir, ama girdi çözünürlüğü kodda tek bir
+alandır --- \texttt{image\_size} --- ve türetilen bütün şekiller
+ondan çıkar. Bu, çözünürlüğü serbest bir ayar yapmaz: bir sayının geçerli
+\emph{olabilmesi} için sağlaması gereken koşullar vardır. 768 üçüncü bir
+nokta olarak eklenmiştir çünkü bu koşulların hepsini sağlar.
+
+Farklı bir boyutun yüklenip çalışabilmesinin nedeni, backbone ve neck'in
+tümüyle evrişimsel olması ve konum kodlamalarının kare başına
+hesaplanmasıdır. Kendini ayarlamayan tek bir tablo vardır: memory
+attention'ın cross-attention'ı (\texttt{RoPEAttentionv2}) döner
+tablolarını kurulum anında sabit bir \texttt{q\_sizes} değerinden
+üretir; 1024 için bu \texttt{[64,\,64]}'tür.
+\texttt{src/trackers/\_hydra\_overrides.py} bunu
+\texttt{image\_size / backbone\_stride} ile kilitli tutar; bu olmadan
+export ``Query RoPE table covers 4096 tokens but the feature map has
+1024'' hatasıyla düşer.
+
+\begin{table}[H]
+  \centering
+  \caption{Bir çözünürlüğü geçerli kılan koşullar ve 768'in bunları
+    nasıl sağladığı. Buradaki hiçbir sayı ölçüm değildir; hepsi
+    mimariden çıkan aritmetiktir.}
+  \label{tab:cozunurluk-768}
+  \small
+  \begin{tabular}{@{}>{\raggedright\arraybackslash}p{72mm}>{\raggedright\arraybackslash}p{72mm}@{}}
+    \toprule
+    Koşul & 768'de \\
+    \midrule
+    stride-2 zincirleri (trunk, neck, mask downsampler) tam bölünmeli &
+      $768 = 3\cdot2^{8}$ --- sekiz tam yarılama, modeldeki her
+      zincirden derin \\
+    \texttt{image\_size} \% \texttt{backbone\_stride} &
+      $768/16 = 48$ \\
+    self-attention belirteç sayısı tam kare olmalı & $48^{2} = 2304$ \\
+    SAM head yüksek çözünürlük seviyeleri (stride 8 ve 4) & 96 ve 192 \\
+    hafıza tarafı (\texttt{k\_sizes}) & değişmez --- sabit
+      $16{\times}16$ latent ızgara, \texttt{image\_size}'ın fonksiyonu
+      değil \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+$512 = 2^{9}$ ve $1024 = 2^{10}$ aynı testlerden geçer;
+\textbf{720 geçmez} ($720/16 = 45$ ve ikiye bölme orada tam olmaktan
+çıkar). \texttt{tests/test\_hydra\_overrides.py} bu aritmetiği depodaki
+her config üzerinde doğrular, yani ileride eklenecek bir
+\texttt{edgetam\_720.yaml} export anında değil CI'da düşer.
+
+\textbf{Maliyet, belirteç sayısının koyduğu yerdedir.} 768 kare başına
+2304 uzamsal belirteç üretir; 1024'te 4096, 512'de 1024. Yani 1024'ün
+uzamsal işinin \%56'sı. 512 konfigürasyonuna göre image encoder piksel
+sayısıyla ölçeklenir (2,25×), memory attention'ın self-attention'ı
+belirteç sayısının karesiyle ($\approx$5×), sabit hafıza bankasına olan
+cross-attention'ı ise belirteç sayısıyla (2,25×).
+
+\textbf{768'in yeri olmadığı durum.} Kaynak 768'in altındaysa 768
+\emph{yukarı ölçekler}: örneğin 640×512 bir kayıtta, yeni hiçbir bilgi
+taşımayan ara değerlenmiş pikseller için 512'nin 2,25 katı belirteç
+ödenir ve 6 pikselik bir hedef 9 piksele çıkar --- hâlâ tek bir
+stride-16 hücresinin içinde. Orada doğru araç
+\texttt{src/trackers/adaptive.py}'dir: 512 fiyatına 4--10× büyütme
+verir. 768, gerçekten 512×512'den fazla detay taşıyan kaynaklar
+içindir; bu projede 1280×720 kayıtlar.
+
+\textbf{Durum: configler ve testler hazır, ölçüm yok.} Hazır olanlar
+\texttt{configs/edgetam\_768.yaml} ve
+\texttt{configs/edgetam\_trt\_768.yaml}; 768'de henüz hiçbir motor
+derlenmedi ve hiçbir ölçüm alınmadı. İlk gerçek kontrol
+export'un kendi koruması olacaktır: \texttt{\_CrossAttentionGraph},
+\texttt{q\_sizes} ile öznitelik haritası uyuşmazsa kurulurken hata
+verir.
+
 \section{Ölçüm Metodolojisi}
 \label{sec:olcum-yontemi}
 
