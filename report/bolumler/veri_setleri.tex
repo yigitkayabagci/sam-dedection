@@ -41,8 +41,9 @@ Bu bölüm, aday veri setlerini tam olarak bu ölçütle eler:
   \caption{İncelenen veri setleri. \hava\ = havadan (UAV) çekim.
     ``Yoğun maske'' = piksel düzeyinde semantik/örnek maskesi;
     parantez içindeki aralık, videolarda hangi karelerin etiketlendiğini
-    gösterir. HF = Hugging Face. Satırlar öncelik sırasına göre
-    gruplanmıştır.}
+    gösterir. HF = Hugging Face. $\dagger$ = kendi çekimi değil, başka
+    veri setlerinden türetilmiş (\cref{sec:ortak-kaynaklar}).
+    Satırlar öncelik sırasına göre gruplanmıştır.}
   \label{tab:veri-setleri}
   \footnotesize
   \setlength{\tabcolsep}{3pt}
@@ -74,12 +75,12 @@ Bu bölüm, aday veri setlerini tam olarak bu ölçütle eler:
     Caltech Aerial RGB-T\hava & 2024 · ECCV & RGB+TIR & 960×600 /
       640×512 & Video & Yoğun maske, 10 sınıf &
       37 çekim (18'i havadan), 4\,195 maske & Caltech arşivi \\
-    AeroVIS\hava & 2026 · arXiv & RGB & kaynak setlere göre değişken &
+    AeroVIS\hava\turetilmis & 2026 · arXiv & RGB & kaynak setlere göre değişken &
       Video & \textbf{Örnek maskesi + kimlik izi}, 9 sınıf &
       117 video / 49\,204 kare, 8\,279 iz & Drive (MIT) \\
     SegFly\hava & 2026 · ECCV & RGB+TIR & 5472×3648 / 640×512 & Statik &
       Yoğun maske, 15 sınıf & 20\,606 RGB + 15\,007 RGB-T çifti & HF \\
-    MVSeg & 2023 · CVPR & RGB+TIR & karışık, $\leq$1280×720 & Video &
+    MVSeg\turetilmis & 2023 · CVPR & RGB+TIR & karışık, $\leq$1280×720 & Video &
       Yoğun maske, 26 sınıf (15 karede bir) &
       738 video, 3\,545 maske & proje sayfası \\
     \midrule
@@ -87,9 +88,9 @@ Bu bölüm, aday veri setlerini tam olarak bu ölçütle eler:
     VTUAV\hava & 2022 · CVPR & RGB+TIR & 1920×1080 & Video &
       Kutu (500 dizi) + maske (100 video) &
       500 dizi, $\sim$1,7\,M kare çifti & Drive / Baidu \\
-    VDD\hava & 2023 · arXiv & RGB & yüksek çöz. & Statik &
+    VDD\hava\turetilmis & 2023 · arXiv & RGB & yüksek çöz. & Statik &
       Yoğun maske, 7 sınıf & 400 görüntü & HF \\
-    FlyAwareV2\hava & 2026 · SPIC & RGB + derinlik & --- & Statik &
+    FlyAwareV2\hava\turetilmis & 2026 · SPIC & RGB + derinlik & --- & Statik &
       Yoğun maske + derinlik (sentetik + gerçek) &
       100\,K+ örnek, $\sim$296\,GB & resmî site, \mbox{GPL-3.0} \\
     Multi-View UAV\hava & 2025 · arXiv & RGB + derinlik & 400×300 &
@@ -110,7 +111,8 @@ aynı: 640×512 termal, RGB'siyle piksel düzeyinde hizalanmış. Aynı
 çözünürlük, \texttt{crop512} modunun sıfır yeniden boyutlandırmayla
 çalıştığı çözünürlüktür (\cref{sec:onisleme-analizi}) --- yani ön-işleme
 maliyeti ölçümü bozmaz. 4\,024 çift, 8 sınıf (yol, bina, motosiklet,
-araba, kamyon, ağaç, insan, trafik ekipmanı), değişken aydınlatma.
+araba, kamyon, ağaç, insan, trafik ekipmanı); 2\,514'ü gündüz, 857'si
+gece, 653'ü düşük ışıklı gece.
 \textbf{Zayıf yanı:} bağımsız kareler, video değil; hafıza mekanizmasını
 ölçemez, ama tek kare maske kalitesi ve termal alan uyumu için en temiz
 kaynak.
@@ -144,6 +146,8 @@ nesne kategorisi, 8\,279 geçerli iz, YTVIS biçiminde. VisDrone, UAVDT ve
 SeaDronesSee'nin elle çizilmiş kutuları SAM3 ile maskeye çevrilip elden
 geçirilerek üretilmiş. \textbf{Zayıf yanı:} maskeler otomatik üretim
 kaynaklı (elle denetlenmiş ama elle çizilmemiş) ve RGB; termal yok.
+Kendi çekimi olmadığı için kaynak setleriyle çakışmaya dikkat
+(\cref{sec:ortak-kaynaklar}).
 
 \paragraph{SegFly~\cite{segfly2026}.}
 Ölçek olarak listenin en büyüğü: 20\,606 RGB görüntü ve 15\,007 hizalı
@@ -159,7 +163,8 @@ MVUAV'ın yer seviyesi kardeşi ve öncülü: 738 RGB-T video, 3\,545 maske,
 olmasının nedeni bu. Buna rağmen listede kalmasının nedeni pratik: MVUAV
 ile aynı ekipten, aynı biçimde ve aynı değerlendirme koduyla geliyor, yani
 ikisi tek bir işle birlikte kullanılabilir. OSU, INO, KAIST ve RGBT234'ten
-derlendiği için çözünürlük karışıktır.
+derlendiği için çözünürlük karışıktır ve setin tamamı
+türetilmedir (\cref{sec:ortak-kaynaklar}).
 
 \subsection*{İkincil}
 
@@ -174,14 +179,17 @@ birikip birikmediğini görmek için doğal bir test yatağı.
 \paragraph{VDD~\cite{cai2023vdd}.}
 Yoğun etiketli, temiz, açık --- ama 400 görüntü ve yalnızca RGB. Bu
 hacim bir fine-tune için az, bir benchmark için sınırda. UDD ve UAVid'in
-yeniden etiketlenmiş halleriyle birlikte geldiği için asıl değeri
-tek başına değil, o üçlüyü tek etiket standardında toplaması.
+yeniden etiketlenmiş halleriyle (IDD paketi) birlikte geldiği için asıl
+değeri tek başına değil, o üçlüyü tek etiket standardında toplaması ---
+ki bu aynı zamanda çakışma kaynağıdır (\cref{sec:ortak-kaynaklar}).
 
 \paragraph{FlyAwareV2~\cite{flyawarev2}.}
 100\,K'yı aşan örnek, dört hava koşulu (güneşli, yağmurlu, sisli, gece),
 üç irtifa (20/50/120\,m), RGB + derinlik + semantik. \textbf{Sorun:}
-büyük kısmı CARLA ile üretilmiş sentetik veri, gerçek kısmı ise UAVid ve
-VisDrone'un artırılmış hali; ayrıca tam sürüm $\sim$296\,GB. Termal yok.
+büyük kısmı CARLA ile üretilmiş sentetik veri, gerçek kısmı ise yalnızca
+$\sim$2\,K kare: VisDrone (eğitim) ve UAVid (test), hava koşulu
+artırımıyla çoğaltılmış. Tam sürüm $\sim$296\,GB, termal yok. Bu iki
+kaynak da başka setlerde geçiyor (\cref{sec:ortak-kaynaklar}).
 Alan uyumu (domain gap) açısından, projenin gerçek termal kayıtlarına
 sentetik RGB'den daha uzak bir veri kaynağı.
 
@@ -192,6 +200,88 @@ Semantik maske ve derinlik hazır, lisans MIT, ama 400×300 EdgeTAM'ın
 512 girdi çözünürlüğünün altında --- yani her karede yukarı ölçeklemek
 gerekir, bu da ölçülen maske kalitesini veri setinin kendi
 çözünürlüğüyle sınırlar.
+
+\section{Ortak Kaynaklar ve Çakışma Riski}
+\label{sec:ortak-kaynaklar}
+
+\Cref{tab:veri-setleri}'ndeki on setin dördü kendi çekimi değildir:
+daha eski, halka açık veri setlerinin yeniden etiketlenmiş ya da
+yeniden paketlenmiş halleridir. Bu, tek başına bir kusur değil ---
+kutuyu maskeye çevirmek gerçek bir katkıdır --- ama iki set aynı ham
+kareleri paylaşıyorsa, birinde eğitip diğerinde J\&F raporlamak
+\textbf{kirlenmiş bir ölçüm} verir. Kaynaklar:
+
+\begin{table}[H]
+  \centering
+  \caption{Türetilmiş veri setleri ve kaynakları. Tabloda $\dagger$ ile
+    işaretli satırlar bunlardır; diğer altı set kendi çekimidir
+    (Multi-View UAV'ın ``çekimi'' CARLA simülasyonudur).}
+  \label{tab:veri-seti-kaynaklari}
+  \footnotesize
+  \setlength{\tabcolsep}{4pt}
+  \renewcommand{\arraystretch}{1.18}
+  \begin{tabular}{@{}
+      >{\raggedright\arraybackslash}p{24mm}
+      >{\raggedright\arraybackslash}p{40mm}
+      >{\raggedright\arraybackslash}p{68mm}@{}}
+    \toprule
+    \textbf{Set} & \textbf{Kaynak} & \textbf{Ne yapılmış} \\
+    \midrule
+    AeroVIS & VisDrone, UAVDT, SeaDronesSee &
+      Tamamı türetilmiş. Kaynakların elle çizilmiş kutuları konum ve
+      kimlik önceli olarak kullanılıp SAM3 ile maskeye çevrilmiş,
+      sonra elden geçirilmiş. \\
+    FlyAwareV2 & gerçek: VisDrone (eğitim) + UAVid (test);
+      sentetik: CARLA / SynDrone &
+      $\sim$2\,K gerçek kare, hava koşulu artırımıyla çoğaltılmış;
+      $\sim$288\,K kare simülasyondan. \\
+    VDD & (kendi 400 görüntüsü) + UDD, UAVid &
+      VDD'nin 400 görüntüsü özgün; birlikte dağıtılan IDD paketi UDD ve
+      UAVid'i VDD etiket standardında yeniden etiketliyor. \\
+    MVSeg & OSU, INO, KAIST, RGBT234 &
+      Mevcut RGB-T video kaynakları MVSS görevine uyarlanıp piksel
+      düzeyinde yeniden etiketlenmiş. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection*{Hangi İkililer Çakışıyor}
+
+\begin{itemize}
+  \item \textbf{VisDrone $\rightarrow$ AeroVIS + FlyAwareV2.} Listedeki
+        tek gerçek kare düzeyinde çakışma riski budur. FlyAwareV2'nin
+        gerçek \emph{eğitim} bölümü VisDrone'dur ve AeroVIS'in videoları
+        da kısmen VisDrone'dan gelir. Bu ikisini bir eğitim/değerlendirme
+        çifti olarak kullanmak güvenli değildir.
+  \item \textbf{UAVid $\rightarrow$ FlyAwareV2 + VDD/IDD.} FlyAwareV2'nin
+        \emph{test} bölümü UAVid'dir; VDD ile gelen IDD paketi de UAVid'i
+        yeniden etiketler. IDD'de eğitip FlyAwareV2 testinde ölçmek aynı
+        kareleri iki kez görmek olur.
+  \item \textbf{CARLA $\rightarrow$ FlyAwareV2 + Multi-View UAV.} Burada
+        paylaşılan şey kareler değil, \emph{simülatör}. Sahneler ve
+        kameralar farklı, yani veri sızıntısı yok; ama ikisi de aynı
+        render motorunun görsel imzasını taşır, dolayısıyla ikisinde de
+        iyi çalışan bir model gerçek termal kayıtta aynı sonucu vermez.
+  \item \textbf{RGBT234 $\rightarrow$ MVSeg.} RGBT234 aslında bir RGB-T
+        \emph{takip} benchmark'ıdır. Bugün için zararsız, ama ileride
+        takip doğruluğu RGBT234 üzerinde ölçülürse MVSeg ile örtüşür.
+\end{itemize}
+
+\subsection*{Sonuç: Öncelikli Blok Kendi İçinde Temiz}
+
+Kritik nokta şudur: öncelikli bloktaki tek türetilmiş set
+\textbf{AeroVIS}'tir ve onun kaynakları (VisDrone, UAVDT, SeaDronesSee)
+bloktaki diğer beş setin --- Kust4K, MVUAV, Caltech Aerial RGB-T,
+SegFly, MVSeg --- hiçbirine değmez. Yani
+\cref{tab:veri-setleri}'nin öncelikli altısı \textbf{birlikte
+kullanılabilir}; aralarında paylaşılan tek bir kare yoktur.
+
+Çakışma, ikincil bloğa geçildiğinde başlar. Pratik kural: FlyAwareV2 ve
+VDD/IDD ile eğitim yapılacaksa, AeroVIS artık tarafsız bir
+değerlendirme kümesi değildir. En temiz kurulum, hem eğitimi hem
+değerlendirmeyi \textbf{öncelikli blokla sınırlamaktır}: örneğin
+Kust4K ve MVUAV'da eğitip J\&F'i AeroVIS'te ölçmek, aralarında tek bir
+paylaşılan kare olmadığı için güvenlidir.
 
 \section{Elenen Bağlantılar}
 \label{sec:elenen-veri-setleri}

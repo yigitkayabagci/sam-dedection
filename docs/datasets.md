@@ -30,6 +30,36 @@ veremez.
 | [FlyAwareV2](https://github.com/LTTM/FlyAwareV2) | 2026 · SPIC | Büyük kısmı CARLA sentetiği, termal yok, tam sürüm ~296 GB |
 | [Multi-View UAV](https://huggingface.co/datasets/Peter341/Multi-View-UAV-Dataset) | 2025 · arXiv | 357 690 kare ama 400×300 (EdgeTAM'ın 512 girdisinin altında) ve tamamı CARLA |
 
+## Ortak kaynaklar — çakışma riski
+
+On setin dördü kendi çekimi değil, daha eski açık setlerin yeniden
+etiketlenmiş hali. Detay: raporda Bölüm 5.4.
+
+| Set | Kaynak |
+|---|---|
+| AeroVIS | VisDrone, UAVDT, SeaDronesSee (tamamı türetilmiş; kutular SAM3 ile maskeye çevrilmiş) |
+| FlyAwareV2 | gerçek: VisDrone (eğitim) + UAVid (test), ~2 K kare · sentetik: CARLA/SynDrone ~288 K kare |
+| VDD | kendi 400 görüntüsü özgün; birlikte gelen IDD paketi UDD ve UAVid'i yeniden etiketliyor |
+| MVSeg | OSU, INO, KAIST, RGBT234 |
+
+Kendi çekimi: Kust4K, MVUAV, Caltech Aerial RGB-T, SegFly, VTUAV
+(Multi-View UAV = CARLA sentetiği).
+
+**Çakışan ikililer:**
+
+- **VisDrone → AeroVIS + FlyAwareV2** — tek gerçek kare düzeyinde risk;
+  bu ikisi eğitim/değerlendirme çifti olarak kullanılamaz.
+- **UAVid → FlyAwareV2 (test) + VDD/IDD** — IDD'de eğitip FlyAwareV2
+  testinde ölçmek aynı kareleri iki kez görmek.
+- **CARLA → FlyAwareV2 + Multi-View UAV** — kare değil simülatör ortak;
+  sızıntı yok ama aynı render imzası.
+- **RGBT234 → MVSeg** — bugün zararsız; ileride RGBT234'te takip
+  ölçülürse örtüşür.
+
+**Sonuç:** öncelikli bloktaki tek türetilmiş set AeroVIS ve kaynakları
+diğer beşine değmiyor → **öncelikli altısı birlikte kullanılabilir.**
+Güvenli kurulum: Kust4K + MVUAV'da eğitip J&F'i AeroVIS'te ölçmek.
+
 ## Elenenler
 
 - [UAV-VisLoc](https://github.com/IntelliSensing/UAV-VisLoc) — GT = GPS
