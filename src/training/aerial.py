@@ -171,6 +171,41 @@ class Frame:
     pair: Path | None = None
 
 
+def describe_layout(root: str | Path, limit: int = 30) -> str:
+    """Every directory under `root` that holds images, with counts and a stem.
+
+    The first thing to look at after a download, and the answer to the most
+    common way this stage fails. A `DatasetSpec`'s globs are written against
+    what a paper says the archive contains; archives are repacked, renamed and
+    nested inside an extra folder all the time, and the symptom is a
+    `FileNotFoundError` that says what was *not* found rather than what is
+    there. This says what is there, in the shape a glob is written in.
+    """
+    root = Path(root)
+    directories: dict[Path, list[Path]] = {}
+    for path in root.rglob("*"):
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
+            directories.setdefault(path.parent, []).append(path)
+
+    if not directories:
+        return f"{root}: no image files anywhere underneath it."
+
+    lines = [f"{root}: {len(directories)} directories hold images",
+             "", "| glob to write | files | example stem |", "|---|---:|---|"]
+    for directory in sorted(directories, key=lambda d: -len(directories[d]))[:limit]:
+        files = sorted(directories[directory])
+        relative = directory.relative_to(root)
+        suffixes = sorted({p.suffix.lower() for p in files})
+        for suffix in suffixes:
+            count = sum(1 for p in files if p.suffix.lower() == suffix)
+            example = next(p for p in files if p.suffix.lower() == suffix)
+            lines.append(f"| `{relative.as_posix()}/*{suffix}` | {count} | "
+                         f"`{example.stem}` |")
+    if len(directories) > limit:
+        lines.append(f"| … and {len(directories) - limit} more | | |")
+    return "\n".join(lines)
+
+
 def _stem(path: Path, strip: SequenceABC[str]) -> str:
     stem = path.stem
     for suffix in strip:
@@ -202,10 +237,15 @@ def list_frames(root: str | Path, spec: DatasetSpec,
     shared = sorted(set(images) & set(masks))
     if not shared:
         raise FileNotFoundError(
-            f"{root}: no image/mask pairs for {spec.name} ({modality}). "
+            f"{root}: no image/mask pairs for {spec.name} ({modality}).\n"
             f"Found {len(images)} images under {spec.glob(modality)!r} and "
-            f"{len(masks)} masks under {spec.masks!r}; the stems have to match "
-            f"(see DatasetSpec.strip).")
+            f"{len(masks)} masks under {spec.masks!r}"
+            + (", and their stems do not match -- see DatasetSpec.strip."
+               if images and masks else ".")
+            + f"\n\nWhat is actually there:\n\n{describe_layout(root)}\n\n"
+            f"Fix it without editing the repo:\n"
+            f"    from dataclasses import replace\n"
+            f"    spec = replace(spec, thermal=..., rgb=..., masks=..., strip=(...))")
     return [Frame(name=name, image=images[name], mask=masks[name],
                   pair=pairs.get(name)) for name in shared]
 
@@ -722,7 +762,7 @@ def sample_masks(sample: Sample, spec: DatasetSpec,
 
 __all__ = [
     "DatasetSpec", "Frame", "FrameIndex", "Instance", "InstanceGates", "SPECS",
-    "Sample", "decompose", "index_frames", "list_frames", "list_pairs",
+    "Sample", "decompose", "describe_layout", "index_frames", "list_frames", "list_pairs",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",
     "split_frames", "summarise", "windows_for",
