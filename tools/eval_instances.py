@@ -57,7 +57,11 @@ def score(model, split, batch: int, device: str, progress=None) -> dict:
     chunks = list(batch_clips(split.samples, batch, seed=0, drop_last=False))
     stream = progress(chunks, total=len(chunks), desc="scoring") if progress else chunks
     for chunk in stream:
-        assembled = collate(chunk, split.spec, split.gates, "cpu", gray=split.gray)
+        # `split.split` is not optional here: decomposing differently from the
+        # index would renumber the component labels and score every instance
+        # against another instance's mask -- and still produce a plausible IoU.
+        assembled = collate(chunk, split.spec, split.gates, "cpu",
+                            gray=split.gray, split=split.split)
         ious.extend(instance_iou(model, assembled.to(device)).tolist())
         for sample in chunk:
             for instance in sample.instances:
@@ -118,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-instances", type=int, default=8)
     p.add_argument("--min-area", type=int, default=48)
     p.add_argument("--fill", type=float, default=0.25)
+    p.add_argument("--split-touching", choices=("none", "watershed"), default="none",
+                   help="Must match what the index and the training run used.")
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
@@ -131,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     gates = InstanceGates(min_area=args.min_area, fill=args.fill)
     cache = Path(args.index) if args.index else None
     index = (load_index(cache) if cache and cache.is_file()
-             else build_index(Path(args.data), spec, args.modality, gates, cache, 8))
+             else build_index(Path(args.data), spec, args.modality, gates, cache, 8,
+                              split=args.split_touching))
 
     # The same split, from the same seed, as training used -- otherwise "held
     # out" is a claim rather than a fact.
@@ -143,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         samples=sample_windows(chosen, size=args.size, per_image=args.per_image,
                                max_instances=args.max_instances, jitter=0,
                                seed=args.seed),
-        spec=spec, gates=gates, gray=args.modality == "thermal")
+        spec=spec, gates=gates, gray=args.modality == "thermal",
+        split=args.split_touching)
     print(f"{args.split}: {len(chosen)} frames, {len(split.samples)} windows, "
           f"{sum(len(s.instances) for s in split.samples)} instances")
 

@@ -91,7 +91,7 @@ class ImageBatch:
 
 def collate(samples: Sequence[Sample], spec: DatasetSpec,
             gates: InstanceGates = InstanceGates(), device: str = "cpu",
-            executor=None, gray: bool = True) -> ImageBatch:
+            executor=None, gray: bool = True, split: str = "none") -> ImageBatch:
     """Read `samples`' pixels and their instance masks into one padded batch.
 
     `executor` spreads the per-sample reads across a thread pool -- decoding a
@@ -104,7 +104,7 @@ def collate(samples: Sequence[Sample], spec: DatasetSpec,
     size = samples[0].size
     pixels = list(mapper(lambda s: load_image(s.frame.image, s.origin, s.window,
                                               s.size, gray), samples))
-    masks = list(mapper(lambda s: sample_masks(s, spec, gates), samples))
+    masks = list(mapper(lambda s: sample_masks(s, spec, gates, split), samples))
 
     width = max(len(s.instances) for s in samples)
     boxes = np.zeros((len(samples), width, 4), dtype=np.float32)
@@ -240,16 +240,19 @@ def instance_iou(model, batch: ImageBatch) -> np.ndarray:
 class ImageSplit:
     """Windows for one split, plus what it takes to read them.
 
-    The spec and the gates travel *with* the split rather than being read from
-    a global, because the whole point of the comparison this feeds is that two
-    runs see identical data. A gate value that differed between them would be a
-    silent third variable.
+    The spec, the gates and the decomposition strategy travel *with* the split
+    rather than being read from a global, because the whole point of the
+    comparison this feeds is that two runs see identical data. A gate value
+    that differed between them would be a silent third variable -- and a
+    `split` that differed between the index and the loader would renumber the
+    component labels and pair every instance with another one's mask.
     """
 
     samples: Sequence[Sample]
     spec: DatasetSpec
     gates: InstanceGates = InstanceGates()
     gray: bool = True
+    split: str = "none"
 
 
 def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
@@ -272,7 +275,8 @@ def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
     pool = sorted(split.samples, key=lambda s: -len(s.instances))
 
     def step(n: int):
-        batch = collate(pool[:n], split.spec, split.gates, "cpu", gray=split.gray)
+        batch = collate(pool[:n], split.spec, split.gates, "cpu",
+                        gray=split.gray, split=split.split)
         return image_losses(model, batch.to(device))[0]
 
     return measure_batch_size(model, step, device,
@@ -295,6 +299,6 @@ def stream(split: ImageSplit, batch: int, seed: int | None, limit: int | None,
     return prefetch_with(
         chunks,
         lambda chunk, pool: collate(chunk, split.spec, split.gates, "cpu", pool,
-                                    split.gray),
+                                    split.gray, split.split),
         device=device, workers=workers, depth=depth,
     )

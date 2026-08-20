@@ -43,18 +43,28 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="Where the checkpoint goes.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
-    p.add_argument("--teacher", default="facebook/dinov2-base",
+    p.add_argument("--teacher", default="facebook/dinov3-vitb16-pretrain-lvd1689m",
                    help="Any DINOv2-class ViT, or a facebook/sam2.1-hiera-* "
                         "checkpoint to distil SAM 2's own encoder instead. The "
                         "class is chosen from the id; see distill.py for what "
                         "each buys and costs.")
     p.add_argument("--teacher-size", type=int, default=None,
-                   help="Default: 518 for a ViT teacher, 1024 for SAM 2.1. "
-                        "A ViT needs a multiple of its patch size; SAM 2.1's "
-                        "position embeddings are not interpolated, so lowering "
-                        "this changes the teacher, not only its cost.")
+                   help="Default: --size snapped up to the ViT's patch grid "
+                        "(512 for a /16 model, 518 for a /14 one), or 1024 for "
+                        "SAM 2.1, whose position embeddings are not "
+                        "interpolated -- lowering that one changes the teacher, "
+                        "not only its cost.")
     p.add_argument("--size", type=int, default=512)
-    p.add_argument("--pairs", type=int, default=None, help="Cap on pairs used.")
+    p.add_argument("--pairs", type=int, default=None,
+                   help="Cap on pairs. Sampled across the whole set, not "
+                        "truncated -- the first N pairs of a video-derived set "
+                        "are a couple of flights.")
+    p.add_argument("--crop", type=float, default=None,
+                   help="Square crop side as a fraction of the frame's shorter "
+                        "axis, placed identically in both halves. Leave unset "
+                        "for a source already near --size (640x512); pass "
+                        "size/min(h,w) for native pixels on a large one "
+                        "(512/1080 = 0.474 on VTUAV).")
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--steps", type=int, default=400)
     p.add_argument("--epochs", type=int, default=1)
@@ -74,12 +84,14 @@ def main(argv: list[str] | None = None) -> int:
 
     import torch
 
-    from src.training.distill import build_teacher, pretrain
+    from src.training.distill import build_teacher, pretrain, subsample
     from tools.train_encoder import _tqdm, build_model
 
     spec = SPECS[args.spec]
-    pairs = list_pairs(Path(args.data), spec)[:args.pairs]
-    print(f"{len(pairs)} registered pairs -- no labels are read at this stage")
+    found = list_pairs(Path(args.data), spec)
+    pairs = subsample(found, args.pairs, seed=args.seed)
+    print(f"{len(pairs)} registered pairs of {len(found)} found -- no labels "
+          f"are read at this stage")
 
     model = build_model(args.size, args.base, args.device)
     teacher = build_teacher(args.teacher, device=args.device, size=args.teacher_size)
@@ -106,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         batch=args.batch, steps_per_epoch=args.steps,
         rates=Rates(neck=args.neck_lr, trunk=args.trunk_lr),
         projector_lr=args.projector_lr, l1_weight=args.l1, freeze=freeze,
+        crop=args.crop,
         workers=args.workers, depth=args.depth, seed=args.seed,
         device=args.device, progress=_tqdm())
     result |= {**meta, "seconds": round(time.time() - started, 1),

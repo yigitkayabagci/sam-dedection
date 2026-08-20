@@ -45,6 +45,7 @@ from src.training.finetune import Rates, apply_freeze  # noqa: E402
 from src.training.image_loop import (  # noqa: E402
     ImageBatch,
     ImageSplit,
+    collate,
     image_losses,
     instance_iou,
     propagate_image,
@@ -299,6 +300,34 @@ class TestEndToEnd(unittest.TestCase):
 
         self.assertEqual([h["stage"] for h in result["history"]], ["encoder"])
         self.assertTrue(np.isfinite(result["best_val_loss"]))
+
+    def test_the_split_strategy_reaches_the_loader_from_the_split(self):
+        # The hazard `ImageSplit.split` exists for: decomposing one way at
+        # index time and another at load time renumbers the component labels,
+        # so every instance is paired with another instance's mask -- and the
+        # loss still looks finite. Indexing with watershed and collating
+        # without it must not silently agree.
+        root = Path(self.tmp.name)
+        mask = np.zeros((SIZE, SIZE), dtype=np.uint8)
+        mask[8:16, 8:16] = 2
+        mask[8:16, 20:28] = 2
+        mask[11:13, 16:20] = 2                              # the bridge
+        cv2.imwrite(str(root / "scene" / "label" / "b_label.png"), mask)
+        cv2.imwrite(str(root / "scene" / "tir" / "b.png"), (mask * 60).astype(np.uint8))
+
+        frame = [f for f in list_frames(root, self.spec, "thermal") if f.name == "b"][0]
+        plain = index_frames([frame], self.spec, self.gates, workers=1)[0]
+        split = index_frames([frame], self.spec, self.gates, workers=1,
+                             split="watershed")[0]
+        self.assertEqual(len(plain.instances), 1)
+        self.assertEqual(len(split.instances), 2)
+
+        samples = sample_windows([split], size=SIZE, per_image=1,
+                                 max_instances=4, seed=0)
+        matched = collate(samples, self.spec, self.gates, "cpu",
+                          gray=True, split="watershed")
+        for row, instance in zip(matched.masks[0], samples[0].instances):
+            self.assertEqual(int(row.sum()), instance.area)
 
     def test_scoring_reports_one_iou_per_instance(self):
         from tools.eval_instances import score

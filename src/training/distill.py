@@ -51,11 +51,23 @@ import torch.nn.functional as F
 from .aerial import load_image, normalise
 from .finetune import EMA, Rates, apply_freeze, param_groups
 
-# DINOv2 patches are 14x14, so the teacher's input has to be a multiple of 14.
-# 518 = 37 x 14 is the resolution its own weights were trained at.
-TEACHER_ID = "facebook/dinov2-base"
-TEACHER_SIZE = 518
+TEACHER_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+STUDENT_SIZE = 512        # what the student is trained at, and the size to match
 SAM2_SIZE = 1024          # what SAM 2.1's position embeddings were trained at
+
+
+def patch_aligned(size: int, patch: int) -> int:
+    """The smallest multiple of `patch` that is at least `size`.
+
+    A ViT teacher can only be fed a multiple of its patch size, and the useful
+    default is "run it at the student's own input resolution, snapped up to its
+    grid". That rule lands exactly on both families' natural numbers without a
+    per-model table: 512 with DINOv3's 16-pixel patches is **512**, giving a
+    32x32 grid that is precisely the student's grid at 512 -- no resampling of
+    the teacher's map at all -- and 512 with DINOv2's 14 is **518**, which is
+    the resolution DINOv2's own weights were trained at.
+    """
+    return -(-int(size) // int(patch)) * int(patch)
 
 # Both families normalise with ImageNet statistics, which is what `normalise`
 # already applies -- so a batch built for the student feeds either teacher
@@ -92,26 +104,41 @@ def tokens_to_map(tokens: torch.Tensor, side: int) -> torch.Tensor:
 
 
 class FeatureTeacher:
-    """A frozen ViT foundation model (DINOv2 and friends), as a dense feature map.
+    """A frozen ViT foundation model (DINOv3, DINOv2 and friends), dense.
 
     Thin on purpose: everything version-sensitive about `transformers` lives in
     `features`, and everything this module reasons about -- the projection, the
     loss, the loop -- is independent of it.
+
+    **DINOv3 is the default, and the reason is the thing being distilled.** What
+    this stage copies is a *dense* feature map, position by position, and dense
+    feature quality is exactly what DINOv3's release is about -- its predecessor
+    is documented to degrade in dense prediction as training scales, which is
+    the failure DINOv3 set out to fix. Its 16-pixel patch is a second, smaller
+    win: at the student's own 512 input it produces a 32x32 grid, the student's
+    grid exactly, so the teacher's map is never resampled before the loss.
+
+    The DINOv3 weights are **gated** on the Hub -- accept the terms once on the
+    model page and set `HF_TOKEN` -- and `build_teacher` says so rather than
+    letting the download fail with a bare 401. `facebook/dinov2-base` is
+    ungated and remains one string away.
     """
 
     def __init__(self, model_id: str = TEACHER_ID, device: str = "cuda",
-                 dtype: str = "bfloat16", size: int = TEACHER_SIZE) -> None:
+                 dtype: str = "bfloat16", size: int | None = None) -> None:
         from transformers import AutoModel
 
         self.model_id = model_id
         self.device = device
-        self.size = size
         self.model = AutoModel.from_pretrained(
             model_id, dtype=getattr(torch, dtype)).to(device).eval()
         for param in self.model.parameters():
             param.requires_grad_(False)
         self.dim = int(self.model.config.hidden_size)
         self.patch = int(getattr(self.model.config, "patch_size", 14))
+        # Resolved after the config is known, so the rule is one rule rather
+        # than a constant per checkpoint.
+        self.size = patch_aligned(size or STUDENT_SIZE, self.patch)
 
     @torch.no_grad()
     def features(self, images: torch.Tensor) -> torch.Tensor:
@@ -199,16 +226,31 @@ class Sam2FeatureTeacher:
 
 def build_teacher(model_id: str = TEACHER_ID, device: str = "cuda",
                   dtype: str = "bfloat16", size: int | None = None):
-    """The right teacher class for `model_id`, with its own default input size.
+    """The right teacher class for `model_id`, at the right input size.
 
     Dispatching on the id rather than on a separate flag keeps the two from
-    disagreeing -- a SAM 2 checkpoint run at DINOv2's 518 would load, run, and
+    disagreeing -- a SAM 2 checkpoint run at a ViT's 518 would load, run, and
     quietly produce features from interpolated position embeddings it was never
-    trained with.
+    trained with. A ViT teacher's size is resolved from its own patch size
+    (`patch_aligned`), so no default has to be remembered per checkpoint.
     """
-    if "sam2" in model_id.lower():
-        return Sam2FeatureTeacher(model_id, device, dtype, size or SAM2_SIZE)
-    return FeatureTeacher(model_id, device, dtype, size or TEACHER_SIZE)
+    try:
+        if "sam2" in model_id.lower():
+            return Sam2FeatureTeacher(model_id, device, dtype, size or SAM2_SIZE)
+        return FeatureTeacher(model_id, device, dtype, size)
+    except OSError as exc:
+        # The Hub answers a gated repo with a 401/403 whose message is about
+        # authentication, which reads like a broken token rather than terms
+        # nobody accepted yet. DINOv3 is gated; say so at the point of failure.
+        raise SystemExit(
+            f"could not load the teacher {model_id!r}.\n\n"
+            f"If it is a gated repository -- every facebook/dinov3-* checkpoint "
+            f"is -- open its model page once, accept the terms, then set a "
+            f"token:\n"
+            f"    from huggingface_hub import login; login()   # or export HF_TOKEN\n\n"
+            f"An ungated alternative that needs no account: "
+            f"--teacher facebook/dinov2-base\n\n"
+            f"original error: {exc}") from exc
 
 
 class Projector(nn.Module):
@@ -298,46 +340,109 @@ class PairBatch:
                          rgb=self.rgb.to(device, non_blocking=True))
 
 
+def shared_window(shape: tuple[int, int], place: tuple[float, float],
+                  scale: float) -> tuple[tuple[int, int], tuple[int, int]]:
+    """`(origin, window)` for a square crop placed in *normalised* coordinates.
+
+    Normalised and not pixel coordinates because the two halves of a registered
+    pair are not always the same size -- and the crop has to land on the same
+    piece of the world in both, or the distillation is matching a teacher that
+    looked somewhere else. `place` is one `(u, v)` in [0, 1) drawn once per
+    pair and reused for both halves; `scale` is the side as a fraction of the
+    frame's shorter axis.
+
+    This is exact when the two halves share a field of view, which is what
+    "registered" means in these datasets. It is *not* exact for a pair whose
+    two cameras were cropped differently before publication -- there is no
+    geometry here that could recover that, and `crop=None` is the safe choice
+    if you are unsure.
+    """
+    height, width = shape
+    side = max(int(round(min(height, width) * float(scale))), 1)
+    side = min(side, height, width)
+    x0 = int(round(float(place[0]) * (width - side)))
+    y0 = int(round(float(place[1]) * (height - side)))
+    return (x0, y0), (side, side)
+
+
 def collate_pairs(pairs: Sequence[tuple[Path, Path]], size: int = 512,
-                  device: str = "cpu", executor=None) -> PairBatch:
+                  device: str = "cpu", executor=None,
+                  crop: float | None = None,
+                  rng: np.random.Generator | None = None) -> PairBatch:
     """Read a batch of registered pairs at `size`, both halves normalised alike.
 
-    The whole frame is resized rather than cropped. A crop would be fine for
-    the student and wrong for the pair: the two halves must show the *same*
-    scene for the distillation to mean anything, and cropping each
-    independently would silently break the registration the datasets went to
-    trouble to provide.
+    `crop=None` resizes the whole frame, which is right for a source already
+    near the model's input size -- Kust4K's 640x512 loses almost nothing.
+
+    `crop=<fraction>` takes a square window instead, at the **same normalised
+    position in both halves** so the registration survives. This is what a
+    high-resolution source needs: squeezing a 1920x1080 VTUAV frame into
+    512x512 both distorts the aspect ratio and shrinks a small vehicle below
+    the size the encoder will ever see it at, so the encoder would be
+    pretrained on image statistics the deployment never produces. Pass
+    `size / min(height, width)` for native pixels -- 512/1080 = 0.474 on
+    VTUAV, 1.0 or None on a 640x512 source.
     """
+    import cv2
+
     mapper = map if executor is None else executor.map
-    thermal_paths = [p[0] for p in pairs]
-    rgb_paths = [p[1] for p in pairs]
+    rng = rng or np.random.default_rng()
+    # One placement per pair, drawn here and used by both halves.
+    places = rng.random((len(pairs), 2)) if crop else np.zeros((len(pairs), 2))
 
     def read(args):
-        path, gray = args
-        import cv2
-
+        path, gray, place = args
         raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if raw is None:
             raise FileNotFoundError(f"Could not read image: {path}")
-        height, width = raw.shape[:2]
-        return load_image(path, (0, 0), (width, height), size, gray)
+        shape = (int(raw.shape[0]), int(raw.shape[1]))
+        if crop:
+            origin, window = shared_window(shape, place, crop)
+        else:
+            origin, window = (0, 0), (shape[1], shape[0])
+        return load_image(path, origin, window, size, gray)
 
-    thermal = list(mapper(read, [(p, True) for p in thermal_paths]))
-    rgb = list(mapper(read, [(p, False) for p in rgb_paths]))
+    thermal = list(mapper(read, [(p[0], True, q) for p, q in zip(pairs, places)]))
+    rgb = list(mapper(read, [(p[1], False, q) for p, q in zip(pairs, places)]))
     return PairBatch(thermal=normalise(np.stack(thermal), device),
                      rgb=normalise(np.stack(rgb), device))
 
 
+def subsample(pairs: Sequence, count: int | None,
+              seed: int = 0) -> list:
+    """`count` pairs spread across the whole set, not the first `count` of it.
+
+    Truncating a sorted list is fine for a set of independent stills and wrong
+    for one derived from video, which is most of them: VTUAV is 500 sequences
+    of ~3 400 frames, so the first 5 000 pairs are **two flights**. A run
+    capped that way trains on two scenes and reports it as five thousand
+    samples. Spreading the sample also drops the near-duplicate neighbours that
+    make consecutive video frames nearly the same image.
+    """
+    pairs = list(pairs)
+    if count is None or count >= len(pairs):
+        return pairs
+    order = np.random.default_rng(seed).permutation(len(pairs))[:count]
+    return [pairs[int(i)] for i in sorted(order)]
+
+
 def stream(pairs: Sequence[tuple[Path, Path]], batch: int, size: int = 512,
            seed: int | None = None, limit: int | None = None,
-           device: str = "cuda", workers: int = 8, depth: int = 2):
-    """Shuffled, prefetched pair batches -- same threading as every other mode."""
+           device: str = "cuda", workers: int = 8, depth: int = 2,
+           crop: float | None = None):
+    """Shuffled, prefetched pair batches -- same threading as every other mode.
+
+    The crop placement is drawn from a generator seeded per epoch, so a run is
+    reproducible from its seed the way the clip and image modes are: the same
+    pairs in the same order, cropped in the same places.
+    """
     from .loader import batch_clips, prefetch_with
 
+    rng = np.random.default_rng(seed)
     chunks = batch_clips(pairs, batch, seed=seed, limit=limit)
     return prefetch_with(
         chunks,
-        lambda chunk, pool: collate_pairs(chunk, size, "cpu", pool),
+        lambda chunk, pool: collate_pairs(chunk, size, "cpu", pool, crop, rng),
         device=device, workers=workers, depth=depth,
     )
 
@@ -361,6 +466,7 @@ def pretrain(
     projector_lr: float = 1e-3,
     l1_weight: float = 0.0,
     freeze=apply_freeze,
+    crop: float | None = None,
     grad_clip: float = 1.0,
     ema_decay: float = 0.999,
     workers: int = 8,
@@ -409,7 +515,7 @@ def pretrain(
     for epoch in range(epochs):
         batches = stream(pairs, batch, size, seed=seed + 100 * epoch,
                          limit=steps_per_epoch, device=device, workers=workers,
-                         depth=depth)
+                         depth=depth, crop=crop)
         if progress is not None:
             batches = progress(batches, total=steps_per_epoch, desc=f"distil e{epoch}")
 
@@ -441,7 +547,7 @@ def pretrain(
     with ema.applied(model):
         save(model, {"stage": "distill", "teacher": teacher.model_id,
                      "teacher_dim": teacher.dim, "teacher_size": teacher.size,
-                     "pairs": len(pairs), "image_size": size,
+                     "pairs": len(pairs), "image_size": size, "crop": crop,
                      "epochs": epochs, "final_loss": history[-1]["loss"]})
 
     del projector, opt, sched, ema

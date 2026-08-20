@@ -145,6 +145,26 @@ SPECS: dict[str, DatasetSpec] = {
                  "solar_panel": 13, "container": 14},
         things=("car", "truck", "bus", "motorcycle", "bicycle", "person"),
     ),
+    # 500 sequences / ~1.7 M registered 1920x1080 RGB-T pairs (CVPR 2022).
+    #
+    # **A stage-A dataset, not a stage-B one.** Its annotation is a tracking
+    # box, and only a 100-video subset carries masks -- so `list_frames` will
+    # find almost nothing here and `list_pairs` will find more registered pairs
+    # than every other set on the list combined. That is exactly the shape
+    # modality distillation wants, because distillation reads no labels at all.
+    #
+    # Two knobs matter more here than anywhere else, both because the frames
+    # are video at 1920x1080: `--crop 0.474` keeps native pixels instead of
+    # squeezing a 16:9 frame into a square, and `--pairs` samples across the
+    # set rather than truncating it (the first 5 000 pairs are two flights).
+    "vtuav": DatasetSpec(
+        name="vtuav",
+        thermal="**/ir/*.jpg",
+        rgb="**/rgb/*.jpg",
+        masks="**/mask/*.png",
+        classes={"background": 0, "target": 255},
+        things=("target",),
+    ),
     # FLIR ADK 640x512 with hardware-synchronised RGB, 4 195 dense masks
     # (ECCV 2024). Field-focused classes -- no small vehicles -- so this is a
     # generalisation check, not a source of instances.
@@ -362,8 +382,67 @@ class Instance:
                 and self.box[2] <= x0 + window[0] and self.box[3] <= y0 + window[1])
 
 
+def split_bridges(binary: np.ndarray, ratio: float = 0.55) -> np.ndarray:
+    """Watershed on the distance transform: `[H, W] uint8` -> labelled `int32`.
+
+    The one cheap repair for the failure `fill` detects. Two objects joined by
+    a **thin bridge of pixels** are one connected component, but they are two
+    peaks in the distance transform with a valley between them, so seeding at
+    the peaks and flooding outwards separates them. `ratio` is where a peak
+    starts: the fraction of each component's *own* maximum distance, per
+    component rather than globally, so a large object does not set the
+    threshold for a small one beside it.
+
+    **What it cannot do, stated plainly:** two rectangles abutting along a full
+    edge tile into a larger rectangle whose distance transform has no valley at
+    all. Nothing about mask geometry can separate those -- only something that
+    looks at the *pixels* can, which is the SAM-2-as-splitter route in
+    `docs/encoder_mimari.md`. So this is a partial rescue, and the honest way
+    to read it is against the `fill` reject count it is meant to reduce.
+    """
+    import cv2
+
+    binary = (np.asarray(binary) > 0).astype(np.uint8)
+    count, labelled, _, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    out = np.zeros(binary.shape, dtype=np.int32)
+    next_label = 1
+
+    for index in range(1, count):
+        piece = (labelled == index).astype(np.uint8)
+        distance = cv2.distanceTransform(piece, cv2.DIST_L2, 3)
+        peak = float(distance.max())
+        cores = (distance >= ratio * peak).astype(np.uint8) * piece
+        seeds, markers = cv2.connectedComponents(cores, connectivity=8)
+        if seeds <= 2:
+            out[piece > 0] = next_label       # one peak: nothing to split
+            next_label += 1
+            continue
+
+        # cv2.watershed floods from labelled markers into the 0-valued unknown
+        # band, over an 8-bit 3-channel image. The distance transform inverted
+        # is that image: flooding downhill from each peak meets at the valley,
+        # which is where the two objects join.
+        markers = markers + 1
+        markers[(piece > 0) & (cores == 0)] = 0
+        markers[piece == 0] = 1               # background, so edges are found
+        height = cv2.normalize(distance, None, 0, 255, cv2.NORM_MINMAX)
+        relief = cv2.cvtColor((255 - height).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        cv2.watershed(relief, markers)
+
+        for marker in range(2, seeds + 1):
+            region = (markers == marker) & (piece > 0)
+            if region.any():
+                out[region] = next_label
+                next_label += 1
+        # Watershed marks its boundary pixels -1; they belong to neither side,
+        # and leaving them out only thins each mask by a pixel.
+
+    return out
+
+
 def decompose(semantic: np.ndarray, spec: DatasetSpec,
-              gates: InstanceGates = InstanceGates()
+              gates: InstanceGates = InstanceGates(),
+              split: str = "none"
               ) -> tuple[np.ndarray, list[Instance], dict[str, int]]:
     """`(component image, instances, rejects)` for one semantic map.
 
@@ -372,12 +451,21 @@ def decompose(semantic: np.ndarray, spec: DatasetSpec,
     "no instance here" -- stuff classes, ignored values and rejected components
     all collapse to it, because none of them is a target.
 
+    `split="watershed"` additionally tries to separate objects joined by a thin
+    bridge of pixels (`split_bridges`). It is off by default because it is a
+    repair with its own failure mode -- it can over-split one long vehicle into
+    two -- and the only honest way to choose is to compare the two on the
+    `fill` reject count and on the panels the notebook draws.
+
     `rejects` counts which gate stopped what. It is the measurement the whole
     stage rests on: a class that rejects 40 % on `fill` is a class whose
     objects are being fused by the decomposition, and no amount of training
     fixes a bad target.
     """
     import cv2
+
+    if split not in ("none", "watershed"):
+        raise ValueError(f"split must be none or watershed, got {split!r}")
 
     semantic = np.asarray(semantic)
     if semantic.ndim == 3:
@@ -392,9 +480,17 @@ def decompose(semantic: np.ndarray, spec: DatasetSpec,
         binary = (semantic == class_id).astype(np.uint8)
         if not binary.any():
             continue
-        count, labelled, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        if split == "watershed":
+            labelled = split_bridges(binary)
+            count = int(labelled.max()) + 1
+            stats = _stats_of(labelled, count)
+        else:
+            count, labelled, stats, _ = cv2.connectedComponentsWithStats(
+                binary, connectivity=8)
         for index in range(1, count):
             x, y, w, h, area = (int(stats[index, k]) for k in range(5))
+            if area == 0:
+                continue
             candidate = Instance(label=next_label, class_id=int(class_id),
                                  box=(float(x), float(y), float(x + w), float(y + h)),
                                  area=area)
@@ -407,6 +503,24 @@ def decompose(semantic: np.ndarray, spec: DatasetSpec,
             next_label += 1
 
     return components, instances, rejects
+
+
+def _stats_of(labelled: np.ndarray, count: int) -> np.ndarray:
+    """`connectedComponentsWithStats`-shaped rows for an already-labelled image.
+
+    Same five columns in the same order (x, y, w, h, area) so `decompose` reads
+    a watershed result and a plain component result through one code path --
+    the alternative is two loops that have to be kept in step.
+    """
+    stats = np.zeros((max(count, 1), 5), dtype=np.int64)
+    for index in range(1, count):
+        rows, columns = np.nonzero(labelled == index)
+        if rows.size == 0:
+            continue
+        stats[index] = (columns.min(), rows.min(),
+                        columns.max() - columns.min() + 1,
+                        rows.max() - rows.min() + 1, rows.size)
+    return stats
 
 
 def reject_reason(instance: Instance, frame_area: float,
@@ -483,7 +597,8 @@ def probe_classes(frames: SequenceABC[Frame], limit: int = 64) -> dict[int, int]
 
 def index_frames(frames: SequenceABC[Frame], spec: DatasetSpec,
                  gates: InstanceGates = InstanceGates(),
-                 workers: int = 8, progress=None) -> list[FrameIndex]:
+                 workers: int = 8, progress=None,
+                 split: str = "none") -> list[FrameIndex]:
     """Decompose every frame's map once, so window sampling has something to aim at.
 
     This is a full pass over the semantic maps and nothing else -- no images are
@@ -495,7 +610,7 @@ def index_frames(frames: SequenceABC[Frame], spec: DatasetSpec,
 
     def one(frame: Frame) -> FrameIndex:
         semantic = read_mask(frame.mask)
-        _, instances, rejects = decompose(semantic, spec, gates)
+        _, instances, rejects = decompose(semantic, spec, gates, split)
         return FrameIndex(frame=frame,
                           size=(int(semantic.shape[1]), int(semantic.shape[0])),
                           instances=tuple(instances), rejects=rejects)
@@ -730,7 +845,8 @@ def normalise(images: np.ndarray, device: str = "cpu"):
 
 
 def sample_masks(sample: Sample, spec: DatasetSpec,
-                 gates: InstanceGates = InstanceGates()) -> np.ndarray:
+                 gates: InstanceGates = InstanceGates(),
+                 split: str = "none") -> np.ndarray:
     """`[K, size, size]` boolean targets, one per instance, in input coordinates.
 
     The semantic map is decomposed again here rather than stored. `decompose`
@@ -739,10 +855,15 @@ def sample_masks(sample: Sample, spec: DatasetSpec,
     box matching, no tolerance, no drift between what was indexed and what is
     trained on. The alternative, a mask store like the video path's, would be
     ~330 KB per instance for data that regenerates in milliseconds.
+
+    `split` has to be the value the index was built with, which is why it
+    travels on `ImageSplit` rather than being read from a flag in two places:
+    decomposing differently here would renumber the labels and silently pair
+    every instance with another instance's mask.
     """
     import cv2
 
-    components, _, _ = decompose(read_mask(sample.frame.mask), spec, gates)
+    components, _, _ = decompose(read_mask(sample.frame.mask), spec, gates, split)
     x0, y0 = sample.origin
     width, height = sample.window
     crop = components[y0:y0 + height, x0:x0 + width]

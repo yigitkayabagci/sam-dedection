@@ -95,6 +95,40 @@ dörtte birini dolduran bir bileşen genelde **ince bir piksel köprüsüyle
 birleşmiş iki nesnedir**. `summarise()` bunu reddedilen bileşenlerin payı
 olarak raporluyor.
 
+### 3.1 Kaynaşma kötüyse: dört çıkış yolu, maliyet sırasıyla
+
+**1. `split="watershed"` — bedava, kısmi.** *İnce köprüyle* birleşmiş nesneler
+tek bileşen ama uzaklık dönüşümünde (distance transform) iki tepe ve arada bir
+vadi; tepelerden tohumlayıp dışa doğru taşırmak onları ayırıyor.
+`SPLIT_TOUCHING = "watershed"`, indeks hücresinden itibaren yeniden koş, `fill`
+reddi sayısını karşılaştır. **Denemeden önce sınırını bilmek gerekiyor:** tam
+kenar boyunca bitişik iki dikdörtgen, daha büyük bir dikdörtgene döşenir ve
+onun uzaklık dönüşümünde **vadi yoktur**. Maske geometrisiyle çalışan hiçbir
+yöntem bunları ayıramaz. Köprü vakasını kurtarır, başka bir şeyi kurtarmaz.
+(`src/training/aerial.py:split_bridges`, ve `tests/test_aerial.py` **her iki**
+sonucu da — kurtardığını ve kurtaramadığını — ayrı ayrı test ediyor.)
+
+**2. Promptable bir öğretmeni ayırıcı olarak kullanmak — bitişik nesneleri
+ayırabilen tek yol.** SAM 2.1 zaten bu depoda (`src/training/labels.py`,
+Anti-UAV410'un kutularını maskeye çeviriyor). Her bileşenin içine bir **nokta**
+prompt'u ver, çıkan maskeyi semantik sınıfla uyuştuğu yerde kabul et: karar
+**görünüşe** göre veriliyor, maske geometrisine göre değil, yani piksel kenarı
+paylaşan iki araba ona hâlâ iki araba. Bileşen başına bir öğretmen geçişi,
+çevrimdışı ve bir kez. Henüz yazılmadı — istersen yazarım.
+
+**3. Daha sert ele, daha az veri kabul et.** `fill`, `min_area` ve sınıf başına
+bir `max_area` zaten şüphelileri atıyor; `FILL`'i 0.4'e çekmek daha fazlasını
+atar. Daha az örnek, hepsi güvenilir. En ucuzu ve çoğu zaman yeterli — 20 000
+temiz örnek, 40 000 yarı-kaynaşmış örnekten iyidir.
+
+**4. Zaten örnek veren bir set kullan, problemi hiç yaşama.** **AeroVIS** örnek
+maskesi *artı* kimlik veriyor (YTVIS biçimi) — hiç ayrıştırma yok, ve video
+olmasına rağmen kareleri statik veri olarak çalışır. **iSAID** havadan büyük
+örnek-segmentasyon seti (655 K örnek), bu aşama için RGB kabul edilebilirse.
+Kaynaşma sayısı yeterince kötüyse **asıl cevap budur**; ayrıştırma, yoğun
+*termal* havadan setlerin hepsi semantik olduğu için var, tercih edildiği için
+değil.
+
 ---
 
 ## 4. Bir batch nasıl kurulur
@@ -226,6 +260,42 @@ haritası, ve 1×1 projeksiyon herhangi iki kanal sayısını hizalar.
 **TODO'daki açık soru 2'nin cevabı bu:** evet, hedef RepViT gövdesine takılıyor,
 çünkü distilasyon kaybının öğrenci tarafı mimariden bağımsız.
 
+### Çift nereden gelecek: VTUAV'ın yeri burası
+
+Aşama A **hiç etiket okumuyor**, yani bir veri setinin anotasyonu bu aşama için
+alakasız; sadece **çift sayısı** önemli. Bu, veri seti listesini baştan sıralıyor:
+
+| kaynak | hizalı RGB-T çifti | aşama A'da kullanılır mı? |
+|---|---:|---|
+| **VTUAV** | **~1 700 000** (500 dizi, 1920×1080) | **evet — açık ara en büyüğü** |
+| MVUAV | ~53 800 | evet |
+| SegFly | 15 007 | evet |
+| Kust4K | 4 024 | evet, ve aşama B'nin seti bu |
+| *AnyThermal'ın kendi eğitim seti* | *16 943* | *ölçek için* |
+
+Yani "VTUAV maskesiz, az gelmez mi?" sorusunun cevabı tersine: **maskesiz olmak
+burada hiçbir şeye mal olmuyor, ve bu notebook'un aşama B'de eğittiği setten yüz
+kat fazla çifti var.** Kutu etiketleri ve 100 videoluk maske bölümü bu aşamanın
+okuduğu şeyler değil.
+
+VTUAV için iki ayar başka hiçbir yerde olmadığı kadar önemli, ikisi de 1920×1080
+video olmasından:
+
+- **`--crop 0.474` (= 512/1080).** 16:9 bir kareyi 512×512'ye sıkıştırmak hem en
+  boy oranını bozuyor hem de küçük bir aracı encoder'ın hiç göremeyeceği boyutun
+  altına indiriyor — yani encoder, dağıtımın hiç üretmediği görüntü
+  istatistikleriyle ön-eğitilmiş olurdu. Kırpma **her iki yarıdan aynı
+  normalize konumdaki** kareyi alıyor, böylece hizalama korunuyor; bu oranda da
+  native piksel oluyor.
+- **`--pairs`.** Kap, seti **baştan kesmiyor**, üzerine yayarak örnekliyor.
+  Videodan türeyen bir sette bu incelik değil zorunluluk: VTUAV'ın ilk 5 000
+  çifti **iki uçuş**, yani kesen bir kap iki sahnede eğitip beş bin örnek diye
+  raporlardı.
+
+Sorun etiket değil **disk**: 1.7 M kare 1920×1080'de bir Colab runtime'ına
+sığmaz. Bir alt küme indir — birkaç dizilik parça bile on binlerce çift eder ki
+bu AnyThermal'ın bütün eğitim setinin üstünde.
+
 Nereye distile ediliyor: `image_encoder`'ın en üst çıktısı — mask decoder'ın
 gerçekten tükettiği ve ONNX encoder grafiğinin ürettiği [B, 256, S/16, S/16]
 tensörü. Ara bir gövde katmanına distile etmek, decoder'ın sadece hiç
@@ -253,23 +323,34 @@ başlıyor — encoder tekrar oynamadan önce decoder yeniden uyum sağlıyor.
 
 **Ve SAM 2.1'i öğretmen yapmanın gerçekten iyi bir gerekçesi var:**
 
-| | DINOv2-base | SAM 2.1 Hiera-Large |
-|---|---|---|
-| öznitelikleri ne kodluyor | **semantik** — "bu yama araç-benzeri bir şey" | **sınıftan bağımsız sınır** — her şeyi segmentler, *ne* olduğunu bilmez |
-| hedef tensörle uyum | 768-d ViT ızgarası → 256'ya projekte | `fpn_hidden_states[-1]` **zaten** 256-d, stride 16 — birebir aynı tip |
-| öğrenciyle ilişkisi | ilgisiz model | EdgeTAM **zaten** SAM 2'nin distilasyonu; bu, aynı hedefi modalite boşluğu ekleyerek sürdürmek |
-| adım maliyeti | 518 girdi, base boyut | 1024 girdi, Hiera-Large — EdgeTAM'ın var olma sebebi olan model |
+| | **DINOv3-ViT-B/16** (varsayılan) | DINOv2-base | SAM 2.1 Hiera-Large |
+|---|---|---|---|
+| öznitelik ne kodluyor | **semantik**, ve özellikle **yoğun** olanı — sürümün bütün derdi bu | semantik | **sınıftan bağımsız sınır** — her şeyi segmentler, *ne* olduğunu bilmez |
+| 512 girdide ızgara | 512/16 = **32×32 — öğrencinin ızgarasının aynısı**, hiç yeniden örnekleme yok | 518/14 = 37×37 → 32'ye interpolasyon | 1024/16 = 64×64 → 32'ye interpolasyon |
+| hedef tensörle uyum | 768-d → 256'ya projekte | 768-d → 256'ya projekte | `fpn_hidden_states[-1]` **zaten** 256-d, stride 16 |
+| öğrenciyle ilişkisi | ilgisiz model | ilgisiz model | EdgeTAM **zaten** SAM 2'nin distilasyonu; aynı hedefi modalite boşluğu ekleyerek sürdürmek |
+| adım maliyeti | 512 girdi, base | 518 girdi, base | 1024 girdi, Hiera-Large — EdgeTAM'ın var olma sebebi olan model |
+| erişim | **kapalı (gated)** — şartları bir kez kabul et, `HF_TOKEN` ver | açık | açık |
 
-DINOv2 lehine argüman: **termal encoder'ın eksiği semantik, sınır değil** —
-soğuk arka plandaki sıcak nesne çoğu zaman RGB'den *daha kolay* bir kenar; ve
-AnyThermal'ın yayınlanmış sonucu DINOv2 distile ediyor. SAM 2.1 lehine argüman:
-üçüncü sütunun tamamı.
+**Neden artık DINOv3 varsayılan.** Bu aşamanın kopyaladığı şey **yoğun** bir
+öznitelik haritası, pozisyon pozisyon — ve yoğun öznitelik kalitesi tam olarak
+DINOv3 sürümünün konusu: selefinin eğitim ölçeklendikçe yoğun tahminde
+bozulduğu belgeli, DINOv3 bunu düzeltmek için çıktı. 16-piksel yaması ikinci ve
+daha küçük bir kazanç: 512'de 32×32 ızgara üretiyor, yani **öğrencinin
+ızgarası** — öğretmenin haritası kayıptan önce hiç yeniden örneklenmiyor.
+(AnyThermal'ın yayınlanmış sonucu DINOv2 kullanıyor; seçenek bu yüzden tek
+string uzakta duruyor ve `facebook/dinov2-base` hesap istemiyor.)
 
-**İkisi de ölçülmedi.** O yüzden argüman değil, anahtar:
+DINO öğretmeni lehine genel argüman: **termal encoder'ın eksiği semantik, sınır
+değil** — soğuk arka plandaki sıcak nesne çoğu zaman RGB'den *daha kolay* bir
+kenar. SAM 2.1 lehine argüman: dördüncü sütunun tamamı.
+
+**Hiçbiri ölçülmedi.** O yüzden argüman değil, anahtar:
 
 ```python
-TEACHER = "facebook/dinov2-base"          # varsayılan
-TEACHER = "facebook/sam2.1-hiera-large"   # ya da bu — tek satır
+TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"   # varsayılan (gated)
+TEACHER = "facebook/dinov2-base"                       # açık, hesap gerekmez
+TEACHER = "facebook/sam2.1-hiera-large"                # SAM 2'nin kendi encoder'ı
 ```
 
 `build_teacher` sınıfı **id'den** seçiyor, ayrı bir bayraktan değil: SAM 2.1

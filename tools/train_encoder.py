@@ -70,7 +70,8 @@ RATES = {
 
 
 def build_index(data: Path, spec, modality: str, gates: InstanceGates,
-                cache: Path | None, workers: int, quiet: bool = False):
+                cache: Path | None, workers: int, quiet: bool = False,
+                split: str = "none"):
     """The per-frame instance index, from cache when there is one.
 
     Decomposing every semantic map is a full pass over the dataset and produces
@@ -85,7 +86,8 @@ def build_index(data: Path, spec, modality: str, gates: InstanceGates,
         return index
 
     frames = list_frames(data, spec, modality)
-    index = index_frames(frames, spec, gates, workers=workers, progress=_tqdm())
+    index = index_frames(frames, spec, gates, workers=workers,
+                         progress=_tqdm(), split=split)
     if cache is not None:
         save_index(cache, index)
         print(f"instance index written to {cache}")
@@ -125,6 +127,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-side", type=int, default=4)
     p.add_argument("--max-area", type=float, default=0.9)
     p.add_argument("--fill", type=float, default=0.25)
+    p.add_argument("--split-touching", choices=("none", "watershed"), default="none",
+                   help="watershed splits objects joined by a thin bridge of "
+                        "pixels -- the failure the `fill` gate detects. Must "
+                        "match the index it is used with.")
     p.add_argument("--batch", type=int, default=0, help="0 measures it on this GPU.")
     p.add_argument("--batch-ceiling", type=int, default=64)
     p.add_argument("--accum", type=int, default=1)
@@ -150,7 +156,8 @@ def main(argv: list[str] | None = None) -> int:
     gates = InstanceGates(min_area=args.min_area, min_side=args.min_side,
                           max_area=args.max_area, fill=args.fill)
     index = build_index(Path(args.data), spec, args.modality, gates,
-                        Path(args.index) if args.index else None, args.workers)
+                        Path(args.index) if args.index else None, args.workers,
+                        split=args.split_touching)
     print(summarise(index, spec))
 
     # Split on frames, never on windows: two windows of one image share most of
@@ -168,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
                                    per_image=args.per_image,
                                    max_instances=args.max_instances,
                                    jitter=jitter, seed=args.seed),
-            spec=spec, gates=gates, gray=gray)
+            spec=spec, gates=gates, gray=gray, split=args.split_touching)
 
     train, val = windows("train", args.jitter), windows("val", 0)
     instances = sum(len(s.instances) for s in train.samples)
@@ -182,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
             "modality": args.modality, "base": args.base, "stage": "instances",
             "train_frames": len(splits["train"]), "train_instances": instances,
             "per_image": args.per_image, "max_instances": args.max_instances,
+            "split_touching": args.split_touching,
             "seed": args.seed}
 
     if args.method == "lora":

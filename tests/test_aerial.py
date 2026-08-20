@@ -95,6 +95,44 @@ class TestDecompose(unittest.TestCase):
         self.assertEqual(len(instances), 1)
         self.assertEqual(instances[0].box, (10.0, 10.0, 30.0, 20.0))
 
+    def test_watershed_rescues_two_cars_joined_by_a_thin_bridge(self):
+        # The case the `fill` gate detects and throws away: two blobs and a few
+        # pixels of annotation joining them. Distance-transform watershed has
+        # two peaks and a valley here, so it splits them.
+        mask = put(put(semantic(), 2, 8, 8, 24, 24), 2, 32, 8, 48, 24)
+        mask[15:17, 24:32] = 2                       # the bridge
+
+        _, fused, _ = decompose(mask, SPEC, GATES)
+        _, split, _ = decompose(mask, SPEC, GATES, split="watershed")
+
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(len(split), 2)
+        for instance in split:
+            self.assertLess(instance.width, 24)      # neither spans both blobs
+
+    def test_watershed_cannot_split_two_perfectly_abutting_rectangles(self):
+        # The honest limit, asserted rather than left to be discovered: two
+        # rectangles sharing a full edge tile into a bigger rectangle whose
+        # distance transform has no valley. No mask geometry can separate
+        # these -- only something that looks at the pixels can.
+        mask = put(put(semantic(), 2, 10, 10, 20, 20), 2, 20, 10, 30, 20)
+        _, split, _ = decompose(mask, SPEC, GATES, split="watershed")
+        self.assertEqual(len(split), 1)
+
+    def test_a_single_object_survives_watershed_unchanged(self):
+        # Over-splitting is watershed's own failure mode; one convex blob must
+        # come through as one instance or the repair costs more than it fixes.
+        mask = put(semantic(), 2, 12, 12, 30, 28)
+        _, plain, _ = decompose(mask, SPEC, GATES)
+        _, split, _ = decompose(mask, SPEC, GATES, split="watershed")
+
+        self.assertEqual(len(plain), len(split), 1)
+        self.assertEqual(plain[0].box, split[0].box)
+
+    def test_an_unknown_split_strategy_is_rejected(self):
+        with self.assertRaises(ValueError):
+            decompose(semantic(), SPEC, GATES, split="magic")
+
     def test_a_car_touching_a_person_stays_two_instances(self):
         # Why components are found per class rather than over the union of
         # things: the union would fuse these two, which is strictly worse than

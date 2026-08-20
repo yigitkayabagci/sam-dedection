@@ -21,13 +21,16 @@ if str(ROOT) not in sys.path:
 
 from src.training.distill import (  # noqa: E402
     SAM2_SIZE,
-    TEACHER_SIZE,
+    STUDENT_SIZE,
     FeatureTeacher,
     Projector,
     Sam2FeatureTeacher,
     build_teacher,
     distill_loss,
     encoder_features,
+    patch_aligned,
+    shared_window,
+    subsample,
     tokens_to_map,
 )
 from src.training.finetune import STAGES, apply_freeze  # noqa: E402
@@ -152,9 +155,14 @@ class TestTeacherChoice(unittest.TestCase):
             distill.FeatureTeacher, distill.Sam2FeatureTeacher = originals
         return seen
 
-    def test_a_dinov2_id_gets_the_vit_teacher_at_518(self):
-        seen = self.dispatch("facebook/dinov2-base")
-        self.assertEqual((seen["cls"], seen["size"]), ("vit", TEACHER_SIZE))
+    def test_a_dino_id_gets_the_vit_teacher_and_resolves_its_own_size(self):
+        # The ViT teacher reads its patch size off the loaded config, so
+        # build_teacher passes the request through untouched rather than
+        # guessing a resolution per checkpoint.
+        for model_id in ("facebook/dinov3-vitb16-pretrain-lvd1689m",
+                         "facebook/dinov2-base"):
+            seen = self.dispatch(model_id)
+            self.assertEqual((seen["cls"], seen["size"]), ("vit", None), model_id)
 
     def test_a_sam2_id_gets_sam2s_own_encoder_at_1024(self):
         for model_id in ("facebook/sam2.1-hiera-large",
@@ -190,6 +198,82 @@ class TestTeacherChoice(unittest.TestCase):
                 self.assertIn(f"self.{attribute} =", source,
                               f"{cls.__name__} never sets {attribute}")
             self.assertTrue(callable(cls.features), cls.__name__)
+
+
+class TestPatchAligned(unittest.TestCase):
+    """One rule instead of a resolution constant per checkpoint."""
+
+    def test_a_16_pixel_patch_lands_exactly_on_the_students_grid(self):
+        # 512 / 16 = 32, and the student's grid at 512 is 32x32 -- so DINOv3's
+        # map is never resampled before the loss.
+        self.assertEqual(patch_aligned(STUDENT_SIZE, 16), 512)
+        self.assertEqual(patch_aligned(STUDENT_SIZE, 16) // 16, 32)
+
+    def test_a_14_pixel_patch_lands_on_dinov2s_native_518(self):
+        self.assertEqual(patch_aligned(STUDENT_SIZE, 14), 518)
+
+    def test_an_exact_multiple_is_left_alone(self):
+        self.assertEqual(patch_aligned(224, 16), 224)
+
+    def test_it_always_rounds_up_never_down(self):
+        for size in range(500, 530):
+            for patch in (14, 16):
+                self.assertGreaterEqual(patch_aligned(size, patch), size)
+                self.assertEqual(patch_aligned(size, patch) % patch, 0)
+
+
+class TestSharedWindow(unittest.TestCase):
+    """The crop that keeps a registered pair registered."""
+
+    def test_the_same_placement_lands_on_the_same_fraction_of_each_half(self):
+        # A 1920x1080 thermal half and a 960x540 RGB half of the same scene
+        # must be cropped to the same piece of the world, not the same pixels.
+        big = shared_window((1080, 1920), (0.5, 0.5), 0.5)
+        small = shared_window((540, 960), (0.5, 0.5), 0.5)
+        self.assertEqual(big[1][0], 2 * small[1][0])
+        self.assertEqual(big[0][0], 2 * small[0][0])
+
+    def test_the_window_is_square_and_inside_the_frame(self):
+        for place in ((0.0, 0.0), (0.5, 0.5), (1.0, 1.0)):
+            (x0, y0), (w, h) = shared_window((1080, 1920), place, 0.474)
+            self.assertEqual(w, h)
+            self.assertGreaterEqual(x0, 0)
+            self.assertGreaterEqual(y0, 0)
+            self.assertLessEqual(x0 + w, 1920)
+            self.assertLessEqual(y0 + h, 1080)
+
+    def test_the_documented_vtuav_fraction_gives_native_pixels(self):
+        # 512/1080: a 512-pixel window of a 1080-tall frame, resized to 512 --
+        # which is no resize at all.
+        _, (side, _) = shared_window((1080, 1920), (0.3, 0.7), 512 / 1080)
+        self.assertEqual(side, 512)
+
+    def test_a_scale_of_one_is_the_largest_square_that_fits(self):
+        _, (side, _) = shared_window((1080, 1920), (0.5, 0.5), 1.0)
+        self.assertEqual(side, 1080)
+
+
+class TestSubsample(unittest.TestCase):
+    def test_it_spreads_across_the_set_instead_of_truncating(self):
+        # The bug this replaces: the first 5 000 pairs of VTUAV are two
+        # flights, and a run capped that way trains on two scenes while
+        # reporting five thousand samples.
+        pairs = list(range(10_000))
+        picked = subsample(pairs, 100, seed=0)
+
+        self.assertEqual(len(picked), 100)
+        self.assertGreater(max(picked), 9_000)
+        self.assertLess(min(picked), 1_000)
+
+    def test_order_is_preserved_so_a_run_stays_reproducible(self):
+        picked = subsample(list(range(1000)), 50, seed=1)
+        self.assertEqual(picked, sorted(picked))
+        self.assertEqual(picked, subsample(list(range(1000)), 50, seed=1))
+
+    def test_asking_for_everything_or_more_returns_everything(self):
+        pairs = list(range(20))
+        self.assertEqual(subsample(pairs, None), pairs)
+        self.assertEqual(subsample(pairs, 50), pairs)
 
 
 class TestProjector(unittest.TestCase):
