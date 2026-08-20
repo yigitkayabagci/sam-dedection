@@ -26,6 +26,7 @@ are bound.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -35,6 +36,7 @@ from pathlib import Path
 
 CELLS: list[tuple[str, str]] = []
 TAGS: dict[str, int] = {}
+STAMP_VALUE = "unstamped"
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,8 @@ def resolve(text: str) -> str:
     substitutions = {**{t: str(i) for t, i in TAGS.items()},
                      "TITLE": V.title, "BLURB": V.blurb,
                      "DATASETS": V.datasets, "FETCH": V.fetch,
-                     "MIRROR": V.mirror, "SIBLING": SIBLING[V.key]}
+                     "MIRROR": V.mirror, "SIBLING": SIBLING[V.key],
+                     "NOTEBOOK": Path(V.path).name, "STAMP": STAMP_VALUE}
     for tag, value in substitutions.items():
         text = text.replace("{{" + tag + "}}", value)
     leftover = re.findall(r"\{\{(\w+)\}\}", text)
@@ -334,12 +337,40 @@ if not REPO.exists():
 os.chdir(REPO)
 sys.path.insert(0, str(REPO))
 
+# Drop this repo's modules so the fast-forward above actually takes effect.
+# `git pull` changes files on disk; it cannot change a module Python already
+# imported, so re-running a later cell after an update quietly keeps running
+# the old code -- which looks exactly like the fix not working. (Safe here:
+# these are pure Python. The same move on torch is not -- see the cell below.)
+for _stale in [n for n in list(sys.modules) if n.split(".")[0] in ("src", "tools")]:
+    del sys.modules[_stale]
+
 # Image mode holds fewer, larger activations than clip mode; the allocator
 # still fragments across the batch-size search, and this costs nothing.
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 !nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 !df -h /content | tail -1
+
+# --- Is this notebook the one the repo expects? -------------------------
+# The repo just fast-forwarded itself; the .ipynb is a file you uploaded, and
+# the two drift apart silently. When they do you hit bugs that were fixed
+# upstream days ago, and the traceback points at a line the repo no longer
+# contains -- which is a genuinely confusing hour. This says so at cell 1.
+import json as _json
+NOTEBOOK = "{{NOTEBOOK}}"
+STAMP    = "{{STAMP}}"
+_stamps  = REPO / "notebooks" / ".stamps.json"
+_want    = _json.loads(_stamps.read_text()).get(NOTEBOOK) if _stamps.is_file() else None
+if _want and _want != STAMP:
+    print("\n" + "=" * 74)
+    print(f"!!  STALE NOTEBOOK -- this file is build {STAMP}, the repo ships {_want}")
+    print( "!!  Every cell below is the old version. Re-download and re-upload:")
+    print(f"!!    https://github.com/yigitkayabagci/sam-dedection/raw/{BRANCH}/notebooks/{NOTEBOOK}")
+    print( "!!  (In Colab: File > Upload notebook, or Runtime > Disconnect first.)")
+    print("=" * 74 + "\n")
+else:
+    print(f"notebook build {STAMP} matches the repo")
 """)
 
 # ---------------------------------------------------------------- 1b
@@ -383,7 +414,7 @@ else:
 code(r"""
 # --- Dependencies -------------------------------------------------------
 # EdgeTAM installs itself *as* the package `sam2` -- it is a fork -- so Meta's
-# sam2 must never share this environment. The DINOv2 teacher goes through
+# sam2 must never share this environment. The DINOv3 teacher goes through
 # transformers, which is independent of both.
 before = torch.__version__
 !bash scripts/setup_edgetam.sh 2>&1 | tail -5
@@ -396,15 +427,56 @@ before = torch.__version__
 # The one thing an install here must not do. EdgeTAM's setup.py declares a
 # torch floor, and on a card newer than any wheel on PyPI a "helpful"
 # reinstall is how a working runtime stops working.
-import importlib, torch as _t
-importlib.reload(_t)
-assert _t.__version__ == before, (
-    f"torch changed from {before} to {_t.__version__} during install. "
-    f"Restore the Colab build (see the CUDA check above), restart, and re-run.")
+#
+# Read the version off *disk*. Reloading the module cannot work: re-running
+# torch/__init__.py re-registers its `triton` TORCH_LIBRARY namespace, which
+# C++ refuses outright -- so `importlib.reload(torch)` raises whether or not
+# anything is wrong, which is the worst possible behaviour for a safety check.
+# Disk is also the right thing to read, because pip cannot change the torch
+# already live in this kernel; only a restart can. That is exactly the window
+# this check exists to catch.
+import importlib.metadata as _md
+installed = _md.version("torch")
+assert installed == before, (
+    f"pip replaced torch {before} with {installed} on disk.\n"
+    f"This kernel is still running {before}, so nothing has broken yet -- but "
+    f"restarting would load a build that may have no kernels for this GPU.\n"
+    f"Restore the Colab build *before* restarting:\n"
+    f"    !pip install -q --force-reinstall torch=={before}")
+
+# setup_edgetam.sh installs EdgeTAM with `pip install -e`, and an editable
+# install is a .pth file in site-packages -- which site.py reads at interpreter
+# *startup* only. A package installed into a kernel that is already running
+# therefore never joins sys.path: `import sam2` raises ModuleNotFoundError with
+# the install sitting on disk two directories away, and `invalidate_caches()`
+# does not help because the path entry was never added. Restarting the runtime
+# would fix it and cost the GPU session and every download in it. Pointing
+# sys.path at the checkout fixes it now.
+#
+# Placed *after* the repo, not at the front: EdgeTAM's own top level carries
+# `tools/`, `notebooks/` and `examples/`, and so does this repo. Ours would win
+# anyway -- a regular package beats a namespace portion -- but ordering means
+# that does not have to be true.
+import importlib
+EDGETAM = REPO / "third_party" / "EdgeTAM"
+if str(EDGETAM) not in sys.path:
+    sys.path.insert(sys.path.index(str(REPO)) + 1 if str(REPO) in sys.path else 0,
+                    str(EDGETAM))
+importlib.invalidate_caches()
 
 import sam2, transformers
 print(f"sam2 (EdgeTAM) {Path(sam2.__file__).parent}\ntransformers {transformers.__version__}")
-assert Path("third_party/EdgeTAM/checkpoints/edgetam.pt").is_file(), \
+
+# The premise of the cell above, checked rather than trusted: the `sam2` that
+# imported has to be the EdgeTAM checkout this repo patched, not Meta's package
+# under the same name. If both are present the wrong one loads silently and
+# fails much later, inside the model.
+_from = Path(sam2.__file__).resolve().parent.parent
+assert _from == EDGETAM.resolve(), (
+    f"`sam2` imported from {_from}, not the EdgeTAM checkout at {EDGETAM}.\n"
+    f"Meta's sam2 is probably installed alongside it: `pip uninstall -y sam2 "
+    f"SAM-2` and re-run this cell.")
+assert (EDGETAM / "checkpoints" / "edgetam.pt").is_file(), \
     "edgetam.pt did not download -- rerun scripts/setup_edgetam.sh and read its output"
 """)
 
@@ -596,6 +668,19 @@ are served in a way that defeats the obvious approach:
 
 Downloads resume, and each archive is deleted once extracted, which halves the
 peak disk this needs.
+
+**If Drive refuses VTUAV** — *"Too many users have viewed or downloaded this
+file recently"* — that is a quota on **who is asking**, not on the file. Colab
+shares its egress addresses with a great many people, so the same archive can
+serve fine elsewhere while a Colab session is refused it. The fetcher retries
+and tries a second route before giving up, and prints three ways out. The
+reliable one: open the
+[mask-split folder](https://drive.google.com/drive/folders/11E-WPkCPVL49hOKRdCzfgQULmGU8pyz8),
+right-click `train_001.zip` → **Make a copy**, move the copy into
+`MyDrive/datasets/`, and re-run this cell. Copying is server-side and is not a
+download, so no quota applies — and neither does one to reading your own file
+through the mount. The cell looks in `MyDrive/datasets/` **before** it touches
+the network, so a staged copy is used as-is and never re-downloaded.
 """)
 
 # ---------------------------------------------------------------- 7
@@ -1123,10 +1208,33 @@ at 1920×1080:
 
 The catch is disk, not labels: 1.7 M frames at 1920×1080 is far more than a
 Colab runtime holds, and the mask split alone is ~120 GB across its eight
-archives. That is why `FETCH` asks for `train_001` and stops — 8.5 GB, 14
-sequences, 26 059 pairs, which is already above AnyThermal's whole training
-set. Add `"train_002"` to the list if you want more; the download cell takes
-any subset of the eight.
+archives. `FETCH` therefore asks for `train_001` and stops — 9.1 GB, 14
+sequences, 26 059 pairs, already above AnyThermal's whole training set and
+enough to saturate stage A on its own (`DISTILL_PAIRS = 20 000`).
+
+**For stage B, one archive is not enough, and the reason is not its size.**
+Reading the three training archives' listings, the target kinds are badly
+unevenly spread:
+
+| archive | | sequences | masks | targets |
+|---|---:|---:|---:|---|
+| `train_001` | 9.1 GB | 14 | 875 | bike 1, bus 4, c-vehicle 1, car 8 |
+| `train_002` | 16.1 GB | 18 | 1 408 | car 4, elebike 3, excavator 2, pedestrian 9 |
+| `train_003` | 17.9 GB | 18 | 1 778 | pedestrian 15, train 1, tricycle 1, truck 1 |
+
+`train_001` **has no pedestrians in it at all.** On its own it teaches that a
+target is a vehicle, which for a drone tracker is a hole rather than a bias.
+
+It also decides what a held-out number is worth. 14 sequences split 11/2/1, so
+`test` is a **single flight** and its quirks dominate any comparison between two
+runs — which is the entire point of running this notebook against its sibling.
+All three archives give 50 sequences and a 40/5/5.
+
+So add them to `FETCH` if the Drive space is there:
+`("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS", ["train_001", "train_002", "train_003"])`.
+If only one more fits, make it `train_003` — the most masks and the most
+pedestrians. With all three, raising `DISTILL_PAIRS` past 20 000 starts to buy
+something too; on `train_001` alone it does not.
 
 ### "We are a SAM-based model. Doesn't a DINO teacher break that?"
 
@@ -1565,6 +1673,16 @@ so that stage needs its own entry in `STAGES` before it can start.
 
 
 def build() -> dict:
+    # Hashed *before* substitution, so `{{STAMP}}` is still a literal in the
+    # text being hashed and the stamp does not depend on itself. Any change to
+    # any cell -- prose included -- gives a new one.
+    global STAMP_VALUE
+    body = "\n".join(f"{kind}\n{text}" for kind, text in CELLS)
+    # The variant's own fields go in too: they are still `{{placeholders}}` in
+    # the text above, so without them both notebooks would stamp identically
+    # and a swapped pair would look correct.
+    body += "\n".join((V.key, V.title, V.blurb, V.datasets, V.fetch, V.mirror))
+    STAMP_VALUE = hashlib.sha256(body.encode()).hexdigest()[:10]
     return {
         "cells": [
             {"cell_type": kind,
@@ -1589,8 +1707,17 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         out = repo / V.path
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(build(), indent=1, ensure_ascii=False) + "\n")
-        print(f"wrote {out.relative_to(repo)} with {len(CELLS)} cells")
+        document = build()
+        out.write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
+
+        # Read-modify-write: each variant is built in its own process, so
+        # overwriting here would leave the file holding only the last one.
+        stamps = repo / "notebooks" / ".stamps.json"
+        known = json.loads(stamps.read_text()) if stamps.is_file() else {}
+        known[out.name] = STAMP_VALUE
+        stamps.write_text(json.dumps(known, indent=1, sort_keys=True) + "\n")
+        print(f"wrote {out.relative_to(repo)} with {len(CELLS)} cells "
+              f"[{STAMP_VALUE}]")
     else:
         # Re-run per variant rather than rebuilding in-process: the cells above
         # are emitted at import time against a single `V`, and a second pass in

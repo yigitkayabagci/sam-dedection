@@ -29,11 +29,14 @@ if str(ROOT) not in sys.path:
 from src.training.aerial import SPECS  # noqa: E402
 from tools.fetch_datasets import (  # noqa: E402
     KUST4K,
+    STAGING,
     RECIPES,
     VTUAV_VIS,
+    drive_download,
     extract,
     human,
     masked_members,
+    staged,
 )
 
 
@@ -161,6 +164,68 @@ class TestExtract(unittest.TestCase):
             # And the spec's glob finds it from the dataset root.
             self.assertEqual(
                 len(list((root / "out").glob(SPECS["kust4k"].thermal))), 2)
+
+
+class TestStagedCopy(unittest.TestCase):
+    """The escape hatch from Drive's download quota.
+
+    "Too many users have viewed or downloaded this file recently" is about who
+    is asking, not about the file: Colab shares its egress addresses with a
+    great many people, and the same archive served fine from elsewhere while a
+    Colab session was being refused it. Copying the file into your own Drive
+    turns a widely-shared file into your own, and reading your own has no
+    shared-file quota -- so the fetcher looks for a staged copy before it
+    touches the network.
+    """
+
+    def test_a_staged_archive_is_found_by_part_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "train_001.zip").write_bytes(b"x" * (2 << 20))
+            self.assertIsNotNone(staged("train_001", [tmp]))
+            self.assertIsNone(staged("train_002", [tmp]))
+
+    def test_a_stub_too_small_to_be_the_archive_is_ignored(self):
+        # A half-finished copy, or Drive's HTML refusal saved under the right
+        # name, would otherwise be extracted as if it were the dataset.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "train_001.zip").write_bytes(b"<html>quota</html>")
+            self.assertIsNone(staged("train_001", [tmp]))
+
+    def test_the_first_folder_that_has_it_wins(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            (Path(b) / "train_001.zip").write_bytes(b"x" * (2 << 20))
+            self.assertEqual(staged("train_001", [a, b]), Path(b) / "train_001.zip")
+
+    def test_a_missing_folder_is_not_an_error(self):
+        self.assertIsNone(staged("train_001", ["/nowhere/at/all"]))
+
+    def test_the_default_search_starts_in_the_colab_drive_mount(self):
+        self.assertTrue(STAGING[0].startswith("/content/drive/"))
+
+
+class TestQuotaMessage(unittest.TestCase):
+    def test_giving_up_explains_all_three_ways_out(self):
+        # The failure the user actually hits, and the one place they will read
+        # about it. An id that cannot resolve exercises the same path.
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as caught:
+                drive_download("0" * 25, Path(tmp) / "x.zip", quiet=True,
+                               attempts=1)
+        text = str(caught.exception)
+        self.assertIn("Make a copy", text)          # 1: your own Drive
+        self.assertIn("few hours", text)            # 2: wait
+        self.assertIn("PRETRAIN", text)             # 3: what dropping it costs
+        self.assertIn("gdown", text)                # both routes reported
+        self.assertIn("direct", text)
+
+    def test_both_routes_are_tried_before_giving_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError) as caught:
+                drive_download("0" * 25, Path(tmp) / "x.zip", quiet=True,
+                               attempts=2)
+        text = str(caught.exception)
+        for attempt in ("gdown #1", "direct #1", "gdown #2", "direct #2"):
+            self.assertIn(attempt, text)
 
 
 class TestHuman(unittest.TestCase):

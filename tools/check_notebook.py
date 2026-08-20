@@ -38,28 +38,18 @@ AMBIENT = {"get_ipython", "In", "Out", "exit", "quit", "display", "_", "__"}
 
 
 class Scope(ast.NodeVisitor):
-    """Names one statement binds, and names it uses -- split by when they run.
+    """Names a cell binds, and names it uses at module level.
 
     Bindings are collected from everywhere -- including inside functions and
     branches -- because a notebook's namespace keeps whatever ran. Uses are
     collected the same way, and the ones a comprehension or a function
     parameter introduced are subtracted, since those never escape.
-
-    Uses are split in two, because they fail at two different times. A name
-    inside a `def` or a `lambda` body runs when the function is *called*, so
-    anything the cell binds later is fair game (`deferred`). Everything else
-    runs the moment its statement does (`immediate`), and for those "bound
-    somewhere in this cell" is not enough -- the settings cell of notebook 07
-    once used `INDEX` in a mkdir loop three lines above the line that defined
-    it, and this checker, then cell-scoped, waved it through.
     """
 
     def __init__(self) -> None:
         self.bound: set[str] = set()
-        self.used: list[tuple[str, int]] = []          # runs later, if at all
-        self.immediate: list[tuple[str, int]] = []     # runs with the statement
+        self.used: list[tuple[str, int]] = []
         self.local: set[str] = set()
-        self._deferred = 0
 
     # -- bindings ---------------------------------------------------------
     def visit_FunctionDef(self, node):
@@ -67,11 +57,7 @@ class Scope(ast.NodeVisitor):
         for argument in ast.walk(node.args):
             if isinstance(argument, ast.arg):
                 self.local.add(argument.arg)
-        self._deferred += 1
-        try:
-            self.generic_visit(node)
-        finally:
-            self._deferred -= 1
+        self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -79,11 +65,7 @@ class Scope(ast.NodeVisitor):
         for argument in ast.walk(node.args):
             if isinstance(argument, ast.arg):
                 self.local.add(argument.arg)
-        self._deferred += 1
-        try:
-            self.generic_visit(node)
-        finally:
-            self._deferred -= 1
+        self.generic_visit(node)
 
     def visit_ClassDef(self, node):
         self.bound.add(node.name)
@@ -115,10 +97,27 @@ class Scope(ast.NodeVisitor):
     def visit_Name(self, node):
         if isinstance(node.ctx, (ast.Store, ast.Del)):
             self.bound.add(node.id)
-        elif self._deferred:
-            self.used.append((node.id, node.lineno))
         else:
-            self.immediate.append((node.id, node.lineno))
+            self.used.append((node.id, node.lineno))
+
+
+class ModuleScope(Scope):
+    """`Scope`, but blind to what happens inside a function body.
+
+    For the ordering check only. A function may refer to a global defined
+    further down the cell -- the name is looked up when it is *called*, not
+    where it is written -- so descending into the body would report uses that
+    Python is perfectly happy with. A class body is different: it runs where it
+    is written, so `Scope`'s handling of it is kept.
+    """
+
+    def visit_FunctionDef(self, node):
+        self.bound.add(node.name)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        pass
 
 
 def strip_magics(source: str) -> tuple[str, list[tuple[str, int]]]:
@@ -160,32 +159,35 @@ def check(path: Path) -> list[str]:
             problems.append(f"cell {index}: syntax error at line {exc.lineno}: {exc.msg}")
             continue
 
-        # Statement by statement, because the cell runs that way. An immediate
-        # use may lean on earlier cells, on earlier statements of this one, or
-        # on its own statement's bindings -- a `for` target, a loop-carried
-        # name -- but not on a binding that has not happened yet. A deferred
-        # use (inside a `def` or `lambda`) runs after the whole cell has, so
-        # for those anything the cell binds anywhere counts, which is also the
-        # rule for the names a shell line interpolates.
-        cell_bound: set[str] = set()
-        deferred: list[tuple[str, int]] = []
-        cell_local: set[str] = set()
-        for statement in tree.body:
-            scope = Scope()
-            scope.visit(statement)
-            for name, line in scope.immediate:
-                if (name not in known and name not in cell_bound
-                        and name not in scope.bound and name not in scope.local):
-                    problems.append(f"cell {index}, line {line}: {name!r} is "
-                                    f"used before anything defines it")
-            deferred += [(n, l) for n, l in scope.used if n not in scope.local]
-            cell_bound |= scope.bound
-            cell_local |= scope.local
-        for name, line in deferred + interpolated:
-            if name not in known and name not in cell_bound and name not in cell_local:
+        scope = Scope()
+        scope.visit(tree)
+        # Every name the cell binds is available to the whole cell, the way a
+        # notebook namespace behaves once the cell has run.
+        for name, line in scope.used + interpolated:
+            if name not in known and name not in scope.bound and name not in scope.local:
                 problems.append(f"cell {index}, line {line}: {name!r} is not "
                                 f"defined by any earlier cell")
-        known |= cell_bound
+
+        # ...but the cell still has to survive its own first run, top to
+        # bottom, and the loop above cannot see that: it treats a name assigned
+        # on the last line as available on the first. That is the namespace
+        # *after* the cell, not during it. Shipped exactly that way once -- a
+        # `mkdir` loop over a path the next statement went on to define -- and
+        # this file reported the notebook clean.
+        ready = set(known)
+        for statement in tree.body:
+            here = ModuleScope()
+            here.visit(statement)
+            for name, line in here.used:
+                # `name in scope.bound` keeps this to genuine ordering faults:
+                # a name nothing in the cell binds was already reported above.
+                if (name in scope.bound and name not in ready
+                        and name not in here.bound and name not in here.local):
+                    problems.append(
+                        f"cell {index}, line {line}: {name!r} is used before "
+                        f"the line that assigns it")
+            ready |= here.bound
+        known |= scope.bound
     return problems
 
 
