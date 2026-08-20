@@ -14,7 +14,7 @@ veremez.
 
 | Veri seti | Yıl · Yayın | Neden |
 |---|---|---|
-| [Kust4K](https://figshare.com/articles/dataset/_b_Kust4K_b_b_b_b_A_Large-scale_Multimodal_UAV_Dataset_for_Robust_Urban_Traffic_Scenes_Semantic_Segmentation_b_/29476610) ([makale](https://www.nature.com/articles/s41597-025-05994-7)) | 2025 · Sci. Data | 4 024 hizalı RGB-TIR çifti, **640×512** — projenin native çözünürlüğü, 8 sınıf |
+| [Kust4K](https://figshare.com/articles/dataset/_b_Kust4K_b_b_b_b_A_Large-scale_Multimodal_UAV_Dataset_for_Robust_Urban_Traffic_Scenes_Semantic_Segmentation_b_/29476610) ([makale](https://www.nature.com/articles/s41597-025-05994-7)) | 2025 · Sci. Data | 4 024 hizalı RGB-TIR çifti (2 514 gündüz / 1 510 gece), **640×512** — projenin native çözünürlüğü, **9 sınıf**. Palet arşivin kendi `visual.py`'sinden okundu ve gerçek indirmeye karşı uçtan uca doğrulandı; makaleden tahmin edilen eski palet **yanlıştı** (aşağıya bak) |
 | [MVUAV](https://jiwei0921.github.io/MVUAV) ([NeurIPS](https://proceedings.neurips.cc/paper_files/paper/2024/hash/78e839f96568985d18463044a064ea0f-Abstract-Conference.html)) | 2024 · NeurIPS | 413 havadan RGB-T video, 53 828 kare, 2 183 etiketli kare, 36 sınıf, gündüz/gece |
 | [Caltech Aerial RGB-T](https://github.com/aerorobotics/caltech-aerial-rgbt-dataset) | 2024 · ECCV | 37 çekim (18'i havadan), 4 195 yoğun maske, FLIR ADK **640×512**, GPS+IMU senkron |
 | [AeroVIS / AeroTrack](https://github.com/Dmygithub/AeroTrack) | 2026 · arXiv | 117 video / 49 204 kare, **örnek maskesi + kimlik izi** (8 279 iz) — EdgeTAM'ın çıktı tipine en yakın set |
@@ -86,6 +86,69 @@ Güvenli kurulum: Kust4K + MVUAV'da eğitip J&F'i AeroVIS'te ölçmek.
 
 **Not:** Ham listedeki figshare bağlantısı ile Nature Scientific Data
 makalesi **aynı veri setidir** (Kust4K); tek satıra indirildi.
+
+## İndirme: hepsi otomatik
+
+`tools/fetch_datasets.py` üç setin de bağlantısını içinde taşıyor; Drive'a elle
+arşiv koymak gerekmiyor. Notebook 07 ve 08 bu dosyayı çağırıyor.
+
+```
+python tools/fetch_datasets.py kust4k    --dest /content/data/Kust4K
+python tools/fetch_datasets.py vtuav_vis --dest /content/data/VTUAV_VIS
+python tools/fetch_datasets.py segfly    --dest /content/data/SegFly
+```
+
+Her bağlantı **canlı sunucuda** doğrulandı, çünkü üçü de "bariz" yöntemi
+kıracak şekilde sunuluyor:
+
+| Set | Bariz yöntem neden çalışmıyor | Ne kullanılıyor |
+|---|---|---|
+| **Kust4K** | Makale sayfasındaki `ndownloader/articles/29476610/versions/3` bağlantısı **HTTP 202 + boş gövde** dönüyor: figshare zip'i *o an üretmeye başlıyor* ve dosya var olmadan yanıt veriyor. İndirici sıfır baytlık dosya yazıp "başarılı" diyor | Dosya bazlı uç noktalar (`ndownloader.figshare.com/files/<id>`) — hazır, range isteğine 206 dönüyor, yayıncının md5'i ile geliyor. Sadece termal isteniyorsa 1,66 GB'lık `RGB.zip` atlanabiliyor |
+| **VTUAV** | Maske bölümü bir Drive **klasörü** ve içindeki zip'ler 8–17 GB. Birkaç yüz MB'ın üstünde Drive dosyayı değil, "virüs taraması yapılamıyor" formunu sunuyor — üstelik 200 koduyla. `curl` bu HTML'i diske yazıyor | `gdown`, formu yeniden gönderiyor |
+| **SegFly** | HF'de parquet, klasör değil — spec'in glob'ları hiçbir şey bulamıyor | `tools/export_hf_dataset.py` PNG düzenine çeviriyor |
+
+Arşivler indirildikten sonra siliniyor (tepe disk yarıya iniyor), indirmeler
+kaldığı yerden devam ediyor, md5 olan yerde doğrulanıyor.
+
+**Kust4K arşivleri düz:** `TIR.zip`, `Seg_annos.zip` ve `RGB.zip`'in üçü de
+aynı 4 024 dosya adını en üst seviyede taşıyor. Yan yana açılsalar birbirlerini
+ezerlerdi; fetcher her birini kendi klasörüne (`tir/`, `label/`, `rgb/`) açıyor.
+
+**VTUAV maske bölümü** sekiz zip: `training/train_001..003` ve
+`test/test_001..005`, toplam ~120 GB. Varsayılan sadece `train_001` (8,5 GB) —
+14 dizi, 26 059 kayıtlı çift, 875 RGB maskesi. Zip'in içi:
+`bike_009/rgb/000000.jpg`, `bike_009/mask/rgb/000000.png`; maskeler
+**modalite başına ayrı klasörde** ve her 30. karede bir, değerler `{0, 255}`.
+
+## İki palet yanlıştı — ikisi de aynı sebeple
+
+Hem Kust4K hem SegFly için palet önce makaleden tahmin edilmişti ve ikisi de
+yanlış çıktı. Sonuç ikisinde de aynı: **`things` yanlış sınıfları seçiyor**,
+yani model bir prompt'a çalıyla cevap vermeyi öğreniyor.
+
+| | Tahmin | Gerçek | Sonuç |
+|---|---|---|---|
+| **Kust4K** | 3 = vegetation varsayıldı | Böyle bir sınıf yok; id 3 = **motorcycle** | Üstündeki her id bir kaydı, id 8'e yer kalmadı. `things` id 6'yı (= **tree**) aldı, id 3'ü (**motorcycle**) kaçırdı |
+| **SegFly** | id'ler ardışık varsayıldı | id'ler **boşluklu** | Grass / Vegetation / Tree / Ground Obstacle takip hedefi oldu |
+
+Kust4K'nın doğru paleti (arşivdeki `visual.py` → `get_palette()`, dizideki sıra
+= sınıf id'si):
+
+```
+0 unlabelled   1 road    2 building   3 motorcycle   4 car
+5 truck        6 tree    7 human      8 traffic_facilities
+```
+
+`things = (motorcycle, car, truck, human)` → id `{3, 4, 5, 7}`.
+
+Gerçek indirmede doğrulandı: 4 024 karenin hepsi eşleşiyor, 60 örneklenen
+haritada palet dışı **tek bir değer yok**, dört "şey" sınıfının dördü de
+mevcut. Ayrıca frekanslar da paleti destekliyor — id 6 kırk kareden 40'ında
+görünüyor, ki bu *tree*'ye uyuyor, *truck*'a değil.
+
+Ders: **paleti ezberden yazma.** İkisi de makul görünen tahminlerdi.
+`probe_classes` indirilen maskelerde gerçekten hangi değerlerin olduğunu
+söylüyor; notebook'ların bunun için bir hücresi var.
 
 ## Mevcut referans
 

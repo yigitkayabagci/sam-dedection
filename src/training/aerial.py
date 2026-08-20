@@ -20,10 +20,10 @@ data we have:
    time.** Per class, not over the union: a car touching a pedestrian would
    otherwise merge into one component spanning two classes, which is worse than
    the problem being solved.
-2. **Keep only the "thing" classes.** Kust4K labels eight, of which four are
-   trackable objects (motorcycle, car, truck, person). Road, building and
-   vegetation are "stuff" -- they have no instances and are not tracking
-   targets, so a component of them is not a training example.
+2. **Keep only the "thing" classes.** Kust4K labels nine, of which four are
+   trackable objects (motorcycle, car, truck, human). Road, building, tree and
+   traffic facilities are "stuff" -- they have no instances and are not
+   tracking targets, so a component of them is not a training example.
 3. **Gate what survives** (`InstanceGates`). Too small to be a target, too
    large to be an object, a sliver whose bounding box it barely fills -- each
    is a reason to distrust the component, and `decompose` reports which gate
@@ -50,6 +50,7 @@ torch are imported inside the three functions that touch pixels.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -101,6 +102,26 @@ class DatasetSpec:
             raise ValueError(f"{self.name} has no {modality} images.")
         return pattern
 
+    def mask_glob(self, modality: str) -> str:
+        """The mask glob for `modality`.
+
+        VTUAV annotates each modality separately -- `mask/ir` and `mask/rgb`,
+        875 and 874 files -- so one pattern for both would glob the two into a
+        single dict where they collide frame for frame. A `{modality}`
+        placeholder is filled with the directory name that modality's *images*
+        live in, which keeps the two halves from ever being mixed. Sets with
+        one mask directory have no placeholder and are returned unchanged.
+        """
+        if "{modality}" not in self.masks:
+            return self.masks
+        folders = [p for p in self.glob(modality).split("/")[:-1] if "*" not in p]
+        if not folders:
+            raise ValueError(
+                f"{self.name}: masks={self.masks!r} needs a modality directory, "
+                f"but {modality} images are globbed as {self.glob(modality)!r}, "
+                f"which names none.")
+        return self.masks.format(modality=folders[-1])
+
     @property
     def thing_ids(self) -> tuple[int, ...]:
         missing = [t for t in self.things if t not in self.classes]
@@ -120,17 +141,36 @@ class DatasetSpec:
 # `probe_classes` on the extracted masks before training and fix the spec with
 # `dataclasses.replace` if the values differ. The notebook does exactly that.
 SPECS: dict[str, DatasetSpec] = {
-    # 4 024 registered RGB-TIR pairs at 640x512, 8 classes (Sci. Data 2025).
-    # 640x512 is the project's native resolution: a 512 window is a crop, not a
-    # resize, and it is the same input the Orin deployment feeds the model.
+    # 4 024 registered RGB-TIR pairs at 640x512 (2 514 day / 1 510 night),
+    # 9 classes (Sci. Data 2025). 640x512 is the project's native resolution: a
+    # 512 window is a crop, not a resize, and it is the same input the Orin
+    # deployment feeds the model.
+    #
+    # **The palette is the authors' own `visual.py`, not a reading of the
+    # paper**, because an earlier version of this spec was wrong from id 3 on:
+    # it assumed a `vegetation` class at 3 that does not exist, which shifted
+    # every id after it by one and left no room for id 8 at all. The effect was
+    # the same class of bug as the SegFly one below -- `things` picked up id 6,
+    # which is **tree**, and missed id 3, which is **motorcycle**. Two
+    # independent checks agree on the list below: `get_palette()` in the
+    # archive's `visual.py`, and the value frequencies in `Seg_annos.zip`
+    # (id 6 appears in 36 of 41 sampled frames, which fits tree and not truck;
+    # id 8 appears in 30, and the old palette had no id 8).
+    #
+    # The three archives are **flat** -- `00001D.png` at the top level of each,
+    # no directories -- so `tools/fetch_datasets.py` extracts them into the
+    # `tir/`, `rgb/` and `label/` folders these globs expect. The `D`/`N` in a
+    # stem is day/night, and the same stem names the frame in all three.
     "kust4k": DatasetSpec(
         name="kust4k",
         thermal="**/tir/*.png",
         rgb="**/rgb/*.png",
         masks="**/label/*.png",
-        classes={"background": 0, "road": 1, "building": 2, "vegetation": 3,
-                 "motorcycle": 4, "car": 5, "truck": 6, "person": 7},
-        things=("motorcycle", "car", "truck", "person"),
+        classes={"unlabelled": 0, "road": 1, "building": 2, "motorcycle": 3,
+                 "car": 4, "truck": 5, "tree": 6, "human": 7,
+                 "traffic_facilities": 8},
+        things=("motorcycle", "car", "truck", "human"),
+        ignore=(0,),
     ),
     # >15 000 geometrically aligned RGB-T pairs at 640x512 thermal, plus
     # >20 000 RGB-only frames, over three altitudes (30/40/50 m). ECCV 2026.
@@ -177,7 +217,7 @@ SPECS: dict[str, DatasetSpec] = {
         name="vtuav",
         thermal="**/ir/*.jpg",
         rgb="**/rgb/*.jpg",
-        masks="**/mask/*.png",
+        masks="**/mask/{modality}/*.png",
         classes={"background": 0, "target": 255},
         things=("target",),
     ),
@@ -198,16 +238,43 @@ SPECS: dict[str, DatasetSpec] = {
     # misregistered pair means the teacher looked somewhere the student did not
     # (`distill_loss(..., tolerance=1)` is the remedy).
     #
-    # **The globs below are a guess.** The layout of the mask split is not
-    # documented in the repository or on the project page, so run
-    # `describe_layout` on the download and fix them with `replace(...)` --
-    # the notebook has a cell for exactly that.
+    # **The globs below were read off the archive, not guessed.** An earlier
+    # version of this comment said they were a guess and asked for
+    # `describe_layout` to confirm; that has now been done by listing the
+    # central directory of `training/train_001.zip` over range requests. What
+    # it contains:
+    #
+    #     bike_009/rgb/000000.jpg        26 059 frames        1920x1080
+    #     bike_009/ir/000000.jpg         26 059 frames        1920x1080
+    #     bike_009/mask/rgb/000000.png      875 masks         1920x1080, {0,255}
+    #     bike_009/mask/ir/000000.png       874 masks
+    #     bike_009/rgb.txt               per-frame `x y w h` tracking boxes
+    #
+    # Three things in that listing shape the spec. **Masks are per modality**,
+    # so the pattern below is `{modality}`-templated -- globbing both into one
+    # dict would collide frame for frame. **Only every 30th frame is masked**
+    # (1 749 masks against 52 118 images), which is why the same download is
+    # worth far more to `list_pairs` than to `list_frames`. And the mask value
+    # is **255, not 1** -- this spec said 1, which would have made every mask
+    # read as empty and every loss compare a prediction against nothing.
+    #
+    # Foreground is 0.2-2.0 % of the frame across the sequences sampled. That
+    # is the small-target regime this project exists for, and it is also why
+    # `--crop` matters: resizing 1920x1080 to a square would put a 0.2 % target
+    # below the patch grid.
+    #
+    # Two caveats the authors' own paper implies and this cannot fix: the two
+    # modalities are **not perfectly registered**, and not every frame is
+    # hand-annotated -- some masks are propagated. That makes it excellent
+    # stage-B data and something to be careful with in stage A, where a
+    # misregistered pair means the teacher looked somewhere the student did not
+    # (`distill_loss(..., tolerance=1)` is the remedy).
     "vtuav_vis": DatasetSpec(
         name="vtuav_vis",
         thermal="**/ir/*.jpg",
         rgb="**/rgb/*.jpg",
-        masks="**/mask/*.png",
-        classes={"background": 0, "target": 1},
+        masks="**/mask/{modality}/*.png",
+        classes={"background": 0, "target": 255},
         things=("target",),
     ),
     # FLIR ADK 640x512 with hardware-synchronised RGB, 4 195 dense masks
@@ -279,6 +346,33 @@ def _stem(path: Path, strip: SequenceABC[str]) -> str:
     return stem
 
 
+def _literal_dirs(pattern: str) -> int:
+    """How many fixed directory components a glob names before the filename."""
+    return sum(1 for part in pattern.split("/")[:-1] if "*" not in part)
+
+
+def _key(path: Path, root: Path, pattern: str, strip: SequenceABC[str]) -> str:
+    """The pairing key: what identifies the *frame*, not just the file.
+
+    `path.stem` alone is not enough, and the way it fails is silent. VTUAV
+    numbers frames per sequence, so `bike_009/rgb/000000.jpg` and
+    `car_083/rgb/000000.jpg` share the stem `000000`. Keying a dict on the
+    stem keeps one of the fourteen sequences in a training zip -- and since
+    the image and mask dicts are built from *different* globs, the survivor on
+    each side can be a different sequence, which pairs one flight's picture
+    with another flight's mask. Nothing downstream can detect that; it just
+    trains on nonsense.
+
+    So the key is the relative path with the glob's own fixed directories
+    taken out: `bike_009/rgb/000000.jpg` and `bike_009/mask/rgb/000000.png`
+    both reduce to `bike_009/000000`, while a flat set like Kust4K
+    (`tir/00001D.png`) still reduces to `00001D`.
+    """
+    relative = path.relative_to(root)
+    keep = max(len(relative.parts) - _literal_dirs(pattern) - 1, 0)
+    return "/".join((*relative.parts[:keep], _stem(path, strip)))
+
+
 def list_frames(root: str | Path, spec: DatasetSpec,
                 modality: str = "thermal") -> list[Frame]:
     """Pair every image with its semantic map, by stem, sorted by name.
@@ -289,14 +383,18 @@ def list_frames(root: str | Path, spec: DatasetSpec,
     missing file.
     """
     root = Path(root)
-    images = {_stem(p, spec.strip): p for p in sorted(root.glob(spec.glob(modality)))
+    mask_pattern = spec.mask_glob(modality)
+    images = {_key(p, root, spec.glob(modality), spec.strip): p
+              for p in sorted(root.glob(spec.glob(modality)))
               if p.suffix.lower() in IMAGE_SUFFIXES}
-    masks = {_stem(p, spec.strip): p for p in sorted(root.glob(spec.masks))
+    masks = {_key(p, root, mask_pattern, spec.strip): p
+             for p in sorted(root.glob(mask_pattern))
              if p.suffix.lower() in IMAGE_SUFFIXES}
     pairs: dict[str, Path] = {}
     other = "rgb" if modality == "thermal" else "thermal"
     if getattr(spec, other) is not None:
-        pairs = {_stem(p, spec.strip): p for p in sorted(root.glob(spec.glob(other)))
+        pairs = {_key(p, root, spec.glob(other), spec.strip): p
+                 for p in sorted(root.glob(spec.glob(other)))
                  if p.suffix.lower() in IMAGE_SUFFIXES}
 
     shared = sorted(set(images) & set(masks))
@@ -304,7 +402,7 @@ def list_frames(root: str | Path, spec: DatasetSpec,
         raise FileNotFoundError(
             f"{root}: no image/mask pairs for {spec.name} ({modality}).\n"
             f"Found {len(images)} images under {spec.glob(modality)!r} and "
-            f"{len(masks)} masks under {spec.masks!r}"
+            f"{len(masks)} masks under {mask_pattern!r}"
             + (", and their stems do not match -- see DatasetSpec.strip."
                if images and masks else ".")
             + f"\n\nWhat is actually there:\n\n{describe_layout(root)}\n\n"
@@ -326,9 +424,11 @@ def list_pairs(root: str | Path, spec: DatasetSpec) -> list[tuple[Path, Path]]:
     label the pretraining objective never looks at.
     """
     root = Path(root)
-    thermal = {_stem(p, spec.strip): p for p in sorted(root.glob(spec.glob("thermal")))
+    thermal = {_key(p, root, spec.glob("thermal"), spec.strip): p
+               for p in sorted(root.glob(spec.glob("thermal")))
                if p.suffix.lower() in IMAGE_SUFFIXES}
-    rgb = {_stem(p, spec.strip): p for p in sorted(root.glob(spec.glob("rgb")))
+    rgb = {_key(p, root, spec.glob("rgb"), spec.strip): p
+           for p in sorted(root.glob(spec.glob("rgb")))
            if p.suffix.lower() in IMAGE_SUFFIXES}
     shared = sorted(set(thermal) & set(rgb))
     if not shared:
@@ -339,27 +439,119 @@ def list_pairs(root: str | Path, spec: DatasetSpec) -> list[tuple[Path, Path]]:
     return [(thermal[name], rgb[name]) for name in shared]
 
 
-def split_frames(items: SequenceABC, fractions=(0.8, 0.1, 0.1),
-                 seed: int = 0) -> dict[str, list]:
-    """train / val / test, on a shuffled order rather than the file order.
+def _seed_for(name: str) -> int:
+    """A stable per-source seed offset, derived from the name rather than a
+    position in the list.
 
-    These sets ship no official split, and the file order is the wrong one to
+    This is what makes two runs on overlapping dataset lists comparable. The
+    offset used to be the source's index in the sorted grouping, so VTUAV was
+    the third source in a three-dataset run and the only one in a VTUAV-only
+    run -- different seed, different permutation, **different held-out
+    sequences**. Comparing the two test numbers would then be comparing two
+    different test sets, which is not a comparison at all.
+
+    Keyed on the name, a dataset's split depends only on that dataset and the
+    caller's seed, so adding SegFly and Kust4K to a run leaves VTUAV's split
+    exactly where it was. `blake2b` rather than `hash()` because the built-in
+    is salted per process and would not survive a restart.
+    """
+    import hashlib
+
+    digest = hashlib.blake2b(name.encode(), digest_size=4).digest()
+    return int.from_bytes(digest, "big")
+
+
+def group_of(item) -> str:
+    """The sequence an item came from, or the item itself if it stands alone.
+
+    `list_frames` names a frame by sequence and number -- `bike_009/000000` --
+    so everything before the last `/` is the flight it was cut from. A frame
+    from a set with no sequence directories (`00001D`) has no group and
+    becomes its own, which is what makes grouping safe to apply everywhere.
+    """
+    name = getattr(getattr(item, "frame", item), "name", "")
+    return name.rsplit("/", 1)[0] if "/" in name else name
+
+
+def split_frames(items: SequenceABC, fractions=(0.8, 0.1, 0.1),
+                 seed: int = 0, group=group_of) -> dict[str, list]:
+    """train / val / test, cut between **sequences** rather than between frames.
+
+    These sets ship no official split, and the file order is the wrong thing to
     cut: consecutive frames of one flight sit next to each other on disk, so a
     positional split puts near-duplicate images on both sides of the line and
-    the held-out number stops meaning anything. A seeded permutation
-    decorrelates it, and sorting within each part keeps the result stable.
+    the held-out number stops meaning anything. A seeded permutation fixes the
+    ordering half of that.
 
-    Works on anything -- `Frame`s or `FrameIndex` entries -- because it never
-    looks inside an item. For a run mixing datasets use `split_index`, which
+    It does not fix the other half, which is why the split is on groups.
+    Permuting *frames* leaves two masks from one flight a second apart -- VTUAV
+    annotates every 30th frame -- on opposite sides of the split, and they show
+    the same target against the same background. The model has effectively seen
+    the test frame, so the number comes out high for a reason that has nothing
+    to do with how well it generalises. Holding out whole sequences is the
+    difference between measuring generalisation and measuring memory.
+
+    Sets with no sequence structure are unaffected: `group_of` makes every
+    frame its own group and the result is the plain permutation. `group=None`
+    asks for that explicitly.
+
+    Works on anything -- `Frame`s or `FrameIndex` entries -- because it only
+    ever looks at `.name`. For a run mixing datasets use `split_index`, which
     stratifies.
     """
     if not np.isclose(sum(fractions), 1.0):
         raise ValueError(f"fractions must sum to 1, got {fractions}")
-    order = np.random.default_rng(seed).permutation(len(items))
-    cuts = np.cumsum([int(round(f * len(items))) for f in fractions[:-1]])
-    parts = np.split(order, cuts)
-    return {name: [items[int(i)] for i in sorted(part)]
+    if group is None:
+        keys = [str(i) for i in range(len(items))]
+    else:
+        keys = [group(item) for item in items]
+
+    groups: dict[str, list[int]] = {}
+    for position, key in enumerate(keys):
+        groups.setdefault(key, []).append(position)
+    names = sorted(groups)
+
+    # Fewer groups than parts cannot be split between them -- one sequence
+    # would mean an empty val and test. Fall back to cutting frames and say so,
+    # because a leaky split that runs beats a crash only if you know it leaked.
+    if group is not None and len(names) < len(fractions) < len(items):
+        warnings.warn(
+            f"{len(names)} sequence(s) for a {len(fractions)}-way split: "
+            f"falling back to splitting frames, so held-out frames share their "
+            f"sequence with training ones and the score will read high. "
+            f"Download another sequence to fix it.", stacklevel=2)
+        return split_frames(items, fractions, seed, group=None)
+
+    order = np.random.default_rng(seed).permutation(len(names))
+    counts = _allocate(len(names), fractions)
+    parts = np.split(order, np.cumsum(counts[:-1]))
+    return {name: [items[i] for g in sorted(part) for i in groups[names[int(g)]]]
             for name, part in zip(("train", "val", "test"), parts)}
+
+
+def _allocate(total: int, fractions: SequenceABC[float]) -> list[int]:
+    """How many groups each split gets -- never starving one to rounding.
+
+    Rounding each fraction independently is fine on thousands of frames and
+    wrong on a handful of sequences: 6 sequences at (0.8, 0.1, 0.1) rounds to
+    5, 1, 0 and the **test set is empty**, which surfaces later as a
+    `nan` score rather than as an error here. Largest-remainder first, then
+    every split with a non-zero fraction is guaranteed one group as long as
+    there are enough to go round, taken from the largest split.
+    """
+    exact = [f * total for f in fractions]
+    counts = [int(x) for x in exact]
+    for index in sorted(range(len(exact)), key=lambda i: exact[i] - counts[i],
+                        reverse=True)[: total - sum(counts)]:
+        counts[index] += 1
+
+    for index, fraction in enumerate(fractions):
+        if fraction > 0 and counts[index] == 0:
+            donor = max(range(len(counts)), key=lambda i: counts[i])
+            if counts[donor] > 1:
+                counts[donor] -= 1
+                counts[index] += 1
+    return counts
 
 
 def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
@@ -393,7 +585,8 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
         grouped.setdefault(entry.source.name if entry.source else "?", []).append(entry)
 
     out: dict[str, list[FrameIndex]] = {"train": [], "val": [], "test": []}
-    for offset, (_, entries) in enumerate(sorted(grouped.items())):
+    for name, entries in sorted(grouped.items()):
+        offset = _seed_for(name)
         role = entries[0].source.role if entries[0].source else "all"
         if role == "train":
             out["train"].extend(entries)
@@ -404,13 +597,14 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
             val, test = fractions[1], fractions[2]
             share = val / max(val + test, 1e-9)
             parts = split_frames(entries, (share, 1.0 - share, 0.0),
-                                 seed + 1000 * offset)
+                                 seed + offset)
             out["val"].extend(parts["train"])
             out["test"].extend(parts["val"])
             continue
-        # A different seed per source, so two datasets of the same length do
-        # not receive the identical permutation.
-        parts = split_frames(entries, fractions, seed + 1000 * offset)
+        # Seeded by name (see `_seed_for`), so two datasets of the same length
+        # do not receive the identical permutation -- and so a set's own split
+        # does not move when a different dataset joins the run.
+        parts = split_frames(entries, fractions, seed + offset)
         for name in out:
             out[name].extend(parts[name])
     return out

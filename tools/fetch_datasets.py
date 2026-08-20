@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""The aerial RGB-T sets, downloaded and laid out the way the specs glob them.
+
+One command per dataset, no staging archives in Drive by hand:
+
+    python tools/fetch_datasets.py kust4k    --dest /content/data/Kust4K
+    python tools/fetch_datasets.py vtuav_vis --dest /content/data/VTUAV_VIS
+    python tools/fetch_datasets.py segfly    --dest /content/data/SegFly
+    python tools/fetch_datasets.py all       --root /content/data
+
+Every URL below was checked against the live host rather than copied off a
+paper, because each of the three is served in a way that breaks the obvious
+approach:
+
+**Kust4K.** The figshare link on the article page,
+`ndownloader/articles/29476610/versions/3`, answers **HTTP 202 with an empty
+body** -- it asks figshare to *build* a zip of the whole article and returns
+before it exists, so a downloader sees a zero-byte file and a success code.
+The per-file endpoints under `ndownloader.figshare.com/files/<id>` are built
+already, answer 206 to a range request, and come with the publisher's md5, so
+those are what this uses. It also means the 1.66 GB `RGB.zip` can be skipped
+when only the thermal half is being trained on.
+
+The three archives are **flat** -- `00001D.png` at the top level of each, no
+directories -- so each is extracted into the folder its spec expects (`tir/`,
+`label/`, `rgb/`). Extracting them side by side would collide: all three use
+the same 4 024 filenames.
+
+**VTUAV.** The mask split is a Google Drive *folder*, and the files inside are
+8-17 GB each, which puts them past the size where Drive serves a file directly
+and into the "cannot scan for viruses" interstitial. `gdown` replays that form;
+plain `curl` gets an HTML page with a 200 on it. The folder holds eight zips --
+`training/train_001..003` and `test/test_001..005` -- and only `train_001`
+(8.5 GB) is fetched by default, because it already carries 14 sequences,
+26 059 registered pairs and 875 RGB masks. `--parts` asks for more.
+
+**SegFly** is parquet on the Hub, not files, so it goes through
+`tools/export_hf_dataset.py`, which writes the PNG layout the spec globs.
+
+Downloads resume (`Range`), verify against the publisher's md5 where there is
+one, and delete the archive once it has been extracted, which halves the peak
+disk a Colab session needs.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import shutil
+import subprocess
+import sys
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+@dataclass(frozen=True)
+class Part:
+    """One archive: where it comes from, and where its contents belong."""
+
+    name: str
+    into: str = ""              # subdirectory to extract into; "" keeps the
+                                # archive's own layout
+    url: str | None = None      # a direct HTTP download
+    drive: str | None = None    # a Google Drive file id
+    size: int = 0               # bytes, for the "this will take a while" line
+    md5: str | None = None
+    default: bool = True        # fetched when --parts is not given
+
+
+@dataclass(frozen=True)
+class Recipe:
+    name: str
+    note: str
+    parts: tuple[Part, ...] = ()
+    hub: str | None = None      # a Hugging Face dataset id instead of archives
+    modality: str | None = None
+
+    def chosen(self, names: tuple[str, ...] | None) -> list[Part]:
+        if not names:
+            return [p for p in self.parts if p.default]
+        known = {p.name: p for p in self.parts}
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise SystemExit(
+                f"{self.name}: no part named {unknown} -- have "
+                f"{sorted(known)}")
+        return [known[n] for n in names]
+
+
+# Verified 2026-08: `GET https://api.figshare.com/v2/articles/29476610/files`.
+# The md5s are the publisher's `computed_md5`.
+KUST4K = Recipe(
+    name="kust4k",
+    note="4 024 registered RGB-TIR pairs at 640x512, 9 classes (Sci. Data 2025)",
+    parts=(
+        Part("tir", into="tir", size=1_032_806_526,
+             url="https://ndownloader.figshare.com/files/55979165",
+             md5="90562a17a4160600b2a12359d2c48391"),
+        Part("labels", into="label", size=20_500_353,
+             url="https://ndownloader.figshare.com/files/55979159",
+             md5="c3111062f64dd06aeacdf16c2c5d1ee5"),
+        # The RGB half is only needed for stage-A distillation, where it is the
+        # teacher's input. Training the thermal encoder alone does not read it.
+        Part("rgb", into="rgb", size=1_660_347_962, default=False,
+             url="https://ndownloader.figshare.com/files/55979147",
+             md5="d0bc9895100f339b1e13f40f2efe532f"),
+    ),
+)
+
+# Verified 2026-08 by listing the Drive folder `11E-WPkCPVL49hOKRdCzfgQULmGU8pyz8`
+# (the "Video instance segmentation" release on https://zhang-pengyu.github.io/DUT-VTUAV/)
+# and reading each zip's central directory over range requests.
+VTUAV_VIS = Recipe(
+    name="vtuav_vis",
+    note="VTUAV mask split: 1920x1080 RGB-T video with per-frame target masks",
+    parts=(
+        # 14 sequences, 26 059 pairs, 875 RGB + 874 IR masks. The smallest of
+        # the eight and enough on its own, which is why it is the default.
+        Part("train_001", drive="1LW1jyldaHmFolmcNzbnWFtzGr4gdfTiX",
+             size=9_080_000_000),
+        Part("train_002", drive="1wKffvGkpALbtXibnj-F-erSuu2CvamYo",
+             size=15_000_000_000, default=False),
+        Part("train_003", drive="17h2zBfmOwHFllw40Zln7fuhSFs0vXvvf",
+             size=17_000_000_000, default=False),
+        # The authors' own held-out sequences. `split_frames` already holds
+        # whole sequences out of `train_001`, so these are only worth the disk
+        # when the canonical split is the point.
+        Part("test_001", drive="1LLYlNlV-V1jUcjT4kbhHSMDoQGSBs8LU",
+             size=16_449_400_000, default=False),
+        Part("test_002", drive="1bUflxddDafrUZOweTt7jGP0icY41Afwg",
+             size=16_000_000_000, default=False),
+        Part("test_003", drive="15o5AM9Qo1kjnJq1PTcd2x4VOLT48dVWT",
+             size=16_000_000_000, default=False),
+        Part("test_004", drive="1UwA4mPpNjkbYtMMgI0gpzQQjkJ5QRkjX",
+             size=14_000_000_000, default=False),
+        Part("test_005", drive="1A5o4zm3sSqR-wFmqmxC7gdAngAQOkYAc",
+             size=15_000_000_000, default=False),
+    ),
+)
+
+SEGFLY = Recipe(
+    name="segfly",
+    note=">15 000 aligned RGB-T pairs over three altitudes (ECCV 2026)",
+    hub="markus-42/SegFly",
+    modality="thermal",
+)
+
+RECIPES: dict[str, Recipe] = {r.name: r for r in (KUST4K, VTUAV_VIS, SEGFLY)}
+
+
+# --------------------------------------------------------------------------
+# Download
+# --------------------------------------------------------------------------
+
+
+def human(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(n) < 1024 or unit == "GB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n:.0f} B"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def checksum(path: Path, chunk: int = 1 << 20) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def http_download(url: str, path: Path, expect: int = 0, quiet: bool = False) -> Path:
+    """Stream `url` to `path`, resuming a partial file rather than restarting.
+
+    Resume matters more than it looks: these are gigabyte archives over a link
+    that occasionally drops, and starting again from zero on a 1 GB file is how
+    a fetch cell turns into an hour.
+    """
+    import requests
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    have = path.stat().st_size if path.exists() else 0
+    if expect and have == expect:
+        if not quiet:
+            print(f"   already complete ({human(have)})")
+        return path
+
+    headers = {"Range": f"bytes={have}-"} if have else {}
+    response = requests.get(url, headers=headers, stream=True, timeout=120)
+    if have and response.status_code == 200:
+        have = 0                      # server ignored the range; start over
+    elif response.status_code not in (200, 206):
+        raise RuntimeError(f"{url}: HTTP {response.status_code}")
+    response.raise_for_status()
+
+    total = expect or (int(response.headers.get("content-length", 0)) + have)
+    done = have
+    with path.open("ab" if have else "wb") as handle:
+        for block in response.iter_content(1 << 20):
+            handle.write(block)
+            done += len(block)
+            if not quiet and total and done % (64 << 20) < (1 << 20):
+                print(f"   {human(done)} / {human(total)} "
+                      f"({100 * done / total:.0f}%)", flush=True)
+    return path
+
+
+def drive_download(file_id: str, path: Path, quiet: bool = False) -> Path:
+    """A Drive file, through `gdown`.
+
+    Not `requests`: past a few hundred megabytes Drive stops serving the file
+    and serves a "Google Drive can't scan this file for viruses" form instead,
+    with a 200 on it. A plain downloader writes that HTML to disk and reports
+    success. `gdown` replays the form, and it resumes.
+    """
+    try:
+        import gdown
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "gdown"],
+                       check=True)
+        import gdown
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out = gdown.download(id=file_id, output=str(path), quiet=quiet, resume=True)
+    if out is None:
+        raise RuntimeError(
+            f"Drive refused {file_id}. The usual cause is the daily download "
+            f"quota on a widely-mirrored file; it clears in a few hours. The "
+            f"Baidu mirror on https://zhang-pengyu.github.io/DUT-VTUAV/ is the "
+            f"alternative (code ltnd).")
+    return Path(out)
+
+
+# --------------------------------------------------------------------------
+# Extract
+# --------------------------------------------------------------------------
+
+
+def masked_members(archive: zipfile.ZipFile) -> list[str]:
+    """Only the frames that carry a mask, plus the masks themselves.
+
+    VTUAV annotates every 30th frame, so a full extraction spends 9 GB of disk
+    to make 875 trainable frames. This keeps the annotated frames in both
+    modalities and drops the other 96 %, which is the difference between a
+    smoke run that fits anywhere and one that needs a Pro+ disk.
+
+    It is the wrong choice for stage A: distillation reads no labels and wants
+    every registered pair it can get. `--frames all` is the default for that
+    reason.
+    """
+    wanted: set[tuple[str, str]] = set()
+    for name in archive.namelist():
+        parts = name.split("/")
+        if len(parts) >= 4 and parts[-3] == "mask":
+            wanted.add((parts[0], Path(parts[-1]).stem))
+
+    keep = []
+    for name in archive.namelist():
+        parts = name.split("/")
+        if len(parts) >= 4 and parts[-3] == "mask":
+            keep.append(name)
+        elif len(parts) >= 3 and (parts[0], Path(parts[-1]).stem) in wanted:
+            keep.append(name)
+    return keep
+
+
+def extract(archive_path: Path, dest: Path, into: str = "",
+            frames: str = "all", quiet: bool = False) -> int:
+    """Unpack into `dest/into`, returning how many files were written."""
+    target = dest / into if into else dest
+    target.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path) as archive:
+        members = (masked_members(archive) if frames == "masked"
+                   else archive.namelist())
+        if not quiet:
+            print(f"   extracting {len(members)} entries -> {target}")
+        archive.extractall(target, members=members)
+    return len(members)
+
+
+def fetch_part(part: Part, dest: Path, work: Path, frames: str,
+               keep: bool, quiet: bool) -> None:
+    archive = work / f"{part.name}.zip"
+    print(f"-- {part.name}"
+          + (f"  ({human(part.size)})" if part.size else ""))
+
+    if part.drive:
+        drive_download(part.drive, archive, quiet=quiet)
+    else:
+        http_download(part.url, archive, expect=part.size, quiet=quiet)
+
+    if part.md5:
+        got = checksum(archive)
+        if got != part.md5:
+            raise RuntimeError(
+                f"{part.name}: md5 {got}, expected {part.md5}. The download is "
+                f"corrupt or truncated -- delete {archive} and run again.")
+        print("   md5 ok")
+
+    extract(archive, dest, part.into, frames=frames, quiet=quiet)
+    if not keep:
+        archive.unlink(missing_ok=True)
+
+
+def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
+          frames: str = "all", keep: bool = False, quiet: bool = False,
+          limit: int | None = None) -> Path:
+    """One dataset into `dest`, in the layout `SPECS[name]` globs."""
+    recipe = RECIPES[name]
+    dest = Path(dest).expanduser()
+    print(f"\n=== {recipe.name}: {recipe.note}")
+
+    if recipe.hub:
+        from tools.export_hf_dataset import export, verify
+        result = export(recipe.hub, dest, recipe.modality, "train", limit,
+                        streaming=True, quiet=quiet)
+        print(f"{result['written']} rows written, {result['skipped']} skipped")
+        print(verify(result["values"], recipe.name))
+        return dest
+
+    chosen = recipe.chosen(parts)
+    total = sum(p.size for p in chosen)
+    print(f"{len(chosen)} archive(s), about {human(total)} to download")
+
+    work = dest / "_archives"
+    work.mkdir(parents=True, exist_ok=True)
+    try:
+        for part in chosen:
+            fetch_part(part, dest, work, frames, keep, quiet)
+    finally:
+        if not keep and work.exists() and not any(work.iterdir()):
+            work.rmdir()
+    return dest
+
+
+def report(name: str, dest: Path, modality: str = "thermal") -> str:
+    """What the reader actually finds there -- the only check that counts."""
+    from src.training.aerial import SPECS, describe_layout, list_frames, list_pairs
+
+    spec = SPECS[name]
+    lines = [f"\n--- {dest}"]
+    try:
+        frames = list_frames(dest, spec, modality)
+        sequences = {f.name.rsplit("/", 1)[0] for f in frames if "/" in f.name}
+        lines.append(f"{len(frames)} labelled {modality} frames"
+                     + (f" over {len(sequences)} sequences" if sequences else ""))
+    except (FileNotFoundError, ValueError) as error:
+        lines.append(f"no labelled frames: {error}".split("\n\n")[0])
+        lines.append(describe_layout(dest))
+    try:
+        lines.append(f"{len(list_pairs(dest, spec))} registered thermal/RGB pairs")
+    except (FileNotFoundError, ValueError):
+        lines.append("no registered pairs (only one modality was fetched)")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("dataset", choices=[*sorted(RECIPES), "all"])
+    p.add_argument("--dest", default=None,
+                   help="Where this dataset goes. Defaults to <root>/<name>.")
+    p.add_argument("--root", default="/content/data",
+                   help="Parent directory, used when --dest is not given.")
+    p.add_argument("--parts", nargs="*", default=None,
+                   help="Which archives to fetch. Without it, the defaults: "
+                        "Kust4K thermal+labels, VTUAV train_001.")
+    p.add_argument("--frames", choices=("all", "masked"), default="all",
+                   help="`masked` keeps only annotated frames and their twins "
+                        "-- a twentieth of the disk, and too few pairs for "
+                        "stage-A distillation.")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Hub datasets only: stop after N rows.")
+    p.add_argument("--keep", action="store_true",
+                   help="Keep the archives after extracting them.")
+    p.add_argument("--quiet", action="store_true")
+    args = p.parse_args(argv)
+
+    names = sorted(RECIPES) if args.dataset == "all" else [args.dataset]
+    folders = {"kust4k": "Kust4K", "vtuav_vis": "VTUAV_VIS", "segfly": "SegFly"}
+    for name in names:
+        dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
+        fetch(name, dest, tuple(args.parts) if args.parts else None,
+              frames=args.frames, keep=args.keep, quiet=args.quiet,
+              limit=args.limit)
+        print(report(name, dest, "rgb" if name == "vtuav_vis" else "thermal"))
+
+    free = shutil.disk_usage(args.root if not args.dest else args.dest).free
+    print(f"\n{human(free)} of disk left.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

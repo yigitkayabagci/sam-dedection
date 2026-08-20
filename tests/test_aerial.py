@@ -34,9 +34,12 @@ from src.training.aerial import (  # noqa: E402
     FrameIndex,
     Instance,
     InstanceGates,
+    SPECS,
     Sample,
     Source,
+    _allocate,
     decompose,
+    group_of,
     index_frames,
     list_frames,
     load_index,
@@ -47,6 +50,7 @@ from src.training.aerial import (  # noqa: E402
     sample_windows,
     save_index,
     split_frames,
+    split_index,
     summarise,
     windows_for,
 )
@@ -292,7 +296,9 @@ class TestOnDisk(unittest.TestCase):
 
     def test_frames_pair_by_stem_after_stripping_the_mask_suffix(self):
         frames = list_frames(self.root, self.spec, "thermal")
-        self.assertEqual([f.name for f in frames], ["a", "b"])
+        # Qualified by the directory the frame sits in, not the bare stem --
+        # see `test_sequences_that_number_frames_the_same_stay_apart`.
+        self.assertEqual([f.name for f in frames], ["scene/a", "scene/b"])
         self.assertTrue(all(f.pair is not None for f in frames))
 
     def test_an_unpaired_layout_is_an_error_not_an_empty_run(self):
@@ -324,7 +330,7 @@ class TestOnDisk(unittest.TestCase):
         cv2.imwrite(str(self.root / "scene" / "label" / "c_label.png"), mask)
         cv2.imwrite(str(self.root / "scene" / "tir" / "c.png"), (mask * 40).astype(np.uint8))
 
-        frame = [f for f in list_frames(self.root, self.spec) if f.name == "c"][0]
+        frame = [f for f in list_frames(self.root, self.spec) if f.name == "scene/c"][0]
         entry = index_frames([frame], self.source, workers=1)[0]
         sample = windows_for(entry, size=64, max_instances=4,
                              rng=np.random.default_rng(0))[0]
@@ -344,6 +350,222 @@ class TestOnDisk(unittest.TestCase):
 
         self.assertIn("min_area", text)
         self.assertIn("hold no instance", text)
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is not installed")
+class TestPerSequenceLayout(unittest.TestCase):
+    """The VTUAV layout: frames numbered from zero inside every sequence.
+
+    Real numbers from `training/train_001.zip`: fourteen sequences, each
+    starting at `000000.jpg`, and masks in a directory per modality.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.spec = DatasetSpec(
+            name="toy_vtuav", thermal="**/ir/*.png", rgb="**/rgb/*.png",
+            masks="**/mask/{modality}/*.png",
+            classes={"background": 0, "target": 255}, things=("target",))
+
+        for sequence in ("bike_009", "car_083"):
+            for sub in ("ir", "rgb", "mask/ir", "mask/rgb"):
+                (self.root / sequence / sub).mkdir(parents=True, exist_ok=True)
+        # The same stem in both sequences, and a mask that differs between
+        # them so a mixed-up pairing is visible rather than merely wrong.
+        for sequence, column in (("bike_009", 10), ("car_083", 40)):
+            mask = np.zeros((64, 64), dtype=np.uint8)
+            mask[20:30, column:column + 10] = 255
+            for modality in ("ir", "rgb"):
+                cv2.imwrite(str(self.root / sequence / modality / "000000.png"),
+                            (mask // 3).astype(np.uint8))
+                cv2.imwrite(str(self.root / sequence / "mask" / modality /
+                                "000000.png"), mask)
+
+    def test_sequences_that_number_frames_the_same_stay_apart(self):
+        # Keyed on the bare stem both sequences are `000000`, one overwrites
+        # the other in the dict, and half the download disappears silently.
+        frames = list_frames(self.root, self.spec, "thermal")
+        self.assertEqual([f.name for f in frames],
+                         ["bike_009/000000", "car_083/000000"])
+
+    def test_the_image_and_its_mask_come_from_the_same_sequence(self):
+        # The worse half of the same bug: the image dict and the mask dict are
+        # built from different globs, so the survivor on each side can be a
+        # different sequence and the model trains on one flight's picture
+        # against another flight's mask.
+        for frame in list_frames(self.root, self.spec, "thermal"):
+            sequence = frame.name.split("/")[0]
+            self.assertEqual(frame.image.parts[-3], sequence)
+            self.assertEqual(frame.mask.parts[-4], sequence)
+            self.assertEqual(frame.pair.parts[-3], sequence)
+
+    def test_each_modality_reads_its_own_mask_directory(self):
+        self.assertEqual(self.spec.mask_glob("thermal"), "**/mask/ir/*.png")
+        self.assertEqual(self.spec.mask_glob("rgb"), "**/mask/rgb/*.png")
+        for modality, folder in (("thermal", "ir"), ("rgb", "rgb")):
+            for frame in list_frames(self.root, self.spec, modality):
+                self.assertEqual(frame.mask.parent.name, folder)
+
+    def test_a_spec_with_one_mask_directory_is_left_alone(self):
+        flat = DatasetSpec(name="flat", thermal="**/tir/*.png",
+                           masks="**/label/*.png", classes={"background": 0},
+                           things=())
+        self.assertEqual(flat.mask_glob("thermal"), "**/label/*.png")
+
+
+class TestKust4kPalette(unittest.TestCase):
+    """Read off the archive's own `visual.py`, pinned so it cannot drift back.
+
+    The bug this replaces: the palette assumed a `vegetation` class at id 3.
+    There is none, so every id above it was shifted by one and there was no
+    room for id 8 at all. `things` therefore selected id 6 -- **tree** -- and
+    missed id 3, **motorcycle**.
+    """
+
+    def test_the_ids_are_the_ones_in_get_palette(self):
+        # palette = [unlabelled, road, building, motorcycle, car, truck, tree,
+        #            human, traffic_facilities], indexed by class id.
+        self.assertEqual(
+            [SPECS["kust4k"].name_of(i) for i in range(9)],
+            ["unlabelled", "road", "building", "motorcycle", "car", "truck",
+             "tree", "human", "traffic_facilities"])
+
+    def test_trees_are_not_tracking_targets_and_motorcycles_are(self):
+        spec = SPECS["kust4k"]
+        self.assertEqual(sorted(spec.thing_ids), [3, 4, 5, 7])
+        self.assertNotIn(spec.classes["tree"], spec.thing_ids)
+        self.assertIn(spec.classes["motorcycle"], spec.thing_ids)
+
+    def test_the_ninth_class_the_old_palette_had_no_room_for_exists(self):
+        self.assertEqual(SPECS["kust4k"].classes["traffic_facilities"], 8)
+
+
+class TestGroupedSplit(unittest.TestCase):
+    """Whole sequences on one side of the line, not frames.
+
+    VTUAV masks every 30th frame, so two masks from one flight are a second
+    apart and show the same target against the same background. Splitting
+    frames puts them on opposite sides and the test score measures memory.
+    """
+
+    def frames(self, sequences=5, per=20):
+        return [Frame(name=f"seq_{s:02d}/{i:06d}", image=Path(f"{s}_{i}.jpg"),
+                      mask=Path(f"{s}_{i}.png"))
+                for s in range(sequences) for i in range(per)]
+
+    def test_no_sequence_appears_in_two_splits(self):
+        parts = split_frames(self.frames(), seed=0)
+        seen = {name: {group_of(f) for f in part} for name, part in parts.items()}
+        self.assertTrue(seen["train"])
+        for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
+            self.assertFalse(seen[a] & seen[b], f"{a} and {b} share a sequence")
+
+    def test_every_frame_still_lands_somewhere_exactly_once(self):
+        frames = self.frames()
+        parts = split_frames(frames, seed=0)
+        names = [f.name for part in parts.values() for f in part]
+        self.assertEqual(sorted(names), sorted(f.name for f in frames))
+
+    def test_a_sequence_is_kept_whole(self):
+        parts = split_frames(self.frames(), seed=0)
+        for part in parts.values():
+            counts: dict[str, int] = {}
+            for frame in part:
+                counts[group_of(frame)] = counts.get(group_of(frame), 0) + 1
+            self.assertTrue(all(n == 20 for n in counts.values()), counts)
+
+    def test_a_flat_set_is_split_frame_by_frame_as_before(self):
+        # Kust4K stems carry no sequence, so each is its own group and the
+        # result has to be the plain permutation it always was.
+        flat = [Frame(name=f"{i:05d}D", image=Path(f"{i}.png"),
+                      mask=Path(f"{i}_m.png")) for i in range(100)]
+        parts = split_frames(flat, seed=0)
+        self.assertEqual([len(p) for p in parts.values()], [80, 10, 10])
+
+    def test_too_few_sequences_to_split_warns_instead_of_emptying_val(self):
+        with self.assertWarns(UserWarning):
+            parts = split_frames(self.frames(sequences=2), seed=0)
+        self.assertTrue(parts["val"])
+        self.assertTrue(parts["test"])
+
+    def test_group_none_asks_for_the_ungrouped_split(self):
+        parts = split_frames(self.frames(), seed=0, group=None)
+        overlap = {group_of(f) for f in parts["train"]} & \
+                  {group_of(f) for f in parts["test"]}
+        self.assertTrue(overlap, "group=None should not hold sequences out")
+
+
+class TestAllocation(unittest.TestCase):
+    """Rounding must not empty a split when there are few sequences to divide.
+
+    Independent rounding is fine on thousands of frames and wrong on a handful
+    of sequences: 6 at (0.8, 0.1, 0.1) rounds to 5, 1, 0 and the test set is
+    gone. That surfaces much later as a `nan`, not as an error here.
+    """
+
+    def test_nothing_is_starved_once_there_are_enough_groups(self):
+        for total in range(3, 40):
+            counts = _allocate(total, (0.8, 0.1, 0.1))
+            self.assertEqual(sum(counts), total, total)
+            self.assertTrue(all(c > 0 for c in counts), f"{total} -> {counts}")
+
+    def test_large_counts_are_still_the_plain_proportions(self):
+        self.assertEqual(_allocate(100, (0.8, 0.1, 0.1)), [80, 10, 10])
+        self.assertEqual(_allocate(1000, (0.8, 0.1, 0.1)), [800, 100, 100])
+
+    def test_a_zero_fraction_stays_zero(self):
+        self.assertEqual(_allocate(10, (0.5, 0.5, 0.0))[2], 0)
+
+
+class TestSplitsAreComparableAcrossRuns(unittest.TestCase):
+    """The property the two notebooks' comparison rests on.
+
+    Notebook 07 trains on three datasets and 08 on VTUAV alone. Comparing their
+    test scores is only meaningful if *the same VTUAV sequences are held out in
+    both*. The per-source seed used to be the source's position in the sorted
+    grouping, so VTUAV was source 3 of 3 in one run and 1 of 1 in the other --
+    different seed, different sequences, and the two numbers would have been
+    measured on different test sets.
+    """
+
+    def entries(self, source, sequences=8, per=5):
+        return [FrameIndex(frame=Frame(name=f"seq_{s:02d}/{i:06d}",
+                                       image=Path("i"), mask=Path("m")),
+                           instances=(), size=(64, 64), rejects={}, source=source)
+                for s in range(sequences) for i in range(per)]
+
+    def vtuav_sequences(self, part):
+        return sorted({e.frame.name.split("/")[0] for e in part
+                       if e.source.spec.name == "vtuav_vis"})
+
+    def test_adding_datasets_does_not_move_another_ones_split(self):
+        gates = InstanceGates()
+        vtuav = Source(SPECS["vtuav_vis"], gates, mode="labels", role="all")
+        alone = split_index(self.entries(vtuav), seed=0)
+        mixed = split_index(
+            self.entries(vtuav)
+            + self.entries(Source(SPECS["kust4k"], gates, role="train"))
+            + self.entries(Source(SPECS["segfly"], gates, role="train")),
+            seed=0)
+
+        for part in ("train", "val", "test"):
+            self.assertEqual(self.vtuav_sequences(alone[part]),
+                             self.vtuav_sequences(mixed[part]), part)
+        self.assertTrue(self.vtuav_sequences(alone["test"]),
+                        "a test set that is empty would pass this vacuously")
+
+    def test_two_sources_still_get_different_permutations(self):
+        gates = InstanceGates()
+        index = (self.entries(Source(SPECS["kust4k"], gates))
+                 + self.entries(Source(SPECS["segfly"], gates)))
+        parts = split_index(index, seed=0)
+        by_spec = {}
+        for entry in parts["test"]:
+            by_spec.setdefault(entry.source.spec.name, set()).add(
+                entry.frame.name.split("/")[0])
+        self.assertNotEqual(by_spec.get("kust4k"), by_spec.get("segfly"))
 
 
 class TestSplit(unittest.TestCase):

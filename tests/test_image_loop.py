@@ -391,7 +391,8 @@ class TestEndToEnd(unittest.TestCase):
         cv2.imwrite(str(root / "scene" / "label" / "b_label.png"), mask)
         cv2.imwrite(str(root / "scene" / "tir" / "b.png"), (mask * 60).astype(np.uint8))
 
-        frame = [f for f in list_frames(root, self.spec, "thermal") if f.name == "b"][0]
+        frame = [f for f in list_frames(root, self.spec, "thermal")
+                 if f.name == "scene/b"][0]
         plain = index_frames([frame], self.source, workers=1)[0]
         watershed = Source(spec=self.spec, gates=self.gates, mode="watershed")
         split = index_frames([frame], watershed, workers=1)[0]
