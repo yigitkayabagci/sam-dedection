@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.training.aerial import SPECS, list_pairs  # noqa: E402
+from src.training.aerial import SPECS, list_pairs, replace  # noqa: E402
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
 
 
@@ -40,6 +40,12 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", required=True, help="Dataset root holding RGB-T pairs.")
     p.add_argument("--spec", default="kust4k", choices=sorted(SPECS))
+    p.add_argument("--thermal-glob", default=None,
+                   help="Override the spec's thermal glob. The layout of a "
+                        "download often differs from what its paper documents, "
+                        "and stage B's override has to reach stage A too or the "
+                        "two stages read different halves of the same archive.")
+    p.add_argument("--rgb-glob", default=None, help="Override the spec's RGB glob.")
     p.add_argument("--out", required=True, help="Where the checkpoint goes.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
@@ -94,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     from tools.train_encoder import _tqdm, build_model
 
     spec = SPECS[args.spec]
+    if args.thermal_glob or args.rgb_glob:
+        spec = replace(spec, thermal=args.thermal_glob or spec.thermal,
+                       rgb=args.rgb_glob or spec.rgb)
+        print(f"globs overridden: thermal={spec.thermal!r} rgb={spec.rgb!r}")
     found = list_pairs(Path(args.data), spec)
     pairs = subsample(found, args.pairs, seed=args.seed)
     print(f"{len(pairs)} registered pairs of {len(found)} found -- no labels "
