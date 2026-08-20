@@ -383,7 +383,7 @@ else:
 code(r"""
 # --- Dependencies -------------------------------------------------------
 # EdgeTAM installs itself *as* the package `sam2` -- it is a fork -- so Meta's
-# sam2 must never share this environment. The DINOv2 teacher goes through
+# sam2 must never share this environment. The DINOv3 teacher goes through
 # transformers, which is independent of both.
 before = torch.__version__
 !bash scripts/setup_edgetam.sh 2>&1 | tail -5
@@ -393,11 +393,22 @@ before = torch.__version__
 # The one thing an install here must not do. EdgeTAM's setup.py declares a
 # torch floor, and on a card newer than any wheel on PyPI a "helpful"
 # reinstall is how a working runtime stops working.
-import importlib, torch as _t
-importlib.reload(_t)
-assert _t.__version__ == before, (
-    f"torch changed from {before} to {_t.__version__} during install. "
-    f"Restore the Colab build (see the CUDA check above), restart, and re-run.")
+#
+# Read the version off *disk*. Reloading the module cannot work: re-running
+# torch/__init__.py re-registers its `triton` TORCH_LIBRARY namespace, which
+# C++ refuses outright -- so `importlib.reload(torch)` raises whether or not
+# anything is wrong, which is the worst possible behaviour for a safety check.
+# Disk is also the right thing to read, because pip cannot change the torch
+# already live in this kernel; only a restart can. That is exactly the window
+# this check exists to catch.
+import importlib.metadata as _md
+installed = _md.version("torch")
+assert installed == before, (
+    f"pip replaced torch {before} with {installed} on disk.\n"
+    f"This kernel is still running {before}, so nothing has broken yet -- but "
+    f"restarting would load a build that may have no kernels for this GPU.\n"
+    f"Restore the Colab build *before* restarting:\n"
+    f"    !pip install -q --force-reinstall torch=={before}")
 
 import sam2, transformers
 print(f"sam2 (EdgeTAM) {Path(sam2.__file__).parent}\ntransformers {transformers.__version__}")

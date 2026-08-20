@@ -25,6 +25,36 @@ from tools.check_notebook import check, strip_magics  # noqa: E402
 NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
 
 
+def reload_calls(path: Path) -> list[str]:
+    """Every real call to `reload(...)` in a notebook's code cells.
+
+    Parsed rather than grepped, so the comment in 07 that *explains* why
+    `importlib.reload(torch)` is wrong does not count as an instance of it.
+    """
+    import ast
+    import json
+
+    found = []
+    cells = json.loads(path.read_text())["cells"]
+    for number, cell in enumerate(cells):
+        if cell["cell_type"] != "code":
+            continue
+        python, _ = strip_magics("".join(cell["source"]))
+        try:
+            tree = ast.parse(python)
+        except SyntaxError:                              # reported elsewhere
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.attr if isinstance(func, ast.Attribute)
+                    else func.id if isinstance(func, ast.Name) else "")
+            if name == "reload":
+                found.append(f"cell {number}: {ast.unparse(node)}")
+    return found
+
+
 class TestEveryNotebook(unittest.TestCase):
     def test_there_are_notebooks_to_check(self):
         # A glob that quietly matched nothing would make every case below pass.
@@ -34,6 +64,41 @@ class TestEveryNotebook(unittest.TestCase):
         for path in NOTEBOOKS:
             with self.subTest(notebook=path.name):
                 self.assertEqual(check(path), [])
+
+    def test_no_notebook_reloads_an_imported_module(self):
+        """`importlib.reload` on a C-extension module always raises.
+
+        Shipped once, in notebook 07's dependency cell, as a check that torch
+        had not been replaced by a pip install. Re-running `torch/__init__.py`
+        re-registers its `triton` TORCH_LIBRARY namespace and C++ refuses the
+        second registration, so the guard raised **unconditionally** -- the
+        worst way for a safety check to fail, because it fires when nothing is
+        wrong and tells you nothing when something is.
+
+        The same is true of numpy and cv2, and the answer is the same in every
+        case: read the installed version from `importlib.metadata`, which comes
+        off disk and needs no reimport. Nothing a notebook does needs a reload.
+        """
+        for path in NOTEBOOKS:
+            with self.subTest(notebook=path.name):
+                self.assertEqual(reload_calls(path), [])
+
+    def test_the_reload_check_would_catch_the_line_that_shipped(self):
+        # Otherwise the case above passes because the notebooks are clean *and*
+        # because the check does nothing, and those look identical.
+        import json
+        import tempfile
+
+        cell = ["# importlib.reload(torch) is wrong -- this comment is not it\n",
+                "import importlib, torch as _t\n",
+                "importlib.reload(_t)\n"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.ipynb"
+            path.write_text(json.dumps({
+                "cells": [{"cell_type": "code", "metadata": {}, "outputs": [],
+                           "execution_count": None, "source": cell}],
+                "metadata": {}, "nbformat": 4, "nbformat_minor": 0}))
+            self.assertEqual(reload_calls(path), ["cell 0: importlib.reload(_t)"])
 
 
 class TestMagicHandling(unittest.TestCase):
