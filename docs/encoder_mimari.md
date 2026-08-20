@@ -194,6 +194,22 @@ düşülecek bir şey yok.
 
 ---
 
+## 7.5 Üç ayrı "öğretmen" var — karıştırılmasın
+
+Bu projede "teacher" kelimesi **üç farklı işi** anlatıyor ve üçü birbirinden
+bağımsız. En sık karışan yer burası:
+
+| rol | kopyalanan şey | ne zaman | hangi model |
+|---|---|---|---|
+| **1. Sahte etiket** (mask distillation) | öğretmenin **çıktı maskesi** | Anti-UAV410 — sadece kutu etiketi var, maske yok | **SAM 2.1 Hiera Large** ✓ zaten kullanılıyor (`labels.py:Sam2Teacher`) |
+| **2. Öznitelik distilasyonu** (aşama A) | öğretmenin **iç öznitelik haritası** | RGB-T çiftleri — **hiç etiket yok** | DINOv2 *ya da* SAM 2.1 (seçilebilir) |
+| **3. Öğretmen yok** (aşama B) | — hedef veri setinin **gerçek maskesi** | Kust4K vb. — yoğun maske zaten var | yok |
+
+Yani "neden SAM 2.1 large kullanmıyoruz" sorusunun cevabı: **kullanıyoruz** —
+1. rolde, notebook 01/02'de. Soru aslında 2. rol için geçerli.
+
+---
+
 ## 8. Aşama A — modalite distilasyonu (etiketsiz)
 
 `src/training/distill.py`. AnyThermal'ın sonucu: DINOv2 sınıfı bir RGB temel
@@ -218,9 +234,53 @@ eğitilmemiş katmanların arkasından gördüğü bir şeyi iyileştirmek olurd
 Projeksiyon **iskele**: aşama bitince atılıyor. Çıkan checkpoint sıradan bir
 EdgeTAM state dict'i.
 
-**Ve hiçbir şey yapmamayı yenmek zorunda.** Taban çizgisi: stok checkpoint'ten
-başlayan aşama B. Notebook üçüncü bir koşu yapıp sadece `--base`'i değiştirerek
-bunu ölçüyor.
+### "SAM tabanlı bir modeliz, DINO öğretmeni bozmaz mı?"
+
+**Yapısal olarak bozamaz.** Distilasyon sadece `image_encoder` içindeki
+**ağırlık değerlerini** değiştiriyor: aynı modüller, aynı state-dict
+anahtarları, aynı ONNX grafiği, aynı motorlar. Projeksiyon atılıyor. Üstelik
+aşama A yalnızca bir **başlangıç noktası** — arkasından gelen aşama B, SAM 2'nin
+kendi hedefiyle (promptable segmentasyon, focal + dice + IoU) **gerçek
+maskeler** üzerinde eğitiyor. DINO öznitelikleri işe yaramazsa aşama B onları
+geri çekiyor ve tek kayıp GPU saati oluyor.
+
+**Gerçek risk yapısal değil, optimizasyona ait:** aşama A encoder'ı oynatırken
+mask decoder donuk, yani decoder hiç eğitilmediği özniteliklerle karşılaşabilir.
+Bu yüzden trunk 5e-5'te, EMA var, ve aşama B **önce head-only** aşamasıyla
+başlıyor — encoder tekrar oynamadan önce decoder yeniden uyum sağlıyor.
+`distilled+ft` koşusu `finetune`'dan **kötü** çıkarsa teşhis budur:
+`--trunk-lr` düşür ya da `EPOCHS = (2, 3)` yap.
+
+**Ve SAM 2.1'i öğretmen yapmanın gerçekten iyi bir gerekçesi var:**
+
+| | DINOv2-base | SAM 2.1 Hiera-Large |
+|---|---|---|
+| öznitelikleri ne kodluyor | **semantik** — "bu yama araç-benzeri bir şey" | **sınıftan bağımsız sınır** — her şeyi segmentler, *ne* olduğunu bilmez |
+| hedef tensörle uyum | 768-d ViT ızgarası → 256'ya projekte | `fpn_hidden_states[-1]` **zaten** 256-d, stride 16 — birebir aynı tip |
+| öğrenciyle ilişkisi | ilgisiz model | EdgeTAM **zaten** SAM 2'nin distilasyonu; bu, aynı hedefi modalite boşluğu ekleyerek sürdürmek |
+| adım maliyeti | 518 girdi, base boyut | 1024 girdi, Hiera-Large — EdgeTAM'ın var olma sebebi olan model |
+
+DINOv2 lehine argüman: **termal encoder'ın eksiği semantik, sınır değil** —
+soğuk arka plandaki sıcak nesne çoğu zaman RGB'den *daha kolay* bir kenar; ve
+AnyThermal'ın yayınlanmış sonucu DINOv2 distile ediyor. SAM 2.1 lehine argüman:
+üçüncü sütunun tamamı.
+
+**İkisi de ölçülmedi.** O yüzden argüman değil, anahtar:
+
+```python
+TEACHER = "facebook/dinov2-base"          # varsayılan
+TEACHER = "facebook/sam2.1-hiera-large"   # ya da bu — tek satır
+```
+
+`build_teacher` sınıfı **id'den** seçiyor, ayrı bir bayraktan değil: SAM 2.1
+checkpoint'i DINOv2'nin 518'inde de yüklenir, koşar ve hiç eğitilmediği
+interpolasyonlu pozisyon gömmelerinden öznitelik üretir — sessizce yanlış.
+Girdi boyutu öğretmenle birlikte seçiliyor (ViT 518, SAM 2.1 1024).
+
+**Ve hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.** Taban
+çizgisi: stok checkpoint'ten başlayan aşama B. Notebook üçüncü bir koşu yapıp
+sadece `--base`'i değiştirerek bunu ölçüyor. Kosinüs mesafesi **öğretmenler
+arasında karşılaştırılamaz** — sadece test bölmesindeki sayı karşılaştırılabilir.
 
 ---
 

@@ -55,25 +55,55 @@ from .finetune import EMA, Rates, apply_freeze, param_groups
 # 518 = 37 x 14 is the resolution its own weights were trained at.
 TEACHER_ID = "facebook/dinov2-base"
 TEACHER_SIZE = 518
+SAM2_SIZE = 1024          # what SAM 2.1's position embeddings were trained at
+
+# Both families normalise with ImageNet statistics, which is what `normalise`
+# already applies -- so a batch built for the student feeds either teacher
+# unchanged. Worth stating because it is the one silent way a distillation run
+# can be wrong: a teacher fed differently-scaled pixels produces plausible
+# features for the wrong image.
 
 
 # --------------------------------------------------------------------------
-# Teacher
+# Teachers
 # --------------------------------------------------------------------------
+
+
+def tokens_to_map(tokens: torch.Tensor, side: int) -> torch.Tensor:
+    """`[B, N, C]` transformer tokens -> `[B, C, side, side]`.
+
+    The **trailing** `side * side` tokens are taken, which drops whatever leads
+    the sequence: a class token, and in some checkpoints registers as well.
+    Counting the leading tokens instead would need a per-checkpoint constant
+    and would shift the whole grid by one wherever that constant was wrong --
+    a failure that produces a plausible feature map for a misaligned image.
+
+    They are dropped rather than reshaped because a class token summarises the
+    whole image, and what a dense encoder has to learn is *where* things are,
+    which only the patch tokens say.
+    """
+    wanted = side * side
+    count = int(tokens.shape[1])
+    if count < wanted:
+        raise RuntimeError(
+            f"teacher returned {count} tokens, too few for a {side}x{side} grid.")
+    tokens = tokens[:, count - wanted:]
+    return tokens.reshape(tokens.shape[0], side, side, -1).permute(0, 3, 1, 2).float()
 
 
 class FeatureTeacher:
-    """A frozen RGB foundation model, as a dense feature map.
+    """A frozen ViT foundation model (DINOv2 and friends), as a dense feature map.
 
     Thin on purpose: everything version-sensitive about `transformers` lives in
     `features`, and everything this module reasons about -- the projection, the
-    loss, the loop -- is independent of it. Swapping the teacher is a string.
+    loss, the loop -- is independent of it.
     """
 
     def __init__(self, model_id: str = TEACHER_ID, device: str = "cuda",
                  dtype: str = "bfloat16", size: int = TEACHER_SIZE) -> None:
         from transformers import AutoModel
 
+        self.model_id = model_id
         self.device = device
         self.size = size
         self.model = AutoModel.from_pretrained(
@@ -85,27 +115,100 @@ class FeatureTeacher:
 
     @torch.no_grad()
     def features(self, images: torch.Tensor) -> torch.Tensor:
-        """`[B, D, h, w]` for normalised RGB `[B, 3, S, S]`.
+        """`[B, D, h, w]` for ImageNet-normalised RGB `[B, 3, S, S]`."""
+        resized = F.interpolate(images, size=(self.size, self.size),
+                                mode="bilinear", align_corners=False)
+        out = self.model(pixel_values=resized.to(self.model.dtype))
+        return tokens_to_map(out.last_hidden_state, self.size // self.patch)
 
-        The class token is dropped: it summarises the image, and what a dense
-        encoder has to learn is *where* things are, which only the patch tokens
-        carry.
+
+class Sam2FeatureTeacher:
+    """SAM 2.1's own image encoder as the teacher, for the obvious question.
+
+    The obvious question being: this is a SAM-family model, so why distil an
+    unrelated RGB model into it rather than the thing it was distilled from?
+    It is a fair question and it deserves a measurement, not an argument, so it
+    is one `--teacher` string away. Three things are genuinely in its favour:
+
+    1. **The tensors match exactly.** `fpn_hidden_states[-1]` is the FPN neck's
+       coarsest output at 256 channels and stride 16 -- the same kind of tensor
+       `encoder_features` pulls out of the student, so the projection is 256 to
+       256 rather than a change of representation.
+    2. **It continues the objective the checkpoint was born from.** EdgeTAM
+       *is* a distillation of SAM 2. Asking it to produce SAM 2's RGB features
+       from a thermal input is the same training objective it already had, with
+       a modality gap added.
+    3. Nothing about "SAM-ness" has to be argued about afterwards.
+
+    And two against, which is why this is not simply the default:
+
+    1. **The features are class-agnostic by design.** SAM 2 segments anything
+       and deliberately carries no notion of *what* a region is; DINOv2's
+       features are strongly semantic. What a thermal encoder is missing is
+       arguably the semantics -- boundaries are often *easier* in thermal, a
+       warm object against a cool background -- and if so the semantic teacher
+       is the better one. Arguably. Nobody here has measured it.
+    2. **It is much more expensive.** Hiera-Large at 1024 is the model EdgeTAM
+       exists to avoid; it costs several times a DINOv2-base pass at 518, per
+       step, for the whole stage. `facebook/sam2.1-hiera-base-plus` is the
+       cheaper end of the same family.
+
+    Note the input size: SAM 2.1's position embeddings were trained at 1024 and
+    this does not interpolate them, so lowering `size` is a change to the
+    teacher and not just to its cost.
+    """
+
+    def __init__(self, model_id: str = "facebook/sam2.1-hiera-large",
+                 device: str = "cuda", dtype: str = "bfloat16",
+                 size: int = SAM2_SIZE) -> None:
+        from transformers import Sam2Model
+
+        self.model_id = model_id
+        self.device = device
+        self.size = size
+        self.patch = 16                      # the FPN's coarsest stride
+        # Loaded through the full model and then narrowed: the checkpoint's
+        # keys are prefixed `vision_encoder.`, and the prompt encoder and mask
+        # decoder are dropped rather than carried on the card unused.
+        full = Sam2Model.from_pretrained(model_id, dtype=getattr(torch, dtype))
+        self.model = full.vision_encoder.to(device).eval()
+        self.dim = int(full.config.vision_config.fpn_hidden_size)
+        del full
+        for param in self.model.parameters():
+            param.requires_grad_(False)
+
+    @torch.no_grad()
+    def features(self, images: torch.Tensor) -> torch.Tensor:
+        """`[B, 256, S/16, S/16]` for ImageNet-normalised RGB `[B, 3, S, S]`.
+
+        `fpn_hidden_states` is ordered high resolution to low, so the last
+        entry is the stride-16 map -- the level the mask decoder reads and the
+        one the student's `vision_feats[-1]` corresponds to.
         """
         resized = F.interpolate(images, size=(self.size, self.size),
                                 mode="bilinear", align_corners=False)
         out = self.model(pixel_values=resized.to(self.model.dtype))
-        tokens = out.last_hidden_state[:, 1:]              # drop CLS
-        side = self.size // self.patch
-        batch, count, dim = tokens.shape
-        if count != side * side:
-            # Some checkpoints carry extra register tokens after the class
-            # token; take the trailing patch grid rather than guessing at the
-            # count, and fail loudly if that does not divide either.
-            if count < side * side:
-                raise RuntimeError(
-                    f"teacher returned {count} tokens for a {side}x{side} grid.")
-            tokens = tokens[:, count - side * side:]
-        return tokens.reshape(batch, side, side, dim).permute(0, 3, 1, 2).float()
+        maps = out.fpn_hidden_states
+        if maps is None:
+            raise RuntimeError(
+                f"{self.model_id}: the vision encoder returned no fpn_hidden_states. "
+                "This transformers version structures SAM 2's output differently; "
+                "see src/training/distill.py:Sam2FeatureTeacher.")
+        return maps[-1].float()
+
+
+def build_teacher(model_id: str = TEACHER_ID, device: str = "cuda",
+                  dtype: str = "bfloat16", size: int | None = None):
+    """The right teacher class for `model_id`, with its own default input size.
+
+    Dispatching on the id rather than on a separate flag keeps the two from
+    disagreeing -- a SAM 2 checkpoint run at DINOv2's 518 would load, run, and
+    quietly produce features from interpolated position embeddings it was never
+    trained with.
+    """
+    if "sam2" in model_id.lower():
+        return Sam2FeatureTeacher(model_id, device, dtype, size or SAM2_SIZE)
+    return FeatureTeacher(model_id, device, dtype, size or TEACHER_SIZE)
 
 
 class Projector(nn.Module):
@@ -336,7 +439,8 @@ def pretrain(
     # could have chosen between them, and on a stage this short the EMA is the
     # less noisy of the two by construction.
     with ema.applied(model):
-        save(model, {"stage": "distill", "teacher": teacher.model.name_or_path,
+        save(model, {"stage": "distill", "teacher": teacher.model_id,
+                     "teacher_dim": teacher.dim, "teacher_size": teacher.size,
                      "pairs": len(pairs), "image_size": size,
                      "epochs": epochs, "final_loss": history[-1]["loss"]})
 

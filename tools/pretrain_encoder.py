@@ -43,9 +43,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="Where the checkpoint goes.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
-    p.add_argument("--teacher", default="facebook/dinov2-base")
-    p.add_argument("--teacher-size", type=int, default=518,
-                   help="Must be a multiple of the teacher's patch size.")
+    p.add_argument("--teacher", default="facebook/dinov2-base",
+                   help="Any DINOv2-class ViT, or a facebook/sam2.1-hiera-* "
+                        "checkpoint to distil SAM 2's own encoder instead. The "
+                        "class is chosen from the id; see distill.py for what "
+                        "each buys and costs.")
+    p.add_argument("--teacher-size", type=int, default=None,
+                   help="Default: 518 for a ViT teacher, 1024 for SAM 2.1. "
+                        "A ViT needs a multiple of its patch size; SAM 2.1's "
+                        "position embeddings are not interpolated, so lowering "
+                        "this changes the teacher, not only its cost.")
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--pairs", type=int, default=None, help="Cap on pairs used.")
     p.add_argument("--batch", type=int, default=8)
@@ -67,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import torch
 
-    from src.training.distill import FeatureTeacher, pretrain
+    from src.training.distill import build_teacher, pretrain
     from tools.train_encoder import _tqdm, build_model
 
     spec = SPECS[args.spec]
@@ -75,9 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(pairs)} registered pairs -- no labels are read at this stage")
 
     model = build_model(args.size, args.base, args.device)
-    teacher = FeatureTeacher(args.teacher, device=args.device, size=args.teacher_size)
-    print(f"teacher {args.teacher}: {teacher.dim}-d, patch {teacher.patch}, "
-          f"input {teacher.size}")
+    teacher = build_teacher(args.teacher, device=args.device, size=args.teacher_size)
+    print(f"teacher {args.teacher} ({type(teacher).__name__}): {teacher.dim}-d "
+          f"at stride {teacher.patch}, input {teacher.size}")
 
     meta = {"stage": "distill", "method": args.method, "dataset": spec.name,
             "teacher": args.teacher, "image_size": args.size, "seed": args.seed}
