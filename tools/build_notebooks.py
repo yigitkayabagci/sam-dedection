@@ -433,9 +433,39 @@ assert installed == before, (
     f"Restore the Colab build *before* restarting:\n"
     f"    !pip install -q --force-reinstall torch=={before}")
 
+# setup_edgetam.sh installs EdgeTAM with `pip install -e`, and an editable
+# install is a .pth file in site-packages -- which site.py reads at interpreter
+# *startup* only. A package installed into a kernel that is already running
+# therefore never joins sys.path: `import sam2` raises ModuleNotFoundError with
+# the install sitting on disk two directories away, and `invalidate_caches()`
+# does not help because the path entry was never added. Restarting the runtime
+# would fix it and cost the GPU session and every download in it. Pointing
+# sys.path at the checkout fixes it now.
+#
+# Placed *after* the repo, not at the front: EdgeTAM's own top level carries
+# `tools/`, `notebooks/` and `examples/`, and so does this repo. Ours would win
+# anyway -- a regular package beats a namespace portion -- but ordering means
+# that does not have to be true.
+import importlib
+EDGETAM = REPO / "third_party" / "EdgeTAM"
+if str(EDGETAM) not in sys.path:
+    sys.path.insert(sys.path.index(str(REPO)) + 1 if str(REPO) in sys.path else 0,
+                    str(EDGETAM))
+importlib.invalidate_caches()
+
 import sam2, transformers
 print(f"sam2 (EdgeTAM) {Path(sam2.__file__).parent}\ntransformers {transformers.__version__}")
-assert Path("third_party/EdgeTAM/checkpoints/edgetam.pt").is_file(), \
+
+# The premise of the cell above, checked rather than trusted: the `sam2` that
+# imported has to be the EdgeTAM checkout this repo patched, not Meta's package
+# under the same name. If both are present the wrong one loads silently and
+# fails much later, inside the model.
+_from = Path(sam2.__file__).resolve().parent.parent
+assert _from == EDGETAM.resolve(), (
+    f"`sam2` imported from {_from}, not the EdgeTAM checkout at {EDGETAM}.\n"
+    f"Meta's sam2 is probably installed alongside it: `pip uninstall -y sam2 "
+    f"SAM-2` and re-run this cell.")
+assert (EDGETAM / "checkpoints" / "edgetam.pt").is_file(), \
     "edgetam.pt did not download -- rerun scripts/setup_edgetam.sh and read its output"
 """)
 
