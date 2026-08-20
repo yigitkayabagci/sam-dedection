@@ -153,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-side", type=int, default=4)
     p.add_argument("--max-area", type=float, default=0.9)
     p.add_argument("--fill", type=float, default=0.25)
+    p.add_argument("--anchor-weight", type=float, default=0.0,
+                   help="Penalise how far the encoder drifts from where it "
+                        "started this stage. Meaningful only with --base "
+                        "pointing at a pretrained checkpoint: stage A moves the "
+                        "encoder over a large unlabelled set and stage B can "
+                        "undo that on a set two orders of magnitude smaller. "
+                        "0.1-1.0 is the range to try; costs no extra forward.")
     p.add_argument("--batch", type=int, default=0, help="0 measures it on this GPU.")
     p.add_argument("--batch-ceiling", type=int, default=64)
     p.add_argument("--accum", type=int, default=1)
@@ -205,12 +212,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {name:<24} {count:>6} train windows")
 
     model = build_model(args.size, args.base, args.device)
+
+    # Snapshot before LoRA touches anything, so the anchor is the checkpoint
+    # this stage started from rather than that checkpoint plus adapters.
+    anchor = None
+    if args.anchor_weight:
+        import copy
+
+        anchor = copy.deepcopy(model).eval()
+        for parameter in anchor.parameters():
+            parameter.requires_grad_(False)
+        print(f"anchoring to {args.base} at weight {args.anchor_weight}")
+
     meta = {"method": args.method, "image_size": args.size,
             "datasets": [r.label for r in requests], "base": args.base,
             "stage": "instances", "train_frames": len(splits["train"]),
             "train_instances": instances, "sources": train.sources,
             "per_image": args.per_image, "max_instances": args.max_instances,
-            "seed": args.seed}
+            "anchor_weight": args.anchor_weight, "seed": args.seed}
 
     if args.method == "lora":
         from src.training import lora
@@ -248,7 +267,8 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.time()
     result = run_stages(model, train, val, schedule, freeze=freeze, save=save,
-                        device=args.device, progress=_tqdm(), loop=images())
+                        device=args.device, progress=_tqdm(),
+                        loop=images(anchor, args.anchor_weight))
     result |= {"seconds": round(time.time() - started, 1),
                "checkpoint": str(args.out),
                "peak_gib": (torch.cuda.max_memory_allocated() / 2**30

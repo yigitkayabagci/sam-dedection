@@ -94,17 +94,23 @@ def _clip_loss(model, batch):
 CLIPS = Loop(stream=_clip_stream, loss=_clip_loss)
 
 
-def images() -> Loop:
+def images(anchor=None, anchor_weight: float = 0.0) -> Loop:
     """The image-mode `Loop`, imported lazily.
 
     `image_loop` pulls in `aerial`, which pulls in nothing heavy but does bind
     a dataset vocabulary that a clip-mode run has no use for. Keeping the
     import inside the call keeps `schedule` importable with nothing but numpy
     and torch, which is what `tests/test_schedule.py` relies on.
+
+    `anchor` is a frozen copy of the model as this stage started; with a
+    non-zero `anchor_weight` the loss gains a term for how far the encoder has
+    drifted from it. See `image_loop.image_losses`.
     """
     from .image_loop import image_losses, stream
 
-    return Loop(stream=stream, loss=image_losses)
+    return Loop(stream=stream,
+                loss=lambda model, batch: image_losses(
+                    model, batch, anchor=anchor, anchor_weight=anchor_weight))
 
 
 def validate(

@@ -43,6 +43,12 @@ tarifin kendisi.
 | **freeze çağrısı** | `apply_freeze(model, "backbone")` | `apply_freeze(model, "encoder")` | C'nin kendi aşaması (henüz yok) |
 | **kod** | `src/training/distill.py` | `src/training/image_loop.py` | `src/training/clip_loop.py` (hazır) |
 
+Bu kurulumun çoklu-öğretmen alternatifine karşı değerlendirmesi, literatürün
+neyi desteklediği ve neyi çürüttüğü: **`docs/encoder_arastirma.md`**. Oradan
+koda giren iki şey — aşama B'de **çapa terimi** (`--anchor-weight`, aşama A'nın
+geri alınmasını engelliyor) ve distilasyonda **moment terimi**
+(`--moments`) — aşağıda ilgili bölümlerde.
+
 Aşama sırası keyfi değil, gerekçesi TODO §1'de.
 
 ---

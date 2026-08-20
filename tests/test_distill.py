@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +29,7 @@ from src.training.distill import (  # noqa: E402
     build_teacher,
     distill_loss,
     encoder_features,
+    moment_loss,
     patch_aligned,
     shared_window,
     subsample,
@@ -84,10 +86,37 @@ class TestDistillLoss(unittest.TestCase):
         loss, _ = distill_loss(student, teacher)
         self.assertTrue(torch.isfinite(loss))
 
-    def test_the_l1_term_is_off_unless_asked_for(self):
+    def test_the_moment_term_is_off_unless_asked_for(self):
         student, teacher = torch.randn(2, 8, 4, 4), torch.randn(2, 8, 4, 4)
-        self.assertNotIn("l1", distill_loss(student, teacher)[1])
-        self.assertIn("l1", distill_loss(student, teacher, l1_weight=1.0)[1])
+        self.assertNotIn("moments", distill_loss(student, teacher)[1])
+        self.assertIn("moments", distill_loss(student, teacher, moment_weight=1.0)[1])
+
+    def test_the_moment_term_catches_a_channel_the_cosine_term_cannot(self):
+        # The failure it exists for: a student that matches direction position
+        # by position while letting half its channels go constant across the
+        # map. Those channels carry nothing for the decoder to read, and the
+        # per-position cosine never notices.
+        torch.manual_seed(0)
+        teacher = torch.randn(4, 32, 8, 8)
+        collapsed = teacher.clone()
+        collapsed[:, 16:] = collapsed[:, 16:].mean(dim=(2, 3), keepdim=True)
+
+        self.assertAlmostEqual(float(moment_loss(*(F.normalize(x.float(), dim=1)
+                                                   for x in (teacher, teacher)))),
+                               0.0, places=6)
+        self.assertGreater(
+            float(moment_loss(*(F.normalize(x.float(), dim=1)
+                                for x in (collapsed, teacher)))), 1e-4)
+
+    def test_a_globally_scaled_teacher_is_the_same_field(self):
+        # The moment term runs on the normalised maps on purpose, so a teacher
+        # scaled by a constant costs nothing -- matching a foundation model's
+        # absolute magnitude would drag the student away from the scale
+        # EdgeTAM's own decoder was trained to read.
+        feats = torch.randn(2, 16, 6, 6)
+        self.assertAlmostEqual(
+            float(distill_loss(feats, feats * 7.0, moment_weight=1.0)[0]),
+            0.0, places=5)
 
     def test_the_gradient_flows_to_the_student_only(self):
         student = torch.randn(2, 8, 4, 4, requires_grad=True)

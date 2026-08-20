@@ -83,8 +83,13 @@ def main(argv: list[str] | None = None) -> int:
                         "misalignment of ~16 source pixels -- for pairs that "
                         "are not registered to the pixel, VTUAV included. "
                         "Costs spatial precision, so leave at 0 otherwise.")
-    p.add_argument("--l1", type=float, default=0.0,
-                   help="Weight of a smooth-L1 term beside the cosine one.")
+    p.add_argument("--moments", type=float, default=0.0,
+                   help="Weight of a per-channel mean/std term beside the "
+                        "cosine one. Cosine fixes direction and says nothing "
+                        "about magnitude; this calibrates it. Keep it small -- "
+                        "at comparable weight the student reproduces the "
+                        "teacher's variance without aligning with its "
+                        "direction (arXiv 2604.27128). Untested here.")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=float, default=None)
     p.add_argument("--workers", type=int, default=8)
@@ -133,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         model, pairs, teacher, save=save, size=args.size, epochs=args.epochs,
         batch=args.batch, steps_per_epoch=args.steps,
         rates=Rates(neck=args.neck_lr, trunk=args.trunk_lr),
-        projector_lr=args.projector_lr, l1_weight=args.l1, freeze=freeze,
+        projector_lr=args.projector_lr, moment_weight=args.moments, freeze=freeze,
         crop=args.crop, tolerance=args.tolerance,
         workers=args.workers, depth=args.depth, seed=args.seed,
         device=args.device, progress=_tqdm())

@@ -65,6 +65,9 @@ Each is argued where it is made; this is the index.
 | the static loop goes through `track_step` | `src/training/image_loop.py` | a still image *is* frame 0 of a clip; two code paths for it would drift |
 | no `object_score` term on static data | 07, `src/training/losses.py` | there is no `exist` label, and BCE against a constant 1 teaches the head to fire unconditionally |
 | distillation for pretraining, not MAE | 07, `src/training/distill.py` | MAE masks tokens and needs a ViT; the student side of a distillation loss is architecture-free |
+| staged A-then-B, not one summed multi-teacher loss | `docs/encoder_arastirma.md` | the two stages' data differ by two orders of magnitude; staging also removes the loss-weighting problem outright |
+| an anchor term instead, during stage B | `src/training/image_loop.py` | stage A moves the encoder on 1.7 M pairs and stage B can undo it on 50 k; the reference is the model's own frozen copy, not a foundation model |
+| the web-pretrained DINOv3, not the satellite one | `docs/encoder_arastirma.md` | DINOv3's own results: satellite pretraining wins on metric tasks, web wins on segmentation and detection |
 | Anti-UAV410, not HIT-UAV or LSOTB-TIR | 01, 02 | 640×512 mono thermal video with a per-frame `exist` flag, and a 512 crop is native pixels |
 | a labelling stride, not fewer sequences | `src/training/labels.py` | a skipped frame keeps `exist` and its box; at 25 fps its mask was nearly its neighbour's |
 | partial fine-tune, not LoRA | 02, `src/training/finetune.py` | the argument: 13.9 M parameters is not memory-bound, and merged LoRA is just weights |

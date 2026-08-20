@@ -143,6 +143,82 @@ class TestPropagate(unittest.TestCase):
             propagate_image(model, batch.images, batch.boxes, batch.valid)
 
 
+class TestAnchoring(unittest.TestCase):
+    """Stage A moves the encoder; stage B must not simply undo it.
+
+    Feature distillation used as a *regulariser* rather than as a teacher: the
+    reference is the model's own frozen copy from the start of the stage, so
+    the term measures drift from what pretraining bought.
+    """
+
+    def test_the_features_come_back_from_the_forward_that_already_ran(self):
+        # The anchoring term is only cheap because of this: no second pass
+        # through a 38.7 GFLOP encoder for a number the first pass computed.
+        model = FakeSam2(SIZE).eval()
+        batch = fake_batch(images=2, width=3)
+        out = propagate_image(model, batch.images, batch.boxes, batch.valid)
+
+        self.assertEqual(model.images, [2])                 # still one encode
+        self.assertEqual(out["features"].shape, (2, 8, SIZE, SIZE))
+
+    def test_an_unmoved_model_pays_nothing(self):
+        import copy
+
+        model = FakeSam2(SIZE).eval()
+        anchor = copy.deepcopy(model).eval()
+        _, terms = image_losses(model, fake_batch(), anchor=anchor, anchor_weight=1.0)
+        self.assertAlmostEqual(terms["anchor"], 0.0, places=5)
+
+    def test_a_moved_encoder_pays(self):
+        import copy
+
+        model = FakeSam2(SIZE).eval()
+        anchor = copy.deepcopy(model).eval()
+        with torch.no_grad():
+            model.image_encoder.weight.add_(0.5)
+
+        _, terms = image_losses(model, fake_batch(), anchor=anchor, anchor_weight=1.0)
+        self.assertGreater(terms["anchor"], 0.01)
+
+    def test_zero_weight_leaves_the_loss_untouched(self):
+        import copy
+
+        torch.manual_seed(0)
+        model = FakeSam2(SIZE).eval()
+        anchor = copy.deepcopy(model).eval()
+        plain, terms = image_losses(model, fake_batch())
+        with_anchor, other = image_losses(model, fake_batch(), anchor=anchor,
+                                          anchor_weight=0.0)
+
+        self.assertAlmostEqual(float(plain.detach()), float(with_anchor.detach()),
+                               places=6)
+        self.assertNotIn("anchor", terms)
+        self.assertNotIn("anchor", other)
+
+    def test_the_anchor_receives_no_gradient(self):
+        import copy
+
+        model = FakeSam2(SIZE).eval()
+        anchor = copy.deepcopy(model).eval()
+        for parameter in anchor.parameters():
+            parameter.requires_grad_(False)
+
+        image_losses(model, fake_batch(), anchor=anchor, anchor_weight=1.0)[0].backward()
+        self.assertIsNone(anchor.image_encoder.weight.grad)
+        self.assertIsNotNone(model.image_encoder.weight.grad)
+
+    def test_the_loop_carries_the_anchor_through_run_stages(self):
+        import copy
+
+        from src.training.schedule import images as image_loop_for
+
+        model = FakeSam2(SIZE).eval()
+        anchor = copy.deepcopy(model).eval()
+        loop = image_loop_for(anchor, 0.5)
+        _, terms = loop.loss(model, fake_batch())
+        self.assertIn("anchor", terms)
+
+
 class TestInstanceLoss(unittest.TestCase):
     def test_there_is_no_object_score_term(self):
         # A static set has no `exist` label; every prompted instance is present

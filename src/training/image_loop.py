@@ -157,6 +157,12 @@ def propagate_image(model, images: torch.Tensor, boxes: torch.Tensor,
 
     backbone = model.forward_image(images)
     _, feats, pos_embeds, feat_sizes = model._prepare_backbone_features(backbone)
+    # The top level as a map, before the per-instance selection: this is the
+    # tensor the mask decoder consumes and the one the ONNX encoder graph
+    # exports, and handing it back means an anchoring term costs no second
+    # forward pass through the encoder.
+    top, (fh, fw) = feats[-1], feat_sizes[-1]
+    encoded = top.permute(1, 2, 0).reshape(top.shape[1], top.shape[2], fh, fw)
     # SAM 2 hands features on as HWxNxC, so the batch axis is 1. Selecting
     # rather than repeating is what keeps a ragged batch free of padded work.
     feats = [f.index_select(1, image_of) for f in feats]
@@ -189,12 +195,14 @@ def propagate_image(model, images: torch.Tensor, boxes: torch.Tensor,
         # belongs to the mask being supervised. Same convention as `clip_loop`.
         "ious": ious.max(dim=-1, keepdim=True).values,
         "pred_masks": out["pred_masks"],
+        "features": encoded,
         "rows": rows,
         "image_of": image_of,
     }
 
 
-def image_losses(model, batch: ImageBatch, weights=None):
+def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
+                 anchor_weight: float = 0.0):
     """Propagate a batch and score every prompted instance in it.
 
     Every frame is scored -- there is no prompted frame to exclude the way
@@ -202,13 +210,37 @@ def image_losses(model, batch: ImageBatch, weights=None):
     answer, and it is not: a box says *where*, and the target is the mask,
     which is the whole task. SAM 2's image pretraining is this and nothing
     else.
+
+    **`anchor` is the answer to what stage A costs if stage B undoes it.**
+    Pretraining moves the encoder over a large unlabelled set; stage B then
+    trains it on a labelled set two orders of magnitude smaller, and nothing
+    stops it drifting back. Passing a frozen copy of the model *as stage B
+    started* -- the stage-A output -- adds a term penalising how far the
+    encoder's features have travelled from it, which is feature distillation
+    used as a regulariser rather than as a teacher.
+
+    The anchor is the model itself and not a foundation model, deliberately:
+    what is worth preserving is what stage A actually learned, the frozen copy
+    is 4.92 M parameters rather than 300 M, and the features come out already
+    in the student's own space so no projection is needed. It also costs no
+    extra encoder pass -- `propagate_image` hands back the map it computed.
     """
     from .losses import Weights, instance_loss
 
     weights = weights or Weights()
     outputs = propagate_image(model, batch.images, batch.boxes, batch.valid)
     targets = batch.masks.reshape(-1, *batch.masks.shape[-2:])[outputs["rows"]]
-    return instance_loss(outputs, targets, weights)
+    loss, terms = instance_loss(outputs, targets, weights)
+
+    if anchor is not None and anchor_weight:
+        from .distill import distill_loss, encoder_features
+
+        with torch.no_grad():
+            reference = encoder_features(anchor, batch.images)
+        drift, _ = distill_loss(outputs["features"], reference)
+        loss = loss + anchor_weight * drift
+        terms["anchor"] = float(drift.detach())
+    return loss, terms
 
 
 @torch.no_grad()

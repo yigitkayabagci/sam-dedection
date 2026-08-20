@@ -290,8 +290,33 @@ def encoder_features(model, images: torch.Tensor) -> torch.Tensor:
     return flat.permute(1, 2, 0).reshape(flat.shape[1], flat.shape[2], height, width)
 
 
+def moment_loss(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+    """Per-channel mean and spread **across positions**, matched.
+
+    An anti-collapse term. Per-position cosine constrains each position's
+    direction and says nothing about how the channels are *used across the
+    map*: a student whose channel is nearly constant everywhere can still score
+    well position by position, and that channel then carries no information for
+    the decoder to read. Matching each channel's mean and standard deviation
+    over the map penalises exactly that.
+
+    **Deliberately computed on the normalised maps, unlike the published
+    version.** arXiv 2604.27128's scale term matches *raw* feature magnitudes,
+    which is right when the student's output is the deployed tensor. Here it is
+    not: the student's raw scale is what EdgeTAM's own mask decoder was trained
+    to read, the projector standing between student and teacher is discarded at
+    the end of the stage, and so pulling the student's magnitude towards a
+    foundation model's would be matching scaffolding at the decoder's expense.
+    What survives normalisation -- which channels do work, and where -- is the
+    part worth copying.
+    """
+    dims = (0, 2, 3)
+    return ((student.mean(dims) - teacher.mean(dims)).pow(2).mean()
+            + (student.std(dims) - teacher.std(dims)).pow(2).mean())
+
+
 def distill_loss(student: torch.Tensor, teacher: torch.Tensor,
-                 l1_weight: float = 0.0,
+                 moment_weight: float = 0.0,
                  tolerance: int = 0) -> tuple[torch.Tensor, dict[str, float]]:
     """Cosine distance between two dense feature maps, position by position.
 
@@ -299,6 +324,17 @@ def distill_loss(student: torch.Tensor, teacher: torch.Tensor,
     scales, and matching the scale is not the point -- what transfers is
     *direction*: which positions the teacher considers similar to which. An L2
     term would spend most of the gradient making the norms agree.
+
+    **Direction first, everything else second, and the order is load-bearing.**
+    The published recipe closest to this one (arXiv 2604.27128, distilling SAM
+    3's encoder into a small student) reports a *collapsed-variance failure
+    mode* when its scale term is given weight comparable to the directional
+    ones: the network converges on a solution reproducing the teacher's
+    variance without aligning with its direction. So `moment_weight` is a small
+    number beside an implicit 1.0 on cosine, and it defaults to **off** -- that
+    paper chose its weights on pilot runs and reports no ablation, and our
+    moment term is not even the same one (see `moment_loss`). Treat it as a
+    hypothesis to test on the held-out split, not a setting to trust.
 
     The teacher is resized to the student's grid, not the other way round. The
     student's resolution is fixed by the deployment (S/16), and upsampling the
@@ -341,10 +377,10 @@ def distill_loss(student: torch.Tensor, teacher: torch.Tensor,
 
     total = cosine.mean()
     terms = {"cosine": float(total.detach())}
-    if l1_weight:
-        l1 = F.smooth_l1_loss(student, teacher)
-        total = total + l1_weight * l1
-        terms["l1"] = float(l1.detach())
+    if moment_weight:
+        moments = moment_loss(student, teacher)
+        total = total + moment_weight * moments
+        terms["moments"] = float(moments.detach())
     return total, terms
 
 
@@ -492,7 +528,7 @@ def pretrain(
     steps_per_epoch: int = 400,
     rates: Rates = Rates(neck=1e-4, trunk=5e-5),
     projector_lr: float = 1e-3,
-    l1_weight: float = 0.0,
+    moment_weight: float = 0.0,
     freeze=apply_freeze,
     crop: float | None = None,
     tolerance: int = 0,
@@ -554,7 +590,7 @@ def pretrain(
                                 enabled=device.startswith("cuda")):
                 target = teacher.features(pair.rgb)
                 student = projector(encoder_features(model, pair.thermal))
-            loss, terms = distill_loss(student, target, l1_weight, tolerance)
+            loss, terms = distill_loss(student, target, moment_weight, tolerance)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
