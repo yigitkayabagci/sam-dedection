@@ -180,6 +180,14 @@ ve her örnek başka bir örneğin maskesiyle eşleşir — kayıp yine de sonlu
 İkisi birlikte taşındığı için artık uyuşmazlık **mümkün değil**; üstelik
 `save_index` damgalıyor ve `load_index` reddediyor.
 
+**Hangi set neyi besliyor: `role`.** Beşinci alan. `train` = sadece eğitim,
+`eval` = sadece val/test, `all` = normal 80/10/10. Sebebi ölçümün ne demek
+olduğu: **semantik haritadan yeniden kurulmuş** örnekler taşıyan bir setin
+"ground truth"u kendisi belirsiz — `decompose` iki arabayı kaynaştırdıysa
+doğrusu tek blob, ve onları **doğru ayıran** model **yanlış** sayılır. O sayı
+modeli değil ayrıştırmayı ölçer. Yani Kust4K `train`, VTUAV VIS `all`: gürültülü
+hedeften öğrenmek normal, gürültülü hedefle **not almak** değil.
+
 **Bölme (split) veri seti başına katmanlı.** 4 024 karelik bir set, 100 dizilik
 bir setin yanında tek permütasyonla neredeyse tamamen `test`'e düşebilir. Ayrıca
 bölme *isim* üzerinden değil indeks girdisi üzerinden: `000123.png` setlerin

@@ -357,6 +357,20 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
     on frame names, because names collide across datasets: `000123.png` exists
     in most of them, and a name-keyed lookup would silently train on one
     dataset's frame while scoring another's.
+
+    **`Source.role` decides which splits a dataset feeds at all**, and the
+    reason is what a held-out number is supposed to mean. A dataset whose
+    instances were *reconstructed* from a semantic map -- connected components,
+    gates, the whole of `decompose` -- carries a target that is itself
+    uncertain: where the decomposition fused two cars, its "ground truth" says
+    one blob, and a model that correctly separates them is marked **wrong**.
+    Scoring on that measures the decomposition as much as the model.
+
+    So a set with real instance masks can be `all` (or `eval`) and a
+    reconstructed one `train`, and then the test number is against annotation
+    somebody actually drew. Training on both is still right -- more data, and a
+    slightly noisy target is a normal thing to learn from. It is only the
+    *measurement* that has to be clean.
     """
     grouped: dict[str, list[FrameIndex]] = {}
     for entry in index:
@@ -364,6 +378,20 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
 
     out: dict[str, list[FrameIndex]] = {"train": [], "val": [], "test": []}
     for offset, (_, entries) in enumerate(sorted(grouped.items())):
+        role = entries[0].source.role if entries[0].source else "all"
+        if role == "train":
+            out["train"].extend(entries)
+            continue
+        if role == "eval":
+            # Everything this set has goes to val and test, in the ratio the
+            # caller asked for between them.
+            val, test = fractions[1], fractions[2]
+            share = val / max(val + test, 1e-9)
+            parts = split_frames(entries, (share, 1.0 - share, 0.0),
+                                 seed + 1000 * offset)
+            out["val"].extend(parts["train"])
+            out["test"].extend(parts["val"])
+            continue
         # A different seed per source, so two datasets of the same length do
         # not receive the identical permutation.
         parts = split_frames(entries, fractions, seed + 1000 * offset)
@@ -378,6 +406,9 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
 
 
 MODES = ("components", "watershed", "labels")
+
+# Which splits a dataset feeds. `all` is the ordinary 80/10/10.
+ROLES = ("all", "train", "eval")
 
 
 @dataclass(frozen=True)
@@ -403,12 +434,15 @@ class Source:
     gates: "InstanceGates" = None            # filled in below; see __post_init__
     mode: str = "components"
     gray: bool = True                        # thermal replicates one channel
+    role: str = "all"                        # which splits this feeds; see below
 
     def __post_init__(self) -> None:
         if self.gates is None:
             object.__setattr__(self, "gates", InstanceGates())
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}")
+        if self.role not in ROLES:
+            raise ValueError(f"role must be one of {ROLES}, got {self.role!r}")
 
     @property
     def name(self) -> str:
@@ -1047,7 +1081,7 @@ def sample_masks(sample: Sample) -> np.ndarray:
 
 __all__ = [
     "DatasetSpec", "Frame", "FrameIndex", "Instance", "InstanceGates", "SPECS",
-    "MODES", "Sample", "Source", "decompose", "describe_layout", "index_frames",
+    "MODES", "ROLES", "Sample", "Source", "decompose", "describe_layout", "index_frames",
     "list_frames", "list_pairs", "split_bridges",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",

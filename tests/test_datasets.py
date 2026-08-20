@@ -56,9 +56,27 @@ class TestParse(unittest.TestCase):
         request = parse("kust4k:/data/K", gates)
         self.assertEqual(request.source.gates.min_area, 999)
 
+    def test_the_role_field_decides_which_splits_a_dataset_feeds(self):
+        self.assertEqual(parse("kust4k:/data/K").source.role, "all")
+        self.assertEqual(
+            parse("kust4k:/data/K:thermal:components:train").source.role, "train")
+        self.assertEqual(
+            parse("vtuav_vis:/data/V:thermal:labels:eval").source.role, "eval")
+
+    def test_role_stays_out_of_the_cache_key(self):
+        # Changing which split a dataset feeds must not throw away an index
+        # that took a full pass over it to build.
+        self.assertEqual(parse("kust4k:/data/K:thermal:components:train").label,
+                         parse("kust4k:/data/K:thermal:components").label)
+
+    def test_a_run_with_nothing_to_score_on_says_so(self):
+        text = describe([parse("kust4k:/data/K:thermal:components:train")])
+        self.assertIn("nothing to", text)
+
     def test_each_field_is_validated_rather_than_ignored(self):
         for bad in ("kust4k", "kust4k:", ":/data/K", "nosuchset:/data/K",
-                    "kust4k:/data/K:sideways", "kust4k:/data/K:thermal:magic"):
+                    "kust4k:/data/K:sideways", "kust4k:/data/K:thermal:magic",
+                    "kust4k:/data/K:thermal:components:sometimes"):
             with self.assertRaises(ValueError, msg=bad):
                 parse(bad)
 
@@ -123,6 +141,40 @@ class TestStratifiedSplit(unittest.TestCase):
         first = [e.frame.name for e in split_index(index, seed=5)["test"]]
         again = [e.frame.name for e in split_index(index, seed=5)["test"]]
         self.assertEqual(first, again)
+
+    def test_a_train_role_dataset_never_reaches_val_or_test(self):
+        # The point: a set whose instances were reconstructed from a semantic
+        # map is a fine thing to learn from and a bad thing to be scored on --
+        # where the decomposition fused two cars, a model that separates them
+        # correctly would be marked wrong.
+        reconstructed = Source(SPECS["kust4k"], role="train")
+        real = Source(SPECS["vtuav_vis"], mode="labels")
+        index = self.index(reconstructed, 100) + self.index(real, 40, "v")
+        parts = split_index(index, seed=0)
+
+        for name in ("val", "test"):
+            for entry in parts[name]:
+                self.assertIs(entry.source, real, name)
+        self.assertEqual(sum(1 for e in parts["train"] if e.source is reconstructed),
+                         100)
+
+    def test_an_eval_role_dataset_never_reaches_train(self):
+        held_out = Source(SPECS["vtuav_vis"], mode="labels", role="eval")
+        index = self.index(self.big, 100) + self.index(held_out, 40, "v")
+        parts = split_index(index, seed=0)
+
+        self.assertFalse(any(e.source is held_out for e in parts["train"]))
+        self.assertEqual(sum(1 for name in ("val", "test")
+                             for e in parts[name] if e.source is held_out), 40)
+
+    def test_an_eval_role_dataset_splits_between_val_and_test(self):
+        held_out = Source(SPECS["vtuav_vis"], mode="labels", role="eval")
+        parts = split_index(self.index(held_out, 200), seed=0)
+
+        self.assertGreater(len(parts["val"]), 0)
+        self.assertGreater(len(parts["test"]), 0)
+        # Default fractions give val and test equal shares of what is left.
+        self.assertAlmostEqual(len(parts["val"]) / 200, 0.5, delta=0.05)
 
     def test_two_sources_of_the_same_length_do_not_get_the_same_permutation(self):
         # Same length, same seed: without the per-source offset both datasets

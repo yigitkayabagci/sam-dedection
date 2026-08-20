@@ -60,6 +60,7 @@ Each is argued where it is made; this is the index.
 | semantic maps decomposed into instances, not trained on directly | 07, `src/training/aerial.py` | a promptable segmenter trained on "all cars are car" pulls two adjacent cars together |
 | …but read instance masks directly where a set has them | 07, `aerial.decompose` | VTUAV's VIS split already ships the annotation the decomposition reconstructs, at 1920×1080 |
 | several datasets in one batch, not one per run | `src/training/datasets.py` | the encoder carries general features, and one dataset is one sensor, one city and one set of annotation habits |
+| reconstructed sets train, real-mask sets grade | `aerial.split_index`, `Source.role` | where the decomposition fused two cars its "truth" is one blob, so a model that separates them is scored wrong |
 | the split is stratified per dataset | `aerial.split_index` | a 4 024-frame set beside a 100-sequence one can land almost entirely in `test`; and frame names collide across datasets |
 | one encode, many prompts | 07, `src/training/image_loop.py` | the encoder is 38.7 GFLOP and does not depend on the prompt |
 | the static loop goes through `track_step` | `src/training/image_loop.py` | a still image *is* frame 0 of a clip; two code paths for it would drift |
@@ -88,7 +89,7 @@ Everything these notebooks call is tested on CPU with **nothing installed but
 numpy and torch** — no EdgeTAM, no GPU:
 
 ```bash
-python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill
+python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill tests.test_datasets tests.test_notebooks
 ```
 
 `tests.test_loader` and the end-to-end labelling case in
