@@ -629,5 +629,72 @@ class TestCheckpointNote(unittest.TestCase):
             self.assertIsNone(_checkpoint_note(str(Path(tmp) / "absent.pt"), 512))
 
 
+class TestRecordModes(unittest.TestCase):
+    """`tools/run_records.py`'s mode table, which nothing else validates.
+
+    A mode names a config and a backend, and a wrong pairing does not fail: a
+    TensorRT config with no engines falls back to PyTorch on whatever
+    checkpoint it names, and the run looks like it worked. So the table is
+    checked here rather than on the device.
+    """
+
+    def setUp(self):
+        from tools import run_records
+
+        self.rr = run_records
+
+    def test_every_mode_names_a_config_that_exists(self):
+        for name, spec in self.rr.MODES.items():
+            self.assertTrue((ROOT / spec.config).is_file(), f"{name}: {spec.config}")
+
+    def test_every_mode_names_a_registered_tracker(self):
+        registered = set(available_trackers())
+        for name, spec in self.rr.MODES.items():
+            self.assertIn(spec.tracker, registered, name)
+
+    def test_the_default_set_is_still_the_tensorrt_one(self):
+        # Adding PyTorch modes must not make an Orin run silently grow.
+        for name in self.rr.DEFAULT_MODES:
+            self.assertEqual(self.rr.MODES[name].tracker, "edgetam_trt", name)
+
+    def test_every_group_holds_real_modes(self):
+        for group, names in self.rr.GROUPS.items():
+            for name in names:
+                self.assertIn(name, self.rr.MODES, f"{group} -> {name}")
+
+    def test_the_samurai_group_changes_exactly_one_thing(self):
+        # The point of a group is a comparison with one variable in it. Same
+        # backend, same window, same weights -- only the memory gate differs.
+        import yaml
+
+        a, b = (self.rr.MODES[m] for m in self.rr.GROUPS["samurai"])
+        self.assertEqual(a.tracker, b.tracker)
+        self.assertEqual(a.crop, b.crop)
+        configs = [yaml.safe_load((ROOT / m.config).read_text()) for m in (a, b)]
+        self.assertEqual(configs[0]["checkpoint"], configs[1]["checkpoint"])
+        self.assertNotIn("samurai", configs[0])
+        self.assertTrue(configs[1]["samurai"]["enabled"])
+
+    def test_the_weights_group_changes_exactly_one_thing(self):
+        import yaml
+
+        specs = [self.rr.MODES[m] for m in self.rr.GROUPS["weights"]]
+        self.assertEqual({s.tracker for s in specs}, {"edgetam"})
+        self.assertEqual({s.crop for s in specs}, {None})
+        checkpoints = [yaml.safe_load((ROOT / s.config).read_text())["checkpoint"]
+                       for s in specs]
+        self.assertEqual(len(set(checkpoints)), len(checkpoints), checkpoints)
+
+    def test_groups_and_modes_expand_in_order_without_repeats(self):
+        self.assertEqual(self.rr.expand_modes("samurai,lora512,lora512_crop"),
+                         ["lora512", "lora512_samurai", "lora512_crop"])
+
+    def test_an_unknown_mode_is_refused_by_name(self):
+        with self.assertRaises(SystemExit):
+            self.rr.expand_modes("lora512,nonsense")
+        with self.assertRaises(SystemExit):
+            self.rr.expand_modes(" , ")
+
+
 if __name__ == "__main__":
     unittest.main()
