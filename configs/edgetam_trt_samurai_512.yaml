@@ -1,26 +1,31 @@
 # EdgeTAM at 512x512 on TensorRT, with SAMURAI motion-aware memory.
 #
 # This is the recommended deployment configuration once the engines are built:
-# configs/edgetam_trt_512.yaml plus the `samurai:` block, and the deployed
-# checkpoint instead of the stock one -- that file is the backend-comparison
-# baseline and has to stay on stock weights to be one. No engine changes shape -- SAMURAI modifies the memory-bank
-# bookkeeping, which this project deliberately kept in PyTorch
-# (docs/tensorrt_fp16.md, "what stays in PyTorch").
+# configs/edgetam_trt_lora_512.yaml plus the `samurai:` block, and nothing
+# else changes -- same engines, same checkpoint, same resolution. That file,
+# not edgetam_trt_512.yaml, is what this must be measured against: the fp16
+# config carries the stock checkpoint because it is the other half of the
+# PyTorch-against-TensorRT comparison, so pairing with it would change the
+# weights and the memory gate at once.
+#
+# No engine changes shape -- SAMURAI modifies the memory-bank bookkeeping,
+# which this project deliberately kept in PyTorch (docs/tensorrt_fp16.md,
+# "what stays in PyTorch").
 #
 # One export flag matters. The sam_head engine picks its own candidate mask
 # internally, so overriding that choice needs every candidate's object pointer:
 #
-#   python tools/export_edgetam_onnx.py --outdir models512/ --image-size 512 \
+#   python tools/export_edgetam_onnx.py --outdir models512_lora/ --image-size 512 \
 #       --checkpoint checkpoints/edgetam_lora_512.pt --all-pointers --verify
-#   python tools/build_trt_engines.py --outdir models512/ --max-batch 4
+#   python tools/build_trt_engines.py --outdir models512_lora/ --max-batch 4
 #
 # Without --all-pointers the tracker says so once and disables the mask
 # re-selection ONLY; the memory gate -- the half that stops a bad frame
 # poisoning the bank -- keeps working. So existing engines still benefit.
-image_encoder_engine:    models512/edgetam_image_encoder.engine
-memory_attention_engine: models512/edgetam_memory_attention.engine
-memory_encoder_engine:   models512/edgetam_memory_encoder.engine
-sam_head_engine:         models512/edgetam_sam_head.engine
+image_encoder_engine:    models512_lora/edgetam_image_encoder.engine
+memory_attention_engine: models512_lora/edgetam_memory_attention.engine
+memory_encoder_engine:   models512_lora/edgetam_memory_encoder.engine
+sam_head_engine:         models512_lora/edgetam_sam_head.engine
 
 # The checkpoint is the LoRA-adapted one: it matched the partial fine-tune on
 # the held-out split while moving 11% of the parameters, and recovered from

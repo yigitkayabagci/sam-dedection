@@ -11,19 +11,20 @@
 # per module in <outdir>/quantization_plan.json and in each spec.
 #
 # Build ON THE ORIN, after capturing real calibration data:
-#   1) python tools/export_edgetam_onnx.py --outdir models512/ --image-size 512 \
+#   1) python tools/export_edgetam_onnx.py --outdir models512_lora/ --image-size 512 \
 #          --checkpoint checkpoints/edgetam_lora_512.pt --verify
 #   2) python tools/quantize_edgetam.py capture --data <anti-uav410> \
 #          --calib outputs/calib/ --image-size 512
-#   3) python tools/quantize_edgetam.py quantize --outdir models512/ \
+#   3) python tools/quantize_edgetam.py quantize --outdir models512_lora/ \
 #          --qdq-outdir models512_int8/ --calib outputs/calib/
 #   4) python tools/build_trt_engines.py --outdir models512_int8/ \
 #          --precision auto --max-batch 4
 #   5) python tools/check_trt_parity.py --outdir models512_int8/ --image-size 512
 #
-# Compare against configs/edgetam_trt_512.yaml (the same graphs at fp16), never
-# against the PyTorch baseline -- otherwise the measurement mixes the backend
-# change in with the precision change.
+# Compare against configs/edgetam_trt_lora_512.yaml (the same graphs, same
+# weights, at fp16), never against the PyTorch baseline and never against
+# edgetam_trt_512.yaml -- the first mixes the backend change in with the
+# precision change, the second mixes the weights in.
 image_encoder_engine:    models512_int8/edgetam_image_encoder.engine
 memory_attention_engine: models512_int8/edgetam_memory_attention.engine
 memory_encoder_engine:   models512_int8/edgetam_memory_encoder.engine

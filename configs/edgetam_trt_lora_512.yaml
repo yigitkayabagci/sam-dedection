@@ -1,0 +1,49 @@
+# EdgeTAM at 512x512 on TensorRT, with the adapted weights. No SAMURAI.
+#
+# THE DEPLOYMENT BASELINE. configs/edgetam_trt_512.yaml is not it and cannot
+# be: that file carries the stock checkpoint on purpose, because it is the
+# other half of the "PyTorch against TensorRT" comparison and both halves have
+# to hold the same weights. Running it after exporting engines from the
+# adapted checkpoint measures a mixture -- adapted engines, stock scaffold --
+# and nothing says so out loud.
+#
+# So the two live in separate engine directories, and each config's checkpoint
+# matches the engines beside it:
+#
+#   models512/       exported from third_party/EdgeTAM/checkpoints/edgetam.pt
+#   models512_lora/  exported from checkpoints/edgetam_lora_512.pt
+#
+# That also means a module falling back to PyTorch (a missing engine, or
+# strict: false) falls back to the *same* weights the engines hold, rather
+# than silently swapping the model out mid-frame.
+#
+# Build ON THE ORIN -- engines are GPU- and TensorRT-version-specific:
+#   python tools/export_edgetam_onnx.py --outdir models512_lora/ --image-size 512 \
+#       --checkpoint checkpoints/edgetam_lora_512.pt --all-pointers --verify
+#   python tools/build_trt_engines.py --outdir models512_lora/ --max-batch 4
+#   python tools/check_trt_parity.py --outdir models512_lora/ --image-size 512 \
+#       --checkpoint checkpoints/edgetam_lora_512.pt
+#
+# --all-pointers is not needed by this config, only by the SAMURAI one beside
+# it. Exporting with it anyway costs nothing here and means one engine set
+# serves both.
+#
+# Add the `samurai:` block (configs/edgetam_trt_samurai_512.yaml) for the
+# recommended deployment; this file is what that one has to be measured
+# against, so that the memory gate is the only thing that changed.
+image_encoder_engine:    models512_lora/edgetam_image_encoder.engine
+memory_attention_engine: models512_lora/edgetam_memory_attention.engine
+memory_encoder_engine:   models512_lora/edgetam_memory_encoder.engine
+sam_head_engine:         models512_lora/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_lora_512.pt
+image_size: 512                           # must match how the engines were exported
+device: cuda
+precision: float16                        # matches the fp16 engines
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
+strict: false                             # true = refuse silent PyTorch fallback
+use_cuda_graph: true                      # replay engines from a captured graph
+fill_hole_area: null

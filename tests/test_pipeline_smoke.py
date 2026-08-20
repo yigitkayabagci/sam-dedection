@@ -587,6 +587,31 @@ class TestThermalConfigs(unittest.TestCase):
             self.assertEqual(self._config(name)["checkpoint"], default, name)
 
 
+class TestEngineDirectories(unittest.TestCase):
+    def test_an_engine_directory_never_serves_two_checkpoints(self):
+        """Engines hold the weights they were exported from.
+
+        A config that points at someone else's engine directory runs those
+        engines with its own checkpoint as the scaffold -- and a module that
+        falls back to PyTorch (a missing engine, `strict: false`) then swaps
+        the weights out mid-frame with nothing said. It is invisible in the
+        output and it is a one-character mistake to make in a YAML file.
+        """
+        import yaml
+
+        seen: dict[str, dict[str, str]] = {}
+        for path in sorted((ROOT / "configs").glob("*.yaml")):
+            cfg = yaml.safe_load(path.read_text())
+            engine = cfg.get("image_encoder_engine")
+            if not engine:
+                continue
+            seen.setdefault(str(Path(engine).parent), {})[path.name] = cfg["checkpoint"]
+
+        self.assertTrue(seen, "no engine-bearing config found")
+        for directory, configs in seen.items():
+            self.assertEqual(len(set(configs.values())), 1, f"{directory}: {configs}")
+
+
 class TestCheckpointNote(unittest.TestCase):
     """Which weights a run actually loaded, said out loud before frame 0."""
 
@@ -684,6 +709,17 @@ class TestRecordModes(unittest.TestCase):
         checkpoints = [yaml.safe_load((ROOT / s.config).read_text())["checkpoint"]
                        for s in specs]
         self.assertEqual(len(set(checkpoints)), len(checkpoints), checkpoints)
+
+    def test_the_trt512_ladder_stays_on_one_set_of_weights(self):
+        # A latency ladder that changed the weights halfway up would not be a
+        # ladder. Window and memory gate vary; the checkpoint does not.
+        import yaml
+
+        specs = [self.rr.MODES[m] for m in self.rr.GROUPS["trt512"]]
+        self.assertEqual({s.tracker for s in specs}, {"edgetam_trt"})
+        checkpoints = {yaml.safe_load((ROOT / s.config).read_text())["checkpoint"]
+                       for s in specs}
+        self.assertEqual(len(checkpoints), 1, checkpoints)
 
     def test_groups_and_modes_expand_in_order_without_repeats(self):
         self.assertEqual(self.rr.expand_modes("samurai,lora512,lora512_crop"),

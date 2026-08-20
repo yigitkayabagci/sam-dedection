@@ -17,8 +17,13 @@ The TensorRT set, which needs engines built at that resolution:
   full512    whole frame resized to 512x512     4x fewer tokens, whole scene
   crop512    centred 512x512 window             native pixels, cropped scene
 
-  full512_samurai, crop512_samurai   the same engines plus the memory gate
-  full512_int8,    crop512_int8      the calibrated INT8 engine set
+These six carry the STOCK checkpoint, because full512 is the other half of the
+"PyTorch against TensorRT" comparison and both halves have to hold the same
+weights. For a deployment number, use the modes built on the adapted weights:
+
+  lora512_trt, lora512_trt_crop                  engines from models512_lora/
+  lora512_trt_samurai, ..._samurai_crop          the same, plus the memory gate
+  lora512_trt_int8, lora512_trt_int8_crop        the calibrated INT8 engine set
 
 The crop modes are what a camera that already centres and focuses on its
 target can offer: the object is in the middle, so the outer frame is mostly
@@ -56,7 +61,7 @@ on any CUDA machine, before anything is built for the device:
 holds exactly one variable: `trt` (the default six), `torch` (all six above),
 `weights` (stock / fine-tune / LoRA), `samurai` (the gate on and off, same
 weights, same input), `crop` (resize against native pixels), `trt512` (the 512
-latency ladder on the device).
+latency ladder on the device, on the adapted weights).
 
 Prompts are picked once per record, on the full frame, and reused by every
 mode (crop modes shift them automatically). They come from, in order:
@@ -117,30 +122,35 @@ MODES = {
     # TensorRT, the Orin deployment path. Each of these needs an engine set
     # built at its resolution first (tools/build_trt_engines.py).
     "full1024": Mode("edgetam_trt", "configs/edgetam_trt.yaml", None,
-                     "1024 TRT", "whole frame, resized"),
+                     "1024 TRT (stock)", "whole frame, resized"),
     "crop1024": Mode("edgetam_trt", "configs/edgetam_trt.yaml", 1024,
-                     "1024 TRT", "centred 1024x1024 window"),
+                     "1024 TRT (stock)", "centred 1024x1024 window"),
     "full768": Mode("edgetam_trt", "configs/edgetam_trt_768.yaml", None,
-                    "768 TRT", "whole frame, resized"),
+                    "768 TRT (stock)", "whole frame, resized"),
     "crop768": Mode("edgetam_trt", "configs/edgetam_trt_768.yaml", 768,
-                    "768 TRT", "centred 768x768 window"),
+                    "768 TRT (stock)", "centred 768x768 window"),
     "full512": Mode("edgetam_trt", "configs/edgetam_trt_512.yaml", None,
-                    "512 TRT", "whole frame, resized"),
+                    "512 TRT (stock)", "whole frame, resized"),
     "crop512": Mode("edgetam_trt", "configs/edgetam_trt_512.yaml", 512,
-                    "512 TRT", "centred 512x512 window"),
-    # The deployment configurations at 512: the engines plus the memory gate,
-    # and the calibrated INT8 engine set. Both carry the deployed checkpoint
-    # rather than the stock one, so pair them with each other for accuracy and
-    # with full512/crop512 only for timing -- SAMURAI's cost is host-side
-    # bookkeeping and does not depend on which weights the engines hold.
-    "full512_samurai": Mode("edgetam_trt", "configs/edgetam_trt_samurai_512.yaml", None,
-                            "512 TRT + SAMURAI", "whole frame, resized"),
-    "crop512_samurai": Mode("edgetam_trt", "configs/edgetam_trt_samurai_512.yaml", 512,
-                            "512 TRT + SAMURAI", "centred 512x512 window"),
-    "full512_int8": Mode("edgetam_trt", "configs/edgetam_trt_int8_512.yaml", None,
-                         "512 TRT INT8", "whole frame, resized"),
-    "crop512_int8": Mode("edgetam_trt", "configs/edgetam_trt_int8_512.yaml", 512,
-                         "512 TRT INT8", "centred 512x512 window"),
+                    "512 TRT (stock)", "centred 512x512 window"),
+    # The same six, on the adapted weights: engines built from
+    # checkpoints/edgetam_lora_512.pt into models512_lora/, so nothing here
+    # ever mixes adapted engines with a stock scaffold. These are the modes to
+    # quote a deployment frame time from; the stock six above answer "what did
+    # TensorRT change", which is a different question.
+    "lora512_trt": Mode("edgetam_trt", "configs/edgetam_trt_lora_512.yaml", None,
+                        "512 TRT LoRA", "whole frame, resized"),
+    "lora512_trt_crop": Mode("edgetam_trt", "configs/edgetam_trt_lora_512.yaml", 512,
+                             "512 TRT LoRA", "centred 512x512 window"),
+    "lora512_trt_samurai": Mode("edgetam_trt", "configs/edgetam_trt_samurai_512.yaml",
+                                None, "512 TRT LoRA + SAMURAI", "whole frame, resized"),
+    "lora512_trt_samurai_crop": Mode("edgetam_trt", "configs/edgetam_trt_samurai_512.yaml",
+                                     512, "512 TRT LoRA + SAMURAI",
+                                     "centred 512x512 window"),
+    "lora512_trt_int8": Mode("edgetam_trt", "configs/edgetam_trt_int8_512.yaml", None,
+                             "512 TRT LoRA INT8", "whole frame, resized"),
+    "lora512_trt_int8_crop": Mode("edgetam_trt", "configs/edgetam_trt_int8_512.yaml", 512,
+                                  "512 TRT LoRA INT8", "centred 512x512 window"),
 
     # PyTorch at 512. No engines, no export, runs on any CUDA machine -- which
     # is what makes these the modes to answer "did the thermal adaptation help
@@ -174,10 +184,11 @@ GROUPS = {
     # Does the resize cost anything? Same weights, whole frame against a
     # native-pixel window.
     "crop": ("lora512", "lora512_crop"),
-    # The 512 latency ladder on the device: engines, engines with the memory
-    # gate, both windows. This is a timing comparison -- see the note on the
-    # SAMURAI modes above.
-    "trt512": ("full512", "crop512", "full512_samurai", "crop512_samurai"),
+    # The 512 latency ladder on the device, all on the adapted weights:
+    # engines, native window, and the memory gate on each. One engine set,
+    # one checkpoint, so the only things that vary are the window and the gate.
+    "trt512": ("lora512_trt", "lora512_trt_crop",
+               "lora512_trt_samurai", "lora512_trt_samurai_crop"),
 }
 
 
