@@ -20,7 +20,7 @@ bu işin dışında; oraya encoder sağlamlaştıktan sonra geçilecek.
 |---|---|---|---|
 | **SAM 2 / EdgeTAM** | **Modelin kendisi.** EdgeTAM, SAM 2'nin küçültülmüş forku (13,9 M) ve `sam2` paketi olarak kuruluyor. Eğittiğimiz ağırlıklar bunun | Her zaman — aşama A ve B'nin ikisinde de | **Evet.** Zaten iş bu |
 | **DINOv3** | **Öğretmen**, model değil. RGB yarısına bakıp öznitelik üretiyor; bizim encoder termal yarısına bakıp aynı özniteliği üretmeye çalışıyor | Yalnızca **aşama A**. Bitince atılıyor | Hayır — donuk, sadece okunuyor |
-| **SAM 3** | **Şu anda kullanılmıyor.** Değerlendirildi, bilinçli olarak ertelendi | — | — |
+| **SAM 3** | **Modelde yok, eğitim döngüsünde yok.** Tek yeri çevrimdışı **masklet üretimi** (aşama C verisi, `tools/make_masklets.py`) — orada da varsayılan öğretmen SAM 2.1, SAM 3 tek string uzakta | Sadece çevrimdışı, eğitimden önce bir kez | Hayır — donuk, sadece okunuyor |
 
 **DINOv3 mimariyi bozmuyor.** Distilasyon `image_encoder`'ın **ağırlık
 değerlerini** değiştiriyor, başka hiçbir şeyi değil: aynı modüller, aynı
@@ -538,6 +538,8 @@ takipçi için **ön koşuldur, kanıt değildir.**
 | `src/training/schedule.py` | iki aşama, EMA, checkpoint kuralı — `Loop` ile iki veri moduna da hizmet ediyor |
 | `src/training/finetune.py` | `STAGES` / `apply_freeze` — `backbone`, `head`, `encoder` |
 | `src/training/lora.py` | PEFT; `STAGES` tablosunu fine-tune ile paylaşıyor |
+| `src/training/masklets.py` | video öğretmeniyle kutu → masklet: parçalı yayılım, kare başına kutu kapısı, kalibrasyon — aşama C'nin veri fabrikası (arastirma §8) |
+| `tools/make_masklets.py` | masklet hattının giriş noktası; `--calibrate` VIS'in çizilmiş maskelerine karşı ölçüyor |
 | `tools/fetch_aerial.py` | Drive/arşiv/URL → yerel disk + palet doğrulaması |
 | `tools/pretrain_encoder.py` | aşama A giriş noktası |
 | `tools/train_encoder.py` | aşama B giriş noktası, `--method finetune\|lora` |
@@ -562,3 +564,10 @@ koşturun.
 SAM 2'nin yaptığı gibi statik veriyle dönüşümlü besleyerek.
 `FROZEN_MODULES` bugün bunun tersini yapıyor, yani `STAGES`'e kendi girdisi
 eklenecek. `clip_loop.py` hazır.
+
+Aşama C'nin veri tarafı da hazır: `tools/make_masklets.py`, VTUAV'ın kutu
+etiketli ~400 dizisini bir video öğretmeniyle (varsayılan SAM 2.1; SAM 3 tek
+string) masklet'e çeviriyor ve çıktıyı `labels.py`'ın deposunun aynısına
+yazıyor. Harcamadan önce ölçü: `--calibrate`, VIS bölümünün çizilmiş
+maskelerine karşı masklet IoU'sunu basıyor — o sayı zayıfsa fabrika
+çalıştırılmaz. Ayrıntı ve literatür: `docs/encoder_arastirma.md` §8.
