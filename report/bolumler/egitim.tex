@@ -1,0 +1,877 @@
+\chapter{Encoder Eğitimi: Ne Yaptık}
+\label{ch:egitim}
+
+Buraya kadarki bölümler \textbf{sabit ağırlıklı} bir checkpoint'i hızlandırmayı
+anlattı: EdgeTAM indirildiği gibi alınıp dört TensorRT motoruna taşındı,
+ölçüldü, karşılaştırıldı. Bu bölüm ters taraf --- \textbf{ağırlıkların
+kendisini} termal ve havadan veriyle eğitmek için kurulan hat.
+
+Bölüm kasten görsel: her şekil bir kurulumu anlatıyor, metin şekli
+açıklıyor. Amaç, hattı ilk kez görecek birinin şekillere bakarak ne
+yapıldığını anlayabilmesi.
+
+\begin{tasarim}
+  \textbf{Bu bölümde tek bir ölçüm yok, ve bu kasıtlı.} Anlatılan her şey
+  depoda çalışır hâlde: \texttt{src/training/} altındaki modüller, üç giriş
+  noktası (\texttt{tools/pretrain\_encoder.py},
+  \texttt{tools/train\_encoder.py}, \texttt{tools/eval\_instances.py}) ve
+  hepsini tek oturumda koşturan
+  \texttt{notebooks/07\_encoder\_aerial\_rgbt.\allowbreak ipynb}.
+  Hiçbiri bir GPU koşusundan geçmedi. Yazılmış olmak ölçülmüş olmak değildir;
+  aşağıdaki hiçbir cümle bir sonuç iddiası taşımıyor, hepsi bir
+  \emph{kurulum} ve o kurulumun gerekçesi.
+\end{tasarim}
+
+\section{Bir Bakışta: Dört Parça, ve Hangisine Dokunuyoruz}
+\label{sec:egitim-dort-parca}
+
+EdgeTAM dört parçadan oluşuyor. İkisi bir \textbf{durağan görüntü
+segmentleyicisi}, diğer ikisi onu \textbf{takipçi} yapan hafıza yolu.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[11]
+    % --- üst sıra: statik segmentleyici ---
+    \node[kgri,  text width=15mm] (im)   at (0,0)    {görüntü};
+    \node[kmavi, text width=25mm] (enc)  at (3.0,0)
+      {image encoder\\{\footnotesize RepViT + FPN}\\{\footnotesize \textbf{4,92 M}}};
+    \node[ksari, text width=21mm] (feat) at (6.3,0)
+      {öznitelik\\{\footnotesize $256{\times}32{\times}32$}};
+    \node[kyesil, text width=20mm] (dec) at (9.2,0)  {mask\\decoder};
+    \node[kgri,  text width=14mm] (mask) at (12.3,0) {maske};
+
+    \draw[esok] (im)   -- (enc);
+    \draw[esok] (enc)  -- (feat);
+    \draw[esok] (feat) -- (dec);
+    \draw[esok] (dec)  -- (mask);
+
+    % prompt encoder: mask decoder'ın soluna kaydırıldı ki aşağıdaki
+    % decoder -> memory encoder hattı içinden geçmesin
+    \node[kyesil, text width=24mm] (pe) at (7.4,-2.1)
+      {prompt encoder\\{\footnotesize kutu / nokta}};
+    \draw[esok] (pe) -- (dec);
+
+    % --- alt sıra: hafıza yolu, donuk ---
+    \node[kdonuk, text width=25mm] (ma)   at (2.6,-4.1)
+      {memory attention\\{\footnotesize 2,96 M}};
+    \node[kdonuk, text width=22mm] (bank) at (6.3,-4.1) {hafıza bankası};
+    \node[kdonuk, text width=25mm] (me)   at (10.2,-4.1)
+      {memory encoder\\{\footnotesize 1,62 M}};
+
+    \draw[esokr=esgri] (me)   -- (bank);
+    \draw[esokr=esgri] (bank) -- (ma);
+    \draw[esokr=esgri] (ma.north) -- (feat.south);
+    % decoder -> memory encoder: mask decoder'ın sağ alt kenarından dik
+    % iniyor, hiçbir kutunun içinden geçmeden
+    \draw[esokr=esgri] (10.2,-0.5) -- (me.north);
+
+    % işaret
+    \node[esisaret, fit=(enc)(feat)(dec)(pe)] (grup) {};
+    \node[esvurgu, anchor=south, yshift=1mm] at (grup.north) {eğitilen kısım};
+    \node[esnot, anchor=north, yshift=-2mm, text width=95mm] at (6.3,-4.9)
+      {taralı kutular: tekrarlayan kısım --- yalnızca kareler
+       \emph{arasında} çalışır, ve hiçbiri gradyan almıyor};
+  \end{tikzpicture}
+  \caption{EdgeTAM'ın dört parçası. Üst sıra tek bir kareyi maskeye
+    çeviriyor; alt sıra kareler arasında hafıza taşıyor. Bu bölümdeki
+    eğitimin tamamı üst sırada geçiyor, alt sıra baştan sona donuk.}
+  \label{fig:egitim-dort-parca}
+\end{figure}
+
+Hafıza yolunun donuk kalması üç ayrı sebeple isteniyor, herhangi biri tek
+başına yeterdi:
+
+\begin{enumerate}
+  \item \textbf{Tekrarlayan bir döngünün yazma ucu.} Bu proje oradaki
+        sistematik bir değişikliğin ne yaptığını zaten ölçtü: yalnızca
+        memory encoder'ı nicemlemek ortalama IoU'yu 0,9397'ye düşürdü ve
+        diğer modüllerin aksine hasar \emph{klip boyunca süregelen bir
+        düşüş} olarak çıktı --- çünkü onun çıktısı bankaya yazılıp sonraki
+        yedi karede geri okunuyor (\cref{ch:deneyler}).
+  \item \textbf{ONNX yeniden yazımının zor olanı orası} --- sabit hafıza
+        slotları, döşenmiş RoPE tabloları, toplamsal maske. O grafiklerin
+        türetildiği ağırlıkları yeniden eğitmek, checkpoint ile motor
+        arasında sessiz bir uyuşmazlık davetidir.
+  \item \textbf{Piksel değil, soyut öznitelik işliyor.} Termal--RGB farkı
+        bir \emph{encoder} problemi; hafıza yolunun buna ihtiyaç duymasını
+        bekletecek bir sebep yok.
+\end{enumerate}
+
+Bu ayrım bizim icadımız değil: SAM~2 de encoder'ı statik görüntüyle, hafıza
+yolunu videoyla eğitiyor ve uzun dizilere geçerken image encoder'ı
+\textbf{tamamen donduruyor}~\cite{ravi2024sam2}.
+
+\section{Üç Aşama}
+\label{sec:egitim-uc-asama}
+
+Plan üç aşamalı. İlk ikisinin kodu yazıldı, üçüncüsü ikincisi ölçülmeden
+başlamıyor.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[42]
+    % A
+    \node[kmavi, text width=31mm] (a) at (0,0)
+      {\textbf{A --- ön-eğitim}\\[0.5mm]{\footnotesize image encoder}};
+    \node[ksari, text width=31mm] (ad) at (0,-2.0)
+      {{\footnotesize hizalı RGB-T çifti}\\{\footnotesize \textbf{etiketsiz}}};
+    \node[kgri, text width=31mm] (al) at (0,-3.7)
+      {{\footnotesize kosinüs mesafesi}};
+    \draw[esok] (a) -- (ad);  \draw[esok] (ad) -- (al);
+
+    % B
+    \node[kmavi, text width=31mm] (b) at (4.7,0)
+      {\textbf{B --- ince ayar}\\[0.5mm]{\footnotesize image encoder
+       + mask decoder}};
+    \node[ksari, text width=31mm] (bd) at (4.7,-2.0)
+      {{\footnotesize statik kare +}\\{\footnotesize \textbf{yoğun maske}}};
+    \node[kgri, text width=31mm] (bl) at (4.7,-3.7)
+      {{\footnotesize 20·focal + dice + IoU}};
+    \draw[esok] (b) -- (bd);  \draw[esok] (bd) -- (bl);
+
+    % C
+    \node[kdonuk, text width=31mm] (c) at (9.4,0)
+      {\textbf{C --- video}\\[0.5mm]{\footnotesize memory attention
+       + memory encoder}};
+    \node[kdonuk, text width=31mm] (cd) at (9.4,-2.0)
+      {{\footnotesize video + örnek kimliği}};
+    \node[kdonuk, text width=31mm] (cl) at (9.4,-3.7)
+      {{\footnotesize + object-score BCE}};
+    \draw[esokr=esgri] (c) -- (cd);  \draw[esokr=esgri] (cd) -- (cl);
+
+    \draw[esok]  (a) -- (b);
+    \draw[esink] (b) -- (c);
+
+    \node[esiyi, anchor=south, yshift=1.5mm] at (a.north) {kod yazıldı};
+    \node[esiyi, anchor=south, yshift=1.5mm] at (b.north) {kod yazıldı};
+    \node[esnot, anchor=south, yshift=1.5mm] at (c.north) {henüz yok};
+
+    \node[esvurgu, anchor=north, yshift=-2.5mm, text width=60mm] at (2.35,-4.2)
+      {ölçüm burada duruyor: hiçbir aşama koşulmadı};
+  \end{tikzpicture}
+  \caption{Üç aşama, her biri kendi verisi ve kendi kaybıyla. Aşama A hiç
+    etiket okumuyor, B yoğun maske istiyor, C örnek kimlikli video istiyor.
+    Sıra keyfi değil: SAM~2'nin kendi tarifi de önce statik görüntü, sonra
+    video.}
+  \label{fig:egitim-uc-asama}
+\end{figure}
+
+Aşamalarda \textbf{ne donuyor} sorusunun cevabı tek bir çağrıda duruyor
+(\texttt{src/\allowbreak training/\allowbreak finetune.py}):
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{48mm}>{\raggedright\arraybackslash}p{50mm}@{}}
+  \toprule
+  \textbf{aşama} & \textbf{açılan modüller} & \textbf{çağrı} \\
+  \midrule
+  A & yalnızca image encoder (head yok)
+    & \texttt{apply\_freeze(model,\allowbreak\ "backbone")} \\
+  B & mask decoder + prompt encoder, sonra + image encoder
+    & \texttt{apply\_freeze(model,\allowbreak\ "head")} $\rightarrow$
+      \texttt{"encoder"} \\
+  C & memory attention + memory encoder & (kendi aşaması, henüz yok) \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\section{Aşama A --- Etiketsiz Modalite Distilasyonu}
+\label{sec:egitim-asama-a}
+
+Aşama A'nın tek varlık sebebi şu: \textbf{hizalı RGB-T çiftleri hiçbir etiket
+istemiyor}, ve elimizde onlardan çok var. Bir RGB temel modeli öğretmen
+oluyor, EdgeTAM'ın termal encoder'ı öğrenci. Öğretmen çiftin RGB yarısına
+bakıyor, öğrenci termal yarısına, ve öğrenci öğretmenin gördüğünü yeniden
+üretmeye çalışıyor~\cite{anythermal2026}.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[7]
+    % çift
+    \node[kgri, text width=19mm] (rgb)  at (0,1.0)  {RGB kare};
+    \node[kgri, text width=19mm] (ter)  at (0,-1.5) {termal kare};
+    \node[esnot, text width=22mm] at (0,-0.25) {\emph{hizalı çift}};
+
+    \node[kdonuk, text width=29mm] (t) at (3.6,1.0)
+      {öğretmen: DINOv3\\{\footnotesize ViT-B/16, \textbf{donuk}}};
+    \node[kmavi, text width=29mm] (s) at (3.6,-1.5)
+      {öğrenci: EdgeTAM\\{\footnotesize image encoder}};
+
+    \draw[esokr=esgri] (rgb) -- (t);
+    \draw[esok] (ter) -- (s);
+
+    \node[ksari, text width=23mm] (tf) at (7.3,1.0)
+      {öğretmen haritası\\{\footnotesize $768{\times}32{\times}32$}};
+    \node[ksari, text width=23mm] (sf) at (7.3,-1.5)
+      {öğrenci haritası\\{\footnotesize $256{\times}32{\times}32$}};
+    \draw[esokr=esgri] (t) -- (tf);
+    \draw[esok] (s) -- (sf);
+
+    \node[kmor, text width=21mm] (proj) at (10.7,-1.5)
+      {$1{\times}1$ projeksiyon\\{\footnotesize $256 \to 768$}};
+    \draw[esok] (sf) -- (proj);
+
+    \node[kyesil, text width=23mm] (loss) at (10.7,1.0)
+      {kosinüs mesafesi\\{\footnotesize pozisyon pozisyon}};
+    \draw[esokr=esgri] (tf) -- (loss);
+    \draw[esok] (proj) -- (loss);
+
+    \node[esvurgu, anchor=north, yshift=-1.5mm, text width=34mm]
+      at (proj.south) {iskele: aşama bitince atılıyor};
+    \node[esiyi, anchor=north, yshift=-1.5mm, text width=38mm]
+      at (s.south) {hiçbir etiket okunmuyor};
+  \end{tikzpicture}
+  \caption{Aşama A. Öğretmen donuk, öğrenci EdgeTAM'ın kendi image
+    encoder'ı; aradaki $1{\times}1$ projeksiyon yalnızca iki kanal sayısını
+    hizalamak için var ve aşama bitince atılıyor. Çıkan dosya sıradan bir
+    EdgeTAM checkpoint'i --- aynı anahtarlar, aynı yükleyici, aynı ONNX
+    grafiği.}
+  \label{fig:egitim-asama-a}
+\end{figure}
+
+\subsection*{Neden MAE değil}
+
+Akla ilk gelen ön-eğitim yöntemi MAE, çünkü SAM~2'nin Hiera gövdesi öyle
+ön-eğitilmiş. Ama transfer olmuyor: \textbf{MAE token maskeliyor} ve ViT için
+tasarlandı; EdgeTAM'ın gövdesi evrişimsel RepViT~\cite{wang2023repvit}, ortada
+maskelenecek bir token ızgarası yok.
+
+Öznitelik distilasyonunun böyle bir şartı yok. Öğretmenle öğrencinin
+mimarileri tanım gereği ilgisiz; hizalanması gereken tek şey bir öznitelik
+haritası, ve $1{\times}1$ projeksiyon herhangi iki kanal sayısını hizalıyor.
+
+\subsection*{Öğretmen seçimi ve ızgara}
+
+Üç aday var ve seçim tek bir string. Aralarındaki en somut fark, öğretmenin
+haritasının kayıptan önce \textbf{yeniden örneklenip örneklenmediği}:
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[19]
+    \node[kmor, text width=34mm] (d3) at (0,0)
+      {\textbf{DINOv3} ViT-B/16\\{\footnotesize $512/16 = 32{\times}32$}\\
+       {\footnotesize \emph{varsayılan} --- kapalı,
+        \texttt{HF\_TOKEN} ister}};
+    \node[kgri, text width=34mm] (d2) at (5.3,0)
+      {DINOv2 base\\{\footnotesize $518/14 = 37{\times}37$}\\
+       {\footnotesize açık, hesap gerekmez}};
+    \node[kgri, text width=34mm] (s2) at (10.6,0)
+      {SAM 2.1 Hiera-L\\{\footnotesize $1024/16 = 64{\times}64$}\\
+       {\footnotesize SAM 2'nin encoder'ı}};
+
+    \node[ksari, text width=40mm] (g) at (5.3,-4.0)
+      {öğrencinin ızgarası\\{\footnotesize $512/16 = \mathbf{32\times32}$}};
+
+    \draw[esokr=esyesil] (0,-1.15) -- (0,-4.0) -- (g.west);
+    \draw[esink] (d2) -- (g);
+    \draw[esokr=esgri] (10.6,-1.15) -- (10.6,-4.0) -- (g.east);
+
+    \node[esiyi, anchor=west, xshift=1.5mm, text width=32mm] at (0,-2.4)
+      {\textbf{birebir}\\yeniden örnekleme yok};
+    % iki "interpolasyon" etiketi: biri kendi çizgisinin sağında, öteki
+    % solunda -- aynı yükseklikte oldukları için aksi hâlde üst üste binerler
+    \node[esnot, anchor=east, xshift=-1.5mm, text width=24mm] at (10.6,-2.4)
+      {interpolasyon};
+    \node[esnot, anchor=west, xshift=1.5mm, text width=24mm] at (5.3,-2.4)
+      {interpolasyon};
+  \end{tikzpicture}
+  \caption{Öğretmen adaylarının ızgarası, öğrencininkiyle karşılaştırmalı.
+    DINOv3'ün 16 piksellik yaması 512 girdide tam olarak öğrencinin
+    ızgarasını veriyor, yani öğretmenin haritası kayıptan önce hiç
+    yeniden örneklenmiyor. Varsayılanın DINOv3 olmasının asıl sebebi ise
+    ızgara değil, \emph{yoğun} öznitelik kalitesinin o sürümün konusu
+    olması~\cite{dinov32025}.}
+  \label{fig:egitim-ogretmen}
+\end{figure}
+
+\begin{tasarim}
+  \textbf{Ve hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
+  Taban çizgisi: stok EdgeTAM checkpoint'inden başlayan aşama B. Ön-eğitim
+  bu taban çizgisini geçmiyorsa harcanmış GPU saatinden ibarettir, ve bunu
+  yalnızca karşılaştırma söyleyebilir. Notebook üçüncü bir koşu yapıp
+  sadece \texttt{--base}'i değiştirerek bunu ölçüyor. \textbf{Kosinüs
+  mesafesi öğretmenler arasında karşılaştırılamaz} --- yalnızca test
+  bölmesindeki örnek IoU'su karşılaştırılabilir.
+\end{tasarim}
+
+\subsection*{Çift bütçesi: VTUAV'ın yeri burası}
+
+Aşama A hiç etiket okumadığı için bir veri setinin \emph{anotasyonu} bu
+aşamada alakasız; yalnızca \textbf{çift sayısı} önemli. Bu, veri seti
+listesini baştan sıralıyor:
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[23]
+    % Çubuk uzunlukları logaritmik: kaba oranı gösteriyor, mutlak değeri
+    % değil. 1,7 M ile 4 024 doğrusal çizilseydi alttaki beş çubuk görünmezdi.
+    \newcommand{\cubuk}[5]{% #1 y, #2 uzunluk (cm), #3 kalem, #4 ad, #5 sayı
+      \draw[cizik, draw=#3, fill=#3!22] (0,#1) rectangle ++(#2,0.5);
+      \node[font=\elyazi\footnotesize, text=esmurekkep, anchor=west]
+        at (0.15,#1+0.25) {#4};
+      \node[esnot, anchor=west] at (#2+0.15,#1+0.25) {#5};}
+    \cubuk{0.00}{7.9}{esmavi}{VTUAV (tam set)}{$\approx$1 700 000 çift}
+    \cubuk{-0.68}{6.5}{esmavi}{VTUAV VIS bölümü}{$\approx$340 000}
+    \cubuk{-1.36}{5.3}{esmavi}{MVUAV}{$\approx$53 800}
+    \cubuk{-2.04}{4.2}{esmavi}{SegFly}{15 007}
+    \cubuk{-2.72}{4.4}{esgri}{\emph{AnyThermal'ın eğitim seti}}{16 943}
+    \cubuk{-3.40}{3.3}{esmavi}{Kust4K}{4 024}
+
+    \node[esvurgu, anchor=north west, text width=68mm] at (0,-3.85)
+      {kırmızı ok: aşama B'nin eğittiği set \emph{bu} --- yüz kat az çift,
+       ama maskeli};
+    \draw[esokr=eskirmizi] (5.8,-3.15) -- (4.5,-3.15);
+    \node[esnot, anchor=north west, text width=68mm] at (0,-4.75)
+      {gri çubuk: yöntemin yayınlandığı ölçek --- havadan veriyle bile onun
+       üstüne çıkılıyor. Çubuk uzunlukları logaritmik izlenim verir.};
+  \end{tikzpicture}
+  \caption{Hizalı RGB-T çifti bütçesi. ``VTUAV maskesiz, az gelmez mi?''
+    sorusunun cevabı tersine: maskesiz olmak bu aşamada hiçbir şeye mal
+    olmuyor, ve aşama B'nin eğittiği setten yüz kat fazla çifti var.}
+  \label{fig:egitim-cift-butcesi}
+\end{figure}
+
+VTUAV için iki ayar başka hiçbir yerde olmadığı kadar önemli, ikisi de
+$1920\times1080$ video olmasından geliyor:
+
+\begin{itemize}
+  \item \texttt{--crop 0.474} ($=512/1080$). 16:9 bir kareyi $512\times512$'ye
+        sıkıştırmak hem en-boy oranını bozar hem de küçük bir aracı
+        encoder'ın göremeyeceği boyutun altına indirir. Kırpma
+        \textbf{her iki yarıdan aynı normalize konumdaki} kareyi alıyor,
+        böylece hizalama korunuyor.
+  \item \texttt{--tolerance 1}. VTUAV'ın iki modalitesi piksel piksel hizalı
+        \emph{değil} (yazarların kendi notu). Tolerans, her öğrenci
+        pozisyonunu çevresindeki $3\times3$ komşuluğun en iyi öğretmen
+        pozisyonuyla eşleştirip bir öznitelik hücresine kadar kaymayı
+        yutuyor. Bedeli uzamsal kesinlik, o yüzden hizalı setlerde 0
+        kalıyor.
+\end{itemize}
+
+\section{Aşama B'nin Asıl Meselesi: Etiket Yanlış Tipte}
+\label{sec:egitim-semantik}
+
+Havadan yoğun maskeli setlerin neredeyse tamamı \textbf{semantik}
+segmentasyon veriyor: piksel $\rightarrow$ sınıf, yani ``bütün arabalar
+araba''. Takipçinin istediği bunun tam tersi: \textbf{``şu araba, yanındaki
+değil''}.
+
+Semantik hedefle eğitmek nötr değil, \textbf{aktif olarak zararlı}: yan yana
+iki arabanın özniteliklerini birbirine yaklaştırır, oysa takip için
+ayrışmaları gerekiyor.
+
+Çözüm veri setini değiştirmek değil --- \textbf{aynı veri üzerinde hedefi}
+değiştirmek. SAM~2 de zaten semantik harita görmüyor: görüntü başına tek tek
+maske örnekleyip her birini ayrı prompt ediyor.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[31]
+    % --- 1. semantik harita ---
+    \begin{scope}[shift={(0,0)}]
+      \foreach \x/\y/\c/\t in {%
+        0/2/esgrid/yol, 1/2/esgrid/yol, 2/2/esgrid/yol,
+        0/1/esgrid/yol, 1/1/eskirmizid/ARB, 2/1/eskirmizid/ARB,
+        0/0/esmord/bina, 1/0/eskirmizid/ARB, 2/0/eskirmizid/ARB}
+        {\draw[cizik, draw=escizgi, fill=\c] (\x*0.9,\y*0.68) rectangle ++(0.9,0.68);
+         \node[font=\elyazi\tiny, text=esmurekkep] at (\x*0.9+0.45,\y*0.68+0.34) {\t};}
+      \node[esbaslik, anchor=north, yshift=-2mm] at (1.35,0) {semantik harita};
+    \end{scope}
+
+    % Ok etiketleri okun *altında*: ızgaralar y=0..2,04 arasını kaplıyor, o
+    % yüzden okun üstünde kalan bir etiket kaçınılmaz olarak onlara biner.
+    \draw[esok] (2.9,1.35) -- (5.3,1.35);
+    \node[esnot, anchor=north, yshift=-1.5mm, text width=24mm] at (4.1,1.2)
+      {``şey'' olmayanı at};
+
+    % --- 2. filtrelenmiş ---
+    \begin{scope}[shift={(5.4,0)}]
+      \foreach \x/\y/\c/\t in {%
+        0/2/white/{$\cdot$}, 1/2/white/{$\cdot$}, 2/2/white/{$\cdot$},
+        0/1/white/{$\cdot$}, 1/1/eskirmizid/ARB, 2/1/eskirmizid/ARB,
+        0/0/white/{$\cdot$}, 1/0/eskirmizid/ARB, 2/0/eskirmizid/ARB}
+        {\draw[cizik, draw=escizgi, fill=\c] (\x*0.9,\y*0.68) rectangle ++(0.9,0.68);
+         \node[font=\elyazi\tiny, text=esmurekkep] at (\x*0.9+0.45,\y*0.68+0.34) {\t};}
+      \node[esbaslik, anchor=north, yshift=-2mm, text width=32mm] at (1.35,0)
+        {yalnızca ``şey'' sınıfları};
+    \end{scope}
+
+    \draw[esok] (8.3,1.35) -- (10.7,1.35);
+    \node[esnot, anchor=north, yshift=-1.5mm, text width=26mm] at (9.5,1.2)
+      {sınıf sınıf bağlantılı bileşen};
+
+    % --- 3. iki örnek ---
+    \begin{scope}[shift={(10.9,0)}]
+      \node[kyesil, text width=8mm, minimum height=10mm] at (0.6,1.35) {\textbf{1}};
+      \node[kyesil, text width=8mm, minimum height=10mm] at (2.2,1.35) {\textbf{2}};
+      \node[esbaslik, anchor=north, yshift=-2mm, text width=32mm] at (1.4,0.6)
+        {iki örnek, iki prompt, iki hedef};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{Semantik haritadan örnek hedefine, dört adımda
+    (\texttt{src/training/aerial.py}). ``Şey'' (thing) sınıfları
+    Kust4K'nın sekizinden dördü: motosiklet, araba, kamyon, insan. Yol,
+    bina ve ağaç ``stuff'' --- örneği yok, takip hedefi değil.}
+  \label{fig:egitim-semantik-ornek}
+\end{figure}
+
+\subsection*{Ve bu adımın kendi riski var: kaynaşma}
+
+Bağlantılı bileşen, geometriyle karar veriyor. Tampon tampona park etmiş iki
+araba tek bir piksel kenarı paylaşıyorsa \textbf{tek bileşen} olur, ve hiçbir
+kapı bunu ayıramaz.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[57]
+    % sol: ince köprü -> watershed kurtarır
+    \begin{scope}[shift={(0,0)}]
+      \draw[cizik, draw=eskirmizi, fill=eskirmizid] (0,0) rectangle (1.5,1.0);
+      \draw[cizik, draw=eskirmizi, fill=eskirmizid] (1.85,0) rectangle (3.35,1.0);
+      \draw[cizik, draw=eskirmizi, fill=eskirmizid] (1.45,0.42) rectangle (1.9,0.58);
+      \node[esbaslik, anchor=north, yshift=-2.5mm, text width=44mm] at (1.67,0)
+        {\textbf{ince köprü}\\{\footnotesize uzaklık dönüşümünde iki tepe,
+         arada vadi}};
+      \node[esiyi, anchor=north, yshift=-2.5mm, text width=44mm] at (1.67,-1.75)
+        {\texttt{watershed} ayırıyor};
+    \end{scope}
+    % sağ: tam kenar -> hiçbir şey kurtaramaz
+    \begin{scope}[shift={(6.6,0)}]
+      \draw[cizik, draw=eskirmizi, fill=eskirmizid] (0,0) rectangle (1.65,1.0);
+      \draw[cizik, draw=eskirmizi, fill=eskirmizid] (1.65,0) rectangle (3.3,1.0);
+      \node[esbaslik, anchor=north, yshift=-2.5mm, text width=46mm] at (1.65,0)
+        {\textbf{tam kenar boyunca bitişik}\\{\footnotesize daha büyük bir
+         dikdörtgene döşenir, vadi yok}};
+      \node[esvurgu, anchor=north, yshift=-2.5mm, text width=48mm] at (1.65,-1.75)
+        {maske geometrisiyle çalışan \emph{hiçbir} yöntem ayıramaz};
+    \end{scope}
+  \end{tikzpicture}
+  \caption{\texttt{watershed} modunun sınırı --- ve bu sınır, denenmeden
+    önce bilinmesi gereken şey. \texttt{tests/test\_aerial.py} her iki
+    sonucu da ayrı ayrı test ediyor: kurtardığını ve kurtaramadığını.}
+  \label{fig:egitim-kaynasma}
+\end{figure}
+
+Bu riskin \textbf{ölçüsü var, varsayımı yok}. \texttt{InstanceGates.fill}
+(alan / kutu alanı) kaynaşmanın sinyali: kendi kutusunun dörtte birini
+dolduran bir bileşen genelde ince bir piksel köprüsüyle birleşmiş iki
+nesnedir. Notebook'un ilgili hücresi, \textbf{tek bir GPU saati harcanmadan
+önce}, bunun ne sıklıkta olduğuna sayı koyuyor. O sayı bütün B aşamasının
+git/gitme kararı.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[63]
+    \node[ksari, text width=28mm] (q) at (0,0)
+      {kaynaşma oranı\\{\footnotesize (notebook 07, GPU'suz)}};
+
+    \node[kyesil, text width=52mm] (o1) at (5.4,3.0)
+      {\textbf{1.} \texttt{mode=watershed}\\{\footnotesize yalnızca köprü
+       vakası --- \emph{maliyet: sıfır}}};
+    \node[kmavi, text width=52mm] (o2) at (5.4,0.8)
+      {\textbf{2.} SAM 3'ü örnek kaynağı yap\\{\footnotesize metin prompt'u
+       $\rightarrow$ her araba ayrı maske --- \emph{çevrimdışı bir öğretmen
+       geçişi}}};
+    \node[kgri, text width=52mm] (o3) at (5.4,-1.45)
+      {\textbf{3.} \texttt{fill} eşiğini sertleştir\\{\footnotesize daha az
+       veri, hepsi temiz --- \emph{maliyet: örnek sayısı}}};
+    \node[kmor, text width=52mm] (o4) at (5.4,-3.3)
+      {\textbf{4.} zaten örnek veren set kullan\\{\footnotesize VTUAV VIS ---
+       \emph{zaten varsayılan}}};
+
+    % shorten: ok ucu kutunun kenarında dursun, ilk satırın üstüne binmesin
+    \draw[esok, shorten >=1.5mm] (q) -- (o1);
+    \draw[esok, shorten >=1.5mm] (q) -- (o2);
+    \draw[esok, shorten >=1.5mm] (q) -- (o3);
+    \draw[esok, shorten >=1.5mm] (q) -- (o4);
+
+    \node[esvurgu, anchor=west, xshift=2.5mm, text width=32mm] at (o2.east)
+      {en iyi çare, henüz yazılmadı};
+  \end{tikzpicture}
+  \caption{Kaynaşma kötü çıkarsa dört çıkış yolu, maliyet sırasıyla.
+    \texttt{watershed}'in ne kurtarıp ne kurtaramadığı
+    \cref{fig:egitim-kaynasma}'de; ikinci yol \emph{görünüşe} göre karar
+    verdiği için bitişik nesneleri ayırabilen tek yol~\cite{sam32025}.}
+  \label{fig:egitim-cikis-yollari}
+\end{figure}
+
+\subsection*{Üç mode, üç farklı anotasyon}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}l l >{\raggedright\arraybackslash}p{86mm}@{}}
+  \toprule
+  \textbf{mode} & \textbf{harita ne} & \textbf{ne oluyor} \\
+  \midrule
+  \texttt{components} & semantik & sınıf sınıf bağlantılı bileşen \\
+  \texttt{watershed}  & semantik & aynısı + ince köprüyle birleşenleri ayırma \\
+  \texttt{labels}     & \textbf{zaten örnek} & hiçbir ayrıştırma yok; her
+                                              sıfırdan farklı değer bir hedef \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+VTUAV'ın VIS bölümü kare başına \textbf{örnek maskesi} veriyor ve tam bu
+sebeple varsayılan veri seti listesinde; orada yukarıdaki hiçbir ayrıştırma
+çalışmıyor.
+
+\section{Bir Batch Nasıl Kurulur}
+\label{sec:egitim-batch}
+
+Encoder 512'de $\approx$38,7~GFLOP ve \textbf{prompt'a bağlı değil}. O yüzden
+görüntü \emph{bir kez} encode ediliyor, pencere içindeki her örnek aynı
+özniteliklere karşı prompt ediliyor.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[71]
+    % pencere
+    \draw[cizik, draw=escizgi, fill=white] (0,-1.4) rectangle (3.2,1.4);
+    \node[esbaslik, anchor=north, yshift=-2mm, text width=40mm] at (1.6,-1.4)
+      {pencere\\{\footnotesize $512\times512$ native piksel}};
+    \draw[cizik, draw=eskirmizi, fill=eskirmizid] (0.45,0.55) rectangle (1.35,0.95);
+    \node[font=\elyazi\tiny] at (0.9,0.75) {A};
+    \draw[cizik, draw=eskirmizi, fill=eskirmizid] (1.85,-0.35) rectangle (2.75,0.05);
+    \node[font=\elyazi\tiny] at (2.3,-0.15) {B};
+    \draw[cizik, draw=eskirmizi, fill=eskirmizid] (0.6,-0.95) rectangle (1.1,-0.6);
+    \node[font=\elyazi\tiny] at (0.85,-0.78) {İ};
+
+    \node[kmavi, text width=24mm] (enc) at (5.2,0)
+      {image encoder\\{\footnotesize \textbf{tek geçiş}}};
+    \draw[esok] (3.35,0) -- (enc);
+
+    \node[ksari, text width=17mm] (f) at (7.9,0) {öznitelik};
+    \draw[esok] (enc) -- (f);
+
+    \node[kyesil, text width=30mm] (d1) at (11.1,1.25)
+      {decoder $\leftarrow$ kutu A};
+    \node[kyesil, text width=30mm] (d2) at (11.1,0)
+      {decoder $\leftarrow$ kutu B};
+    \node[kyesil, text width=30mm] (d3) at (11.1,-1.25)
+      {decoder $\leftarrow$ kutu İ};
+    \draw[esok] (f) -- (d1);
+    \draw[esok] (f) -- (d2);
+    \draw[esok] (f) -- (d3);
+
+    \node[esiyi, anchor=north, yshift=-3mm, text width=76mm] at (8.0,-1.7)
+      {batch artık \emph{aynı sahneyi paylaşan} birden çok nesne taşıyor ---
+       kaybın yapması gereken ayrım tam olarak bu};
+  \end{tikzpicture}
+  \caption{Bir batch: tek encode, örnek başına bir prompt. Hem daha ucuz hem
+    daha iyi sinyal. Teknik olarak \texttt{forward\_image} bir kez çalışıyor
+    ve düzleştirilmiş öznitelikler batch ekseninde örnek başına
+    seçiliyor; SAM~2 zaten \emph{nesneleri} batch'liyor, yani $N$ örnek,
+    $N$ takip edilen nesnenin bindiği makinenin aynısına biniyor.}
+  \label{fig:egitim-batch}
+\end{figure}
+
+İki ayrıntı, sessiz hata üreten türden:
+
+\begin{itemize}
+  \item \textbf{Bölme kare üzerinden, asla pencere üzerinden.} Bir görüntünün
+        iki penceresi piksellerinin çoğunu paylaşır; pencere seviyesinde
+        bölmek neredeyse aynı görüntüleri çizginin iki yanına koyar ve
+        ``held-out'' sayı anlamını kaybeder.
+  \item \textbf{Kenardan kesilen örnek kırpılmaz, düşürülür.} Piksellerinin
+        sahip olmadığı bir genişliği iddia eden kutu, hedefsizlikten daha
+        kötü bir hedeftir.
+\end{itemize}
+
+\section{Kayıp: Hangi Terim Var, Hangisi Neden Yok}
+\label{sec:egitim-kayip}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[83]
+    % Kutular ortak bir sol kenardan başlıyor (anchor=west), böylece
+    % genişlik farkı doğrudan ağırlık farkını okutuyor. Notlar sabit bir
+    % x'te duran tek sütun -- kutu genişliğine bağlı olsalardı hizasız
+    % görünürlerdi.
+    % --- var olan terimler ---
+    \node[kyesil, anchor=west, minimum width=46mm, text width=42mm] (f) at (0,0)
+      {\textbf{20} $\times$ focal};
+    \node[kyesil, anchor=west, minimum width=26mm, text width=22mm] (d) at (0,-1.2)
+      {\textbf{1} $\times$ dice};
+    \node[kyesil, anchor=west, minimum width=26mm, text width=22mm] (i) at (0,-2.25)
+      {\textbf{1} $\times$ IoU-L1};
+
+    \node[esnot, anchor=west, text width=58mm] at (5.1,0)
+      {havadan bir aracın kaç piksel tuttuğunu ölçeğine yansıtan tek terim
+       bu --- baskın olması tasarım};
+    \node[esnot, anchor=west, text width=58mm] at (5.1,-1.2)
+      {maske örtüşmesi};
+    \node[esnot, anchor=west, text width=58mm] at (5.1,-2.25)
+      {IoU başının kendi tahmini};
+
+    % --- yok olanlar ---
+    \node[esbaslik, anchor=west, text width=110mm] at (0,-3.4)
+      {\textbf{yok olanlar} --- ve sıfır ağırlıklı değil, \emph{hiç yok}};
+
+    \node[kkirmizi, anchor=west, minimum width=46mm, text width=42mm] (os) at (0,-4.8)
+      {\sout{object\_score BCE}};
+    \node[kkirmizi, anchor=west, minimum width=46mm, text width=42mm] (bp) at (0,-6.8)
+      {\sout{box\_projection}};
+
+    \node[esnot, anchor=west, text width=58mm] at (5.1,-4.8)
+      {statik sette ``mevcut'' etiketi yok --- prompt edilen her örnek tanım
+       gereği mevcut. Sabit 1'e karşı BCE ``hiçbir şey öğretme'' değil,
+       \textbf{koşulsuz ateşle} öğretirdi};
+    \node[esnot, anchor=west, text width=58mm] at (5.1,-6.8)
+      {o, öğretmen maskesi kalite kapısından geçemeyen kareler için yedek.
+       Burada maske \emph{zaten} ground truth};
+  \end{tikzpicture}
+  \caption{Aşama B'nin kaybı --- SAM~2'nin görüntü ön-eğitimi hedefinin
+    aynısı. Kırmızı iki terim video yoluna ait ve bilerek dışarıda:
+    \texttt{object\_score\_logits}'in yersiz ateşlemesi, videoda hafıza
+    bankasını zehirleyen şeyin ta kendisi. Etiketin gerçek olduğu yerde
+    (aşama C) eğitilecek.}
+  \label{fig:egitim-kayip}
+\end{figure}
+
+\section{Sürüklenme Riski ve Çapa Terimi}
+\label{sec:egitim-capa}
+
+Aşama A encoder'ı \emph{çok büyük} bir etiketsiz sette oynatıyor. Arkasından
+gelen aşama B onu \emph{iki mertebe küçük} bir etiketli sette eğitiyor --- ve
+A'nın öğrendiğinin geri sürüklenmesini engelleyen hiçbir şey yok.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[97]
+    \node[kmavi, text width=38mm] (a) at (0,0)
+      {\textbf{aşama A}\\{\footnotesize $\approx$1 700 000 etiketsiz çift}};
+    \node[kmavi, text width=38mm] (b) at (6.6,0)
+      {\textbf{aşama B}\\{\footnotesize 10--50 bin etiketli kare}};
+    \draw[esok] (a) -- (b);
+    \node[esvurgu, anchor=south, yshift=1.5mm] at (3.3,0.35)
+      {iki mertebe fark};
+
+    \node[kkirmizi, text width=42mm] (drift) at (6.6,-2.1)
+      {encoder A'nın öğrendiğinden geri sürüklenir};
+    \draw[esokr=eskirmizi] (b) -- (drift);
+
+    \node[kyesil, text width=64mm] (fix) at (2.9,-4.0)
+      {\textbf{çare: çapa}\\[0.5mm]
+       $\lambda \cdot \bigl(1 - \cos(\text{şimdiki},\ \text{A'nın})\bigr)$};
+    \draw[esokr=esyesil] (drift) -- (fix);
+
+    \node[esnot, anchor=north, yshift=-2.5mm, text width=118mm] at (5.0,-4.8)
+      {çapa \emph{donuk bir temel model değil}, modelin aşama B başındaki
+       kendi kopyası: korunmaya değer olan A'nın öğrendiği şey. 4,92 M
+       parametre, projeksiyon gerekmiyor, ve ekstra encoder geçişi de yok ---
+       \texttt{propagate\_image} zaten hesapladığı haritayı geri veriyor.
+       Bayrak: \texttt{--anchor-weight}, varsayılan kapalı.};
+  \end{tikzpicture}
+  \caption{İki kaybı \emph{toplamak} yerine aşamalamak, sonra aşama A'yı bir
+    düzenleyiciyle korumak. Toplamak bizde yanlış olurdu: veri iki mertebe
+    farklı, ortak batch ya aşama A'nın çoğunu çöpe atardı ya da iki akışlı
+    bir sampler isterdi --- ve aşamalamak loss-ağırlıklandırma problemini
+    tamamen ortadan kaldırıyor.}
+  \label{fig:egitim-capa}
+\end{figure}
+
+Aynı literatürden ikinci bir şey daha koda girdi: \textbf{moment terimi}
+(\texttt{--moments}). Saf yön (kosinüs) kaybının göremediği bir hata var ---
+harita boyunca sabitlenmiş kanallar. Terim kanal başına ortalama ve standart
+sapmayı eşliyor, ama \textbf{normalize edilmiş} haritalar üzerinde: ham
+büyüklüğü eşlemek, atılacak olan iskeleyi decoder'ın pahasına eşlemek
+olurdu. Varsayılan kapalı, çünkü kaynağın kendisi ablasyon
+raporlamıyor~\cite{sam3distill2026}.
+
+\section{İki Yöntem, Tek Döngü}
+\label{sec:egitim-lora}
+
+\texttt{--method finetune | lora}. Aralarındaki fark \textbf{tam olarak iki
+şey}: hangi parametreler çözülüyor, ve checkpoint nasıl yazılıyor.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[103]
+    \node[kmavi, text width=40mm] (ft) at (0,0)
+      {\textbf{kısmi fine-tune}\\{\footnotesize seçili ağırlıklar doğrudan
+       gradyan alır}\\[0.5mm]{\footnotesize eğitilen: \textbf{$\approx$9,3 M}}};
+    \node[kmor, text width=40mm] (lo) at (5.2,0)
+      {\textbf{LoRA} ($r=16$)\\{\footnotesize aynı katmanların yanında
+       $B\!\cdot\!A$}\\[0.5mm]{\footnotesize eğitilen: \textbf{$\approx$0,3 M}}};
+    \node[kgri, text width=40mm] (sh) at (10.4,0)
+      {{\footnotesize ortak: aşamalar, batch sırası, tohum, kayıplar,
+       one-cycle, gradyan kırpma, EMA, doğrulama dilimi}};
+    \node[esnot, anchor=north, yshift=-1.5mm, text width=44mm] at (sh.south)
+      {\texttt{src/training/schedule.py} --- tek yerde};
+
+    \node[kyesil, text width=44mm] (ck) at (2.6,-2.5)
+      {\textbf{aynı checkpoint biçimi}\\{\footnotesize LoRA yazmadan önce
+       birleştiriyor}};
+    \draw[esok] (ft) -- (ck);
+    \draw[esok] (lo) -- (ck);
+
+    \node[esvurgu, anchor=north, yshift=-2.5mm, text width=104mm] at (4.5,-3.3)
+      {bilerek eşitlenmeyen tek şey öğrenme oranı: LoRA $B=0$'dan başlıyor,
+       güncellemesinin gideceği yol daha uzun. Fine-tune'un oranını
+       dayatmak, LoRA'yı değil \emph{kötü ayarlanmış bir LoRA'yı} ölçmek
+       olurdu.};
+  \end{tikzpicture}
+  \caption{İki yöntem tek döngüden geçiyor, yoksa karşılaştırma iki yöntemi
+    değil iki notebook'u ölçerdi. Son satır testi adil yapan şey:
+    $k\times k$ evrişim ile $1\times1$ evrişimin bileşkesi \emph{bir
+    $k\times k$ evrişimdir}, yani faktörizasyon RepViT gövdesi için de tam
+    --- ``LoRA sadece \texttt{nn.Linear}'a ulaşır'' itirazı yönteme değil,
+    Linear-only bir uygulamaya yapılan itirazdır~\cite{hu2022lora}.}
+  \label{fig:egitim-lora}
+\end{figure}
+
+\section{Tek Veri Seti Yetmez}
+\label{sec:egitim-veri}
+
+\texttt{--dataset} tekrarlanabilir ve pencereler tek havuzda birleşiyor, yani
+\textbf{bir batch birden çok seti aynı adımda taşıyabiliyor}.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[113]
+    % İş bölümü notları kutuların *içinde*: dışarıda dursalardı havuza
+    % giden üç okun geçtiği koridora düşerlerdi.
+    \node[kmor, text width=48mm] (v) at (0,2.1)
+      {\textbf{VTUAV VIS} {\footnotesize $1920{\times}1080$}\\
+       {\footnotesize \emph{gerçek} örnek maskesi}\\
+       {\footnotesize hem eğitiyor, hem not veriyor}};
+    \node[kmavi, text width=48mm] (s) at (0,0)
+      {\textbf{SegFly} {\footnotesize $640{\times}512$, 15 007 kare}\\
+       {\footnotesize hacim: üç irtifa, sahne çeşitliliği}};
+    \node[kmavi, text width=48mm] (k) at (0,-2.0)
+      {\textbf{Kust4K} {\footnotesize $640{\times}512$, 4 024 kare}\\
+       {\footnotesize en ince etiket: 4 ``şey'' sınıfı}};
+
+    \node[ksari, text width=24mm] (pool) at (5.6,0) {tek pencere havuzu};
+    \draw[esok] (v.east) -- (pool.north west);
+    \draw[esok] (2.9,0) -- (pool.west);
+    \draw[esok] (k.east) -- (pool.south west);
+
+    \node[kyesil, text width=24mm] (batch) at (9.1,0) {karışık batch};
+    \draw[esok] (pool) -- (batch);
+
+    \node[esvurgu, anchor=north, yshift=-4mm, text width=108mm] at (4.5,-2.9)
+      {alternatif --- setler arasında sırayla geçmek --- gövdenin her
+       seferinde bir setin istatistiklerine oturmasına izin verirdi};
+  \end{tikzpicture}
+  \caption{Üç setin iş bölümü. Encoder'ın taşıdığı şey \emph{genel} görsel
+    öznitelik; tek veri seti demek tek sensör, tek şehir, tek etiketleme
+    alışkanlığı demek. Kust4K'nın 4 024 karesi bir head'i ince ayarlamak
+    için makul, bir gövdeyi oynatmak için ince.}
+  \label{fig:egitim-veri}
+\end{figure}
+
+\textbf{Hangi set neyi besliyor: \texttt{role} alanı.} \texttt{train} =
+yalnızca eğitim, \texttt{eval} = yalnızca val/test, \texttt{all} = normal
+80/10/10. Sebebi ölçümün ne demek olduğu: semantik haritadan \emph{yeniden
+kurulmuş} örnekler taşıyan bir setin ``ground truth''u kendisi belirsizdir
+--- ayrıştırma iki arabayı kaynaştırdıysa ``doğru'' cevap tek blob olur ve
+onları \emph{doğru ayıran} model \emph{yanlış} sayılır. O sayı modeli değil
+ayrıştırmayı ölçer.
+
+Yani Kust4K \texttt{train}, VTUAV VIS \texttt{all}: \textbf{gürültülü
+hedeften öğrenmek normal, gürültülü hedefle not almak değil.}
+
+\section{Ölçüm: Ne Ölçüyor, Ne Ölçmüyor}
+\label{sec:egitim-olcum}
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[127]
+    \node[ksari, text width=44mm] (proxy) at (0,0)
+      {\textbf{örnek IoU}\\{\footnotesize (\texttt{eval\_instances.py})}\\[0.5mm]
+       {\footnotesize kutu gir $\rightarrow$ maske çık $\rightarrow$ IoU}\\
+       {\footnotesize \texttt{test} bölmesi, tek prompt, tek kare}};
+    \node[kgri, text width=44mm] (real) at (9.0,0)
+      {\textbf{J\&F}\\[0.5mm]{\footnotesize video nesne segmentasyonunun
+       standart metriği}\\{\footnotesize hafıza bankası gerektirir}};
+    \draw[esink] (proxy.east) -- (real.west);
+    \node[esnot, anchor=south, yshift=2mm, text width=30mm] at (4.5,0.15)
+      {vekil, kanıt değil};
+
+    \node[esvurgu, anchor=north, yshift=-2mm] at (real.south) {$\Rightarrow$ aşama C};
+
+    \node[kyesil, text width=100mm] (oku) at (4.5,-2.6)
+      {\textbf{ortalamayı değil, küçük-nesne sütununu okuyun}};
+    \node[esnot, anchor=north, yshift=-2mm, text width=104mm] at (oku.south)
+      {havadan bir setin ortalama IoU'su kamyonlarının hâkimiyetinde; bu
+       hattın var olma sebebi olan hedefler ise yirmi piksellik olanlar};
+  \end{tikzpicture}
+  \caption{Bu aşamanın ölçebildiği ve ölçemediği. Notebook 07'nin sayısı
+    tek prompt'lu kare skorluyor, dolayısıyla bu projenin düzeltmeye
+    çalıştığı hatayı --- hafıza bankasının kirlenmesini --- \emph{göremez}.
+    Daha iyi bir encoder, daha iyi bir takipçi için \textbf{ön koşuldur,
+    kanıt değildir}.}
+  \label{fig:egitim-olcum}
+\end{figure}
+
+\section{Şu An Elde Ne Var}
+\label{sec:egitim-durum}
+
+Bittiğinde çıkan şey sıradan bir EdgeTAM checkpoint'i: aynı anahtarlar, aynı
+yükleyici, aynı ONNX export, aynı motor derlemesi --- yani
+\cref{ch:sistem-yontem}'de anlatılan dağıtım zinciri hiç değişmiyor.
+\textbf{Hafıza yolu hâlâ stok.}
+
+Tek incelik: encoder ONNX grafiği mask decoder'ın \texttt{conv\_s0} /
+\texttt{conv\_s1} projeksiyonlarını içine katlıyor, ve aşama B decoder'ı da
+eğitiyor. Yani ikisi de yeniden export edilip parity dört modülde birden
+koşturulmalı.
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}>{\ttfamily}l >{\raggedright\arraybackslash}p{74mm}@{}}
+  \toprule
+  \textnormal{\textbf{dosya}} & \textbf{sorumluluk} \\
+  \midrule
+  src/training/aerial.py      & veri seti düzeni, palet, semantik $\rightarrow$
+                                örnek ayrıştırma, kapılar, pencere geometrisi \\
+  src/training/distill.py     & öğretmen, projeksiyon, kosinüs kaybı,
+                                ön-eğitim döngüsü (aşama A) \\
+  src/training/image\_loop.py & tek kare ileri geçiş, batch, örnek IoU
+                                (aşama B) \\
+  src/training/losses.py      & \texttt{instance\_loss} (statik) ve
+                                \texttt{frame\_loss} (video) \\
+  src/training/schedule.py    & iki aşama, EMA, checkpoint kuralı --- iki veri
+                                moduna da hizmet ediyor \\
+  src/training/finetune.py    & \texttt{STAGES} / \texttt{apply\_freeze}:
+                                \texttt{backbone}, \texttt{head},
+                                \texttt{encoder} \\
+  src/training/lora.py        & PEFT; \texttt{STAGES} tablosunu fine-tune ile
+                                paylaşıyor \\
+  tools/pretrain\_encoder.py  & aşama A giriş noktası \\
+  tools/train\_encoder.py     & aşama B giriş noktası,
+                                \texttt{-{}-method finetune|lora} \\
+  tools/eval\_instances.py    & held-out örnek IoU \\
+  notebooks/07\_encoder\_\allowbreak aerial\_rgbt.ipynb
+                              & hepsinin tek oturumdaki tarifi \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\begin{tasarim}
+  \textbf{Sıradaki adım bir kod değil, bir koşu.} Aşağıdaki üç sayı,
+  bu bölümdeki her cümleyi ya doğrular ya da çöpe atar:
+  \begin{enumerate}
+    \item \textbf{Kaynaşma oranı} (GPU'suz, dakikalar içinde). Bağlantılı
+          bileşen ayrıştırması temiz örnek veriyor mu? Bütün B aşaması
+          buna bağlı.
+    \item \textbf{Taban çizgisine karşı aşama A.} Stok checkpoint'ten
+          başlayan B, ön-eğitilmiş checkpoint'ten başlayan B'yi yeniyorsa
+          aşama A'nın gerekçesi yoktur.
+    \item \textbf{LoRA'ya karşı kısmi fine-tune}, görüntü modunda. Klip
+          modundaki cevapla aynı çıkmak zorunda değil.
+  \end{enumerate}
+  Aşama C, ikinci sayı gelmeden başlamıyor.
+\end{tasarim}

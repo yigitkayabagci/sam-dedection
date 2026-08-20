@@ -5,6 +5,8 @@
 giriyor, kayıp hangi terimlerden oluşuyor, ve hangi dosya nereden sorumlu.
 
 Çalışan hâli: `notebooks/07_encoder_aerial_rgbt.ipynb`.
+Aynı kurulumun **görsel** anlatımı — on dört el çizimi şekil, öğretmek
+için yazılmış — raporun 6. bölümünde: `report/bolumler/egitim.tex`.
 
 ---
 

@@ -1,0 +1,186 @@
+% ============================================================================
+% eskiz.tex -- el çizimi ("Excalidraw") görünümlü TikZ stilleri.
+%
+% Neden ayrı bir görsel dil: raporun geri kalanındaki şekiller
+% (arka_plan.tex, deneyler.tex, gelecek_calismalar.tex) düz, keskin TikZ
+% kutularıyla çizilmiş ve öyle kalıyor -- onlar ölçüm anlatıyor. Eğitim
+% bölümü öğretmek için yazıldı; orada tahtaya çizilmiş gibi duran bir dil
+% kullanılıyor, çünkü anlatılan şey bir sayı değil bir kurulum. İki dili
+% karıştırmamak için eskiz stilleri burada, tek yerde duruyor.
+%
+% preamble.tex tarafından \input{eskiz} ile çağrılır.
+%
+% Bir teknik not, yeniden kurcalayacak olan için: `rounded corners` ile
+% `decorate` birlikte kullanılamıyor -- yuvarlatılmış köşenin minik yayları
+% rastgele adım dekorasyonunda "Dimension too large" veriyor. Bu yüzden bütün
+% kutular keskin köşeli; titremenin kendisi zaten köşeyi mekanik olmaktan
+% çıkarıyor, ve dolgu ile kenar *aynı* dekore edilmiş yolu paylaştığı için
+% dolgunun kenardan taşması diye bir sorun da doğmuyor.
+% ============================================================================
+
+\usetikzlibrary{decorations.pathmorphing, patterns, shapes.misc,
+                shapes.geometric, calc, positioning, fit, backgrounds,
+                arrows.meta}
+
+% ---- Palet ------------------------------------------------------------------
+% Excalidraw'ın kendi varsayılan paleti: her renk bir koyu "kalem" tonu ve ona
+% eşlenen açık bir "dolgu" tonu. Raporun geri kalanının paletiyle
+% (anarenk / vurgu / yesilvurgu) çakışmasın diye hepsi "es" önekli.
+\definecolor{esmurekkep}{HTML}{1E1E1E}   % kalem: metin
+\definecolor{escizgi}{HTML}{343A40}      % kalem: nötr kenar ve ok
+\definecolor{esmavi}{HTML}{1971C2}       \definecolor{esmavid}{HTML}{A5D8FF}
+\definecolor{esyesil}{HTML}{2F9E44}      \definecolor{esyesild}{HTML}{B2F2BB}
+\definecolor{essari}{HTML}{E8590C}       \definecolor{essarid}{HTML}{FFEC99}
+\definecolor{eskirmizi}{HTML}{E03131}    \definecolor{eskirmizid}{HTML}{FFC9C9}
+\definecolor{esmor}{HTML}{6741D9}        \definecolor{esmord}{HTML}{D0BFFF}
+\definecolor{esgri}{HTML}{868E96}        \definecolor{esgrid}{HTML}{E9ECEF}
+
+% ---- Yazı tipi --------------------------------------------------------------
+% Patrick Hand (SIL OFL 1.1, report/fonts/) -- Excalidraw'ın el yazısı fontuna
+% (Virgil / Excalifont) en yakın duran, **tam Türkçe kapsamlı** serbest font.
+% Depoda taşınıyor ki rapor hiçbir font indirmeden derlensin: Ubuntu'nun
+% paketlediği el yazısı fontlarının ikisi de (Humor Sans, Comic Neue) ğ/Ğ/İ
+% harflerini içermiyor, yani Türkçe bir şekilde kullanılamıyorlar.
+%
+% Dosya yoksa \elyazi sessizce TeX Gyre Heros'a düşer: şekiller aynı çizilir,
+% yalnızca etiketler düz sans olur ve derleme kırılmaz.
+%
+% AutoFakeBold / AutoFakeSlant: Patrick Hand tek ağırlıkta geliyor, kalın ve
+% italik varyantı yok. Şekillerde \textbf ve \emph kullanılıyor (bir kutunun
+% adı kalın, bir yan not italik), o yüzden ikisi de sentetik üretiliyor --
+% aksi hâlde XeLaTeX her kullanımda "font shape undefined" uyarısı verip
+% sessizce düz varyanta düşerdi ve vurgu kaybolurdu.
+%
+% Ligatures=TeX: `---` ve `--` girdilerini uzun/kısa tireye çeviren klasik
+% TeX bağı. \newfontfamily ile kurulan bir aileye kendiliğinden gelmiyor,
+% o yüzden açıkça isteniyor -- yoksa şekillerdeki her uzun tire üç ayrı
+% kısa çizgi olarak dizilir (fontun kendisinde iki glif de var).
+\IfFileExists{fonts/PatrickHand-Regular.ttf}{%
+  \newfontfamily\elyazi{PatrickHand-Regular.ttf}[%
+    Path=fonts/, Scale=1.18, AutoFakeBold=1.9, AutoFakeSlant=0.2,
+    Ligatures=TeX]%
+}{%
+  \newcommand{\elyazi}{\sffamily}%
+}
+
+% ---- Çizgi: elle çizilmiş titreme -------------------------------------------
+% `random steps` yolu küçük rastgele adımlara bölüyor. Genlik ve adım boyu
+% deneyerek seçildi: 0,7 pt / 2,6 mm elle çizilmiş okunuyor; daha büyüğü
+% suda dalgalanmış gibi duruyor, daha küçüğü düz cetvel.
+%
+% Tohum her şeklin başında sabitleniyor (\eskizbasla), böylece aynı kaynak her
+% derlemede baytı baytına aynı PDF'i veriyor -- şekiller derlemeden derlemeye
+% "kıpırdamıyor".
+% Titreme ayarları iki adlandırılmış stilde duruyor. \newcommand ile bir
+% makroya koyup `decoration={random steps, \makro}` yazmak *çalışmıyor* --
+% pgfkeys anahtar listesini genişletmeden okuyor ve makronun adını anahtar
+% sanıyor ("I do not know the key '/pgf/decoration/.expanded'"). Stil olarak
+% tanımlamak hem çalışıyor hem de tek yerden ayarlanabilir kalıyor.
+\tikzset{
+  estitreme/.style={decorate,
+    decoration={random steps, segment length=2.6mm, amplitude=0.7pt}},
+  estitremeok/.style={decorate,
+    decoration={random steps, segment length=4mm, amplitude=0.9pt}},
+}
+
+\tikzset{
+  cizik/.style={
+    estitreme,
+    line width=1pt, line cap=round, line join=round,
+  },
+}
+
+% Excalidraw her kenarı iki kez, hafifçe kaydırarak çiziyor. İkinci geçiş
+% burada bir `postaction`: aynı yol yeniden dekore edilince rastgele adımlar
+% yeniden çekiliyor, yani ikinci çizgi birincisinin tam üstüne oturmuyor --
+% aranan etki tam olarak bu.
+\tikzset{
+  eskutu/.style n args={2}{
+    cizik, draw=#1, fill=#2,
+    align=center, inner sep=2.2mm, text=esmurekkep, font=\elyazi\small,
+    postaction={
+      estitreme,
+      draw=#1, line width=0.55pt, opacity=0.45,
+      line cap=round, line join=round,
+    },
+  },
+}
+
+% Renkli kutular. `kbos` dolgusuz (kağıdın kendisi), gerisi Excalidraw'ın
+% açık dolgularıyla. Bu bölümdeki anlam sözleşmesi:
+%   mavi   -> eğitilen modül        yeşil -> hedef / doğru sonuç
+%   sarı   -> veri, ara tensör      kırmızı -> hata, risk, kaybedilen şey
+%   mor    -> öğretmen / dış model  gri   -> nötr, bilgi
+\tikzset{
+  kbos/.style={eskutu={escizgi}{white}},
+  kmavi/.style={eskutu={esmavi}{esmavid}},
+  kyesil/.style={eskutu={esyesil}{esyesild}},
+  ksari/.style={eskutu={essari}{essarid}},
+  kkirmizi/.style={eskutu={eskirmizi}{eskirmizid}},
+  kmor/.style={eskutu={esmor}{esmord}},
+  kgri/.style={eskutu={esgri}{esgrid}},
+}
+
+% Donmuş (eğitilmeyen) modül: taralı dolgu -- Excalidraw'ın "hachure"
+% doldurması. Bu bölümde "bu kutuya dokunulmuyor" demenin görsel yolu, ve
+% bilerek renksiz: donuk olmak bir renk değil, bir yokluk.
+\tikzset{
+  kdonuk/.style={
+    cizik, draw=esgri,
+    pattern=north east lines, pattern color=esgri!50,
+    align=center, inner sep=2.2mm, text=esgri, font=\elyazi\small,
+  },
+}
+
+% ---- Oklar ------------------------------------------------------------------
+% `Straight Barb` = açık V uç; Excalidraw'ın ok ucu bu.
+\tikzset{
+  esokgovde/.style={
+    estitremeok,
+    line cap=round, line join=round,
+  },
+  esok/.style={esokgovde, draw=escizgi, line width=1pt,
+               -{Straight Barb[length=2mm, width=3mm, line width=1pt]}},
+  % renkli ok: \draw[esokr=esmavi] ...
+  esokr/.style={esokgovde, draw=#1, line width=1pt,
+                -{Straight Barb[length=2mm, width=3mm, line width=1pt]}},
+  % ince kesikli: "veri akışı değil, ilişki" oku
+  esink/.style={esokgovde, draw=esgri, line width=0.7pt,
+                dash pattern=on 1.7mm off 1.2mm,
+                -{Straight Barb[length=1.6mm, width=2.4mm, line width=0.7pt]}},
+  % uçsuz çizgi
+  escizik/.style={esokgovde, draw=escizgi, line width=1pt},
+  escizikr/.style={esokgovde, draw=#1, line width=1pt},
+}
+
+% ---- Etiketler ---------------------------------------------------------------
+\tikzset{
+  esnot/.style={font=\elyazi\footnotesize, text=esgri, align=center, inner sep=1.5pt},
+  esvurgu/.style={font=\elyazi\footnotesize, text=eskirmizi, align=center, inner sep=1.5pt},
+  esiyi/.style={font=\elyazi\footnotesize, text=esyesil, align=center, inner sep=1.5pt},
+  esbaslik/.style={font=\elyazi\small, text=esmurekkep, align=center, inner sep=1.5pt},
+}
+
+% Elle çizilmiş bir çerçeve içine alma -- bir grubu "işaretlemek" için.
+% Kullanım: \node[esisaret, fit=(a)(b)] {};   ya da başlıklısı için altına
+% ayrı bir \node[esnot] koyun.
+\tikzset{
+  esisaret/.style={
+    cizik, draw=eskirmizi, line width=1pt, inner sep=2.8mm,
+    postaction={estitreme,
+                draw=eskirmizi, line width=0.55pt, opacity=0.45,
+                line cap=round, line join=round},
+  },
+  esisaretr/.style={
+    cizik, draw=#1, line width=1pt, inner sep=2.8mm,
+    postaction={estitreme,
+                draw=#1, line width=0.55pt, opacity=0.45,
+                line cap=round, line join=round},
+  },
+}
+
+% ---- Şekil başlangıcı ---------------------------------------------------------
+% Her el çizimi şeklin başına konur: rastgele tohumu sabitler (derlemeler
+% arası kararlılık). İsteğe bağlı argüman tohumu değiştirir, yani bir şeklin
+% titremesi beğenilmezse sadece sayıyı değiştirmek yetiyor.
+\newcommand{\eskizbasla}[1][2024]{\pgfmathsetseed{#1}}

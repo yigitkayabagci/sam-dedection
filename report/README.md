@@ -83,8 +83,9 @@ Temizlik: `make clean` (yalnızca ara dosyalar) / `make cleanall`
 
 ```
 report/
-├── main.tex              -- ana dosya, başlık sayfası, bölüm sırası
+├── main.tex               -- ana dosya, başlık sayfası, bölüm sırası
 ├── preamble.tex           -- stil: fontlar, renkler, kutu/tablo tanımları
+├── eskiz.tex              -- el çizimi ("Excalidraw") TikZ stilleri
 ├── kaynaklar.bib          -- SAM / SAM 2 / EdgeTAM / TensorRT kaynakları
 ├── bolumler/
 │   ├── ozet.tex
@@ -93,22 +94,70 @@ report/
 │   ├── sistem_yontem.tex  -- 4 motor kararı, ölçüm metodolojisi
 │   ├── deneyler.tex       -- EXPERIMENT_LOG'daki tüm ölçülmüş sonuçlar
 │   ├── veri_setleri.tex   -- aday veri setleri tablosu + J&F metriği
+│   ├── egitim.tex         -- encoder eğitimi: aşama A/B/C, görsel ağırlıklı
 │   ├── gelecek_calismalar.tex
 │   └── sonuc.tex
-└── figures/                -- kendi görselleriniz (bkz. figures/README.md)
+├── fonts/                 -- Patrick Hand (SIL OFL 1.1), eskiz etiketleri için
+└── figures/               -- kendi görselleriniz (bkz. figures/README.md)
 ```
+
+## Encoder eğitimi bölümü ve el çizimi şekiller
+
+Bölüm 6 (`bolumler/egitim.tex`) raporun geri kalanından **kasten farklı**
+görünüyor: on dört şeklin hepsi elle çizilmiş gibi duran, Excalidraw
+tarzı TikZ kutularıyla çiziliyor. Sebebi anlatılan şeyin türü --- orada
+bir ölçüm değil bir **kurulum** anlatılıyor, ve bölüm öğretmek için
+yazıldı.
+
+Stiller tek dosyada, `eskiz.tex`'te:
+
+| stil | ne için |
+|---|---|
+| `kmavi` / `kyesil` / `ksari` / `kkirmizi` / `kmor` / `kgri` / `kbos` | renkli kutular; anlam sözleşmesi dosyanın başında |
+| `kdonuk` | taralı kutu = eğitilmeyen (donuk) modül |
+| `esok` / `esokr=<renk>` / `esink` / `escizik` | oklar ve çizgiler |
+| `esnot` / `esvurgu` / `esiyi` / `esbaslik` | etiketler |
+| `esisaret` | bir grubu elle daire içine alma (`fit=` ile) |
+| `\eskizbasla[tohum]` | her şeklin başına: titremeyi sabitler |
+
+İki not, kurcalayacak olan için:
+
+- **`rounded corners` ile `decorate` birlikte çalışmıyor** (``Dimension too
+  large``). Bütün kutular bu yüzden keskin köşeli; titremenin kendisi zaten
+  köşeyi mekanik olmaktan çıkarıyor.
+- **Titreme sabit tohumlu.** `\eskizbasla` her şeklin başında
+  `\pgfmathsetseed` çağırıyor, yani aynı kaynak her derlemede aynı PDF'i
+  veriyor --- şekiller derlemeden derlemeye "kıpırdamıyor". Bir şeklin
+  titremesi beğenilmezse tek yapılacak tohum sayısını değiştirmek.
+
+**Yazı tipi.** Şekil etiketleri **Patrick Hand** (SIL OFL 1.1) ile
+diziliyor; `report/fonts/` içinde, lisansıyla birlikte depoda duruyor, yani
+ek bir kurulum gerekmiyor. Ubuntu'nun paketlediği iki el yazısı fontu
+(`fonts-humor-sans`, `fonts-comic-neue`) `ğ`/`Ğ`/`İ` harflerini içermediği
+için Türkçe bir raporda kullanılamıyor --- seçim bu yüzden.
+
+Font dosyası silinirse rapor **yine de hatasız derlenir**: `\elyazi`
+sessizce TeX Gyre Heros'a düşer, şekiller aynı çizilir, yalnızca etiketler
+düz sans olur.
 
 ## Renkli kutuların anlamı
 
-Deneyler bölümünde her sonuç iki kutudan biriyle işaretlidir:
+Deneyler bölümünde (Bölüm 4) her sonuç iki kutudan biriyle işaretlidir:
 
 - **Mavi (Ölçüldü, cihazda)**: Jetson AGX Orin'de gerçek bir koşudan,
   alıntılanabilir.
 - **Gri (CPU'da, yapısal)**: CUDA'sız bir makinede ölçülmüş; bir
   ilişkinin var olduğunu kanıtlar, cihazdaki mutlak maliyeti değil.
 
-Rapordaki tüm sayılar bu iki kategoriden birine girer; bekleyen (TODO)
-bir ölçüm kalmamıştır.
+Rapordaki **her sayı** bu iki kategoriden birine girer; bekleyen (TODO) bir
+ölçüm kalmamıştır.
+
+Üçüncü bir kutu yalnızca Bölüm 6'da (encoder eğitimi) kullanılıyor:
+
+- **Mor (Tasarım kararı --- kod yazıldı, ölçüm bekliyor)**: anlatılan şey
+  depoda çalışır hâlde, ama hiçbir GPU koşusundan geçmedi. O bölümde
+  **tek bir ölçüm yoktur** ve bu kutu bunu her seferinde açıkça söyler ---
+  bir tasarım gerekçesi bir sayının yerine geçmez.
 
 ## Görsel eklemek
 

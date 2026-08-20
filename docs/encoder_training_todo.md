@@ -10,8 +10,10 @@ Buradaki hiçbir şey **ölçülmüş** değil. Bu bir **araştırma ve iş plan
 
 A ve B aşamalarının kodu artık yazıldı — **kurulumun** nasıl olduğu
 `docs/encoder_mimari.md`'de, çalışan hâli
-`notebooks/07_encoder_aerial_rgbt.ipynb`'de. Yazılmış olmak ölçülmüş olmak
-değil: aşağıdaki her madde hâlâ kendi taban çizgisine karşı sayı bekliyor.
+`notebooks/07_encoder_aerial_rgbt.ipynb`'de, ve görsel anlatımı raporun
+6. bölümünde (`report/bolumler/egitim.tex`). Yazılmış olmak ölçülmüş olmak
+değil: aşağıdaki her madde hâlâ kendi taban çizgisine karşı sayı bekliyor —
+rapor bölümü de bunu her kutusunda açıkça söylüyor.
 
 Veri setleri: `docs/datasets.md` ve raporda Bölüm 5.
 
@@ -278,3 +280,4 @@ bir arabaya değen bir insan böylece iki örnek kalıyor.
 - Mevcut eğitim kararları — `src/training/finetune.py` modül dokümanı
 - **Kurulumun kendisi** — `docs/encoder_mimari.md` (bu planın uygulanmış hâli)
 - **Çalıştırmak için** — `notebooks/07_encoder_aerial_rgbt.ipynb`
+- **Görsel anlatım** — rapor Bölüm 6 (`report/bolumler/egitim.tex`)

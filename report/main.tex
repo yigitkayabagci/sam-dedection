@@ -39,7 +39,10 @@
 \input{bolumler/ozet}
 
 \begingroup
+% \footnotesize + hafif sıkıştırılmış satır aralığı: liste tek sayfada
+% kalsın diye (bkz. preamble.tex'teki \DeclareTOCStyleEntry notu).
 \footnotesize
+\linespread{0.94}\selectfont
 \tableofcontents
 \endgroup
 
@@ -51,6 +54,10 @@
 \input{bolumler/sistem_yontem}
 \input{bolumler/deneyler}
 \input{bolumler/veri_setleri}
+% Encoder eğitimi: son içerik bölümü. Veri setlerinden hemen sonra geliyor
+% çünkü orada anlatılan setleri kullanıyor; "gelecek çalışmalar" ve "sonuç"
+% kapanış bölümleri olarak en sonda kalıyor.
+\input{bolumler/egitim}
 \input{bolumler/gelecek_calismalar}
 \input{bolumler/sonuc}
 
