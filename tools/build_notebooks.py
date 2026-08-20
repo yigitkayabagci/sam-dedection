@@ -325,7 +325,7 @@ import os, sys
 from pathlib import Path
 
 REPO   = Path("/content/sam-dedection")
-BRANCH = "claude/encoder-architecture-colab-myo61y"
+BRANCH = "claude/encoder-notebook-validation-4t1p8j"
 
 if not REPO.exists():
     !git clone -q -b {BRANCH} https://github.com/yigitkayabagci/sam-dedection.git {REPO}
@@ -388,7 +388,10 @@ code(r"""
 before = torch.__version__
 !bash scripts/setup_edgetam.sh 2>&1 | tail -5
 !pip install -q -r requirements.txt
-!pip install -q "transformers>=4.44" datasets
+# 4.56 is the floor that knows the teachers: DINOv3 and Sam2Model both landed
+# there, and an older wheel satisfies a lower pin and then fails at
+# from_pretrained, forty minutes into the session.
+!pip install -q "transformers>=4.56" datasets
 
 # The one thing an install here must not do. EdgeTAM's setup.py declares a
 # torch floor, and on a card newer than any wheel on PyPI a "helpful"
@@ -553,12 +556,13 @@ SEED            = 0
 LOADER_WORKERS  = min(2 * (os.cpu_count() or 4), 24)
 PREFETCH_DEPTH  = 2
 
-for d in (DATA_DIR, WORK, CKPT, MIRROR, INDEX):
-    d.mkdir(parents=True, exist_ok=True)
 # One index file per dataset, named after it, so changing one dataset's mode
 # does not invalidate the others -- and so an index built one way can never be
 # loaded by a run decomposing the other way (it is stamped and checked).
 INDEX = MIRROR / "index"
+
+for d in (DATA_DIR, WORK, CKPT, MIRROR, INDEX):
+    d.mkdir(parents=True, exist_ok=True)
 
 import torch
 VRAM = torch.cuda.get_device_properties(0).total_memory / 2**30 if torch.cuda.is_available() else 0
@@ -668,8 +672,12 @@ for request in requests:
     spec = request.source.spec
     if spec.name in OVERRIDES:
         spec = replace(spec, **OVERRIDES[spec.name])
+    # `role` travels too: dropping it here would put the reconstructed sets
+    # back into val and test in every table this notebook prints, while the
+    # training subprocesses -- which re-parse DATASETS themselves -- keep them
+    # out. The two views of the split have to be the same view.
     source = Source(spec=spec, gates=gates, mode=request.source.mode,
-                    gray=request.source.gray)
+                    gray=request.source.gray, role=request.source.role)
     frames = list_frames(request.root, spec, request.modality)
     sources[request.label], frames_of[request.label] = source, frames
 
@@ -1388,7 +1396,8 @@ for label, path in CHECKPOINTS.items():
     !python tools/eval_instances.py {DATASET_FLAGS} --index {INDEX} \
         --checkpoint {path} --split test --size {SIZE} \
         --per-image {PER_IMAGE} --max-instances {MAX_INSTANCES} \
-        --min-area {MIN_AREA} --fill {FILL} --batch {BATCH} --seed {SEED} \
+        --min-area {MIN_AREA} --min-side {MIN_SIDE} --max-area {MAX_AREA} \
+        --fill {FILL} --batch {BATCH} --seed {SEED} \
         --json {WORK}/test_{tag}.json 2>&1 | tail -14
 """)
 

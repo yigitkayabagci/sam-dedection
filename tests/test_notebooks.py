@@ -36,6 +36,62 @@ class TestEveryNotebook(unittest.TestCase):
                 self.assertEqual(check(path), [])
 
 
+def _notebook(tmpdir: Path, *cells: str) -> Path:
+    import json
+
+    path = tmpdir / "cell.ipynb"
+    path.write_text(json.dumps({
+        "cells": [{"cell_type": "code", "metadata": {},
+                   "outputs": [], "execution_count": None,
+                   "source": source.splitlines(keepends=True)}
+                  for source in cells],
+        "metadata": {}, "nbformat": 4, "nbformat_minor": 0,
+    }))
+    return path
+
+
+class TestStatementOrder(unittest.TestCase):
+    """Within one cell, statements run top to bottom -- the check follows.
+
+    The shape that motivated this: the settings cell once used `INDEX` in a
+    mkdir loop three lines above the line that defined it. Bound *somewhere*
+    in the cell, so the cell-scoped check passed; unbound at the line that
+    ran, so a Run all died at cell 6.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_use_above_its_own_cell_binding_is_reported(self):
+        path = _notebook(self.dir,
+                         "A = 1\n",
+                         "for d in (A, B):\n    d\nB = 2\n")
+        problems = check(path)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("'B'", problems[0])
+
+    def test_a_function_body_may_lean_on_a_later_binding(self):
+        # `f` runs after the cell has, so the cell-wide rule is the right one
+        # for what its body uses.
+        path = _notebook(self.dir,
+                         "def f():\n    return LATER\nLATER = 1\nf()\n")
+        self.assertEqual(check(path), [])
+
+    def test_a_loop_carried_name_is_not_a_false_positive(self):
+        # `prev` is read before the line that binds it, but the binding lives
+        # in the same statement and runs on the first iteration.
+        path = _notebook(self.dir,
+                         "total = 0\nfor i in range(3):\n"
+                         "    if i:\n        total += prev\n    prev = i\n")
+        self.assertEqual(check(path), [])
+
+
 class TestMagicHandling(unittest.TestCase):
     """The IPython lines, which are where this check earns its keep."""
 

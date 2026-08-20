@@ -83,6 +83,36 @@ class TestBatchClips(unittest.TestCase):
         batches = list(batch_clips(self.clips, 2, seed=0, limit=3))
         self.assertEqual(len(batches), 3)
 
+    def test_a_small_pool_cycles_up_to_the_limit(self):
+        # The cap is also a floor. OneCycleLR's step count and the notebooks'
+        # "same budget" comparison are sized to `limit`; a 700-window VTUAV
+        # pool that ended a 400-step epoch at step 21 would leave the learning
+        # rate mid-warmup forever, with no error to explain it.
+        batches = list(batch_clips(self.clips, 4, seed=0, limit=40))
+        self.assertEqual(len(batches), 40)
+        self.assertTrue(all(len(b) == 4 for b in batches))
+        seen = {c for b in batches for c in b}
+        self.assertEqual(seen, set(self.clips))   # cycling covers the pool
+
+    def test_cycling_is_reproducible_from_its_seed(self):
+        a = list(batch_clips(self.clips, 4, seed=7, limit=20))
+        b = list(batch_clips(self.clips, 4, seed=7, limit=20))
+        self.assertEqual(a, b)
+
+    def test_a_pool_smaller_than_one_batch_still_yields(self):
+        # The validation slice on a tiny split: zero batches would mean a nan
+        # mean, which never beats the best, which means no checkpoint is ever
+        # written -- three hours of training with nothing kept.
+        batches = list(batch_clips(self.clips[:3], 8, seed=0, limit=5))
+        self.assertEqual([len(b) for b in batches], [3] * 5)
+
+    def test_an_empty_pool_yields_nothing_rather_than_spinning(self):
+        self.assertEqual(list(batch_clips([], 4, seed=0, limit=5)), [])
+
+    def test_without_a_limit_a_pass_is_still_a_single_pass(self):
+        seen = [c for b in batch_clips(self.clips, 4, seed=3) for c in b]
+        self.assertEqual(len(seen), len(set(seen)))
+
     def test_the_short_last_batch_is_kept_only_when_asked_for(self):
         self.assertEqual(len(list(batch_clips(self.clips, 4, seed=0, drop_last=False))), 6)
 

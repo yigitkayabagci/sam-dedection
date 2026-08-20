@@ -59,19 +59,34 @@ def batch_clips(
     ~60000 clips, and an "epoch" over all of them is a day. A capped, reshuffled
     pass sees a different random subset each time, which is what is wanted
     anyway -- consecutive clip starts overlap in 7 of their 8 frames.
+
+    With `limit` set, the cap is also a floor: a pool too small to fill it is
+    reshuffled and drawn again until it does, and a pool smaller than one batch
+    yields the whole pool per batch. The callers that pass `limit` size real
+    commitments to it -- OneCycleLR's total step count, the "same budget, only
+    the data differs" comparison between the encoder notebooks, a validation
+    mean the checkpoint rule trusts -- and a VTUAV-only run has ~700 windows
+    against a 400-step epoch. Ending that epoch at step 21 would leave the
+    learning rate mid-warmup forever and no error to explain it; a validation
+    pool under one batch would score nothing, so nothing would ever be saved.
     """
-    order = np.random.default_rng(seed).permutation(len(clips))
+    rng = np.random.default_rng(seed)
+    if limit is not None:
+        size = min(size, max(len(clips), 1))
     batch: list[Clip] = []
     produced = 0
-    for i in order:
-        batch.append(clips[int(i)])
-        if len(batch) < size:
-            continue
-        yield batch
-        produced += 1
-        batch = []
-        if limit is not None and produced >= limit:
-            return
+    while True:
+        for i in rng.permutation(len(clips)):
+            batch.append(clips[int(i)])
+            if len(batch) < size:
+                continue
+            yield batch
+            produced += 1
+            batch = []
+            if limit is not None and produced >= limit:
+                return
+        if limit is None or not len(clips):
+            break
     if batch and not drop_last and (limit is None or produced < limit):
         yield batch
 
