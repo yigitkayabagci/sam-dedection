@@ -47,11 +47,25 @@ Aşama sırası keyfi değil, gerekçesi TODO §1'de.
 
 ---
 
-## 3. Asıl mesele: etiket yanlış tipte
+## 3. Asıl mesele: etiket çoğu sette yanlış tipte
 
 Kust4K, SegFly, Caltech Aerial — hepsi **semantik** segmentasyon: piksel →
 sınıf, yani "bütün arabalar araba". Takipçinin istediği bunun tersi:
 **"şu araba, yanındaki değil"**.
+
+**Bir set istisna** ve varsayılan olarak `DATASETS`'te: **VTUAV'ın VIS
+bölümü** kare başına **örnek (instance) maskesi** veriyor, 1920×1080'de. Orada
+aşağıdaki hiçbir şey çalışmıyor — `mode="labels"` her sıfırdan farklı değeri
+doğrudan bir hedef olarak okuyor. Aşağısı, elinde sadece semantik harita olan
+setler için; ki hâlâ çoğunluk onlar.
+
+### 3.0 Üç `mode`, üç farklı anotasyon
+
+| mode | harita ne | ne oluyor |
+|---|---|---|
+| `components` | semantik | sınıf sınıf bağlantılı bileşen — §3'teki yeniden kurma |
+| `watershed` | semantik | aynısı + ince köprüyle birleşmiş nesneleri ayırma |
+| `labels` | **zaten örnek** | hiçbir ayrıştırma yok; her sıfırdan farklı değer bir hedef |
 
 Semantik hedefle eğitmek zarar verir — yan yana iki arabanın özniteliklerini
 **birbirine yaklaştırır**, oysa takip için ayrışmaları gerekiyor.
@@ -97,11 +111,13 @@ olarak raporluyor.
 
 ### 3.1 Kaynaşma kötüyse: dört çıkış yolu, maliyet sırasıyla
 
-**1. `split="watershed"` — bedava, kısmi.** *İnce köprüyle* birleşmiş nesneler
+**1. O veri setinde `mode=watershed` — bedava, kısmi.** *İnce köprüyle* birleşmiş nesneler
 tek bileşen ama uzaklık dönüşümünde (distance transform) iki tepe ve arada bir
 vadi; tepelerden tohumlayıp dışa doğru taşırmak onları ayırıyor.
-`SPLIT_TOUCHING = "watershed"`, indeks hücresinden itibaren yeniden koş, `fill`
-reddi sayısını karşılaştır. **Denemeden önce sınırını bilmek gerekiyor:** tam
+`DATASETS`'te o setin dördüncü alanını değiştir
+(`kust4k:...:thermal:watershed`), indeks hücresinden itibaren yeniden koş,
+`fill` reddi sayısını karşılaştır. Her mode kendi indeksini önbelleğe aldığı
+için geri dönmek bedava. **Denemeden önce sınırını bilmek gerekiyor:** tam
 kenar boyunca bitişik iki dikdörtgen, daha büyük bir dikdörtgene döşenir ve
 onun uzaklık dönüşümünde **vadi yoktur**. Maske geometrisiyle çalışan hiçbir
 yöntem bunları ayıramaz. Köprü vakasını kurtarır, başka bir şeyi kurtarmaz.
@@ -121,13 +137,47 @@ bir `max_area` zaten şüphelileri atıyor; `FILL`'i 0.4'e çekmek daha fazlası
 atar. Daha az örnek, hepsi güvenilir. En ucuzu ve çoğu zaman yeterli — 20 000
 temiz örnek, 40 000 yarı-kaynaşmış örnekten iyidir.
 
-**4. Zaten örnek veren bir set kullan, problemi hiç yaşama.** **AeroVIS** örnek
-maskesi *artı* kimlik veriyor (YTVIS biçimi) — hiç ayrıştırma yok, ve video
-olmasına rağmen kareleri statik veri olarak çalışır. **iSAID** havadan büyük
-örnek-segmentasyon seti (655 K örnek), bu aşama için RGB kabul edilebilirse.
-Kaynaşma sayısı yeterince kötüyse **asıl cevap budur**; ayrıştırma, yoğun
-*termal* havadan setlerin hepsi semantik olduğu için var, tercih edildiği için
-değil.
+**4. Zaten örnek veren bir set kullan — ve biri zaten veriyor.** **VTUAV'ın
+VIS bölümü** havadan, RGB-T, 1920×1080 ve örnek maskeli; `mode=labels` onu
+doğrudan okuyor, hiçbir ayrıştırma çalışmıyor. Tam bu sebeple varsayılan
+`DATASETS`'te. **AeroVIS** örnek maskesi *artı* kimlik veriyor (YTVIS biçimi)
+ama sadece RGB; **iSAID** havadan büyük örnek-segmentasyon seti (655 K örnek),
+bu aşama için RGB kabul edilebilirse. Ayrıştırma, yoğun *termal* havadan
+setlerin **çoğu** semantik olduğu için var — gerçek bir örnek etiketine tercih
+edildiği için değil.
+
+---
+
+## 3.5 Tek veri seti yetmez — `Source` neden örnek başına
+
+`--dataset` tekrarlanabilir ve pencereler birleşiyor:
+
+```
+--dataset vtuav_vis:/data/VTUAV_VIS:thermal:labels     1920×1080, örnek maskesi
+--dataset kust4k:/data/Kust4K                          640×512, semantik
+--dataset segfly:/data/SegFly:thermal:watershed        640×512, semantik
+```
+
+Sebebi encoder'ın ne taşıdığı: **genel** görsel öznitelik. Tek veri seti = tek
+sensör, tek şehir, tek etiketleme alışkanlığı. Kust4K'nın 4 024 karesi bir
+head'i ince ayarlamak için makul, bir gövdeyi oynatmak için ince.
+
+Bu yüzden `Source` (spec + gates + mode + modalite) **her `Sample`'ın üstünde**
+duruyor, run'ın üstünde değil: bir batch VTUAV'ın örnek maskeleriyle Kust4K'nın
+ayrıştırılmış semantik maskelerini **aynı adımda** taşıyabiliyor. Alternatif —
+setler arasında sırayla geçmek — trunk'ın her seferinde bir setin
+istatistiklerine oturmasına izin verirdi.
+
+Yan fayda: bir sessiz hata sınıfı kapanıyor. İndeksi bir mode ile kurup
+maskeleri başka bir mode ile okumak bileşen etiketlerini yeniden numaralandırır
+ve her örnek başka bir örneğin maskesiyle eşleşir — kayıp yine de sonlu görünür.
+İkisi birlikte taşındığı için artık uyuşmazlık **mümkün değil**; üstelik
+`save_index` damgalıyor ve `load_index` reddediyor.
+
+**Bölme (split) veri seti başına katmanlı.** 4 024 karelik bir set, 100 dizilik
+bir setin yanında tek permütasyonla neredeyse tamamen `test`'e düşebilir. Ayrıca
+bölme *isim* üzerinden değil indeks girdisi üzerinden: `000123.png` setlerin
+çoğunda var, isimle eşleme bir setin karesinde eğitip başkasınınkinde ölçerdi.
 
 ---
 
@@ -267,7 +317,8 @@ alakasız; sadece **çift sayısı** önemli. Bu, veri seti listesini baştan s�
 
 | kaynak | hizalı RGB-T çifti | aşama A'da kullanılır mı? |
 |---|---:|---|
-| **VTUAV** | **~1 700 000** (500 dizi, 1920×1080) | **evet — açık ara en büyüğü** |
+| **VTUAV** (tam set) | **~1 700 000** (500 dizi, 1920×1080) | **evet — açık ara en büyüğü** |
+| VTUAV VIS bölümü | 100 dizi (~340 000) | evet, **ve aşama B'nin de seti** |
 | MVUAV | ~53 800 | evet |
 | SegFly | 15 007 | evet |
 | Kust4K | 4 024 | evet, ve aşama B'nin seti bu |
@@ -291,6 +342,14 @@ video olmasından:
   Videodan türeyen bir sette bu incelik değil zorunluluk: VTUAV'ın ilk 5 000
   çifti **iki uçuş**, yani kesen bir kap iki sahnede eğitip beş bin örnek diye
   raporlardı.
+- **`--tolerance 1`.** VTUAV'ın iki modalitesi piksel piksel hizalı **değil**
+  (yazarların kendi notu). `tolerance=0`'da öğrenci pozisyonu *p* sadece
+  öğretmen pozisyonu *p* ile eşleşiyor — hizasızsa öğretmen öğrencinin
+  bakmadığı yere bakmış olur ve her pozisyon sistematik hata taşır.
+  `tolerance=1` her öğrenci pozisyonunu çevresindeki 3×3 komşuluğun **en iyi**
+  öğretmen pozisyonuyla eşleştiriyor, yani bir öznitelik hücresine (stride
+  16'da 16 kaynak piksel) kadar kaymayı yutuyor. Bedeli uzamsal kesinlik, o
+  yüzden hizalı setlerde 0 kalıyor.
 
 Sorun etiket değil **disk**: 1.7 M kare 1920×1080'de bir Colab runtime'ına
 sığmaz. Bir alt küme indir — birkaç dizilik parça bile on binlerce çift eder ki

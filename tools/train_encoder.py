@@ -21,12 +21,23 @@ load into the same config, export to the same ONNX graph and build the same
 engines. If they did not, the numbers would be comparing deployments rather
 than training methods.
 
+**And it takes more than one dataset.** `--dataset` is repeatable and the
+windows concatenate into one pool, so a batch mixes them. That matters more
+here than for the head: the encoder carries general visual features, and one
+dataset is one sensor, one city and one set of annotation habits. Kust4K's
+4 024 frames at 640x512 are a thin thing to move a trunk with on their own.
+
 Usage:
-    python tools/train_encoder.py --data /content/data/Kust4K --spec kust4k \\
+    python tools/train_encoder.py --dataset kust4k:/content/data/Kust4K \\
         --out checkpoints/edgetam_aerial_512.pt --method finetune
 
-    python tools/train_encoder.py ... --method lora --lora-r 16 \\
-        --out checkpoints/edgetam_aerial_lora_512.pt
+    # higher resolution, and instance masks that need no decomposition at all
+    python tools/train_encoder.py \\
+        --dataset vtuav_vis:/content/data/VTUAV:thermal:labels \\
+        --dataset kust4k:/content/data/Kust4K \\
+        --dataset segfly:/content/data/SegFly:thermal:watershed \\
+        --index /content/drive/MyDrive/edgetam-encoder/index \\
+        --out checkpoints/edgetam_aerial_512.pt --method lora --lora-r 16
 """
 from __future__ import annotations
 
@@ -41,16 +52,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.aerial import (  # noqa: E402
-    SPECS,
     InstanceGates,
     index_frames,
     list_frames,
     load_index,
     sample_windows,
     save_index,
-    split_frames,
+    split_index,
     summarise,
 )
+from src.training.datasets import Request, describe, parse  # noqa: E402
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
 from src.training.schedule import Schedule, images, run_stages  # noqa: E402
 
@@ -69,28 +80,40 @@ RATES = {
 }
 
 
-def build_index(data: Path, spec, modality: str, gates: InstanceGates,
-                cache: Path | None, workers: int, quiet: bool = False,
-                split: str = "none"):
-    """The per-frame instance index, from cache when there is one.
+def build_index(request: Request, cache_dir: Path | None, workers: int,
+                quiet: bool = False):
+    """One dataset's per-frame instance index, from cache when there is one.
 
-    Decomposing every semantic map is a full pass over the dataset and produces
-    a few hundred kilobytes of boxes. Caching it is what makes a second run --
-    the LoRA one, in particular -- start training immediately, and what makes
-    the two runs provably see the same instances rather than the same code.
+    Decomposing every annotation map is a full pass over the dataset and
+    produces a few hundred kilobytes of boxes. Caching it is what makes a
+    second run -- the LoRA one, in particular -- start training immediately,
+    and what makes the two runs provably see the same instances rather than the
+    same code. The cache is keyed by the request, so a mixed run keeps one file
+    per dataset and changing one dataset's mode does not invalidate the others.
     """
+    source = request.source
+    cache = (cache_dir / f"{request.label.replace(':', '_')}.json"
+             if cache_dir else None)
     if cache is not None and cache.is_file():
-        index = load_index(cache)
+        index = load_index(cache, source)
         if not quiet:
-            print(f"instance index reused from {cache}")
+            print(f"  {request.label}: index reused from {cache}")
         return index
 
-    frames = list_frames(data, spec, modality)
-    index = index_frames(frames, spec, gates, workers=workers,
-                         progress=_tqdm(), split=split)
+    frames = list_frames(request.root, source.spec, request.modality)
+    index = index_frames(frames, source, workers=workers, progress=_tqdm())
     if cache is not None:
         save_index(cache, index)
-        print(f"instance index written to {cache}")
+        print(f"  {request.label}: index written to {cache}")
+    return index
+
+
+def build_indexes(requests: list[Request], cache_dir: Path | None,
+                  workers: int) -> list:
+    """Every dataset's index, concatenated. Order is the flag order."""
+    index = []
+    for request in requests:
+        index.extend(build_index(request, cache_dir, workers))
     return index
 
 
@@ -110,14 +133,17 @@ def build_model(size: int, checkpoint: str, device: str):
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data", required=True, help="Dataset root.")
-    p.add_argument("--spec", default="kust4k", choices=sorted(SPECS))
-    p.add_argument("--modality", default="thermal", choices=("thermal", "rgb"))
+    p.add_argument("--dataset", action="append", required=True, metavar="SPEC:PATH[:MODALITY[:MODE]]",
+                   help="Repeatable. e.g. kust4k:/data/Kust4K or "
+                        "vtuav_vis:/data/VTUAV:thermal:labels. Every dataset "
+                        "given is mixed into the same batches -- see "
+                        "src/training/datasets.py.")
     p.add_argument("--out", required=True, help="Where the checkpoint goes.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt",
                    help="Starting weights -- the stock checkpoint, or a distilled one.")
-    p.add_argument("--index", default=None, help="Cache the instance index here.")
+    p.add_argument("--index", default=None,
+                   help="Directory to cache each dataset's instance index in.")
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--per-image", type=int, default=1, help="Windows sampled per frame.")
     p.add_argument("--max-instances", type=int, default=8,
@@ -127,10 +153,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--min-side", type=int, default=4)
     p.add_argument("--max-area", type=float, default=0.9)
     p.add_argument("--fill", type=float, default=0.25)
-    p.add_argument("--split-touching", choices=("none", "watershed"), default="none",
-                   help="watershed splits objects joined by a thin bridge of "
-                        "pixels -- the failure the `fill` gate detects. Must "
-                        "match the index it is used with.")
     p.add_argument("--batch", type=int, default=0, help="0 measures it on this GPU.")
     p.add_argument("--batch-ceiling", type=int, default=64)
     p.add_argument("--accum", type=int, default=1)
@@ -152,30 +174,26 @@ def main(argv: list[str] | None = None) -> int:
 
     from src.training.image_loop import ImageSplit, auto_batch_size
 
-    spec = SPECS[args.spec]
     gates = InstanceGates(min_area=args.min_area, min_side=args.min_side,
                           max_area=args.max_area, fill=args.fill)
-    index = build_index(Path(args.data), spec, args.modality, gates,
-                        Path(args.index) if args.index else None, args.workers,
-                        split=args.split_touching)
-    print(summarise(index, spec))
+    requests = [parse(argument, gates) for argument in args.dataset]
+    print(describe(requests), "\n")
+    index = build_indexes(requests, Path(args.index) if args.index else None,
+                          args.workers)
+    print()
+    print(summarise(index))
 
     # Split on frames, never on windows: two windows of one image share most of
     # their pixels, and a window-level split would put near-duplicates on both
-    # sides of it and make the held-out number meaningless.
-    parts = split_frames([e.frame for e in index], seed=args.seed)
-    by_name = {e.frame.name: e for e in index}
-    splits = {name: [by_name[f.name] for f in frames] for name, frames in parts.items()}
-
-    gray = args.modality == "thermal"
+    # sides of it and make the held-out number meaningless. Stratified per
+    # dataset, and on index entries rather than names -- names collide across
+    # datasets.
+    splits = split_index(index, seed=args.seed)
 
     def windows(name, jitter):
-        return ImageSplit(
-            samples=sample_windows(splits[name], size=args.size,
-                                   per_image=args.per_image,
-                                   max_instances=args.max_instances,
-                                   jitter=jitter, seed=args.seed),
-            spec=spec, gates=gates, gray=gray, split=args.split_touching)
+        return ImageSplit(sample_windows(
+            splits[name], size=args.size, per_image=args.per_image,
+            max_instances=args.max_instances, jitter=jitter, seed=args.seed))
 
     train, val = windows("train", args.jitter), windows("val", 0)
     instances = sum(len(s.instances) for s in train.samples)
@@ -183,13 +201,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\ntrain {len(train.samples)} windows / {instances} instances "
           f"({native / max(len(train.samples), 1):.0%} native pixels), "
           f"val {len(val.samples)} windows")
+    for name, count in train.sources.items():
+        print(f"  {name:<24} {count:>6} train windows")
 
     model = build_model(args.size, args.base, args.device)
-    meta = {"method": args.method, "image_size": args.size, "dataset": spec.name,
-            "modality": args.modality, "base": args.base, "stage": "instances",
-            "train_frames": len(splits["train"]), "train_instances": instances,
+    meta = {"method": args.method, "image_size": args.size,
+            "datasets": [r.label for r in requests], "base": args.base,
+            "stage": "instances", "train_frames": len(splits["train"]),
+            "train_instances": instances, "sources": train.sources,
             "per_image": args.per_image, "max_instances": args.max_instances,
-            "split_touching": args.split_touching,
             "seed": args.seed}
 
     if args.method == "lora":

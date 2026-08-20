@@ -14,8 +14,13 @@ because they are where a change is visible: an aerial dataset's mean IoU is
 dominated by its trucks, and the targets this pipeline cares about are the ones
 twenty pixels across.
 
+Pass the **same `--dataset` flags the training run used**, or the stratified
+split will not be the same one and "held out" stops being true. Numbers are
+reported per `dataset/class`, because `car` is class 5 in Kust4K and something
+else elsewhere.
+
 Usage:
-    python tools/eval_instances.py --data /content/data/Kust4K --spec kust4k \\
+    python tools/eval_instances.py --dataset kust4k:/content/data/Kust4K \\
         --checkpoint checkpoints/edgetam_aerial_512.pt --split test \\
         --json /content/instances_finetune.json
 """
@@ -33,12 +38,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.aerial import (  # noqa: E402
-    SPECS,
     InstanceGates,
-    load_index,
     sample_windows,
-    split_frames,
+    split_index,
 )
+from src.training.datasets import describe, parse  # noqa: E402
 
 # "Small" is the bucket the deployment lives in: a target this size is a few
 # hundred pixels of a 512 window, which is where a tracker starts losing things.
@@ -51,21 +55,22 @@ def score(model, split, batch: int, device: str, progress=None) -> dict:
     from src.training.loader import batch_clips
 
     ious: list[float] = []
-    classes: list[int] = []
+    classes: list[str] = []
     sides: list[float] = []
 
     chunks = list(batch_clips(split.samples, batch, seed=0, drop_last=False))
     stream = progress(chunks, total=len(chunks), desc="scoring") if progress else chunks
     for chunk in stream:
-        # `split.split` is not optional here: decomposing differently from the
-        # index would renumber the component labels and score every instance
-        # against another instance's mask -- and still produce a plausible IoU.
-        assembled = collate(chunk, split.spec, split.gates, "cpu",
-                            gray=split.gray, split=split.split)
+        assembled = collate(chunk, "cpu")
         ious.extend(instance_iou(model, assembled.to(device)).tolist())
         for sample in chunk:
+            spec = sample.source.spec if sample.source else None
             for instance in sample.instances:
-                classes.append(instance.class_id)
+                # Qualified by dataset: `car` is class 5 in Kust4K and
+                # something else elsewhere, and adding two unrelated
+                # distributions together would report neither.
+                classes.append(f"{spec.name}/{spec.name_of(instance.class_id)}"
+                               if spec else str(instance.class_id))
                 # In *window* pixels, which is what the model saw -- a 40-pixel
                 # car in a resized 4000-wide frame is not a 40-pixel car here.
                 scale = sample.size / max(sample.window)
@@ -84,13 +89,13 @@ def score(model, split, batch: int, device: str, progress=None) -> dict:
         "small_instances": int(small.sum()),
         "small_mean_iou": float(ious[small].mean()) if small.any() else float("nan"),
         "large_mean_iou": float(ious[~small].mean()) if (~small).any() else float("nan"),
-        "per_class": {int(c): {"instances": int((classes == c).sum()),
-                               "mean_iou": float(ious[classes == c].mean())}
+        "per_class": {c: {"instances": int((classes == c).sum()),
+                          "mean_iou": float(ious[classes == c].mean())}
                       for c in sorted(set(classes.tolist()))},
     }
 
 
-def report(result: dict, spec) -> str:
+def report(result: dict) -> str:
     lines = [
         f"{result['instances']} instances  mean IoU {result['mean_iou']:.4f}  "
         f"IoU>=0.5 {result['iou_50']:.3f}  IoU>=0.75 {result['iou_75']:.3f}",
@@ -98,32 +103,30 @@ def report(result: dict, spec) -> str:
         f"{result['small_instances']} at {result['small_mean_iou']:.4f}   "
         f"larger: {result['large_mean_iou']:.4f}",
         "",
-        "| class | instances | mean IoU |",
+        "| dataset / class | instances | mean IoU |",
         "|---|---:|---:|",
     ]
-    for class_id, row in result["per_class"].items():
-        lines.append(f"| {spec.name_of(class_id)} | {row['instances']} | "
-                     f"{row['mean_iou']:.4f} |")
+    for name, row in result["per_class"].items():
+        lines.append(f"| {name} | {row['instances']} | {row['mean_iou']:.4f} |")
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data", required=True)
-    p.add_argument("--spec", default="kust4k", choices=sorted(SPECS))
-    p.add_argument("--modality", default="thermal", choices=("thermal", "rgb"))
+    p.add_argument("--dataset", action="append", required=True,
+                   metavar="SPEC:PATH[:MODALITY[:MODE]]",
+                   help="Repeatable, and must match the training run's flags "
+                        "for the split to be the same one.")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--index", default=None,
-                   help="Reuse the index train_encoder.py wrote; built here if absent.")
+                   help="Directory holding the indexes train_encoder.py wrote.")
     p.add_argument("--split", default="test", choices=("train", "val", "test"))
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--per-image", type=int, default=1)
     p.add_argument("--max-instances", type=int, default=8)
     p.add_argument("--min-area", type=int, default=48)
     p.add_argument("--fill", type=float, default=0.25)
-    p.add_argument("--split-touching", choices=("none", "watershed"), default="none",
-                   help="Must match what the index and the training run used.")
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
@@ -131,37 +134,32 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     from src.training.image_loop import ImageSplit
-    from tools.train_encoder import _tqdm, build_index, build_model
+    from tools.train_encoder import _tqdm, build_indexes, build_model
 
-    spec = SPECS[args.spec]
     gates = InstanceGates(min_area=args.min_area, fill=args.fill)
-    cache = Path(args.index) if args.index else None
-    index = (load_index(cache) if cache and cache.is_file()
-             else build_index(Path(args.data), spec, args.modality, gates, cache, 8,
-                              split=args.split_touching))
+    requests = [parse(argument, gates) for argument in args.dataset]
+    print(describe(requests), "\n")
+    index = build_indexes(requests, Path(args.index) if args.index else None, 8)
 
-    # The same split, from the same seed, as training used -- otherwise "held
-    # out" is a claim rather than a fact.
-    parts = split_frames([e.frame for e in index], seed=args.seed)
-    by_name = {e.frame.name: e for e in index}
-    chosen = [by_name[f.name] for f in parts[args.split]]
-
-    split = ImageSplit(
-        samples=sample_windows(chosen, size=args.size, per_image=args.per_image,
-                               max_instances=args.max_instances, jitter=0,
-                               seed=args.seed),
-        spec=spec, gates=gates, gray=args.modality == "thermal",
-        split=args.split_touching)
+    # The same stratified split, from the same seed, as training used --
+    # otherwise "held out" is a claim rather than a fact.
+    chosen = split_index(index, seed=args.seed)[args.split]
+    split = ImageSplit(sample_windows(
+        chosen, size=args.size, per_image=args.per_image,
+        max_instances=args.max_instances, jitter=0, seed=args.seed))
     print(f"{args.split}: {len(chosen)} frames, {len(split.samples)} windows, "
           f"{sum(len(s.instances) for s in split.samples)} instances")
+    for name, count in split.sources.items():
+        print(f"  {name:<24} {count:>6} windows")
 
     model = build_model(args.size, args.checkpoint, args.device)
     result = score(model, split, args.batch, args.device, progress=_tqdm())
     result |= {"checkpoint": args.checkpoint, "split": args.split,
-               "dataset": spec.name, "modality": args.modality}
+               "datasets": [r.label for r in requests],
+               "sources": split.sources}
 
     print()
-    print(report(result, spec))
+    print(report(result))
     if args.json:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)

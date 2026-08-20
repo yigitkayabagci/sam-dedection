@@ -42,7 +42,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .aerial import DatasetSpec, InstanceGates, Sample, load_image, normalise, sample_masks
+from .aerial import Sample, load_image, normalise, sample_masks
 from .clip_loop import _capture_head, box_prompt, check_model
 
 
@@ -89,22 +89,28 @@ class ImageBatch:
         )
 
 
-def collate(samples: Sequence[Sample], spec: DatasetSpec,
-            gates: InstanceGates = InstanceGates(), device: str = "cpu",
-            executor=None, gray: bool = True, split: str = "none") -> ImageBatch:
+def collate(samples: Sequence[Sample], device: str = "cpu",
+            executor=None) -> ImageBatch:
     """Read `samples`' pixels and their instance masks into one padded batch.
 
+    **Every sample decodes itself**, through the `Source` it carries. That is
+    what lets one batch hold VTUAV's instance masks beside Kust4K's decomposed
+    semantic ones -- and training on several datasets at once is the only way
+    a trunk carrying general visual features sees past any single sensor,
+    city and set of annotation habits.
+
     `executor` spreads the per-sample reads across a thread pool -- decoding a
-    PNG and running connected components on its semantic map both release the
-    GIL, so this is real parallelism. It is also where the parallelism belongs:
-    a batch is a few dozen images, and assembling whole batches concurrently
-    instead would hold a copy of each in host memory at once.
+    PNG and running connected components on its map both release the GIL, so
+    this is real parallelism. It is also where the parallelism belongs: a batch
+    is a few dozen images, and assembling whole batches concurrently instead
+    would hold a copy of each in host memory at once.
     """
     mapper = map if executor is None else executor.map
     size = samples[0].size
-    pixels = list(mapper(lambda s: load_image(s.frame.image, s.origin, s.window,
-                                              s.size, gray), samples))
-    masks = list(mapper(lambda s: sample_masks(s, spec, gates, split), samples))
+    pixels = list(mapper(
+        lambda s: load_image(s.frame.image, s.origin, s.window, s.size,
+                             s.source.gray if s.source else True), samples))
+    masks = list(mapper(sample_masks, samples))
 
     width = max(len(s.instances) for s in samples)
     boxes = np.zeros((len(samples), width, 4), dtype=np.float32)
@@ -238,21 +244,31 @@ def instance_iou(model, batch: ImageBatch) -> np.ndarray:
 
 @dataclass(frozen=True)
 class ImageSplit:
-    """Windows for one split, plus what it takes to read them.
+    """Windows for one split. Nothing else -- each sample decodes itself.
 
-    The spec, the gates and the decomposition strategy travel *with* the split
-    rather than being read from a global, because the whole point of the
-    comparison this feeds is that two runs see identical data. A gate value
-    that differed between them would be a silent third variable -- and a
-    `split` that differed between the index and the loader would renumber the
-    component labels and pair every instance with another one's mask.
+    A split used to carry the spec, the gates and the decomposition mode for
+    everything in it, which made it a single-dataset object by construction.
+    Those now travel on each `Sample`'s `Source`, so concatenating the windows
+    of several datasets **is** the multi-dataset split:
+
+        ImageSplit(kust4k_windows + vtuav_windows + segfly_windows)
+
+    and every batch drawn from it mixes them.
     """
 
     samples: Sequence[Sample]
-    spec: DatasetSpec
-    gates: InstanceGates = InstanceGates()
-    gray: bool = True
-    split: str = "none"
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    @property
+    def sources(self) -> dict[str, int]:
+        """`{source name: windows}` -- what a mixed split is actually made of."""
+        counts: dict[str, int] = {}
+        for sample in self.samples:
+            key = sample.source.name if sample.source else "?"
+            counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items()))
 
 
 def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
@@ -275,8 +291,7 @@ def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
     pool = sorted(split.samples, key=lambda s: -len(s.instances))
 
     def step(n: int):
-        batch = collate(pool[:n], split.spec, split.gates, "cpu",
-                        gray=split.gray, split=split.split)
+        batch = collate(pool[:n], "cpu")
         return image_losses(model, batch.to(device))[0]
 
     return measure_batch_size(model, step, device,
@@ -298,7 +313,6 @@ def stream(split: ImageSplit, batch: int, seed: int | None, limit: int | None,
     chunks = batch_clips(split.samples, batch, seed=seed, limit=limit)
     return prefetch_with(
         chunks,
-        lambda chunk, pool: collate(chunk, split.spec, split.gates, "cpu", pool,
-                                    split.gray, split.split),
+        lambda chunk, pool: collate(chunk, "cpu", pool),
         device=device, workers=workers, depth=depth,
     )

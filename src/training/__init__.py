@@ -20,12 +20,14 @@ with `schedule.run_stages` shared between them, because the stages, the
 optimiser, the EMA and the checkpoint rule are the same problem either way.
 """
 from .aerial import (
+    MODES,
     DatasetSpec,
     FrameIndex,
     Instance,
     InstanceGates,
     SPECS,
     Sample,
+    Source,
     decompose,
     index_frames,
     list_frames,
@@ -63,6 +65,7 @@ from .labels import (
 __all__ = [
     "Clip",
     "DatasetSpec",
+    "MODES",
     "FrameIndex",
     "Gates",
     "Instance",
@@ -71,6 +74,7 @@ __all__ = [
     "SPECS",
     "Sample",
     "Sequence",
+    "Source",
     "SequenceLabels",
     "clip_tensor",
     "crop_window",

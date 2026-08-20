@@ -71,6 +71,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--trunk-lr", type=float, default=5e-5)
     p.add_argument("--neck-lr", type=float, default=1e-4)
     p.add_argument("--projector-lr", type=float, default=1e-3)
+    p.add_argument("--tolerance", type=int, default=0,
+                   help="Match each student position against the best teacher "
+                        "position within this many feature cells. 1 absorbs a "
+                        "misalignment of ~16 source pixels -- for pairs that "
+                        "are not registered to the pixel, VTUAV included. "
+                        "Costs spatial precision, so leave at 0 otherwise.")
     p.add_argument("--l1", type=float, default=0.0,
                    help="Weight of a smooth-L1 term beside the cosine one.")
     p.add_argument("--lora-r", type=int, default=16)
@@ -118,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         batch=args.batch, steps_per_epoch=args.steps,
         rates=Rates(neck=args.neck_lr, trunk=args.trunk_lr),
         projector_lr=args.projector_lr, l1_weight=args.l1, freeze=freeze,
-        crop=args.crop,
+        crop=args.crop, tolerance=args.tolerance,
         workers=args.workers, depth=args.depth, seed=args.seed,
         device=args.device, progress=_tqdm())
     result |= {**meta, "seconds": round(time.time() - started, 1),

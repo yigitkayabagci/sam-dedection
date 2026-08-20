@@ -165,6 +165,35 @@ SPECS: dict[str, DatasetSpec] = {
         classes={"background": 0, "target": 255},
         things=("target",),
     ),
+    # VTUAV's video-instance-segmentation split: 100 of the 500 sequences,
+    # RGB-T pairs at 1920x1080 with **per-frame instance masks**.
+    #
+    # **The only set on this list whose annotation is already what stage B
+    # wants.** Everything `decompose` does in `components` mode -- filter to
+    # thing classes, connected components, gate against fusion -- exists to
+    # reconstruct exactly this, so here it is skipped: `mode="labels"` reads
+    # each distinct non-zero value as one instance. Use it with
+    #     Source(SPECS["vtuav_vis"], mode="labels", gray=True)
+    #
+    # Two caveats the authors' own paper implies and this cannot fix:
+    # the two modalities are **not perfectly registered**, and not every frame
+    # is hand-annotated -- some masks are propagated. That makes it excellent
+    # stage-B data and something to be careful with in stage A, where a
+    # misregistered pair means the teacher looked somewhere the student did not
+    # (`distill_loss(..., tolerance=1)` is the remedy).
+    #
+    # **The globs below are a guess.** The layout of the mask split is not
+    # documented in the repository or on the project page, so run
+    # `describe_layout` on the download and fix them with `replace(...)` --
+    # the notebook has a cell for exactly that.
+    "vtuav_vis": DatasetSpec(
+        name="vtuav_vis",
+        thermal="**/ir/*.jpg",
+        rgb="**/rgb/*.jpg",
+        masks="**/mask/*.png",
+        classes={"background": 0, "target": 1},
+        things=("target",),
+    ),
     # FLIR ADK 640x512 with hardware-synchronised RGB, 4 195 dense masks
     # (ECCV 2024). Field-focused classes -- no small vehicles -- so this is a
     # generalisation check, not a source of instances.
@@ -294,27 +323,96 @@ def list_pairs(root: str | Path, spec: DatasetSpec) -> list[tuple[Path, Path]]:
     return [(thermal[name], rgb[name]) for name in shared]
 
 
-def split_frames(frames: SequenceABC[Frame], fractions=(0.8, 0.1, 0.1),
-                 seed: int = 0) -> dict[str, list[Frame]]:
-    """train / val / test, by name hash rather than by position.
+def split_frames(items: SequenceABC, fractions=(0.8, 0.1, 0.1),
+                 seed: int = 0) -> dict[str, list]:
+    """train / val / test, on a shuffled order rather than the file order.
 
-    These sets ship no official split. Splitting on a shuffled *name* order and
-    not on the file order matters: consecutive frames of one flight sit next to
-    each other on disk, so a positional split puts near-duplicate images on
-    both sides of it and the held-out number stops meaning anything.
+    These sets ship no official split, and the file order is the wrong one to
+    cut: consecutive frames of one flight sit next to each other on disk, so a
+    positional split puts near-duplicate images on both sides of the line and
+    the held-out number stops meaning anything. A seeded permutation
+    decorrelates it, and sorting within each part keeps the result stable.
+
+    Works on anything -- `Frame`s or `FrameIndex` entries -- because it never
+    looks inside an item. For a run mixing datasets use `split_index`, which
+    stratifies.
     """
     if not np.isclose(sum(fractions), 1.0):
         raise ValueError(f"fractions must sum to 1, got {fractions}")
-    order = np.random.default_rng(seed).permutation(len(frames))
-    cuts = np.cumsum([int(round(f * len(frames))) for f in fractions[:-1]])
+    order = np.random.default_rng(seed).permutation(len(items))
+    cuts = np.cumsum([int(round(f * len(items))) for f in fractions[:-1]])
     parts = np.split(order, cuts)
-    return {name: [frames[int(i)] for i in sorted(part)]
+    return {name: [items[int(i)] for i in sorted(part)]
             for name, part in zip(("train", "val", "test"), parts)}
+
+
+def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
+                seed: int = 0) -> dict[str, list[FrameIndex]]:
+    """`split_frames` per source, then concatenated -- a **stratified** split.
+
+    Two reasons it cannot just permute the whole thing. Splitting proportionally
+    within each dataset keeps a small one from landing almost entirely in
+    `test` by chance, which on a 4 024-frame set beside a 100-sequence one is
+    not a remote possibility. And it splits on `FrameIndex` entries rather than
+    on frame names, because names collide across datasets: `000123.png` exists
+    in most of them, and a name-keyed lookup would silently train on one
+    dataset's frame while scoring another's.
+    """
+    grouped: dict[str, list[FrameIndex]] = {}
+    for entry in index:
+        grouped.setdefault(entry.source.name if entry.source else "?", []).append(entry)
+
+    out: dict[str, list[FrameIndex]] = {"train": [], "val": [], "test": []}
+    for offset, (_, entries) in enumerate(sorted(grouped.items())):
+        # A different seed per source, so two datasets of the same length do
+        # not receive the identical permutation.
+        parts = split_frames(entries, fractions, seed + 1000 * offset)
+        for name in out:
+            out[name].extend(parts[name])
+    return out
 
 
 # --------------------------------------------------------------------------
 # Semantic map -> instances
 # --------------------------------------------------------------------------
+
+
+MODES = ("components", "watershed", "labels")
+
+
+@dataclass(frozen=True)
+class Source:
+    """Everything needed to turn one dataset's files into training targets.
+
+    A *per-sample* bundle rather than a per-run setting, and that is the whole
+    point: one encoder trained on one dataset is one sensor, one city and one
+    set of annotation habits, which is not enough to move a trunk that carries
+    general visual features. Mixing several datasets in a single batch is what
+    makes the encoder see past any one of them -- so every `Sample` carries the
+    rules for decoding *its own* frame, and a batch may hold VTUAV's instance
+    masks beside Kust4K's decomposed semantic ones.
+
+    It also removes a class of silent bug. The mode used to build an index and
+    the mode used to load its masks have to agree exactly, or the component
+    labels renumber and every instance is paired with another one's mask.
+    Carrying them together makes disagreeing impossible rather than merely
+    discouraged.
+    """
+
+    spec: DatasetSpec
+    gates: "InstanceGates" = None            # filled in below; see __post_init__
+    mode: str = "components"
+    gray: bool = True                        # thermal replicates one channel
+
+    def __post_init__(self) -> None:
+        if self.gates is None:
+            object.__setattr__(self, "gates", InstanceGates())
+        if self.mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}")
+
+    @property
+    def name(self) -> str:
+        return f"{self.spec.name}/{self.mode}"
 
 
 @dataclass(frozen=True)
@@ -442,30 +540,38 @@ def split_bridges(binary: np.ndarray, ratio: float = 0.55) -> np.ndarray:
 
 def decompose(semantic: np.ndarray, spec: DatasetSpec,
               gates: InstanceGates = InstanceGates(),
-              split: str = "none"
+              mode: str = "components"
               ) -> tuple[np.ndarray, list[Instance], dict[str, int]]:
-    """`(component image, instances, rejects)` for one semantic map.
+    """`(component image, instances, rejects)` for one annotation map.
 
-    Components are found **per thing class** and then given globally unique
-    labels, so a car touching a pedestrian stays two instances. Label 0 means
-    "no instance here" -- stuff classes, ignored values and rejected components
-    all collapse to it, because none of them is a target.
+    Three modes, because the datasets differ in what their masks already are:
 
-    `split="watershed"` additionally tries to separate objects joined by a thin
-    bridge of pixels (`split_bridges`). It is off by default because it is a
-    repair with its own failure mode -- it can over-split one long vehicle into
-    two -- and the only honest way to choose is to compare the two on the
-    `fill` reject count and on the panels the notebook draws.
+    `components` (default) -- **the map is semantic**, so instances are found
+        as connected components **per thing class**, then given globally unique
+        labels. Per class and not over their union: a car touching a pedestrian
+        would otherwise fuse into one component spanning two classes.
 
-    `rejects` counts which gate stopped what. It is the measurement the whole
-    stage rests on: a class that rejects 40 % on `fill` is a class whose
-    objects are being fused by the decomposition, and no amount of training
-    fixes a bad target.
+    `watershed` -- the same, plus an attempt to separate objects joined by a
+        thin bridge of pixels (`split_bridges`). Off by default because it is a
+        repair with its own failure mode -- it can over-split one long vehicle
+        -- and the only honest way to choose is to compare the two on the
+        `fill` reject count and on the panels the notebook draws.
+
+    `labels` -- **the map already carries instances**, one value each, as
+        VTUAV's video-instance-segmentation split does. Nothing is decomposed
+        and no class filter applies: every non-background value *is* a target,
+        which is the annotation this whole stage has been reconstructing. The
+        gates still run, but read a `fill` rejection differently here -- it is
+        a genuinely thin or diagonal object, not two objects fused, because
+        there was no fusing step.
+
+    Label 0 means "no instance here" in the returned image. `rejects` counts
+    which gate stopped what.
     """
     import cv2
 
-    if split not in ("none", "watershed"):
-        raise ValueError(f"split must be none or watershed, got {split!r}")
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
 
     semantic = np.asarray(semantic)
     if semantic.ndim == 3:
@@ -476,17 +582,8 @@ def decompose(semantic: np.ndarray, spec: DatasetSpec,
     frame_area = float(semantic.size)
     next_label = 1
 
-    for class_id in spec.thing_ids:
-        binary = (semantic == class_id).astype(np.uint8)
-        if not binary.any():
-            continue
-        if split == "watershed":
-            labelled = split_bridges(binary)
-            count = int(labelled.max()) + 1
-            stats = _stats_of(labelled, count)
-        else:
-            count, labelled, stats, _ = cv2.connectedComponentsWithStats(
-                binary, connectivity=8)
+    def keep(labelled, count, stats, class_id):
+        nonlocal next_label
         for index in range(1, count):
             x, y, w, h, area = (int(stats[index, k]) for k in range(5))
             if area == 0:
@@ -501,6 +598,32 @@ def decompose(semantic: np.ndarray, spec: DatasetSpec,
             components[labelled == index] = next_label
             instances.append(candidate)
             next_label += 1
+
+    if mode == "labels":
+        # Every distinct non-background value is one instance. Values are
+        # remapped to a dense 1..N so the stats table below is indexable, and
+        # `spec.ignore` plus 0 are the only things dropped.
+        skip = {0, *spec.ignore}
+        values = [int(v) for v in np.unique(semantic) if int(v) not in skip]
+        dense = np.zeros(semantic.shape, dtype=np.int32)
+        for index, value in enumerate(values, start=1):
+            dense[semantic == value] = index
+        class_id = spec.thing_ids[0] if spec.thing_ids else 0
+        keep(dense, len(values) + 1, _stats_of(dense, len(values) + 1), class_id)
+        return components, instances, rejects
+
+    for class_id in spec.thing_ids:
+        binary = (semantic == class_id).astype(np.uint8)
+        if not binary.any():
+            continue
+        if mode == "watershed":
+            labelled = split_bridges(binary)
+            count = int(labelled.max()) + 1
+            stats = _stats_of(labelled, count)
+        else:
+            count, labelled, stats, _ = cv2.connectedComponentsWithStats(
+                binary, connectivity=8)
+        keep(labelled, count, stats, class_id)
 
     return components, instances, rejects
 
@@ -550,9 +673,10 @@ def reject_reason(instance: Instance, frame_area: float,
 @dataclass(frozen=True)
 class FrameIndex:
     frame: Frame
-    size: tuple[int, int]                 # (width, height) of the semantic map
+    size: tuple[int, int]                 # (width, height) of the annotation map
     instances: tuple[Instance, ...]
     rejects: dict[str, int]
+    source: Source | None = None
 
 
 def read_mask(path: str | Path) -> np.ndarray:
@@ -595,13 +719,11 @@ def probe_classes(frames: SequenceABC[Frame], limit: int = 64) -> dict[int, int]
     return dict(sorted(counts.items()))
 
 
-def index_frames(frames: SequenceABC[Frame], spec: DatasetSpec,
-                 gates: InstanceGates = InstanceGates(),
-                 workers: int = 8, progress=None,
-                 split: str = "none") -> list[FrameIndex]:
+def index_frames(frames: SequenceABC[Frame], source: Source,
+                 workers: int = 8, progress=None) -> list[FrameIndex]:
     """Decompose every frame's map once, so window sampling has something to aim at.
 
-    This is a full pass over the semantic maps and nothing else -- no images are
+    A full pass over the annotation maps and nothing else -- no images are
     decoded. It is what makes the "are the instances clean?" question answerable
     before any GPU time is spent, and `save_index` keeps the answer across a
     runtime restart.
@@ -610,10 +732,12 @@ def index_frames(frames: SequenceABC[Frame], spec: DatasetSpec,
 
     def one(frame: Frame) -> FrameIndex:
         semantic = read_mask(frame.mask)
-        _, instances, rejects = decompose(semantic, spec, gates, split)
+        _, instances, rejects = decompose(semantic, source.spec, source.gates,
+                                          source.mode)
         return FrameIndex(frame=frame,
                           size=(int(semantic.shape[1]), int(semantic.shape[0])),
-                          instances=tuple(instances), rejects=rejects)
+                          instances=tuple(instances), rejects=rejects,
+                          source=source)
 
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
         stream = pool.map(one, frames)
@@ -623,8 +747,16 @@ def index_frames(frames: SequenceABC[Frame], spec: DatasetSpec,
 
 
 def save_index(path: str | Path, index: SequenceABC[FrameIndex]) -> Path:
+    """Write an index, stamped with the source that produced it.
+
+    The stamp is what `load_index` checks. An index built with one mode and
+    loaded by a run decomposing with another renumbers every component label,
+    so each instance would train against a different instance's mask -- and the
+    loss would stay perfectly finite while it happened.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = next((e.source for e in index if e.source), None)
     payload = [{"name": e.frame.name, "image": str(e.frame.image),
                 "mask": str(e.frame.mask),
                 "pair": str(e.frame.pair) if e.frame.pair else None,
@@ -632,12 +764,25 @@ def save_index(path: str | Path, index: SequenceABC[FrameIndex]) -> Path:
                 "instances": [[i.label, i.class_id, *i.box, i.area]
                               for i in e.instances]}
                for e in index]
-    path.write_text(json.dumps(payload) + "\n")
+    path.write_text(json.dumps({
+        "source": {"spec": stamp.spec.name if stamp else None,
+                   "mode": stamp.mode if stamp else None},
+        "frames": payload,
+    }) + "\n")
     return path
 
 
-def load_index(path: str | Path) -> list[FrameIndex]:
+def load_index(path: str | Path, source: Source | None = None) -> list[FrameIndex]:
+    """Read an index back, refusing one built by a different source."""
     payload = json.loads(Path(path).read_text())
+    stamp, rows = payload["source"], payload["frames"]
+    if source is not None and stamp["spec"] is not None:
+        if (stamp["spec"], stamp["mode"]) != (source.spec.name, source.mode):
+            raise ValueError(
+                f"{path} was built from {stamp['spec']}/{stamp['mode']} but this "
+                f"run decomposes with {source.spec.name}/{source.mode}. Loading "
+                f"it would renumber every component label and pair each instance "
+                f"with another one's mask. Delete the cache or match the mode.")
     return [FrameIndex(
         frame=Frame(name=e["name"], image=Path(e["image"]), mask=Path(e["mask"]),
                     pair=Path(e["pair"]) if e["pair"] else None),
@@ -646,10 +791,11 @@ def load_index(path: str | Path) -> list[FrameIndex]:
         instances=tuple(Instance(label=int(r[0]), class_id=int(r[1]),
                                  box=(r[2], r[3], r[4], r[5]), area=int(r[6]))
                         for r in e["instances"]),
-    ) for e in payload]
+        source=source,
+    ) for e in rows]
 
 
-def summarise(index: SequenceABC[FrameIndex], spec: DatasetSpec) -> str:
+def summarise(index: SequenceABC[FrameIndex], spec: DatasetSpec | None = None) -> str:
     """One markdown block: instances per class, their sizes, and what was rejected.
 
     Two numbers decide whether this stage is worth running at all -- how many
@@ -658,11 +804,18 @@ def summarise(index: SequenceABC[FrameIndex], spec: DatasetSpec) -> str:
     filling a quarter of their own bounding box are usually two objects joined
     by a bridge of pixels.
     """
-    per_class: dict[int, list[Instance]] = {}
+    # Keyed by (dataset, class) because a mixed index has several: `car` is 5
+    # in Kust4K and something else elsewhere, and collapsing them would add two
+    # unrelated distributions together.
+    per_class: dict[tuple[str, int], list[Instance]] = {}
     rejects: dict[str, int] = {}
+    naming: dict[str, DatasetSpec] = {}
     for entry in index:
+        owner = entry.source.spec if entry.source else spec
+        label = owner.name if owner else "?"
+        naming[label] = owner
         for instance in entry.instances:
-            per_class.setdefault(instance.class_id, []).append(instance)
+            per_class.setdefault((label, instance.class_id), []).append(instance)
         for reason, count in entry.rejects.items():
             rejects[reason] = rejects.get(reason, 0) + count
 
@@ -673,14 +826,18 @@ def summarise(index: SequenceABC[FrameIndex], spec: DatasetSpec) -> str:
         f"{sum(rejects.values())} components rejected. "
         f"{empty} frame(s) hold no instance and are dropped.",
         "",
-        "| class | instances | frames | median area px | median side px |",
-        "|---|---:|---:|---:|---:|",
+        "| dataset | class | instances | frames | median area px | median side px |",
+        "|---|---|---:|---:|---:|---:|",
     ]
-    for class_id, items in sorted(per_class.items(), key=lambda kv: -len(kv[1])):
+    for (label, class_id), items in sorted(per_class.items(), key=lambda kv: -len(kv[1])):
         areas = np.array([i.area for i in items], dtype=np.float64)
         sides = np.array([max(i.width, i.height) for i in items], dtype=np.float64)
-        frames = sum(1 for e in index if any(i.class_id == class_id for i in e.instances))
-        lines.append(f"| {spec.name_of(class_id)} | {len(items)} | {frames} | "
+        frames = sum(1 for e in index
+                     if (e.source.spec.name if e.source else label) == label
+                     and any(i.class_id == class_id for i in e.instances))
+        owner = naming.get(label)
+        name = owner.name_of(class_id) if owner else str(class_id)
+        lines.append(f"| {label} | {name} | {len(items)} | {frames} | "
                      f"{np.median(areas):.0f} | {np.median(sides):.0f} |")
 
     if rejects:
@@ -712,6 +869,7 @@ class Sample:
     window: tuple[int, int]
     size: int
     instances: tuple[Instance, ...]
+    source: Source | None = None
 
     @property
     def native(self) -> bool:
@@ -773,7 +931,8 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
             picked = rng.permutation(len(others))[:max(max_instances - 1, 0)]
             inside = [anchor] + [others[int(j)] for j in sorted(picked)]
         samples.append(Sample(frame=entry.frame, origin=origin, window=window,
-                              size=size, instances=tuple(inside)))
+                              size=size, instances=tuple(inside),
+                              source=entry.source))
     return samples
 
 
@@ -844,9 +1003,7 @@ def normalise(images: np.ndarray, device: str = "cpu"):
     return out.sub_(mean).div_(std)
 
 
-def sample_masks(sample: Sample, spec: DatasetSpec,
-                 gates: InstanceGates = InstanceGates(),
-                 split: str = "none") -> np.ndarray:
+def sample_masks(sample: Sample) -> np.ndarray:
     """`[K, size, size]` boolean targets, one per instance, in input coordinates.
 
     The semantic map is decomposed again here rather than stored. `decompose`
@@ -856,14 +1013,21 @@ def sample_masks(sample: Sample, spec: DatasetSpec,
     trained on. The alternative, a mask store like the video path's, would be
     ~330 KB per instance for data that regenerates in milliseconds.
 
-    `split` has to be the value the index was built with, which is why it
-    travels on `ImageSplit` rather than being read from a flag in two places:
-    decomposing differently here would renumber the labels and silently pair
-    every instance with another instance's mask.
+    The decoding rules come from `sample.source` rather than from an argument,
+    which is what makes them impossible to disagree with the index: decomposing
+    differently here would renumber the labels and silently pair every instance
+    with another instance's mask. It is also what lets one batch mix datasets.
     """
     import cv2
 
-    components, _, _ = decompose(read_mask(sample.frame.mask), spec, gates, split)
+    if sample.source is None:
+        raise ValueError(
+            "this Sample carries no Source, so there is no way to know how its "
+            "mask should be decoded. Build windows from an index made by "
+            "index_frames(frames, source).")
+    source = sample.source
+    components, _, _ = decompose(read_mask(sample.frame.mask), source.spec,
+                                 source.gates, source.mode)
     x0, y0 = sample.origin
     width, height = sample.window
     crop = components[y0:y0 + height, x0:x0 + width]
@@ -883,8 +1047,9 @@ def sample_masks(sample: Sample, spec: DatasetSpec,
 
 __all__ = [
     "DatasetSpec", "Frame", "FrameIndex", "Instance", "InstanceGates", "SPECS",
-    "Sample", "decompose", "describe_layout", "index_frames", "list_frames", "list_pairs",
+    "MODES", "Sample", "Source", "decompose", "describe_layout", "index_frames",
+    "list_frames", "list_pairs", "split_bridges",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",
-    "split_frames", "summarise", "windows_for",
+    "split_frames", "split_index", "summarise", "windows_for",
 ]

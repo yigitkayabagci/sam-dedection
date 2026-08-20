@@ -35,6 +35,7 @@ from src.training.aerial import (  # noqa: E402
     Instance,
     InstanceGates,
     Sample,
+    Source,
     decompose,
     index_frames,
     list_frames,
@@ -59,6 +60,7 @@ SPEC = DatasetSpec(
     things=("car", "person"),
 )
 GATES = InstanceGates(min_area=4, min_side=2, max_area=0.9, fill=0.25)
+SOURCE = Source(spec=SPEC, gates=GATES)
 
 
 def semantic(width: int = 64, height: int = 64) -> np.ndarray:
@@ -103,7 +105,7 @@ class TestDecompose(unittest.TestCase):
         mask[15:17, 24:32] = 2                       # the bridge
 
         _, fused, _ = decompose(mask, SPEC, GATES)
-        _, split, _ = decompose(mask, SPEC, GATES, split="watershed")
+        _, split, _ = decompose(mask, SPEC, GATES, mode="watershed")
 
         self.assertEqual(len(fused), 1)
         self.assertEqual(len(split), 2)
@@ -116,7 +118,7 @@ class TestDecompose(unittest.TestCase):
         # distance transform has no valley. No mask geometry can separate
         # these -- only something that looks at the pixels can.
         mask = put(put(semantic(), 2, 10, 10, 20, 20), 2, 20, 10, 30, 20)
-        _, split, _ = decompose(mask, SPEC, GATES, split="watershed")
+        _, split, _ = decompose(mask, SPEC, GATES, mode="watershed")
         self.assertEqual(len(split), 1)
 
     def test_a_single_object_survives_watershed_unchanged(self):
@@ -124,14 +126,14 @@ class TestDecompose(unittest.TestCase):
         # come through as one instance or the repair costs more than it fixes.
         mask = put(semantic(), 2, 12, 12, 30, 28)
         _, plain, _ = decompose(mask, SPEC, GATES)
-        _, split, _ = decompose(mask, SPEC, GATES, split="watershed")
+        _, split, _ = decompose(mask, SPEC, GATES, mode="watershed")
 
         self.assertEqual(len(plain), len(split), 1)
         self.assertEqual(plain[0].box, split[0].box)
 
     def test_an_unknown_split_strategy_is_rejected(self):
         with self.assertRaises(ValueError):
-            decompose(semantic(), SPEC, GATES, split="magic")
+            decompose(semantic(), SPEC, GATES, mode="magic")
 
     def test_a_car_touching_a_person_stays_two_instances(self):
         # Why components are found per class rather than over the union of
@@ -193,7 +195,8 @@ class TestWindows(unittest.TestCase):
                      area=int((box[2] - box[0]) * (box[3] - box[1])))
             for n, box in enumerate(boxes))
         frame = Frame(name="f", image=Path("f.png"), mask=Path("f_label.png"))
-        return FrameIndex(frame=frame, size=size, instances=instances, rejects={})
+        return FrameIndex(frame=frame, size=size, instances=instances, rejects={},
+                          source=SOURCE)
 
     def test_a_window_that_fits_is_native_pixels(self):
         # The property the whole 512 story depends on: no resampling, so the
@@ -258,7 +261,7 @@ class TestWindows(unittest.TestCase):
 
     def test_a_frame_with_no_instances_produces_no_windows(self):
         entry = FrameIndex(frame=Frame("f", Path("a"), Path("b")),
-                           size=(64, 64), instances=(), rejects={})
+                           size=(64, 64), instances=(), rejects={}, source=SOURCE)
         self.assertEqual(windows_for(entry), [])
 
     def test_the_same_seed_gives_the_same_pool(self):
@@ -285,6 +288,7 @@ class TestOnDisk(unittest.TestCase):
             cv2.imwrite(str(self.root / "scene" / "rgb" / f"{name}.png"),
                         np.stack([mask * 40] * 3, axis=-1))
         self.spec = DatasetSpec(**{**SPEC.__dict__, "strip": ("_label",)})
+        self.source = Source(spec=self.spec, gates=GATES)
 
     def test_frames_pair_by_stem_after_stripping_the_mask_suffix(self):
         frames = list_frames(self.root, self.spec, "thermal")
@@ -302,12 +306,12 @@ class TestOnDisk(unittest.TestCase):
 
     def test_the_index_survives_a_round_trip(self):
         frames = list_frames(self.root, self.spec)
-        index = index_frames(frames, self.spec, GATES, workers=2)
+        index = index_frames(frames, self.source, workers=2)
         self.assertEqual(len(index), 2)
         self.assertEqual(len(index[0].instances), 2)
 
         path = save_index(self.root / "index.json", index)
-        again = load_index(path)
+        again = load_index(path, self.source)
         self.assertEqual([e.frame.name for e in again], [e.frame.name for e in index])
         self.assertEqual([i.box for i in again[0].instances],
                          [i.box for i in index[0].instances])
@@ -321,10 +325,10 @@ class TestOnDisk(unittest.TestCase):
         cv2.imwrite(str(self.root / "scene" / "tir" / "c.png"), (mask * 40).astype(np.uint8))
 
         frame = [f for f in list_frames(self.root, self.spec) if f.name == "c"][0]
-        entry = index_frames([frame], self.spec, GATES, workers=1)[0]
+        entry = index_frames([frame], self.source, workers=1)[0]
         sample = windows_for(entry, size=64, max_instances=4,
                              rng=np.random.default_rng(0))[0]
-        masks = sample_masks(sample, self.spec, GATES)
+        masks = sample_masks(sample)
 
         self.assertEqual(masks.shape, (len(sample.instances), 64, 64))
         self.assertEqual(len(sample.instances), 2)
@@ -334,8 +338,9 @@ class TestOnDisk(unittest.TestCase):
 
     def test_summarise_counts_instances_and_names_the_rejects(self):
         frames = list_frames(self.root, self.spec)
-        index = index_frames(frames, self.spec, InstanceGates(min_area=200), workers=2)
-        text = summarise(index, self.spec)
+        index = index_frames(frames, Source(self.spec, InstanceGates(min_area=200)),
+                             workers=2)
+        text = summarise(index)
 
         self.assertIn("min_area", text)
         self.assertIn("hold no instance", text)

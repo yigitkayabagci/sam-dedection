@@ -37,6 +37,7 @@ except ImportError:                                     # pragma: no cover
 from src.training.aerial import (  # noqa: E402
     DatasetSpec,
     InstanceGates,
+    Source,
     index_frames,
     list_frames,
     sample_windows,
@@ -235,12 +236,11 @@ class TestEndToEnd(unittest.TestCase):
             classes={"background": 0, "car": 2, "person": 3},
             things=("car", "person"), strip=("_label",))
         self.gates = InstanceGates(min_area=4, min_side=2, max_area=0.9, fill=0.25)
+        self.source = Source(spec=self.spec, gates=self.gates)
         index = index_frames(list_frames(root, self.spec, "thermal"),
-                             self.spec, self.gates, workers=2)
-        self.split = ImageSplit(
-            samples=sample_windows(index, size=SIZE, per_image=1,
-                                   max_instances=4, seed=0),
-            spec=self.spec, gates=self.gates, gray=True)
+                             self.source, workers=2)
+        self.split = ImageSplit(sample_windows(index, size=SIZE, per_image=1,
+                                               max_instances=4, seed=0))
 
     def test_every_window_carries_both_objects(self):
         self.assertEqual(len(self.split.samples), 6)
@@ -316,16 +316,15 @@ class TestEndToEnd(unittest.TestCase):
         cv2.imwrite(str(root / "scene" / "tir" / "b.png"), (mask * 60).astype(np.uint8))
 
         frame = [f for f in list_frames(root, self.spec, "thermal") if f.name == "b"][0]
-        plain = index_frames([frame], self.spec, self.gates, workers=1)[0]
-        split = index_frames([frame], self.spec, self.gates, workers=1,
-                             split="watershed")[0]
+        plain = index_frames([frame], self.source, workers=1)[0]
+        watershed = Source(spec=self.spec, gates=self.gates, mode="watershed")
+        split = index_frames([frame], watershed, workers=1)[0]
         self.assertEqual(len(plain.instances), 1)
         self.assertEqual(len(split.instances), 2)
 
         samples = sample_windows([split], size=SIZE, per_image=1,
                                  max_instances=4, seed=0)
-        matched = collate(samples, self.spec, self.gates, "cpu",
-                          gray=True, split="watershed")
+        matched = collate(samples, "cpu")
         for row, instance in zip(matched.masks[0], samples[0].instances):
             self.assertEqual(int(row.sum()), instance.area)
 
@@ -334,8 +333,66 @@ class TestEndToEnd(unittest.TestCase):
 
         result = score(FakeSam2(SIZE).eval(), self.split, batch=3, device="cpu")
         self.assertEqual(result["instances"], 12)
-        self.assertEqual(sorted(result["per_class"]), [2, 3])
+        # Qualified by dataset: `car` is class 5 in Kust4K and something else
+        # elsewhere, so a mixed run must not add two distributions together.
+        self.assertEqual(sorted(result["per_class"]), ["toy/car", "toy/person"])
         self.assertTrue(0.0 <= result["mean_iou"] <= 1.0)
+
+    def test_two_datasets_mix_inside_one_batch(self):
+        # The reason `Source` lives on the sample and not on the split: one
+        # dataset is one sensor, one city and one set of annotation habits, and
+        # a trunk carrying general visual features needs to see past any of
+        # them. Here a semantic set that must be decomposed rides in the same
+        # batch as one whose masks already carry instances.
+        root = Path(self.tmp.name)
+        (root / "vis" / "ir").mkdir(parents=True, exist_ok=True)
+        (root / "vis" / "mask").mkdir(parents=True, exist_ok=True)
+        for i in range(4):
+            mask = np.zeros((SIZE, SIZE), dtype=np.uint8)
+            mask[6:14, 6:14] = 17 + i               # arbitrary instance ids
+            mask[18:26, 18:26] = 90 + i
+            cv2.imwrite(str(root / "vis" / "mask" / f"v{i}.png"), mask)
+            cv2.imwrite(str(root / "vis" / "ir" / f"v{i}.png"),
+                        (mask * 2).astype(np.uint8))
+
+        instance_spec = DatasetSpec(
+            name="toyvis", thermal="**/vis/ir/*.png", masks="**/vis/mask/*.png",
+            classes={"background": 0, "target": 1}, things=("target",))
+        instance_source = Source(spec=instance_spec, gates=self.gates, mode="labels")
+        other = index_frames(list_frames(root, instance_spec, "thermal"),
+                             instance_source, workers=2)
+        # `labels` mode reads each distinct value as one instance -- no class
+        # filter and no components, because the annotation is already the
+        # target this whole stage has been reconstructing.
+        self.assertTrue(all(len(e.instances) == 2 for e in other))
+
+        mixed = ImageSplit(list(self.split.samples)
+                           + sample_windows(other, size=SIZE, per_image=1,
+                                            max_instances=4, seed=0))
+        self.assertEqual(set(mixed.sources),
+                         {"toy/components", "toyvis/labels"})
+
+        # A batch large enough to span both, assembled and scored as one.
+        batch = collate(list(mixed.samples), "cpu")
+        self.assertEqual(batch.images.shape[0], len(mixed.samples))
+        loss, _ = image_losses(FakeSam2(SIZE).eval(), batch)
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_an_index_built_one_way_is_refused_by_a_run_decomposing_another(self):
+        # The failure this prevents is silent: different modes renumber the
+        # component labels, so every instance would train against a different
+        # instance's mask while the loss stayed perfectly finite.
+        from src.training.aerial import load_index, save_index
+
+        root = Path(self.tmp.name)
+        index = index_frames(list_frames(root, self.spec, "thermal"),
+                             self.source, workers=2)
+        path = save_index(root / "cache.json", index)
+
+        load_index(path, self.source)                      # same source: fine
+        with self.assertRaises(ValueError) as ctx:
+            load_index(path, Source(self.spec, self.gates, mode="watershed"))
+        self.assertIn("renumber", str(ctx.exception))
 
 
 class TestBatch(unittest.TestCase):

@@ -291,7 +291,8 @@ def encoder_features(model, images: torch.Tensor) -> torch.Tensor:
 
 
 def distill_loss(student: torch.Tensor, teacher: torch.Tensor,
-                 l1_weight: float = 0.0) -> tuple[torch.Tensor, dict[str, float]]:
+                 l1_weight: float = 0.0,
+                 tolerance: int = 0) -> tuple[torch.Tensor, dict[str, float]]:
     """Cosine distance between two dense feature maps, position by position.
 
     Cosine and not L2 because the two models' features live on different
@@ -303,6 +304,18 @@ def distill_loss(student: torch.Tensor, teacher: torch.Tensor,
     student's resolution is fixed by the deployment (S/16), and upsampling the
     student to compare would supervise interpolated positions that the model
     never actually produces.
+
+    **`tolerance` is for pairs that are not perfectly registered.** At zero,
+    student position *p* is matched against teacher position *p* and nothing
+    else -- correct when the two cameras are aligned to the pixel, and quietly
+    wrong when they are not, because then the teacher was looking somewhere the
+    student was not and every position carries a systematic error. At
+    `tolerance=1` each student position is scored against the *best* teacher
+    position in the 3x3 neighbourhood around it, which absorbs a misalignment
+    of up to one feature cell -- 16 source pixels at stride 16. VTUAV's authors
+    note its modalities are not perfectly aligned; this is the remedy, and it
+    is off by default because it costs real spatial precision: a model free to
+    match a neighbour is a model that need not place a boundary exactly.
     """
     if student.shape[-2:] != teacher.shape[-2:]:
         teacher = F.interpolate(teacher, size=student.shape[-2:],
@@ -310,7 +323,22 @@ def distill_loss(student: torch.Tensor, teacher: torch.Tensor,
     student = F.normalize(student.float(), dim=1)
     teacher = F.normalize(teacher.float(), dim=1)
 
-    cosine = 1.0 - (student * teacher).sum(dim=1)
+    if tolerance > 0:
+        # Every offset in the neighbourhood at once: unfold lays the teacher's
+        # (2r+1)^2 shifted copies along a new axis, the dot product is then one
+        # einsum, and the best offset per position is a max. Cheaper and
+        # clearer than a loop over shifts, and the max is what makes the term
+        # "match something nearby" rather than "match exactly here".
+        width = 2 * tolerance + 1
+        batch, channels, height, columns = student.shape
+        patches = F.unfold(teacher, kernel_size=width, padding=tolerance)
+        patches = patches.reshape(batch, channels, width * width, height * columns)
+        flat = student.reshape(batch, channels, 1, height * columns)
+        similarity = (flat * patches).sum(dim=1).amax(dim=1)
+        cosine = 1.0 - similarity.reshape(batch, height, columns)
+    else:
+        cosine = 1.0 - (student * teacher).sum(dim=1)
+
     total = cosine.mean()
     terms = {"cosine": float(total.detach())}
     if l1_weight:
@@ -467,6 +495,7 @@ def pretrain(
     l1_weight: float = 0.0,
     freeze=apply_freeze,
     crop: float | None = None,
+    tolerance: int = 0,
     grad_clip: float = 1.0,
     ema_decay: float = 0.999,
     workers: int = 8,
@@ -525,7 +554,7 @@ def pretrain(
                                 enabled=device.startswith("cuda")):
                 target = teacher.features(pair.rgb)
                 student = projector(encoder_features(model, pair.thermal))
-            loss, terms = distill_loss(student, target, l1_weight)
+            loss, terms = distill_loss(student, target, l1_weight, tolerance)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -548,6 +577,7 @@ def pretrain(
         save(model, {"stage": "distill", "teacher": teacher.model_id,
                      "teacher_dim": teacher.dim, "teacher_size": teacher.size,
                      "pairs": len(pairs), "image_size": size, "crop": crop,
+                     "tolerance": tolerance,
                      "epochs": epochs, "final_loss": history[-1]["loss"]})
 
     del projector, opt, sched, ema

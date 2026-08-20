@@ -12,7 +12,7 @@ not the implementation.
 | 04 | `04_samurai_long_video.ipynb` | SAMURAI thresholds + a before/after | **nothing** |
 | 05 | `05_adaptive_inference_sahi.ipynb` | whether the latency margin is worth spending | 01 for the data |
 | 06 | `06_lora_vs_finetune.ipynb` | LoRA against the partial fine-tune, scored on `test` | **nothing** — it labels and trains both |
-| 07 | `07_encoder_aerial_rgbt.ipynb` | `edgetam_aerial{,_lora}_512.pt` on your Drive + a held-out instance score | an aerial RGB-T dataset staged in your Drive |
+| 07 | `07_encoder_aerial_rgbt.ipynb` | `edgetam_aerial{,_lora}_512.pt` on your Drive + a held-out instance score | one or more aerial RGB-T datasets staged in your Drive |
 
 **Notebook 07 is a different axis from 01–06.** Those specialise the *whole*
 tracker on thermal video; 07 trains the **image encoder alone** on static
@@ -58,6 +58,9 @@ Each is argued where it is made; this is the index.
 | decision | where | one line |
 |---|---|---|
 | semantic maps decomposed into instances, not trained on directly | 07, `src/training/aerial.py` | a promptable segmenter trained on "all cars are car" pulls two adjacent cars together |
+| …but read instance masks directly where a set has them | 07, `aerial.decompose` | VTUAV's VIS split already ships the annotation the decomposition reconstructs, at 1920×1080 |
+| several datasets in one batch, not one per run | `src/training/datasets.py` | the encoder carries general features, and one dataset is one sensor, one city and one set of annotation habits |
+| the split is stratified per dataset | `aerial.split_index` | a 4 024-frame set beside a 100-sequence one can land almost entirely in `test`; and frame names collide across datasets |
 | one encode, many prompts | 07, `src/training/image_loop.py` | the encoder is 38.7 GFLOP and does not depend on the prompt |
 | the static loop goes through `track_step` | `src/training/image_loop.py` | a still image *is* frame 0 of a clip; two code paths for it would drift |
 | no `object_score` term on static data | 07, `src/training/losses.py` | there is no `exist` label, and BCE against a constant 1 teaches the head to fire unconditionally |
