@@ -26,6 +26,7 @@ are bound.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -35,6 +36,7 @@ from pathlib import Path
 
 CELLS: list[tuple[str, str]] = []
 TAGS: dict[str, int] = {}
+STAMP_VALUE = "unstamped"
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,8 @@ def resolve(text: str) -> str:
     substitutions = {**{t: str(i) for t, i in TAGS.items()},
                      "TITLE": V.title, "BLURB": V.blurb,
                      "DATASETS": V.datasets, "FETCH": V.fetch,
-                     "MIRROR": V.mirror, "SIBLING": SIBLING[V.key]}
+                     "MIRROR": V.mirror, "SIBLING": SIBLING[V.key],
+                     "NOTEBOOK": Path(V.path).name, "STAMP": STAMP_VALUE}
     for tag, value in substitutions.items():
         text = text.replace("{{" + tag + "}}", value)
     leftover = re.findall(r"\{\{(\w+)\}\}", text)
@@ -340,6 +343,26 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 !nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 !df -h /content | tail -1
+
+# --- Is this notebook the one the repo expects? -------------------------
+# The repo just fast-forwarded itself; the .ipynb is a file you uploaded, and
+# the two drift apart silently. When they do you hit bugs that were fixed
+# upstream days ago, and the traceback points at a line the repo no longer
+# contains -- which is a genuinely confusing hour. This says so at cell 1.
+import json as _json
+NOTEBOOK = "{{NOTEBOOK}}"
+STAMP    = "{{STAMP}}"
+_stamps  = REPO / "notebooks" / ".stamps.json"
+_want    = _json.loads(_stamps.read_text()).get(NOTEBOOK) if _stamps.is_file() else None
+if _want and _want != STAMP:
+    print("\n" + "=" * 74)
+    print(f"!!  STALE NOTEBOOK -- this file is build {STAMP}, the repo ships {_want}")
+    print( "!!  Every cell below is the old version. Re-download and re-upload:")
+    print(f"!!    https://github.com/yigitkayabagci/sam-dedection/raw/{BRANCH}/notebooks/{NOTEBOOK}")
+    print( "!!  (In Colab: File > Upload notebook, or Runtime > Disconnect first.)")
+    print("=" * 74 + "\n")
+else:
+    print(f"notebook build {STAMP} matches the repo")
 """)
 
 # ---------------------------------------------------------------- 1b
@@ -1567,6 +1590,16 @@ so that stage needs its own entry in `STAGES` before it can start.
 
 
 def build() -> dict:
+    # Hashed *before* substitution, so `{{STAMP}}` is still a literal in the
+    # text being hashed and the stamp does not depend on itself. Any change to
+    # any cell -- prose included -- gives a new one.
+    global STAMP_VALUE
+    body = "\n".join(f"{kind}\n{text}" for kind, text in CELLS)
+    # The variant's own fields go in too: they are still `{{placeholders}}` in
+    # the text above, so without them both notebooks would stamp identically
+    # and a swapped pair would look correct.
+    body += "\n".join((V.key, V.title, V.blurb, V.datasets, V.fetch, V.mirror))
+    STAMP_VALUE = hashlib.sha256(body.encode()).hexdigest()[:10]
     return {
         "cells": [
             {"cell_type": kind,
@@ -1591,8 +1624,17 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         out = repo / V.path
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(build(), indent=1, ensure_ascii=False) + "\n")
-        print(f"wrote {out.relative_to(repo)} with {len(CELLS)} cells")
+        document = build()
+        out.write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
+
+        # Read-modify-write: each variant is built in its own process, so
+        # overwriting here would leave the file holding only the last one.
+        stamps = repo / "notebooks" / ".stamps.json"
+        known = json.loads(stamps.read_text()) if stamps.is_file() else {}
+        known[out.name] = STAMP_VALUE
+        stamps.write_text(json.dumps(known, indent=1, sort_keys=True) + "\n")
+        print(f"wrote {out.relative_to(repo)} with {len(CELLS)} cells "
+              f"[{STAMP_VALUE}]")
     else:
         # Re-run per variant rather than rebuilding in-process: the cells above
         # are emitted at import time against a single `V`, and a second pass in

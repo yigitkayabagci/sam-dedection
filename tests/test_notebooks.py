@@ -55,6 +55,18 @@ def reload_calls(path: Path) -> list[str]:
     return found
 
 
+def stamp_of(path: Path) -> str | None:
+    """The build id a generated notebook embeds, or None if it has none."""
+    import json
+
+    found = [line.split('"')[1]
+             for cell in json.loads(path.read_text())["cells"]
+             if cell["cell_type"] == "code"
+             for line in cell["source"] if line.startswith("STAMP    = ")]
+    assert len(found) <= 1, f"{path.name} embeds {len(found)} stamps"
+    return found[0] if found else None
+
+
 class TestEveryNotebook(unittest.TestCase):
     def test_there_are_notebooks_to_check(self):
         # A glob that quietly matched nothing would make every case below pass.
@@ -82,6 +94,44 @@ class TestEveryNotebook(unittest.TestCase):
         for path in NOTEBOOKS:
             with self.subTest(notebook=path.name):
                 self.assertEqual(reload_calls(path), [])
+
+    def test_each_notebook_carries_the_stamp_the_repo_records(self):
+        """The embedded build id must equal the one in `.stamps.json`.
+
+        That pair is what lets cell 1 say "you are running an old file" -- a
+        confusion that cost two full runs once, because the traceback pointed
+        at a line the repo no longer contained. The check is only as good as
+        the two staying in step, so a hand-edited notebook, or a rebuild whose
+        `.stamps.json` was not committed, has to fail here.
+        """
+        import json
+
+        stamps_file = ROOT / "notebooks" / ".stamps.json"
+        self.assertTrue(stamps_file.is_file(), "notebooks/.stamps.json is missing")
+        stamps = json.loads(stamps_file.read_text())
+
+        # Only the generated pair is stamped; 01-06 are written by hand. The
+        # two sets have to agree in both directions, so a generated notebook
+        # missing from the file fails just as loudly as a stale stamp.
+        embedded = {path.name: stamp_of(path) for path in NOTEBOOKS}
+        self.assertEqual(sorted(k for k, v in embedded.items() if v),
+                         sorted(stamps))
+
+        for name, stamp in sorted(stamps.items()):
+            with self.subTest(notebook=name):
+                self.assertEqual(
+                    embedded.get(name), stamp,
+                    f"{name} is out of step with .stamps.json -- run: "
+                    f"python tools/build_notebooks.py")
+
+    def test_the_two_notebooks_do_not_share_a_stamp(self):
+        # They are built from one file and most cells are identical, so the
+        # hash has to fold in the variant or a swapped pair looks correct.
+        import json
+
+        stamps = json.loads((ROOT / "notebooks" / ".stamps.json").read_text())
+        generated = [stamps[p.name] for p in NOTEBOOKS if p.name in stamps]
+        self.assertEqual(len(generated), len(set(generated)))
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*
