@@ -8,10 +8,10 @@ not the implementation.
 |---|---|---|---|
 | 01 | `01_dataset_antiuav410.ipynb` | Anti-UAV410 clips + pseudo-mask labels | a CUDA GPU, ~20 GB of disk |
 | 02 | `02_finetune_edgetam_512_thermal.ipynb` | `checkpoints/edgetam_thermal_512.pt` | **nothing** — it repeats 01 inline |
-| 03 | `03_quantization_v2_int8.ipynb` | `models512_int8/` — calibrated Q/DQ graphs | 02 |
+| 03 | `03_quantization_v2_int8.ipynb` | `models512_int8/` — calibrated Q/DQ graphs | 02 or 06 |
 | 04 | `04_samurai_long_video.ipynb` | SAMURAI thresholds + a before/after | **nothing** |
 | 05 | `05_adaptive_inference_sahi.ipynb` | whether the latency margin is worth spending | 01 for the data |
-| 06 | `06_lora_vs_finetune.ipynb` | LoRA against the partial fine-tune, scored on `test` | **nothing** — it labels and trains both |
+| 06 | `06_lora_vs_finetune.ipynb` | `checkpoints/edgetam_lora_512.pt` + its adapter, and the verdict | **nothing** — it labels and trains both |
 
 ## Three things to know before starting
 
@@ -37,11 +37,14 @@ different name; that is what lets one runtime both label and train.
 **Notebook 04 is independent.** SAMURAI is training-free, changes no weights and
 needs no new engine. If you want the fastest measurable result, start there.
 
-**Notebook 06 settles an argument.** `finetune.py` argues LoRA is the wrong tool
-here; nothing had measured it. 06 runs both through the same loop
-(`tools/train_thermal.py --method {finetune,lora}`) and scores them on the
-held-out test split. LoRA's adapters merge into the base weights, so both
-produce an ordinary EdgeTAM checkpoint and are evaluated identically.
+**Notebook 06 settled an argument, against the repo's own position.**
+`finetune.py` argued LoRA was the wrong tool here; 06 ran both through the same
+loop (`tools/train_thermal.py --method {finetune,lora}`) and scored them on the
+held-out test split. LoRA matched the fine-tune's accuracy while training 11 %
+of the parameters and recovered from dropouts in half the frames, so
+`configs/edgetam_512_lora.yaml` is the 512 thermal default now. The full table
+and its limits: `docs/lora_vs_finetune.md`. Both methods merge to an ordinary
+EdgeTAM checkpoint, so switching between them is a config line.
 
 ## The decisions these encode
 
@@ -51,8 +54,9 @@ Each is argued where it is made; this is the index.
 |---|---|---|
 | Anti-UAV410, not HIT-UAV or LSOTB-TIR | 01, 02 | 640×512 mono thermal video with a per-frame `exist` flag, and a 512 crop is native pixels |
 | a labelling stride, not fewer sequences | `src/training/labels.py` | a skipped frame keeps `exist` and its box; at 25 fps its mask was nearly its neighbour's |
-| partial fine-tune, not LoRA | 02, `src/training/finetune.py` | the argument: 13.9 M parameters is not memory-bound, and merged LoRA is just weights |
-| …but measured rather than assumed | 06, `src/training/lora.py` | the risk is 60 scenes against 9.3 M moving parameters, and only the test split can say |
+| LoRA, not the partial fine-tune | 06, `docs/lora_vs_finetune.md` | equal accuracy on `test` for 11 % of the trainable parameters, and dropouts half as long |
+| …measured, not argued | 06, `src/training/lora.py` | the repo argued the opposite first; 60 scenes against 9.3 M moving parameters is what only the test split could settle |
+| the adapter is kept beside the merged file | `src/training/lora.py` | a few MB of delta leaves upstream's checkpoint untouched, and makes a second domain a second adapter |
 | one loop, two methods | `src/training/schedule.py` | swapping the freeze and the save is the only honest way to compare them |
 | the memory path stays frozen | 02, `finetune.py` | it is the write port of a recurrent loop; error there accumulates |
 | training in `eval()` mode | 02, `src/training/clip_loop.py` | frozen batch-norm statistics keep the checkpoint matching its engines |

@@ -332,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     cap.add_argument("--data", required=True, help="Anti-UAV410 root.")
     cap.add_argument("--split", default="train")
     cap.add_argument("--calib", default="outputs/calib")
-    cap.add_argument("--checkpoint", default="checkpoints/edgetam_thermal_512.pt")
+    cap.add_argument("--checkpoint", default="checkpoints/edgetam_lora_512.pt")
     cap.add_argument("--model-cfg", default="configs/edgetam.yaml")
     cap.add_argument("--image-size", type=int, default=512)
     cap.add_argument("--device", default="cpu")

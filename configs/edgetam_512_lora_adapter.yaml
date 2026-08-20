@@ -1,0 +1,40 @@
+# The same weights as configs/edgetam_512_lora.yaml, carried as base + delta.
+#
+# `checkpoint` here is the stock EdgeTAM file, exactly as upstream shipped it.
+# The thermal adaptation rides beside it as a few MB of LoRA A/B tensors that
+# src/trackers/edgetam_tracker.py merges into the weights at load. What runs is
+# the model the merged checkpoint would have given -- same modules, same
+# state-dict keys, same masks -- so this config is a statement about the files
+# on disk, not about the arithmetic.
+#
+# Why that is worth a second config:
+#
+#   * the base checkpoint is never overwritten, so "what did this project
+#     change" has a few-MB answer instead of a 54 MB one, and the thing that
+#     was downloaded stays byte-identical to what everyone else downloaded;
+#   * another domain -- RGB, a different sensor, a different altitude band --
+#     becomes another adapter beside the same base, not another 54 MB file;
+#   * `lora_scale` blends: 0.0 is stock EdgeTAM exactly, 1.0 is the run as it
+#     was trained. That is a real knob for footage that only partly matches the
+#     adapter's domain, and nothing here has measured any value but 1.0.
+#
+# What it costs: one extra file read and a merge over the adapted layers at
+# startup, milliseconds, then nothing at all per frame.
+#
+# The ONNX exporter and the engine build do NOT read this file. Export from
+# checkpoints/edgetam_lora_512.pt instead -- the same weights, already folded.
+#
+# Both artefacts come out of one run:
+#   python tools/train_thermal.py --method lora --lora-r 16 \
+#       --data <anti-uav410> --labels <work>/labels \
+#       --out checkpoints/edgetam_lora_512.pt
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt   # stock, untouched
+lora_adapter: checkpoints/edgetam_lora_512.adapter.pt
+lora_scale: 1.0                           # 0.0 = stock, 1.0 = as trained
+image_size: 512                           # overrides the Hydra config's 1024
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

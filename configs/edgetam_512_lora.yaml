@@ -1,5 +1,20 @@
 # EdgeTAM at 512x512, adapted to Anti-UAV410 thermal footage with LoRA.
 #
+# THIS IS THE 512 THERMAL DEPLOYMENT DEFAULT, and it is a measured choice
+# rather than a preference. On the held-out test split (25 sequences, seen by
+# neither run): state accuracy 0.5669 against the partial fine-tune's 0.5626
+# and stock EdgeTAM's 0.3840, while training 1.06 M parameters instead of
+# 9.32 M. The accuracy gap between the two adapted runs is inside single-seed
+# noise and should be read as a tie; what is not a tie is the shape of the
+# failures -- 6 815 lost frames against 7 070, in episodes of median 31 frames
+# against 56. Long dropouts are the memory-poisoning failure this whole project
+# is aimed at, and LoRA's are half the length. docs/lora_vs_finetune.md has the
+# full table and what it does and does not license.
+#
+# configs/edgetam_512_lora_adapter.yaml runs these same weights as stock
+# checkpoint + a few-MB adapter, for when keeping upstream's file untouched on
+# disk matters more than loading one file instead of two.
+#
 # Byte-for-byte the same file as configs/edgetam_512_thermal.yaml except for the
 # checkpoint path, and that is the whole point: LoRA's adapters are merged into
 # the base weights before the checkpoint is written, so what lands here is an

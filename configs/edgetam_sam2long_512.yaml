@@ -21,8 +21,14 @@
 #
 # Both blocks can be on at once. They compose: SAMURAI chooses within a
 # pathway and filters what it remembers; SAM2Long chooses between pathways.
+#
+# The checkpoint is the LoRA-adapted one: it matched the partial fine-tune on
+# the held-out split while moving 11% of the parameters, and recovered from
+# dropouts in half the frames (docs/lora_vs_finetune.md). Swap in
+# checkpoints/edgetam_thermal_512.pt to run the fine-tune instead -- the two
+# are interchangeable, which is the point of merging the adapters.
 model_cfg: configs/edgetam.yaml
-checkpoint: checkpoints/edgetam_thermal_512.pt
+checkpoint: checkpoints/edgetam_lora_512.pt
 image_size: 512
 device: cuda
 precision: bfloat16

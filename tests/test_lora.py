@@ -8,6 +8,7 @@ for is between two deployments rather than two training methods.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -205,6 +206,139 @@ class TestMerge(unittest.TestCase):
         # The run must be able to continue: the adapters are still there.
         self.assertTrue(any(p.requires_grad for p in model.parameters()))
         self.assertTrue(any(isinstance(m, lora.ADAPTED) for m in model.modules()))
+
+
+class TestAdapterFile(unittest.TestCase):
+    """The delta on its own: saved, reloaded onto stock weights, folded in.
+
+    This is the artefact that keeps the base checkpoint untouched on disk. It
+    is only worth anything if reattaching it reproduces the merged model
+    exactly -- otherwise "keep the original and carry a 4 MB delta" is a
+    different model from the one that was measured.
+    """
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.model = FakeSam2()
+        self.base_state = {k: v.detach().clone()
+                           for k, v in self.model.state_dict().items()}
+        self.images = torch.randn(2, 3, self.model.size, self.model.size)
+        lora.inject(self.model, "encoder", r=2)
+        for name, param in self.model.named_parameters():
+            if name.endswith("lora_B"):
+                with torch.no_grad():
+                    param.normal_(0, 0.1)     # B = 0 would prove nothing
+
+    def _stock(self):
+        model = FakeSam2()
+        model.load_state_dict(self.base_state)
+        return model
+
+    def test_reattaching_reproduces_the_merged_model(self):
+        adapted = self.model.forward_image(self.images)["features"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = lora.save_adapter(self.model, Path(tmp) / "a.adapter.pt")
+            fresh = self._stock()
+            report = lora.apply_adapter(fresh, path)
+
+        self.assertEqual(report["layers"], report["merged"])
+        # Key-for-key an EdgeTAM again, and the same function as the adapted model.
+        self.assertEqual(list(fresh.state_dict()), list(self.base_state))
+        torch.testing.assert_close(fresh.forward_image(self.images)["features"],
+                                   adapted, rtol=1e-4, atol=1e-5)
+
+    def test_stock_plus_adapter_is_the_merged_checkpoint_tensor_for_tensor(self):
+        # configs/edgetam_512_lora_adapter.yaml claims to be the same weights as
+        # configs/edgetam_512_lora.yaml. This is that claim, at the file level:
+        # one run writes both, and reassembling one gives the other exactly.
+        with tempfile.TemporaryDirectory() as tmp:
+            merged_path = lora.save_merged_checkpoint(self.model, Path(tmp) / "m.pt")
+            adapter_path = lora.save_adapter(self.model, Path(tmp) / "m.adapter.pt")
+
+            merged = torch.load(merged_path, weights_only=False)["model"]
+            rebuilt = self._stock()
+            lora.apply_adapter(rebuilt, adapter_path)
+            self.assertLess(adapter_path.stat().st_size, merged_path.stat().st_size)
+
+        rebuilt = rebuilt.state_dict()
+        self.assertEqual(list(rebuilt), list(merged))
+        for name, value in merged.items():
+            torch.testing.assert_close(rebuilt[name], value, msg=name)
+
+    def test_the_base_weights_are_not_in_the_adapter_file(self):
+        # The whole claim: the checkpoint upstream shipped stays as it is, and
+        # what this project changed rides beside it.
+        state = lora.adapter_state(self.model)
+        self.assertTrue(all(key.endswith(lora.LORA_PREFIXES) for key in state["adapters"]))
+        self.assertLess(sum(t.numel() for t in state["adapters"].values()),
+                        sum(v.numel() for v in self.base_state.values()))
+
+    def test_scale_zero_leaves_the_base_checkpoint_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = lora.save_adapter(self.model, Path(tmp) / "a.pt")
+            fresh = self._stock()
+            lora.apply_adapter(fresh, path, scale=0.0)
+        for name, value in fresh.state_dict().items():
+            torch.testing.assert_close(value, self.base_state[name])
+
+    def test_scale_is_linear_in_the_delta(self):
+        # Half the adapter is half the weight change -- so a partly-matching
+        # domain can be dialled in rather than taken whole.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = lora.save_adapter(self.model, Path(tmp) / "a.pt")
+            full, half = self._stock(), self._stock()
+            lora.apply_adapter(full, path)
+            lora.apply_adapter(half, path, scale=0.5)
+
+        weight = "image_encoder.weight"
+        torch.testing.assert_close(
+            half.state_dict()[weight] - self.base_state[weight],
+            (full.state_dict()[weight] - self.base_state[weight]) * 0.5,
+            rtol=1e-4, atol=1e-6)
+
+    def test_the_run_that_wrote_it_is_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = lora.save_adapter(self.model, Path(tmp) / "a.pt",
+                                     {"method": "lora", "lora_r": 2,
+                                      "dataset": "Anti-UAV410"})
+            report = lora.apply_adapter(self._stock(), path)
+        self.assertEqual(report["meta"]["dataset"], "Anti-UAV410")
+        self.assertIn("r=2", lora.summarise_adapter(report))
+
+    def test_a_layer_the_model_does_not_have_is_an_error(self):
+        state = lora.adapter_state(self.model)
+        state["layers"]["image_encoder_v2"] = state["layers"]["image_encoder"]
+        with self.assertRaises(KeyError):
+            lora.load_adapter(self._stock(), state)
+
+    def test_a_shape_that_does_not_fit_is_an_error(self):
+        state = lora.adapter_state(self.model)
+        state["adapters"]["image_encoder.lora_A"] = torch.zeros(2, 3, 5, 5)
+        with self.assertRaises(ValueError):
+            lora.load_adapter(self._stock(), state)
+
+    def test_a_layer_of_the_wrong_kind_is_an_error(self):
+        state = lora.adapter_state(self.model)
+        state["layers"]["image_encoder"]["kind"] = "LoRALinear"
+        with self.assertRaises(TypeError):
+            lora.load_adapter(self._stock(), state)
+
+    def test_loading_twice_is_an_error_not_a_doubled_delta(self):
+        state = lora.adapter_state(self.model)
+        fresh = self._stock()
+        lora.load_adapter(fresh, state)
+        with self.assertRaises(RuntimeError):
+            lora.load_adapter(fresh, state)
+
+    def test_an_unreadable_format_is_refused(self):
+        state = lora.adapter_state(self.model)
+        state["format"] = lora.ADAPTER_FORMAT + 1
+        with self.assertRaises(ValueError):
+            lora.load_adapter(self._stock(), state)
+
+    def test_saving_an_unadapted_model_is_an_error(self):
+        with self.assertRaises(RuntimeError):
+            lora.adapter_state(FakeSam2())
 
 
 if __name__ == "__main__":

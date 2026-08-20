@@ -1,10 +1,13 @@
 """LoRA for EdgeTAM, as the measurable alternative to partial fine-tuning.
 
-`src/training/finetune.py` argues against LoRA. The argument is reasonable and
-it is still only an argument -- nothing in this repo has measured it. This
-module exists so the two can be run against each other under an identical loop,
-identical data and identical evaluation, and the question settled with a number
-on the held-out split instead of a table of expectations.
+`src/training/finetune.py` used to argue against LoRA. This module exists so
+that argument could be run against a number rather than repeated -- under an
+identical loop, identical data and identical evaluation -- and it has been.
+LoRA matched the partial fine-tune's accuracy on the held-out split while
+training 11% of the parameters, with dropout episodes half as long, so the
+merged LoRA checkpoint is what `configs/edgetam_512_lora.yaml` deploys.
+The whole table, and what it does and does not license, is in
+`docs/lora_vs_finetune.md`.
 
 **What LoRA is here.** Every adapted layer keeps its frozen weight `W` and gains
 `B @ A`, with `A` random and `B` zero, so the network starts exactly where the
@@ -32,10 +35,19 @@ key-for-key the one `build_sam2` expects: the LoRA checkpoint loads into the
 same config, exports to the same ONNX graph and builds the same engines as the
 fine-tuned one. If it were not exactly interchangeable, the comparison would be
 measuring two different deployments rather than two training methods.
+
+**The delta is also kept on its own.** `save_adapter` writes `A` and `B`
+without the base weights and `apply_adapter` puts them back onto a stock
+checkpoint at load time (`configs/edgetam_512_lora_adapter.yaml`). Merging is
+what makes deployment simple; keeping the adapter separately is what makes "the
+original weights were never disturbed" a fact about the filesystem rather than
+a figure of speech -- and it is what lets a second domain be a second few-MB
+adapter beside the same base instead of a second 54 MB checkpoint.
 """
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -240,6 +252,145 @@ def save_merged_checkpoint(model: nn.Module, path, meta: dict | None = None):
     written = save_checkpoint(clone, path, meta)
     del clone
     return written
+
+
+# --------------------------------------------------------------------------
+# The adapter as an artefact of its own
+# --------------------------------------------------------------------------
+
+ADAPTER_FORMAT = 1
+
+_ADAPTER_KINDS = {
+    "LoRALinear": (LoRALinear, nn.Linear),
+    "LoRAConv2d": (LoRAConv2d, nn.Conv2d),
+}
+
+
+def adapter_state(model: nn.Module, meta: dict | None = None) -> dict:
+    """`A` and `B` for every adapted layer, plus enough to put them back.
+
+    `save_merged_checkpoint` writes the deployment artefact -- base plus delta,
+    folded, indistinguishable from what a fine-tune would have produced. This
+    writes the delta on its own, a few MB against that file's 54, and it is
+    what makes the usual reason for reaching for LoRA true here rather than
+    merely stated: **the base checkpoint is never overwritten.** Adaptation
+    becomes a file that can be attached, detached, scaled or swapped for
+    another domain's, instead of a second full set of weights that has to be
+    trusted as a whole.
+
+    Per layer this records `r` and the *scaling*, not `alpha`. A reload then
+    does not depend on the `alpha = 2r` convention still holding on the day it
+    is read, and `load_adapter` needs no argument that could contradict how the
+    run was actually configured.
+    """
+    tensors: dict[str, torch.Tensor] = {}
+    layers: dict[str, dict] = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, ADAPTED):
+            continue
+        for part in LORA_PREFIXES:
+            tensors[f"{name}.{part}"] = (
+                getattr(module, part).detach().to("cpu", torch.float32).clone())
+        layers[name] = {"kind": type(module).__name__, "r": module.r,
+                        "scaling": float(module.scaling)}
+    if not layers:
+        raise RuntimeError("this model carries no adapters -- was inject() called?")
+    return {"format": ADAPTER_FORMAT, "layers": layers, "adapters": tensors,
+            "meta": meta or {}}
+
+
+def save_adapter(model: nn.Module, path, meta: dict | None = None) -> Path:
+    """Write `adapter_state` beside the merged checkpoint."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(adapter_state(model, meta), path)
+    return path
+
+
+@torch.no_grad()
+def load_adapter(model: nn.Module, source, scale: float = 1.0) -> dict:
+    """Re-wrap exactly the layers the file names and restore their `A` and `B`.
+
+    Deliberately *not* `inject()` followed by a `load_state_dict`: that would
+    re-derive the target list from `STAGES` at load time, and would silently
+    adapt a different set of layers if that table ever changed. The file names
+    the layers it was trained on; anything it names that this model does not
+    have, or that has a different shape, is an error here rather than a
+    mysteriously unchanged weight much later.
+
+    `scale` multiplies every adapter's contribution: 0.0 is the base checkpoint
+    exactly, 1.0 is the run as it was trained. Values in between blend the two,
+    which is a knob worth having when the adapter's domain and the footage's
+    only partly overlap -- and which nothing in this repo has measured.
+    """
+    if not isinstance(source, dict):
+        source = torch.load(source, map_location="cpu", weights_only=True)
+    if source.get("format") != ADAPTER_FORMAT:
+        raise ValueError(f"adapter format {source.get('format')!r}, "
+                         f"expected {ADAPTER_FORMAT}")
+
+    tensors, layers = source["adapters"], source["layers"]
+    for name, spec in layers.items():
+        if spec["kind"] not in _ADAPTER_KINDS:
+            raise ValueError(f"{name!r}: unknown adapter kind {spec['kind']!r}")
+        adapter_cls, base_cls = _ADAPTER_KINDS[spec["kind"]]
+        try:
+            base = model.get_submodule(name)
+        except AttributeError as exc:
+            raise KeyError(f"{name!r} is in the adapter file but not in this "
+                           f"model") from exc
+        if isinstance(base, ADAPTED):
+            raise RuntimeError(f"{name!r} is adapted already; load into a fresh model")
+        if not isinstance(base, base_cls):
+            raise TypeError(f"{name!r} is a {type(base).__name__}, but the adapter "
+                            f"was trained on a {base_cls.__name__}")
+
+        adapter = adapter_cls(base, r=spec["r"], alpha=spec["r"])
+        adapter.scaling = spec["scaling"] * scale
+        for part in LORA_PREFIXES:
+            saved, target = tensors[f"{name}.{part}"], getattr(adapter, part)
+            if saved.shape != target.shape:
+                raise ValueError(f"{name}.{part}: the file holds "
+                                 f"{tuple(saved.shape)}, this model wants "
+                                 f"{tuple(target.shape)}")
+            target.copy_(saved.to(target.dtype))
+
+        parent_name, _, attribute = name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, attribute, adapter)
+
+    return {"layers": len(layers), "scale": float(scale),
+            "parameters": sum(t.numel() for t in tensors.values()),
+            "meta": source.get("meta", {})}
+
+
+@torch.no_grad()
+def apply_adapter(model: nn.Module, source, scale: float = 1.0) -> dict:
+    """Load an adapter onto a base model and fold it in, in one step.
+
+    This is the inference path. `build_sam2` loads the stock checkpoint, this
+    puts the thermal adaptation on top of it, and what comes back is an
+    ordinary EdgeTAM again: same modules, same state-dict keys, same export,
+    same engines. The difference from loading the merged checkpoint is on disk
+    rather than in the model -- upstream's file stays exactly as it shipped,
+    and the small one beside it is the whole of what this project changed.
+    """
+    report = load_adapter(model, source, scale=scale)
+    report["merged"] = merge(model)
+    return report
+
+
+def summarise_adapter(report: dict) -> str:
+    """One line for a run log: what was attached, from where, how strongly."""
+    meta = report.get("meta") or {}
+    bits = [f"{report['layers']} layers", f"{report['parameters'] / 1e6:.3f} M"]
+    if meta.get("lora_r"):
+        bits.append(f"r={meta['lora_r']:g}")
+    if meta.get("dataset"):
+        bits.append(str(meta["dataset"]))
+    if report["scale"] != 1.0:
+        bits.append(f"scaled to {report['scale']:g} of what was trained")
+    return "lora adapter: " + ", ".join(bits)
 
 
 def summarise(report: dict, counts: dict[str, int] | None = None) -> str:

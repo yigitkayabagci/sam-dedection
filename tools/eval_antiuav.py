@@ -142,8 +142,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg_path = Path(args.config) if args.config else ROOT / f"configs/{args.tracker}.yaml"
     cfg = yaml.safe_load(Path(cfg_path).read_text())
-    for key in ("checkpoint", "image_encoder_engine", "memory_attention_engine",
-                "memory_encoder_engine", "sam_head_engine", "engine_path"):
+    for key in ("checkpoint", "lora_adapter", "image_encoder_engine",
+                "memory_attention_engine", "memory_encoder_engine",
+                "sam_head_engine", "engine_path"):
         if cfg.get(key):
             cfg[key] = str(ROOT / cfg[key]) if not Path(cfg[key]).is_absolute() else cfg[key]
     tracker = build_tracker(args.tracker, **cfg)

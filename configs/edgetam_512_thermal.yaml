@@ -1,5 +1,12 @@
 # EdgeTAM at 512x512, fine-tuned on Anti-UAV410 thermal footage.
 #
+# The partial fine-tune: 9.32 M of 13.9 M parameters moved. It is no longer the
+# default for thermal work -- configs/edgetam_512_lora.yaml matched it on the
+# test split for 11% of the trainable parameters and recovered from dropouts in
+# half the frames (docs/lora_vs_finetune.md). Keep using this one to reproduce
+# the fine-tune's numbers, to re-run the comparison on more seeds, or if a
+# later measurement overturns that verdict.
+#
 # Identical to configs/edgetam_512.yaml except for the checkpoint. That is the
 # point: the fine-tune changes weights and nothing else, so the ONNX export,
 # the engine build, check_trt_parity.py and compare_backends.py all keep

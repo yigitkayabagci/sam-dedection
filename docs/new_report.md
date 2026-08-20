@@ -3,9 +3,11 @@
 Bu belge, bu dalda yapılan işin tamamının Türkçe özeti ve çalıştırma kılavuzu.
 Amaç: sohbet geçmişine erişemesen bile buradan devam edebilmek.
 
-**Durum: kod ve araçlar hazır, hiçbir sayı henüz ölçülmedi.** Aşağıdaki
-tablolardaki rakamların tamamı `docs/tensorrt_fp16.md`'deki mevcut fp16
-çalışmasından geliyor; onların üzerine kurulan her şey plan.
+**Durum: bir ölçüm yapıldı, gerisi hazır ama ölçülmedi.** Yapılan ölçüm
+LoRA'ya karşı kısmi fine-tuning (§2, `docs/lora_vs_finetune.md`) — sonucu
+deponun ilk argümanını çevirdi ve varsayılan checkpoint'i değiştirdi. Geri
+kalan tablolardaki rakamların tamamı `docs/tensorrt_fp16.md`'deki mevcut fp16
+çalışmasından geliyor; onların üzerine kurulan her şey hâlâ plan.
 
 ---
 
@@ -15,6 +17,7 @@ tablolardaki rakamların tamamı `docs/tensorrt_fp16.md`'deki mevcut fp16
 1. Anti-UAV410'u indir  →  Drive'a koy          (notebook 01 anlatıyor)
 2. notebook 01  →  pseudo-mask etiketleri üret   (~1-2 sa, A100)
 3. notebook 02  →  fine-tune, checkpoint çıkar   (~2-4 sa)
+3b. notebook 06 →  LoRA vs fine-tune  ✅ koşuldu   (karar: LoRA, §2)
 4. notebook 03  →  INT8 kalibrasyon + PTQ
 5. notebook 04  →  SAMURAI  (bunu 1'den önce de çalıştırabilirsin)
 6. notebook 05  →  adaptif ROI (en riskli parça, en sona bıraktım)
@@ -74,57 +77,137 @@ pixel value, not ndim") bu tuzağı bir kez yaşamış.
 
 ---
 
-## 2. Karar: kısmi fine-tuning — LoRA ise artık ölçülüyor
+## 2. Karar: LoRA — ölçüldü, ilk argüman yanlış çıktı
 
-| | kısmi fine-tune | LoRA |
-|---|---|---|
-| bellek | EdgeTAM **toplam 13.9M parametre**. A100'de, hatta L4'te bellek sıkıntısı yok | var olmayan bir problemi çözüyor |
-| deployment | ağırlık değişir, ONNX grafiği aynı | merge edilmiş adapter zaten sadece ağırlık — hiçbir kazanç yok |
-| kapsama | her yere ulaşır | *bkz. aşağıdaki düzeltme* |
-| sonrasında QAT | aynı döngü + `mtq.quantize` | zaten gerçek ağırlık güncellemesi gerekir |
+Bu bölüm "sonuç ne çıkarsa ona göre yeniden yazılacak" diyordu. Ölçüldü, ve
+sonuç deponun ilk argümanının tersi: **512 termal için varsayılan artık LoRA**
+(`configs/edgetam_512_lora.yaml`). Tam tablo, gerekçe ve sınırlar:
+`docs/lora_vs_finetune.md`.
 
-LoRA'nın tek gerçek faydası (küçük tek-sınıf sette regularizasyon) **doğru
-modülleri dondurarak** daha ucuza alınıyor — **iddiası bu**, ve bu belgenin
-başındaki uyarı burada da geçerli: ölçülmedi.
+**test split, 25 dizi — hiçbir eğitim bunu görmedi:**
 
-### Tablodaki bir satır yanlıştı
+| | state acc | success AUC | epizot | kayıp kare | medyan uzunluk |
+|---|---:|---:|---:|---:|---:|
+| stock | 0.3840 | 0.3800 | 48 | 12 270 | 8.0 |
+| finetune | 0.5626 | 0.5593 | 43 | 7 070 | 56.0 |
+| **lora** | **0.5669** | **0.5650** | 54 | **6 815** | **31.0** |
+
+**Maliyet tarafı:** finetune 9.318 M eğitilebilir parametre, 36 dk, 77.6 GiB,
+en iyi val 0.1468. LoRA 1.064 M — fine-tune'un oynattığının **%11.42**'si, 131
+katman, r=16 — 41 dk, 77.7 GiB, en iyi val 0.1461.
+
+### Önce ilk satır okunur
+
+Uyarlamanın kendisi stock'a göre **+0.183 state accuracy** ve hedefin kayıp
+olduğu kare sayısında **%44 azalma** demek. İki yöntem de bunun neredeyse
+tamamını veriyor. LoRA mı fine-tune mu sorusu, birinci dereceden bir kazancın
+içindeki ikinci dereceden bir karar — bu sıra kaybedilmemeli.
+
+### Doğruluk farkı berabere
+
+0.0043 state accuracy, tek seed. Notebook'un, sayılar görülmeden yazılmış
+kuralı: 0.01'in altındaki bir farka inanmak için iki-üç seed gerekir. Val
+kaybında da aynı hikâye (0.1461 / 0.1468) — ayrışma yok. Dürüst ifade "LoRA
+daha doğru" değil, **"aynı doğruluk, parametrenin %11'iyle"**.
+
+### Berabere olmayan şey: dropout'un şekli
+
+`docs/samurai.md`'nin anlattığı arıza bu: kötü bir karede bankaya
+`no_obj_ptr` yazılıyor, sonraki `num_maskmem` kare onu geri okuyor ve mimaride
+bunu geri alan hiçbir şey yok. **Uzun dropout = hafıza zehirlenmesi; kısa
+dropout = sadece kötü bir kare.**
+
+- toplam kör kalınan süre: 6 815 / 7 070 kare — %3.6, marjinal
+- medyan epizot: **31 / 56 kare** — 30 fps'te ~1.0 s'e karşı ~1.9 s
+- ortalama epizot: 126 / 164 kare — kuyruk da daha hafif
+- epizot sayısı: 54 / 43 — LoRA hedefi **daha sık** kaybediyor
+
+Yani fine-tune daha seyrek düşüyor ama neredeyse iki katı süre yerde kalıyor;
+LoRA daha sık göz kırpıyor ve daha çabuk toparlıyor. Anti-UAV'de operasyonel
+maliyet "kaç saniye kör kalındı" olduğu için beraberlik LoRA lehine bozuldu.
+Bu, bu uygulamaya dair bir yargı — yöntemler hakkında genel bir doğru değil.
+
+Mekanizma olarak da tutarlı: rank-16 bir güncelleme bir katmanı o kadar uzağa
+taşıyamaz, dolayısıyla uyarlanmış encoder altındaki genel amaçlı özniteliklere
+yakın kalır ve termal ipuçları belirsizleştiğinde onlara geri düşer.
+Beraberliğin işaret ettiği mekanizma bu; ayrıca ölçülmedi.
+
+### Beklenen iki fayda tutmadı
+
+Bunu açıkça yazmak gerek, çünkü LoRA genelde bu ikisi için seçiliyor:
+
+- **Bellek kazandırmadı.** Aynı peak, aynı batch — ikisi de 32, ve batch
+  `auto_batch_size` ile ölçüldü, sabitlenmedi. LoRA'nın kaçındığı optimizer
+  state 8.25 M parametre üzerinde iki moment, ~63 MB; peak ise 32 klip × 8 kare
+  × 512²'lik aktivasyon. 77 GiB'ın yanında 63 MB hiçbir şey. Optimizer state'in
+  gerçekten baskın olduğu bir GPU'da hikâye başka olurdu; bu o GPU değil.
+- **Hız kazandırmadı.** %14 daha yavaş: adapter'lar ileri geçişte her uyarlanan
+  katmanın yanına ikinci bir konvolüsyon koyuyor, geri geçiş yine trunk'ın
+  tamamından geçmek zorunda. Ucuzlayan tek şey ağırlık güncellemesi, ki pahalı
+  olan zaten o değildi.
+
+Geriye üçüncü sebep kalıyor ve işe yarayan o: **güncelleme rank ile sınırlı** —
+dondurma politikasının ifade edemediği bir düzenlileştirme.
+
+### Tablodaki bir satır zaten yanlıştı
 
 "LoRA `nn.Linear` hedefler, domain kayması konvolüsyonel trunk'ta" — bu
 *Linear-only bir implementasyona* itiraz, yöntemin kendisine değil. `k × k` bir
-konvolüsyonun `1 × 1` ile bileşkesi yine `k × k` bir konvolüsyondur, yani
-düşük-ranklı çarpanlara ayırma RepViT trunk'ında da **tam** olarak geçerli.
-`src/training/lora.py` konvolüsyonları da adapte ediyor; sadece gruplu
-(depthwise) olanları atlıyor — onların ağırlığı blok-köşegen ve yoğun bir
-`B @ A` ona bir güncelleme temsil edemez. Kaç tanesini atladığını raporluyor.
+konvolüsyonun `1 × 1` ile bileşkesi yine `k × k` bir konvolüsyondur; düşük
+ranklı çarpanlara ayırma RepViT trunk'ında da **tam** geçerli.
+`src/training/lora.py` konvolüsyonları da adapte ediyor, sadece gruplu
+(depthwise) olanları atlıyor — onların ağırlığı blok-köşegen, yoğun bir `B @ A`
+ona bir güncelleme temsil edemez. Kaç tanesini atladığını da raporluyor.
+Uyarlanan 131 katmanın büyük kısmı bu yüzden trunk'ta.
 
-### Gerçek risk parametre sayısı değil, sahne çeşitliliği
+### Ne söylemiyor
 
-"410 video yetmez mi" sorusu yanlış soru: train split'i yüz binlerce etiketli
-kare, notebook 02'nin varsayılan alt kümesi bile ~60 000 klip. Küçük olan
-**sahne sayısı** — 60 dizi = 60 arka plan, tek sınıf, tek sensör. Buna karşılık
-fine-tune ikinci aşamada **13.9M'in 9.3M'ini** oynatıyor. Ölçülmesi gereken şey
-bu: "60 sahnede ağın üçte ikisini oynatmak, yüzde yarımını oynatmaktan daha mı
-iyi genelliyor".
+- **Tek seed.** 0.0043'ü "LoRA daha doğru" diye okumak için `--seed 1`,
+  `--seed 2` ile tekrar gerekir.
+- **60 dizi.** Asıl risk örnek sayısı değil sahne çeşitliliği: 60 dizi = 60
+  arka plan, tek sınıf, tek sensör. Fine-tune'un kullanacak daha fazla
+  kapasitesi var ve sahne eklendikçe farkı kapatması beklenir — yani bu karar
+  60 sahnelik bir bütçeye özgü, bütçe büyürse yeniden bakılmalı.
+- **Termal, 512 crop, Anti-UAV410.** RGB'ye, başka bir sensöre ya da tam kare
+  640×512 girdiye hiçbir şey aktarılmıyor; her biri yeniden ölçüm ister.
+- **r = 16 taranmadı.** Yaygın bir varsayılan olarak seçildi ve çalıştı.
 
-### Nasıl ölçülüyor
+### Orijinal ağırlıklar diskte duruyor
+
+`tools/train_thermal.py --method lora` artık iki dosya yazıyor: merge edilmiş
+checkpoint (54 MB, deployment artefaktı) ve **adapter'ın kendisi** (birkaç MB).
+`configs/edgetam_512_lora_adapter.yaml` stock EdgeTAM'ı yükleyip adapter'ı
+açılışta merge ediyor — aynı model, aynı maskeler, milisaniyelik ek yük. Kazanç
+dosya sisteminde:
+
+- upstream'in checkpoint'i bit bit aynı kalıyor, "bu proje neyi değiştirdi"
+  sorusunun cevabı 54 MB değil birkaç MB;
+- ikinci bir domain (RGB, başka sensör, başka irtifa bandı) ikinci bir 54 MB
+  değil, aynı tabanın yanında ikinci bir adapter oluyor;
+- `lora_scale` stock (0.0) ile eğitildiği hâl (1.0) arasında karışım veriyor —
+  domainin kısmen tuttuğu görüntüler için gerçek bir düğme, ve 1.0 dışındaki
+  her değer ölçülmemiş bir deney.
+
+Bunu abartmamak lazım: **merge edildikten sonra LoRA checkpoint'inin
+ağırlıkları da fine-tune kadar değişmiştir** — aynı tensörler, aynı yerler.
+Sınırlı olan değişimin *rank*'i, değişimin varlığı değil. "Orijinali bozmamak"
+iki ayrı argüman: adapter'ı ayrı tutmak *diskte ne durduğuna* dair, rank ise
+*ne öğrenildiğine* dair. İkisi de ayrı ayrı geçerli.
+
+ONNX export ve engine build hâlâ merge edilmiş dosyadan geçiyor; TensorRT
+adapter diye bir şey görmüyor.
+
+### Nasıl koşuluyor
 
 `tools/train_thermal.py --method {finetune,lora}` iki yöntemi **tek koddan**
 çalıştırıyor: aynı klipler, aynı sıra, aynı loss, aynı iki aşama, aynı
 one-cycle, aynı EMA, aynı validation dilimi (`src/training/schedule.py`).
 `--method` yalnızca iki şeyi değiştiriyor — hangi parametrelerin gradyan aldığı
-ve checkpoint'in nasıl yazıldığı. LoRA yazarken adapter'ları merge ettiği için
-çıkan dosya sıradan bir EdgeTAM state dict: aynı config, aynı tracker, aynı
-export, aynı engine, aynı `eval_antiuav.py`. Aksi halde karşılaştırma iki
-eğitim yöntemini değil iki deployment'ı ölçerdi.
-
-Tek kasıtlı fark **learning rate**: LoRA `B = 0`'dan başlıyor, güncellemesinin
-gidecek yolu daha uzun; her yayınlanmış reçete ona bir mertebe fazla LR veriyor.
-İkisi de `tools/train_thermal.py:RATES` içinde, tek yerde.
-
-`notebooks/06_lora_vs_finetune.ipynb` ikisini arka arkaya koşturup **test
-split'inde** — hiçbirinin görmediği — state accuracy, success AUC ve dropout
-epizotlarını yan yana basıyor. Sonuç ne çıkarsa bu bölüm ona göre yeniden
-yazılacak.
+ve checkpoint'in nasıl yazıldığı. Tek kasıtlı fark **learning rate**: LoRA
+`B = 0`'dan başlıyor, gidecek yolu daha uzun; her yayınlanmış reçete ona bir
+mertebe fazla veriyor. İkisi de `tools/train_thermal.py:RATES` içinde, tek
+yerde. `notebooks/06_lora_vs_finetune.ipynb` ikisini arka arkaya koşturup
+yukarıdaki tabloyu ve dizi başına farkı çiziyor.
 
 ### Hep donuk: tüm hafıza yolu
 
@@ -471,7 +554,9 @@ yakalayacak bir şeyi yok, saf maliyet.
 | config | ne zaman |
 |---|---|
 | `edgetam_512.yaml` | **baseline** — karşılaştırma buna karşı |
-| `edgetam_512_thermal.yaml` | fine-tune edilmiş checkpoint, PyTorch |
+| `edgetam_512_lora.yaml` | **512 termal varsayılanı** — LoRA, merge edilmiş |
+| `edgetam_512_lora_adapter.yaml` | aynı ağırlıklar: stock checkpoint + adapter |
+| `edgetam_512_thermal.yaml` | kısmi fine-tune; artık varsayılan değil (§2) |
 | `edgetam_samurai_512.yaml` | + SAMURAI, PyTorch |
 | `edgetam_trt_samurai_512.yaml` | **önerilen deployment** |
 | `edgetam_trt_int8_512.yaml` | INT8 karışık engine seti |
@@ -494,8 +579,11 @@ Eski üç süit daha fazla ortam istiyor (OpenCV / pytest / EdgeTAM); onlar içi
 
 ## 8. Dürüst sınırlar
 
-- **Buradaki hiçbir sayı yeni bir ölçüm değil.** Mevcut fp16 tablosunun altındaki
-  her şey ondan türetilmiş plan.
+- **§2 dışında buradaki hiçbir sayı yeni bir ölçüm değil.** LoRA/fine-tune
+  karşılaştırması gerçek bir çalışma; mevcut fp16 tablosunun altındaki her şey
+  hâlâ ondan türetilmiş plan.
+- **§2'nin kendisi de tek seed.** Doğruluk farkı gürültünün içinde; karar
+  dropout epizotlarının uzunluğuna dayanıyor, doğruluk farkına değil.
 - **Adaptif inference (notebook 05) işe yaramayabilir.** Hafıza bankasıyla
   çalışmak yerine ona karşı çalışıyor. Notebook o ihtimali açıkça ölçüyor.
 - **SAM2Long makalenin tamamı değil** — nesne-oluşum farkındalıklı hafıza rafine

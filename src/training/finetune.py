@@ -1,13 +1,29 @@
 """What to train, what to leave alone, and how to save it back.
 
-The decision this module encodes is **partial fine-tuning, not LoRA**. EdgeTAM
-is 13.9 M parameters in total, so nothing about full training is
-memory-constrained on the GPUs this runs on; LoRA's reason to exist does not
-apply, it would not change the exported graph one way or the other (a merged
-adapter is just weights), and it targets `nn.Linear` while the domain shift
-here lives in a convolutional RepViT trunk. The regularisation LoRA would have
-provided is bought instead by freezing the right modules, which is both cheaper
-and more specific:
+This module implements **partial fine-tuning**, and it used to argue that the
+alternative was not worth having. That argument has since been run against a
+number and it lost (`docs/lora_vs_finetune.md`): on the held-out split LoRA
+matched this method's accuracy while moving 11% of the parameters, and got the
+target back from a dropout in half as many frames. `configs/edgetam_512_lora.yaml`
+is the default for thermal work now. Everything below still runs, is still what
+`--method finetune` does, and is still what LoRA is measured against.
+
+Of the three claims that argument rested on, two were true and turned out not
+to be the deciding ones, and one was simply wrong:
+
+* *"Nothing here is memory-constrained, so LoRA solves a problem we do not
+  have."* True, and measured true -- identical peak memory, identical batch
+  size, LoRA 14% slower. It is just not why LoRA won.
+* *"A merged adapter is only weights, so the exported graph is unchanged."*
+  True, and it is what makes the two interchangeable rather than what makes
+  either of them better.
+* *"LoRA targets `nn.Linear`, and the domain shift is in a convolutional
+  trunk."* Wrong -- an objection to a Linear-only implementation, not to the
+  method. `src/training/lora.py` adapts convolutions exactly.
+
+What decided it was the one thing freezing cannot express: a rank-constrained
+update. **The freeze policy below is unchanged and governs both methods** --
+LoRA adapts exactly the modules this table would have trained:
 
 **Always frozen: the memory path** -- `memory_attention`, `memory_encoder`,
 `spatial_perceiver`, and the learned memory tokens. Three separate reasons, any

@@ -136,17 +136,31 @@ def main(argv: list[str] | None = None) -> int:
     meta = {"method": args.method, "image_size": args.size, "dataset": "Anti-UAV410",
             "train_sequences": sorted(train.stores), "seed": args.seed}
 
+    adapter_path = None
     if args.method == "lora":
         from src.training import lora
 
         report = lora.inject(model, "encoder", r=args.lora_r, alpha=args.lora_alpha,
                              dropout=args.lora_dropout)
         print(lora.summarise(report))
+        adapter_path = Path(args.out).with_suffix(".adapter.pt")
         freeze = lora.freeze
-        def save(m, extra): lora.save_merged_checkpoint(m, args.out, {**meta, **extra})
+
+        # Two artefacts from one run, and they are not redundant. The merged
+        # checkpoint is what every existing config, exporter and engine build
+        # already understands. The adapter beside it is the delta alone: a few
+        # MB that leave the stock checkpoint on disk exactly as upstream
+        # shipped it, which is the property LoRA is usually chosen for and the
+        # one a merged file quietly gives up. See
+        # configs/edgetam_512_lora_adapter.yaml.
+        def save(m, extra):
+            lora.save_merged_checkpoint(m, args.out, {**meta, **extra})
+            lora.save_adapter(m, adapter_path, {**meta, **extra})
+
         meta |= {"lora_r": report["r"], "lora_alpha": report["alpha"],
                  "lora_parameters": report["parameters"],
-                 "adapted_layers": len(report["adapted"])}
+                 "adapted_layers": len(report["adapted"]),
+                 "adapter": adapter_path.name}
     else:
         freeze = apply_freeze
         def save(m, extra): save_checkpoint(m, args.out, {**meta, **extra})
@@ -177,12 +191,15 @@ def main(argv: list[str] | None = None) -> int:
                         device=args.device, progress=_tqdm())
     result |= {"seconds": round(time.time() - started, 1),
                "checkpoint": str(args.out),
+               "adapter": str(adapter_path) if adapter_path else None,
                "peak_gib": (torch.cuda.max_memory_allocated() / 2**30
                             if args.device.startswith("cuda") else 0.0)}
 
     print(f"\n{args.method}: best val clip loss {result['best_val_loss']:.4f} "
           f"in {result['seconds'] / 60:.0f} min, peak {result['peak_gib']:.1f} GiB "
           f"-> {args.out}")
+    if adapter_path:
+        print(f"adapter (the delta alone, base checkpoint untouched) -> {adapter_path}")
     if args.json:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)

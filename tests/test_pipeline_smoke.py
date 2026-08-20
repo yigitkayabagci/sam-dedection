@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+
 import numpy as np
 
 from src.pipeline import PipelineConfig, _resolve_video_mode
@@ -547,6 +549,84 @@ class TestFrameSkip(unittest.TestCase):
                              video_mode="mp4", frame_stride=2)
         with self.assertRaises((ValueError, RuntimeError)):
             _resolve_video_mode(cfg)
+
+
+class TestThermalConfigs(unittest.TestCase):
+    """The 512 thermal configs, checked without EdgeTAM or a GPU.
+
+    A config key the tracker does not accept is a `TypeError` at model-build
+    time -- after the operator has waited for a checkpoint load. These build the
+    tracker object itself, which is where every key is validated.
+    """
+
+    def _config(self, name: str) -> dict:
+        import yaml
+
+        return yaml.safe_load((ROOT / "configs" / name).read_text())
+
+    def test_the_adapter_config_builds_a_tracker(self):
+        cfg = self._config("edgetam_512_lora_adapter.yaml")
+        tracker = build_tracker("edgetam", **cfg)
+        self.assertTrue(tracker.lora_adapter.endswith("edgetam_lora_512.adapter.pt"))
+        self.assertEqual(tracker.lora_scale, 1.0)
+        # The base weights it loads are upstream's, untouched.
+        self.assertIn("third_party/EdgeTAM", tracker.checkpoint)
+
+    def test_the_merged_config_asks_for_no_adapter(self):
+        tracker = build_tracker("edgetam", **self._config("edgetam_512_lora.yaml"))
+        self.assertIsNone(tracker.lora_adapter)
+        self.assertTrue(tracker.checkpoint.endswith("edgetam_lora_512.pt"))
+
+    def test_the_deployment_configs_agree_on_which_checkpoint_ships(self):
+        # Whatever the default is, SAMURAI and the INT8 build must track it --
+        # engines calibrated against one checkpoint and scored against another
+        # measure the difference between the checkpoints.
+        default = self._config("edgetam_512_lora.yaml")["checkpoint"]
+        for name in ("edgetam_samurai_512.yaml", "edgetam_sam2long_512.yaml",
+                     "edgetam_trt_samurai_512.yaml", "edgetam_trt_int8_512.yaml"):
+            self.assertEqual(self._config(name)["checkpoint"], default, name)
+
+
+class TestCheckpointNote(unittest.TestCase):
+    """Which weights a run actually loaded, said out loud before frame 0."""
+
+    def _write(self, tmp: Path, meta: dict) -> Path:
+        import torch
+
+        path = tmp / "ckpt.pt"
+        torch.save({"model": {}, "meta": meta}, path)
+        return path
+
+    def test_it_names_the_run_that_produced_the_checkpoint(self):
+        from src.trackers.edgetam_tracker import _checkpoint_note
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), {"method": "lora", "lora_r": 16,
+                                           "dataset": "Anti-UAV410",
+                                           "train_sequences": ["a", "b"],
+                                           "image_size": 512})
+            note = _checkpoint_note(str(path), 512)
+        self.assertIn("lora", note)
+        self.assertIn("r=16", note)
+        self.assertIn("Anti-UAV410", note)
+        self.assertIn("2 sequences", note)
+        self.assertNotIn("!!", note)      # nothing to warn about
+
+    def test_it_warns_when_the_config_runs_it_at_another_resolution(self):
+        from src.trackers.edgetam_tracker import _checkpoint_note
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), {"method": "lora", "image_size": 512})
+            self.assertIn("!!", _checkpoint_note(str(path), 768))
+
+    def test_a_checkpoint_with_no_provenance_is_silent_not_loud(self):
+        # Upstream's own checkpoint has no meta, and a missing file must not
+        # turn a diagnostic into the thing that fails the run.
+        from src.trackers.edgetam_tracker import _checkpoint_note
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(_checkpoint_note(str(self._write(Path(tmp), {})), 512))
+            self.assertIsNone(_checkpoint_note(str(Path(tmp) / "absent.pt"), 512))
 
 
 if __name__ == "__main__":

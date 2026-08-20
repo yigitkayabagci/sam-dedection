@@ -48,6 +48,46 @@ def _samurai_config(samurai: dict | None):
     return _block_config(samurai, "samurai")
 
 
+def _checkpoint_note(path: str, image_size: int | None) -> str | None:
+    """One line saying what is actually being loaded, and whether it fits.
+
+    Two 54 MB files whose tensors have identical shapes are indistinguishable
+    at a glance and produce very different tracks. `training/finetune.py`
+    records how each one was made, so a run can say which one it got instead of
+    the operator having to remember which path they typed six weeks ago.
+
+    Best-effort by design: a checkpoint with no `meta` (upstream's own, for
+    instance) and a torch too old for `mmap` both return None. A diagnostic
+    that can abort a deployment is worse than no diagnostic.
+    """
+    import torch
+
+    try:
+        blob = torch.load(path, map_location="cpu", mmap=True, weights_only=False)
+        meta = blob.get("meta") or {} if isinstance(blob, dict) else {}
+    except Exception:
+        return None
+    if not meta:
+        return None
+
+    bits = [str(meta.get("method", "?"))]
+    if meta.get("lora_r"):
+        bits.append(f"r={meta['lora_r']:g}")
+    if meta.get("dataset"):
+        bits.append(f"on {meta['dataset']}")
+    if meta.get("train_sequences"):
+        bits.append(f"{len(meta['train_sequences'])} sequences")
+    if meta.get("val_loss") is not None:
+        bits.append(f"val {meta['val_loss']:.4f}")
+    note = f"[edgetam] {Path(path).name}: {', '.join(bits)}"
+
+    trained_at = meta.get("image_size")
+    if trained_at and image_size and trained_at != image_size:
+        note += (f"\n  !! tuned at {trained_at}, this config runs it at "
+                 f"{image_size} -- what that costs is a measurement, not a given")
+    return note
+
+
 def _replicate_prompts(prompts: PromptSet, pathways: int) -> PromptSet:
     """Every prompt repeated once per SAM2Long pathway, under its own object id."""
     from dataclasses import replace
@@ -91,6 +131,8 @@ class EdgeTAMTracker(VideoTracker):
         offload_video_to_cpu: bool = False,
         offload_state_to_cpu: bool = False,
         image_size: int | None = None,
+        lora_adapter: str | Path | None = None,
+        lora_scale: float = 1.0,
         samurai: dict | None = None,
         sam2long: dict | None = None,
     ) -> None:
@@ -120,6 +162,17 @@ class EdgeTAMTracker(VideoTracker):
         # as 1024" -- that second question needs ground truth, not a backend
         # A/B.
         self.image_size = image_size
+        # Thermal adaptation carried as a delta instead of as a second full
+        # checkpoint. `checkpoint` stays the stock file upstream shipped and
+        # this is loaded on top of it, then merged -- so what runs is the same
+        # model the merged checkpoint would have given, while the weights on
+        # disk stay separable: attach a different domain's adapter, or none at
+        # all, without re-downloading anything. `lora_scale` blends the two
+        # (0.0 = stock, 1.0 = the run as trained); anything between is
+        # unmeasured. See src/training/lora.py and
+        # configs/edgetam_512_lora_adapter.yaml.
+        self.lora_adapter = str(lora_adapter) if lora_adapter else None
+        self.lora_scale = float(lora_scale)
         # Motion-aware memory (`samurai.py`): a training-free inference wrapper,
         # off unless the config asks for it. None and `{enabled: false}` both
         # leave the model exactly as upstream wrote it.
@@ -161,11 +214,23 @@ class EdgeTAMTracker(VideoTracker):
                 "(see scripts/setup_edgetam.sh comments). For dev machines without "
                 "CUDA, pass --config configs/edgetam_cpu.yaml."
             )
+        note = _checkpoint_note(self.checkpoint, self.image_size)
+        if note:
+            print(note)
         overrides = image_size_overrides(self.image_size)
         self._predictor = build_sam2_video_predictor(
             self.model_cfg, self.checkpoint, device=self.device,
             hydra_overrides_extra=overrides,
         )
+        if self.lora_adapter:
+            from ..training.lora import apply_adapter, summarise_adapter
+
+            # Merged on the spot, so everything downstream -- SAMURAI,
+            # SAM2Long, the exporter -- sees an ordinary EdgeTAM and none of
+            # them need to know an adapter was ever involved.
+            report = apply_adapter(self._predictor, self.lora_adapter,
+                                   scale=self.lora_scale)
+            print(f"[edgetam] {summarise_adapter(report)}")
 
     def _inference_ctx(self):
         """Enter inference_mode + autocast together, mirroring vos_inference.py."""

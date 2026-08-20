@@ -166,8 +166,9 @@ def main(argv: list[str] | None = None) -> int:
                          min_window=args.min_window, scale_step=args.scale_step,
                          margin=args.margin)
     backend = yaml.safe_load(Path(args.config).read_text())
-    for key in ("checkpoint", "image_encoder_engine", "memory_attention_engine",
-                "memory_encoder_engine", "sam_head_engine", "engine_path"):
+    for key in ("checkpoint", "lora_adapter", "image_encoder_engine",
+                "memory_attention_engine", "memory_encoder_engine",
+                "sam_head_engine", "engine_path"):
         if backend.get(key) and not Path(backend[key]).is_absolute():
             backend[key] = str(ROOT / backend[key])
     tracker = build_tracker(args.tracker, **backend)

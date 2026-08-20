@@ -184,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         backend_cfg,
         keys=(
             "checkpoint",
+            "lora_adapter",
             "engine_path",
             "image_encoder_engine",
             "memory_attention_engine",
