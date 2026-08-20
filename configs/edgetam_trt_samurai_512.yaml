@@ -1,8 +1,9 @@
 # EdgeTAM at 512x512 on TensorRT, with SAMURAI motion-aware memory.
 #
 # This is the recommended deployment configuration once the engines are built:
-# configs/edgetam_trt_512.yaml plus the `samurai:` block, and nothing else
-# changes. No engine changes shape -- SAMURAI modifies the memory-bank
+# configs/edgetam_trt_512.yaml plus the `samurai:` block, and the deployed
+# checkpoint instead of the stock one -- that file is the backend-comparison
+# baseline and has to stay on stock weights to be one. No engine changes shape -- SAMURAI modifies the memory-bank
 # bookkeeping, which this project deliberately kept in PyTorch
 # (docs/tensorrt_fp16.md, "what stays in PyTorch").
 #

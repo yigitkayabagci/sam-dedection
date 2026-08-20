@@ -17,6 +17,9 @@ The TensorRT set, which needs engines built at that resolution:
   full512    whole frame resized to 512x512     4x fewer tokens, whole scene
   crop512    centred 512x512 window             native pixels, cropped scene
 
+  full512_samurai, crop512_samurai   the same engines plus the memory gate
+  full512_int8,    crop512_int8      the calibrated INT8 engine set
+
 The crop modes are what a camera that already centres and focuses on its
 target can offer: the object is in the middle, so the outer frame is mostly
 background being paid for twice -- once in the resize, once in the model.
@@ -52,7 +55,8 @@ on any CUDA machine, before anything is built for the device:
 `--modes` takes mode names or one of the groups, which exist so a comparison
 holds exactly one variable: `trt` (the default six), `torch` (all six above),
 `weights` (stock / fine-tune / LoRA), `samurai` (the gate on and off, same
-weights, same input), `crop` (resize against native pixels).
+weights, same input), `crop` (resize against native pixels), `trt512` (the 512
+latency ladder on the device).
 
 Prompts are picked once per record, on the full frame, and reused by every
 mode (crop modes shift them automatically). They come from, in order:
@@ -124,6 +128,19 @@ MODES = {
                     "512 TRT", "whole frame, resized"),
     "crop512": Mode("edgetam_trt", "configs/edgetam_trt_512.yaml", 512,
                     "512 TRT", "centred 512x512 window"),
+    # The deployment configurations at 512: the engines plus the memory gate,
+    # and the calibrated INT8 engine set. Both carry the deployed checkpoint
+    # rather than the stock one, so pair them with each other for accuracy and
+    # with full512/crop512 only for timing -- SAMURAI's cost is host-side
+    # bookkeeping and does not depend on which weights the engines hold.
+    "full512_samurai": Mode("edgetam_trt", "configs/edgetam_trt_samurai_512.yaml", None,
+                            "512 TRT + SAMURAI", "whole frame, resized"),
+    "crop512_samurai": Mode("edgetam_trt", "configs/edgetam_trt_samurai_512.yaml", 512,
+                            "512 TRT + SAMURAI", "centred 512x512 window"),
+    "full512_int8": Mode("edgetam_trt", "configs/edgetam_trt_int8_512.yaml", None,
+                         "512 TRT INT8", "whole frame, resized"),
+    "crop512_int8": Mode("edgetam_trt", "configs/edgetam_trt_int8_512.yaml", 512,
+                         "512 TRT INT8", "centred 512x512 window"),
 
     # PyTorch at 512. No engines, no export, runs on any CUDA machine -- which
     # is what makes these the modes to answer "did the thermal adaptation help
@@ -157,6 +174,10 @@ GROUPS = {
     # Does the resize cost anything? Same weights, whole frame against a
     # native-pixel window.
     "crop": ("lora512", "lora512_crop"),
+    # The 512 latency ladder on the device: engines, engines with the memory
+    # gate, both windows. This is a timing comparison -- see the note on the
+    # SAMURAI modes above.
+    "trt512": ("full512", "crop512", "full512_samurai", "crop512_samurai"),
 }
 
 
