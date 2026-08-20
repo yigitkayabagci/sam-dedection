@@ -120,15 +120,32 @@ KUST4K = Recipe(
 VTUAV_VIS = Recipe(
     name="vtuav_vis",
     note="VTUAV mask split: 1920x1080 RGB-T video with per-frame target masks",
+    # Read off the three training archives' central directories. The target
+    # kinds are the sequence-name prefixes, and they are **not** spread evenly
+    # -- which matters more than the sizes do:
+    #
+    #   train_001   9.1 GB  14 seq    875 masks   bike 1, bus 4, c-vehicle 1, car 8
+    #   train_002  16.1 GB  18 seq  1 408 masks   car 4, elebike 3, excavator 2,
+    #                                             pedestrian 9
+    #   train_003  17.9 GB  18 seq  1 778 masks   pedestrian 15, train 1,
+    #                                             tricycle 1, truck 1
+    #
+    # **train_001 contains no pedestrians at all.** On its own it teaches an
+    # encoder that a target is a vehicle, which for a drone tracker is a hole
+    # rather than a bias. It is still the default, because it is the smallest
+    # and it saturates stage A by itself (26 059 pairs against DISTILL_PAIRS =
+    # 20 000) -- but stage B wants at least train_003 beside it.
+    #
+    # It also decides how much a held-out number is worth: 14 sequences split
+    # 11/2/1, so the test set is a single flight and its quirks dominate any
+    # comparison between two runs. All three give 50 sequences and a 40/5/5.
     parts=(
-        # 14 sequences, 26 059 pairs, 875 RGB + 874 IR masks. The smallest of
-        # the eight and enough on its own, which is why it is the default.
         Part("train_001", drive="1LW1jyldaHmFolmcNzbnWFtzGr4gdfTiX",
              size=9_080_000_000),
         Part("train_002", drive="1wKffvGkpALbtXibnj-F-erSuu2CvamYo",
-             size=15_000_000_000, default=False),
+             size=16_100_000_000, default=False),
         Part("train_003", drive="17h2zBfmOwHFllw40Zln7fuhSFs0vXvvf",
-             size=17_000_000_000, default=False),
+             size=17_900_000_000, default=False),
         # The authors' own held-out sequences. `split_frames` already holds
         # whole sequences out of `train_001`, so these are only worth the disk
         # when the canonical split is the point.

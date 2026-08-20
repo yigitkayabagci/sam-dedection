@@ -1193,10 +1193,33 @@ at 1920×1080:
 
 The catch is disk, not labels: 1.7 M frames at 1920×1080 is far more than a
 Colab runtime holds, and the mask split alone is ~120 GB across its eight
-archives. That is why `FETCH` asks for `train_001` and stops — 8.5 GB, 14
-sequences, 26 059 pairs, which is already above AnyThermal's whole training
-set. Add `"train_002"` to the list if you want more; the download cell takes
-any subset of the eight.
+archives. `FETCH` therefore asks for `train_001` and stops — 9.1 GB, 14
+sequences, 26 059 pairs, already above AnyThermal's whole training set and
+enough to saturate stage A on its own (`DISTILL_PAIRS = 20 000`).
+
+**For stage B, one archive is not enough, and the reason is not its size.**
+Reading the three training archives' listings, the target kinds are badly
+unevenly spread:
+
+| archive | | sequences | masks | targets |
+|---|---:|---:|---:|---|
+| `train_001` | 9.1 GB | 14 | 875 | bike 1, bus 4, c-vehicle 1, car 8 |
+| `train_002` | 16.1 GB | 18 | 1 408 | car 4, elebike 3, excavator 2, pedestrian 9 |
+| `train_003` | 17.9 GB | 18 | 1 778 | pedestrian 15, train 1, tricycle 1, truck 1 |
+
+`train_001` **has no pedestrians in it at all.** On its own it teaches that a
+target is a vehicle, which for a drone tracker is a hole rather than a bias.
+
+It also decides what a held-out number is worth. 14 sequences split 11/2/1, so
+`test` is a **single flight** and its quirks dominate any comparison between two
+runs — which is the entire point of running this notebook against its sibling.
+All three archives give 50 sequences and a 40/5/5.
+
+So add them to `FETCH` if the Drive space is there:
+`("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS", ["train_001", "train_002", "train_003"])`.
+If only one more fits, make it `train_003` — the most masks and the most
+pedestrians. With all three, raising `DISTILL_PAIRS` past 20 000 starts to buy
+something too; on `train_001` alone it does not.
 
 ### "We are a SAM-based model. Doesn't a DINO teacher break that?"
 
