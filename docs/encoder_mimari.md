@@ -159,10 +159,15 @@ edildiği için değil.
 `--dataset` tekrarlanabilir ve pencereler birleşiyor:
 
 ```
---dataset vtuav_vis:/data/VTUAV_VIS:thermal:labels     1920×1080, örnek maskesi
---dataset kust4k:/data/Kust4K                          640×512, semantik
---dataset segfly:/data/SegFly:thermal:watershed        640×512, semantik
+--dataset vtuav_vis:/data/VTUAV_VIS:thermal:labels:all       1920×1080, örnek maskesi
+--dataset segfly:/data/SegFly:thermal:components:train        640×512, 15 007 kare
+--dataset kust4k:/data/Kust4K:thermal:components:train        640×512, 4 024 kare
 ```
+
+Üç setin iş bölümü: **VTUAV** gerçek örnek maskesiyle hem eğitiyor hem not
+veriyor; **SegFly** hacmi getiriyor (Kust4K'nın ~4 katı kare, üç irtifa,
+sahne çeşitliliği); **Kust4K** en ince etiketi getiriyor (4 "şey" sınıfı —
+motosiklet/araba/kamyon/insan; SegFly'da sadece `vehicle` ve `truck` var).
 
 Sebebi encoder'ın ne taşıdığı: **genel** görsel öznitelik. Tek veri seti = tek
 sensör, tek şehir, tek etiketleme alışkanlığı. Kust4K'nın 4 024 karesi bir

@@ -132,18 +132,34 @@ SPECS: dict[str, DatasetSpec] = {
                  "motorcycle": 4, "car": 5, "truck": 6, "person": 7},
         things=("motorcycle", "car", "truck", "person"),
     ),
-    # 15 007 registered thermal frames at 640x512 alongside 4000x3000 RGB,
-    # 15 classes (ECCV 2026). The registered pair is the 640x512 one.
+    # >15 000 geometrically aligned RGB-T pairs at 640x512 thermal, plus
+    # >20 000 RGB-only frames, over three altitudes (30/40/50 m). ECCV 2026.
+    # Thermal exists for scenes 3, 4, 5 and 9 only.
+    #
+    # **The class ids have gaps and the thing classes are only two.** This is
+    # the authors' own table, not a guess, and the difference matters: an
+    # earlier version of this spec assumed contiguous ids and would have
+    # trained on **grass, vegetation, tree and ground obstacle** as tracking
+    # targets. Vehicle is 13 and Truck is 36; there is no person, bus,
+    # motorcycle or bicycle class at all.
+    #
+    # Labels are 8-bit single-channel PNG whose pixel value *is* the class id.
+    #
+    # Distributed as a Hugging Face **parquet** dataset, not as directories:
+    # columns `image`, `label`, `RGB_aligned`, `scene`, `altitude`, `modality`.
+    # `tools/export_hf_dataset.py` writes it into the layout below.
     "segfly": DatasetSpec(
         name="segfly",
-        thermal="**/thermal/*.png",
-        rgb="**/rgb/*.jpg",
+        thermal="**/images/*.png",
+        rgb="**/rgb/*.png",
         masks="**/labels/*.png",
-        classes={"background": 0, "road": 1, "building": 2, "vegetation": 3,
-                 "water": 4, "car": 5, "truck": 6, "bus": 7, "motorcycle": 8,
-                 "bicycle": 9, "person": 10, "pole": 11, "fence": 12,
-                 "solar_panel": 13, "container": 14},
-        things=("car", "truck", "bus", "motorcycle", "bicycle", "person"),
+        classes={"unlabeled": 0, "road": 1, "walkway": 2, "dirt": 3,
+                 "gravel": 4, "grass": 6, "vegetation": 7, "tree": 8,
+                 "ground_obstacle": 9, "vehicle": 13, "water": 14,
+                 "building": 16, "roof": 17, "parking_lot": 33,
+                 "construction": 34, "truck": 36},
+        things=("vehicle", "truck"),
+        ignore=(0,),
     ),
     # 500 sequences / ~1.7 M registered 1920x1080 RGB-T pairs (CVPR 2022).
     #
