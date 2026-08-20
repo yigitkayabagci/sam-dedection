@@ -101,6 +101,25 @@ class Scope(ast.NodeVisitor):
             self.used.append((node.id, node.lineno))
 
 
+class ModuleScope(Scope):
+    """`Scope`, but blind to what happens inside a function body.
+
+    For the ordering check only. A function may refer to a global defined
+    further down the cell -- the name is looked up when it is *called*, not
+    where it is written -- so descending into the body would report uses that
+    Python is perfectly happy with. A class body is different: it runs where it
+    is written, so `Scope`'s handling of it is kept.
+    """
+
+    def visit_FunctionDef(self, node):
+        self.bound.add(node.name)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        pass
+
+
 def strip_magics(source: str) -> tuple[str, list[tuple[str, int]]]:
     """Python-only source, plus the names an IPython line interpolated.
 
@@ -148,6 +167,26 @@ def check(path: Path) -> list[str]:
             if name not in known and name not in scope.bound and name not in scope.local:
                 problems.append(f"cell {index}, line {line}: {name!r} is not "
                                 f"defined by any earlier cell")
+
+        # ...but the cell still has to survive its own first run, top to
+        # bottom, and the loop above cannot see that: it treats a name assigned
+        # on the last line as available on the first. That is the namespace
+        # *after* the cell, not during it. Shipped exactly that way once -- a
+        # `mkdir` loop over a path the next statement went on to define -- and
+        # this file reported the notebook clean.
+        ready = set(known)
+        for statement in tree.body:
+            here = ModuleScope()
+            here.visit(statement)
+            for name, line in here.used:
+                # `name in scope.bound` keeps this to genuine ordering faults:
+                # a name nothing in the cell binds was already reported above.
+                if (name in scope.bound and name not in ready
+                        and name not in here.bound and name not in here.local):
+                    problems.append(
+                        f"cell {index}, line {line}: {name!r} is used before "
+                        f"the line that assigns it")
+            ready |= here.bound
         known |= scope.bound
     return problems
 

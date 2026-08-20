@@ -206,6 +206,41 @@ class TestTheCheckerCatchesThings(unittest.TestCase):
     def test_an_earlier_cell_satisfies_a_later_one(self):
         self.assertEqual(check(self.notebook("EARLIER = 1", "print(EARLIER)")), [])
 
+    def test_a_name_assigned_further_down_the_same_cell_is_reported(self):
+        """The shape that shipped: a loop over a path the next line defines.
+
+        The cross-cell pass cannot see this -- it treats everything a cell
+        binds as available throughout the cell, which is the namespace *after*
+        the cell has run, not during its first pass. The notebook reported
+        clean and died on `NameError` at the exact line.
+        """
+        problems = check(self.notebook(
+            "MIRROR = 1\n"
+            "for d in (MIRROR, INDEX):\n"
+            "    pass\n"
+            "INDEX = 2\n"))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("INDEX", problems[0])
+        self.assertIn("used before", problems[0])
+
+    def test_a_function_may_use_a_global_defined_below_it(self):
+        # Legal Python: the body resolves LATER when it is called, not where
+        # it is written. Reporting this would make the check unusable.
+        self.assertEqual(check(self.notebook(
+            "def f():\n    return LATER\nLATER = 1\nprint(f())\n")), [])
+
+    def test_a_loop_target_is_not_reported_inside_its_own_loop(self):
+        self.assertEqual(check(self.notebook(
+            "for d in (1, 2):\n    print(d)\n")), [])
+
+    def test_a_comprehension_variable_is_not_reported(self):
+        self.assertEqual(check(self.notebook(
+            "xs = [1]\nys = [x * 2 for x in xs]\nprint(ys)\n")), [])
+
+    def test_a_name_used_after_its_assignment_is_fine(self):
+        self.assertEqual(check(self.notebook(
+            "INDEX = 2\nfor d in (INDEX,):\n    pass\n")), [])
+
     def test_imports_and_builtins_are_not_reported(self):
         self.assertEqual(check(self.notebook("import os\nprint(len(os.sep))")), [])
 

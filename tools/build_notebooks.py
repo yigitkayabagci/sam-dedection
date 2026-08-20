@@ -617,12 +617,13 @@ SEED            = 0
 LOADER_WORKERS  = min(2 * (os.cpu_count() or 4), 24)
 PREFETCH_DEPTH  = 2
 
-for d in (DATA_DIR, WORK, CKPT, MIRROR, INDEX):
-    d.mkdir(parents=True, exist_ok=True)
 # One index file per dataset, named after it, so changing one dataset's mode
 # does not invalidate the others -- and so an index built one way can never be
 # loaded by a run decomposing the other way (it is stamped and checked).
 INDEX = MIRROR / "index"
+
+for d in (DATA_DIR, WORK, CKPT, MIRROR, INDEX):
+    d.mkdir(parents=True, exist_ok=True)
 
 import torch
 VRAM = torch.cuda.get_device_properties(0).total_memory / 2**30 if torch.cuda.is_available() else 0
