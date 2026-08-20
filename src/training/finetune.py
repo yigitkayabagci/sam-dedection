@@ -46,6 +46,12 @@ HEAD_MODULES = ("sam_mask_decoder", "sam_prompt_encoder", "obj_ptr_proj")
 STAGES = {
     "head": HEAD_MODULES,
     "encoder": HEAD_MODULES + ("image_encoder",),
+    # The pretraining scope: the trunk and neck alone, no head at all. Modality
+    # distillation (`src/training/distill.py`) has no mask decoder in its graph
+    # -- it matches features against a frozen RGB teacher -- so unfreezing a
+    # head that receives no gradient would only put dead parameters in the
+    # optimiser and in the EMA.
+    "backbone": ("image_encoder",),
 }
 
 

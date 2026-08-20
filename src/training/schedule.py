@@ -9,6 +9,14 @@ difference between two notebooks instead of the difference between two methods.
 
 So the loop lives here once and takes those two things as callbacks. The
 notebook that explains it and the CLI that runs it twice execute the same code.
+
+**A third thing is a callback for the same reason: what a batch is.** The
+encoder work trains on single images with several prompts
+(`src/training/image_loop.py`) rather than on clips, and that is a different
+data pipeline and a different loss -- but it is not a different schedule, and
+running it through a second copy of this file would make "static training
+versus clip training" a comparison of two loops again. `Loop` is the pair of
+functions that differ; `CLIPS` and `IMAGES` are the two of them that exist.
 """
 from __future__ import annotations
 
@@ -58,27 +66,67 @@ class Schedule:
     meta: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class Loop:
+    """What a batch is made of, and what it costs -- the two data-mode knobs.
+
+    `stream(split, batch, seed, limit, device, workers, depth)` yields batches;
+    `loss(model, batch)` returns `(loss, terms)`. Nothing else about a run is
+    allowed to depend on which mode it is in.
+    """
+
+    stream: Callable
+    loss: Callable
+
+
+def _clip_stream(split: Split, batch: int, seed: int | None, limit: int | None,
+                 device: str = "cuda", workers: int = 8, depth: int = 2):
+    return prefetch(batch_clips(split.clips, batch, seed=seed, limit=limit),
+                    split.stores, device, workers=workers, depth=depth)
+
+
+def _clip_loss(model, batch):
+    # Resolved through the module global rather than captured, so a caller (or
+    # a test) that swaps `clip_losses` swaps what the loop actually runs.
+    return clip_losses(model, batch)
+
+
+CLIPS = Loop(stream=_clip_stream, loss=_clip_loss)
+
+
+def images() -> Loop:
+    """The image-mode `Loop`, imported lazily.
+
+    `image_loop` pulls in `aerial`, which pulls in nothing heavy but does bind
+    a dataset vocabulary that a clip-mode run has no use for. Keeping the
+    import inside the call keeps `schedule` importable with nothing but numpy
+    and torch, which is what `tests/test_schedule.py` relies on.
+    """
+    from .image_loop import image_losses, stream
+
+    return Loop(stream=stream, loss=image_losses)
+
+
 def validate(
     model,
-    split: Split,
+    split,
     schedule: Schedule,
     device: str = "cuda",
+    loop: Loop = CLIPS,
 ) -> float:
-    """Mean clip loss over a fixed slice of the split.
+    """Mean loss over a fixed slice of the split.
 
-    Fixed because the seed is fixed: the same clips every epoch, so a change in
-    the number is the model and not the sample. The slice is bounded *while
+    Fixed because the seed is fixed: the same batches every epoch, so a change
+    in the number is the model and not the sample. The slice is bounded *while
     generating*, which is the whole point -- scoring the entire validation set
     every epoch is hours nobody asked for.
     """
-    chunks = batch_clips(split.clips, schedule.batch, seed=1,
-                         limit=schedule.val_batches)
     losses = []
     with torch.no_grad():
-        for batch in prefetch(chunks, split.stores, device,
-                              workers=schedule.workers, depth=schedule.depth):
+        for batch in loop.stream(split, schedule.batch, 1, schedule.val_batches,
+                                 device, schedule.workers, schedule.depth):
             with _autocast(device):
-                losses.append(float(clip_losses(model, batch)[0]))
+                losses.append(float(loop.loss(model, batch)[0]))
     return float(np.mean(losses)) if losses else float("nan")
 
 
@@ -89,8 +137,8 @@ def _autocast(device: str):
 
 def run_stages(
     model,
-    train: Split,
-    val: Split,
+    train,
+    val,
     schedule: Schedule = Schedule(),
     *,
     freeze: Callable[[object, str], dict[str, int]],
@@ -98,6 +146,7 @@ def run_stages(
     device: str = "cuda",
     progress: Callable | None = None,
     log: Callable[[str], None] = print,
+    loop: Loop = CLIPS,
 ) -> dict:
     """Train `model` through `schedule.stages`; return the run's history.
 
@@ -106,6 +155,10 @@ def run_stages(
     counts. `save(model, meta)` writes whichever checkpoint that method should
     produce, and is called only when the validation loss improves, inside the
     EMA context so the averaged weights are the ones stored.
+
+    `loop` decides what a batch is: `CLIPS` for the video path, `images()` for
+    the static encoder path. Everything below this line is the same either way,
+    which is the property that lets the two be compared.
 
     The EMA is rebuilt per stage on purpose: it averages the trainable
     parameters, and that set changes the moment the encoder unfreezes.
@@ -127,18 +180,17 @@ def run_stages(
         ema = EMA(model, decay=schedule.ema_decay)
 
         for epoch in range(epochs):
-            chunks = batch_clips(train.clips, schedule.batch,
-                                 seed=schedule.seed + 100 * epoch,
-                                 limit=schedule.steps_per_epoch)
-            stream = prefetch(chunks, train.stores, device,
-                              workers=schedule.workers, depth=schedule.depth)
+            stream = loop.stream(train, schedule.batch,
+                                 schedule.seed + 100 * epoch,
+                                 schedule.steps_per_epoch, device,
+                                 schedule.workers, schedule.depth)
             if progress is not None:
                 stream = progress(stream, total=schedule.steps_per_epoch,
                                   desc=f"{stage} e{epoch}")
 
             for step, batch in enumerate(stream):
                 with _autocast(device):
-                    loss, terms = clip_losses(model, batch)
+                    loss, terms = loop.loss(model, batch)
                 (loss / schedule.accum).backward()
                 if (step + 1) % schedule.accum == 0:
                     torch.nn.utils.clip_grad_norm_(trainable, schedule.grad_clip)
@@ -151,7 +203,7 @@ def run_stages(
                                        **{k: f"{v:.2f}" for k, v in terms.items()})
 
             with ema.applied(model):
-                score = validate(model, val, schedule, device)
+                score = validate(model, val, schedule, device, loop)
                 improved = score < best
                 if improved:
                     best = score

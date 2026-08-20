@@ -27,8 +27,14 @@ timm>=1.0
 #                                         # Deliberately NOT facebookresearch/sam2:
 #                                         # that installs as `sam2` and collides
 #                                         # with EdgeTAM, which is a fork of it.
+#                                         # Also carries the DINOv2 teacher the
+#                                         # encoder pretraining distils from
+#                                         # (src/training/distill.py); that one
+#                                         # only needs >=4.44.
 #   pip install "nvidia-modelopt[onnx]"   # calibrated INT8 PTQ/QAT
 #   pip install onnx onnxruntime          # export verification
+#   pip install gdown                     # only for gdrive: sources in
+#                                         # tools/fetch_aerial.py
 #
 # Nothing new is required for SAMURAI (src/trackers/samurai.py) or for
 # size-adaptive inference (src/trackers/adaptive.py): both are numpy over

@@ -123,6 +123,9 @@ class Weights:
 
     `focal` dominates by design: it is the only term whose scale reflects how
     few pixels a drone occupies.
+
+    `object_score` and `box_projection` are both video-path terms and both go
+    unused on static data -- see `instance_loss`.
     """
 
     focal: float = 20.0
@@ -130,6 +133,47 @@ class Weights:
     iou: float = 1.0
     object_score: float = 1.0
     box_projection: float = 1.0
+
+
+def instance_loss(
+    outputs: dict,
+    masks: torch.Tensor,
+    weights: Weights = Weights(),
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Promptable segmentation on a still image: the mask terms, and only those.
+
+    SAM 2's image-pretraining objective exactly -- focal + dice on the mask, L1
+    on the IoU head. Every instance is supervised; there is no per-sample
+    decision to make, because a static set has no unlabelled frames and no
+    frames where the target is absent.
+
+    **The `object_score` term is deliberately gone, not merely zero-weighted.**
+    It is BCE against Anti-UAV410's per-frame `exist` flag, and a static
+    segmentation set has no such label: every prompted instance is present by
+    construction. Keeping the term would train the head against a constant 1,
+    which does not teach it nothing -- it teaches it to fire unconditionally,
+    and `object_score_logits` is precisely the signal whose spurious firing
+    poisons the memory bank on video. Leaving it untrained here and training it
+    on video, where the label is real, is the only coherent split.
+
+    `box_projection` is gone for the opposite reason: it is the fallback for
+    frames whose teacher mask failed a quality gate, and here the mask *is* the
+    ground truth. There is nothing to fall back to.
+    """
+    logits = outputs["pred_masks_high_res"]
+    if logits.dim() == 3:
+        logits = logits[:, None]
+    targets = masks.unsqueeze(1).to(logits.dtype) if masks.dim() == 3 else masks.to(logits.dtype)
+
+    focal = focal_loss(logits, targets)
+    dice = dice_loss(logits, targets)
+    iou = iou_head_loss(outputs["ious"], logits, targets)
+    total = weights.focal * focal + weights.dice * dice + weights.iou * iou
+    return total.mean(), {
+        "focal": float(focal.mean().detach()),
+        "dice": float(dice.mean().detach()),
+        "iou": float(iou.mean().detach()),
+    }
 
 
 def frame_loss(

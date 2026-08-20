@@ -42,13 +42,17 @@ CANDIDATES = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 
 
 def batch_clips(
-    clips: Sequence[Clip],
+    clips: Sequence,
     size: int,
     seed: int | None = None,
     limit: int | None = None,
     drop_last: bool = True,
-) -> Iterator[list[Clip]]:
+) -> Iterator[list]:
     """Shuffle `clips` reproducibly and cut them into batches of `size`.
+
+    Named for clips and used for windows too (`aerial.Sample`): it never looks
+    inside an item, and having one shuffle means a clip-mode run and an
+    image-mode run are reproducible from their seed in exactly the same way.
 
     `limit` caps the number of batches, which is how an epoch is bounded on a
     dataset where every frame is a clip start: 60 sequences of 1000 frames is
@@ -72,17 +76,17 @@ def batch_clips(
         yield batch
 
 
-def prefetch(
-    chunks: Iterable[list[Clip]],
-    stores: Mapping[str, Mapping[int, np.ndarray]],
+def prefetch_with(
+    chunks: Iterable[list],
+    assemble: Callable[[list, ThreadPoolExecutor], object],
     device: str = "cuda",
     workers: int = 8,
     depth: int = 2,
-) -> Iterator[Batch]:
-    """Collate `chunks` on worker threads; yield them, in order, on `device`.
+) -> Iterator:
+    """Assemble `chunks` on worker threads; yield them, in order, on `device`.
 
     **`workers` and `depth` are different knobs on purpose.** `workers` is how
-    many clips are read at once, and wants to be around the core count.
+    many items are read at once, and wants to be around the core count.
     `depth` is how many *batches* may exist in host memory ahead of the
     training step, and wants to stay at two or three whatever `workers` is: a
     batch of 64 clips is 1.6 GB, so tying the queue length to the thread count
@@ -91,13 +95,18 @@ def prefetch(
 
     Two pools rather than one because a task that submits to the pool it is
     running on deadlocks the moment that pool is full. Batch assembly runs on
-    its own small pool and blocks on the clip pool, which submits nothing.
+    its own small pool and blocks on the item pool, which submits nothing.
 
     Order is preserved -- futures are consumed from a queue rather than as they
     complete -- so a run stays reproducible from its seed.
+
+    `assemble(chunk, pool)` is the only thing that knows what a batch is made
+    of, which is what lets clip mode and image mode share this: one reads eight
+    JPEGs and a run-length store per row, the other one image and a semantic
+    map, and neither difference belongs in a prefetcher.
     """
     source = iter(chunks)
-    with ThreadPoolExecutor(max_workers=max(workers, 1)) as clip_pool, \
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as item_pool, \
             ThreadPoolExecutor(max_workers=max(depth, 1)) as batch_pool:
         pending: deque = deque()
 
@@ -105,10 +114,7 @@ def prefetch(
             chunk = next(source, None)
             if chunk is None:
                 return False
-            pending.append(batch_pool.submit(
-                collate, chunk, [stores[c.sequence.name] for c in chunk], "cpu",
-                clip_pool,
-            ))
+            pending.append(batch_pool.submit(assemble, chunk, item_pool))
             return True
 
         for _ in range(max(depth, 1)):
@@ -118,6 +124,22 @@ def prefetch(
             batch = pending.popleft().result()
             submit()
             yield batch.to(device)
+
+
+def prefetch(
+    chunks: Iterable[list[Clip]],
+    stores: Mapping[str, Mapping[int, np.ndarray]],
+    device: str = "cuda",
+    workers: int = 8,
+    depth: int = 2,
+) -> Iterator[Batch]:
+    """`prefetch_with`, wired to the clip collate and its mask stores."""
+    return prefetch_with(
+        chunks,
+        lambda chunk, pool: collate(
+            chunk, [stores[c.sequence.name] for c in chunk], "cpu", pool),
+        device=device, workers=workers, depth=depth,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -147,48 +169,45 @@ def largest_that_fits(
     return best
 
 
-def auto_batch_size(
+def measure_batch_size(
     model,
-    clips: Sequence[Clip],
-    stores: Mapping[str, Mapping[int, np.ndarray]],
+    step: Callable[[int], object],
     device: str = "cuda",
     maximum: int | None = None,
     reserve: float = 0.15,
     candidates: Sequence[int] = CANDIDATES,
     verbose: bool = True,
 ) -> int:
-    """Measure the largest clip batch that trains on this GPU.
+    """The largest candidate `step(n)` runs in, measured rather than guessed.
 
-    Each candidate gets a real forward *and backward* -- the backward is where
-    the activation graph is actually held, so a forward-only probe would report
-    a size that OOMs on the first optimiser step. `reserve` keeps a fraction of
-    the card free: fragmentation, the EMA copy and the evaluation pass all want
-    memory that the probe never asks for.
+    `step(n)` must build a batch of `n` and return its **loss with the graph
+    still attached**; the backward is run here, because the backward is where
+    the activation graph is actually held and a forward-only probe would report
+    a size that OOMs on the first optimiser step.
 
-    Call this **after** `apply_freeze`: which parameters require gradients is
-    most of what decides the answer.
+    `reserve` keeps a fraction of the card free: fragmentation, the EMA copy
+    and the evaluation pass all want memory the probe never asks for.
+
+    Call this **after** the freeze: which parameters require gradients is most
+    of what decides the answer.
     """
     import torch
-
-    from .clip_loop import clip_losses
 
     if not torch.cuda.is_available() or not device.startswith("cuda"):
         return 1
 
     total = torch.cuda.get_device_properties(device).total_memory
     budget = total * (1.0 - reserve)
-    pool = list(clips)
-    ceiling = min(maximum or len(pool), len(pool))
+    ceiling = maximum or max(candidates)
 
     def trial(n: int) -> bool:
         if n > ceiling:
             return False
-        batch = collate(pool[:n], [stores[c.sequence.name] for c in pool[:n]], "cpu")
         try:
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats(device)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss, _ = clip_losses(model, batch.to(device))
+                loss = step(n)
             loss.backward()
             peak = torch.cuda.max_memory_allocated(device)
         except torch.cuda.OutOfMemoryError:
@@ -197,7 +216,6 @@ def auto_batch_size(
             return False
         finally:
             model.zero_grad(set_to_none=True)
-            del batch
             torch.cuda.empty_cache()
         if verbose:
             print(f"  batch {n:>3}: peak {peak / 2**30:5.1f} GiB "
@@ -209,3 +227,33 @@ def auto_batch_size(
     if verbose:
         print(f"batch size {best}")
     return best
+
+
+def auto_batch_size(
+    model,
+    clips: Sequence[Clip],
+    stores: Mapping[str, Mapping[int, np.ndarray]],
+    device: str = "cuda",
+    maximum: int | None = None,
+    reserve: float = 0.15,
+    candidates: Sequence[int] = CANDIDATES,
+    verbose: bool = True,
+) -> int:
+    """`measure_batch_size` for clip mode: the largest clip batch that trains here.
+
+    Clip-mode activation memory scales with batch x clip length x resolution,
+    and the numbers that fit differ by an order of magnitude between a 16 GB
+    card and a 90 GB one.
+    """
+    from .clip_loop import clip_losses
+
+    pool = list(clips)
+
+    def step(n: int):
+        batch = collate(pool[:n], [stores[c.sequence.name] for c in pool[:n]], "cpu")
+        return clip_losses(model, batch.to(device))[0]
+
+    return measure_batch_size(model, step, device,
+                              maximum=min(maximum or len(pool), len(pool)),
+                              reserve=reserve, candidates=candidates,
+                              verbose=verbose)

@@ -4,9 +4,14 @@ Amaç: EdgeTAM'ın **image encoder**'ını termal + havadan veriyle iyileştirme
 sonra iyileşmiş encoder'la bütün mimariyi birleştirip video üzerinde memory
 attention tarafına geçmek.
 
-Buradaki hiçbir şey ölçülmüş değil. Bu bir **araştırma ve iş planı**;
+Buradaki hiçbir şey **ölçülmüş** değil. Bu bir **araştırma ve iş planı**;
 ölçülen sonuçlar `docs/EXPERIMENT_LOG.md`'ye, rapora girecek olanlar
 `report/`'a yazılır.
+
+A ve B aşamalarının kodu artık yazıldı — **kurulumun** nasıl olduğu
+`docs/encoder_mimari.md`'de, çalışan hâli
+`notebooks/07_encoder_aerial_rgbt.ipynb`'de. Yazılmış olmak ölçülmüş olmak
+değil: aşağıdaki her madde hâlâ kendi taban çizgisine karşı sayı bekliyor.
 
 Veri setleri: `docs/datasets.md` ve raporda Bölüm 5.
 
@@ -16,9 +21,9 @@ Veri setleri: `docs/datasets.md` ve raporda Bölüm 5.
 
 | Aşama | Ne eğitilir | Hangi veri | Durum |
 |---|---|---|---|
-| **A. Pretraining** | image encoder, etiketsiz | hizalı RGB-T çiftleri | araştırılacak |
-| **B. Encoder + head** | image encoder + mask decoder | **statik** yoğun maskeli setler | başlanmadı |
-| **C. Video** | memory attention / encoder | video setleri | B bitmeden başlanmaz |
+| **A. Pretraining** | image encoder, etiketsiz | hizalı RGB-T çiftleri | **kod yazıldı** (`src/training/distill.py`), ölçülmedi |
+| **B. Encoder + head** | image encoder + mask decoder | **statik** yoğun maskeli setler | **kod yazıldı** (`src/training/image_loop.py`), ölçülmedi |
+| **C. Video** | memory attention / encoder | video setleri | B ölçülmeden başlanmaz |
 
 Aşama sırası keyfi değil — gerekçesi §1'de.
 
@@ -72,17 +77,20 @@ Yani aşama A ve B için gereken dondurma mekanizması **hazır**.
 | `tools/train_thermal.py` | eğitim giriş noktası, `--method finetune\|lora` |
 | `tools/export_edgetam_onnx.py` → `build_trt_engines.py` → `check_trt_parity.py` | eğitim sonrası dağıtım zinciri |
 
-### Eksik olan
+### Eksik olan — artık yazıldı
 
-- **Statik (tek kare) eğitim yolu yok.** `src/training/clip_loop.py` klip
-  temelli ve `from .antiuav import Clip, clip_masks, clip_tensor` ile
-  Anti-UAV410'a bağlı. Statik setler için bunun kardeşi gerekiyor: tek kare
-  encode → prompt → maske → loss, memory bank hiç devreye girmeden.
-- **Veri okuyucu yok.** `antiuav.py` bir veri setine özel. Kust4K / SegFly /
-  Caltech için ayrı okuyucular ya da ortak bir arayüz lazım.
-- **`losses.py`'deki `object_score` terimi statik sette karşılıksız** —
-  Anti-UAV410'un kare başına `exist` bayrağına dayanıyor, statik setlerde
-  öyle bir etiket yok. Aşama B'de bu terim kapatılır.
+Üçü de aşağıdaki gibi çözüldü; hiçbiri ölçülmedi.
+
+| eksikti | nerede karşılandı |
+|---|---|
+| **statik (tek kare) eğitim yolu** — tek kare encode → prompt → maske → loss, memory bank devreye girmeden | `src/training/image_loop.py`. `clip_loop.py`'nin kardeşi ve ortak kare için **aynı** kod yolunu kullanıyor: tek kare zaten bir klibin 0. karesi, yani `track_step(is_init_cond_frame=True, run_mem_encoder=False)`. Görüntü bir kez encode edilir, pencere içindeki her örnek aynı özniteliklere karşı prompt edilir |
+| **veri okuyucu** — Kust4K / SegFly / Caltech için ortak arayüz | `src/training/aerial.py`. Bildirimsel `DatasetSpec` (düzen + palet + hangi sınıf "şey"), `probe_classes` ile indirmeye karşı doğrulanıyor. Örnek ayrıştırma, kapılar ve pencere geometrisi de burada; `crop_window`/`map_boxes` video yoluyla ortak, böylece iki taraf birbirinden ayrışamıyor |
+| **`object_score` statik sette karşılıksız** | `losses.instance_loss` — terim sıfır ağırlıklı değil, **hiç yok**. Sıfır ağırlık da yanlış olurdu: sabit 1'e karşı BCE "hiçbir şey öğretme" değil "koşulsuz ateşle" öğretir, ve videoda hafıza bankasını zehirleyen tam olarak o. `box_projection` de yok — orada maske zaten ground truth, geri düşülecek bir şey yok |
+
+Yanında gelen üç şey daha: `schedule.run_stages` artık `Loop` alıyor (klip modu
+ve görüntü modu **aynı** aşamalar, EMA ve checkpoint kuralından geçiyor),
+`STAGES`'e `backbone` eklendi (ön-eğitimin kapsamı — head'siz), ve
+`loader.prefetch` / `auto_batch_size` veri modundan bağımsız hâle getirildi.
 
 ---
 
@@ -116,9 +124,16 @@ Daha da iyisi, **girdi formatı elimizdekiyle birebir aynı.** Hizalı RGB-T
 Karşılaştırma için: AnyThermal'ın kendi eğitim seti TartanRGBT **16 943**
 çift. Yani sadece havadan veriyle bile o mertebenin üstüne çıkılıyor.
 
-**Yapılacak:** AnyThermal deposunu ve ağırlıklarını incele; distilasyon
-hedefinin EdgeTAM'ın RepViT gövdesine takılıp takılmadığına bak (öğretmen
-DINOv2 bir ViT; öğrenci mimarisi serbest olmalı ama doğrulanmalı).
+**Cevaplandı (§6 soru 2):** evet, takılıyor. Distilasyon kaybının **öğrenci
+tarafı mimariden bağımsız** — hizalanması gereken tek şey bir öznitelik
+haritası, ve 1×1 projeksiyon herhangi iki kanal sayısını hizalar. Öğretmenin
+ViT olması öğrenciyi bağlamıyor. `src/training/distill.py` bunu
+`image_encoder`'ın en üst çıktısına (mask decoder'ın tükettiği ve ONNX
+grafiğinin ürettiği [B, 256, S/16, S/16] tensörü) uyguluyor; projeksiyon aşama
+bitince atılıyor ve çıkan checkpoint sıradan bir EdgeTAM state dict'i.
+
+**Yapılacak:** koş ve A3 taban çizgisine karşı ölç. Kust4K'nın 4 024 çifti bu
+aşama için az olabilir — dürüst testi MVUAV'ın 53 828 çifti.
 
 ### A2. MAE / maskeli görüntü modelleme — muhtemelen uygun değil
 
@@ -171,6 +186,15 @@ ayrıştırması temiz örnek veriyor mu? Yan yana duran iki araç tek bileşene
 kaynıyorsa hedef yine bozuk olur. Bileşen sayısı ve alan dağılımını çıkar;
 gerekirse en büyük %N'i ele.
 
+*Bunun aracı hazır:* `index_frames` + `summarise` semantik haritaları okuyup
+(görüntü decode etmeden, GPU'ya dokunmadan) sınıf başına örnek sayısını, boyut
+dağılımını ve hangi kapının neyi reddettiğini raporluyor. Kaynaşmanın sinyali
+`InstanceGates.fill` — kendi kutusunun dörtte birini dolduran bileşen genelde
+ince bir piksel köprüsüyle birleşmiş iki nesnedir. Notebook 07'nin 11. ve 12.
+hücreleri sayıyı ve görüntüyü birlikte veriyor; **hiçbir GPU-saati harcanmadan
+önce**. `decompose` bileşenleri sınıf sınıf buluyor, birleşim üzerinden değil —
+bir arabaya değen bir insan böylece iki örnek kalıyor.
+
 **AeroVIS'te bu adım hiç gerekmiyor** — zaten örnek maskesi + kimlik veriyor
 (YTVIS biçimi). Ama o video, aşama C'ye ait.
 
@@ -221,15 +245,28 @@ gerekirse en büyük %N'i ele.
 
 1. **Bağlantılı bileşen ayrıştırması temiz örnek veriyor mu?** §4.1'deki ilk
    kontrol. Bütün B aşaması buna bağlı; en ucuz ve en riskli adım bu.
-2. **AnyThermal'ın distilasyon hedefi RepViT gövdesine takılıyor mu?**
+   *Ölçüm hazır* — notebook 07 hücre 11–12, GPU'suz. Cevap hâlâ yok.
+2. ~~**AnyThermal'ın distilasyon hedefi RepViT gövdesine takılıyor mu?**~~
+   **Cevaplandı: evet.** Distilasyon kaybının öğrenci tarafı mimariden
+   bağımsız; hizalanması gereken tek şey bir öznitelik haritası. Gerekçe §3
+   A1'de, uygulaması `src/training/distill.py`'de. Geriye kalan soru artık
+   "takılıyor mu" değil, **"bir şey kazandırıyor mu"** — o A3'e karşı ölçülecek.
 3. **Kust4K'nın "şey" sınıfları yeterli örnek üretiyor mu?** 4 024 görüntüde
-   kaç araç/insan bileşeni var — bilinmiyor, sayılmalı.
+   kaç araç/insan bileşeni var — bilinmiyor, sayılmalı. *Sayan kod hazır*
+   (`summarise(index, spec)`), sayı hâlâ yok.
 4. **Statik eğitim gerçekten J&F'i iyileştiriyor mu?** Encoder'ı statik veriyle
    eğitip video setinde ölçmek, aşamalar arası transferin işe yaradığı
    varsayımına dayanıyor. Bu varsayım A3 taban çizgisine karşı ölçülmeli.
+   **Bu soruyu notebook 07 cevaplayamaz** — `eval_instances.py` tek prompt'lu
+   kare skorluyor, J&F ise hafıza bankası istiyor. Vekil ile asıl metriğin
+   karıştırılmaması gereken yer burası.
 5. **Veri sızıntısı.** Eğitim ve değerlendirme setleri kaynak paylaşmamalı;
    hangi ikililerin çakıştığı raporda Bölüm 5.3'te. Güvenli kurulum:
    Kust4K + MVUAV'da eğit, J&F'i AeroVIS ya da UAVScenes'te ölç.
+6. **PEFT mi tam fine-tune mu?** Notebook 06 bunu klip modunda soruyor,
+   notebook 07 aynı soruyu görüntü modunda soruyor — ve cevaplar aynı olmak
+   zorunda değil: burada hareket eden 9.3 M parametreye karşı çok daha çeşitli
+   bir sahne kümesi var. İki ölçüm ayrı ayrı raporlanmalı.
 
 ---
 
@@ -239,3 +276,5 @@ gerekirse en büyük %N'i ele.
 - AnyThermal — arXiv 2602.06203, <https://anythermal.github.io/>
 - Veri setleri — `docs/datasets.md`, rapor Bölüm 5
 - Mevcut eğitim kararları — `src/training/finetune.py` modül dokümanı
+- **Kurulumun kendisi** — `docs/encoder_mimari.md` (bu planın uygulanmış hâli)
+- **Çalıştırmak için** — `notebooks/07_encoder_aerial_rgbt.ipynb`

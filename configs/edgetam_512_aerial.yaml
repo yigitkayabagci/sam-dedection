@@ -1,0 +1,33 @@
+# EdgeTAM at 512x512, image encoder trained on static aerial / RGB-T instances.
+#
+# Identical to configs/edgetam_512.yaml except for the checkpoint. That is the
+# point, and it is the same point configs/edgetam_512_thermal.yaml makes: the
+# training moves weights and nothing else, so the ONNX export, the engine build,
+# check_trt_parity.py and compare_backends.py all keep working untouched.
+#
+# One thing does differ from the thermal fine-tune, and it is worth knowing:
+# this checkpoint's *memory path is still the stock one*, because stage B never
+# trains it (src/training/image_loop.py runs with no memory bank at all). So
+# this is an encoder result being read through an untrained memory path -- the
+# honest first measurement, and the reason stage C exists.
+#
+# Produce the checkpoint with notebooks/07_encoder_aerial_rgbt.ipynb, or:
+#   python tools/train_encoder.py --data <root> --spec kust4k \
+#       --out checkpoints/edgetam_aerial_512.pt --method finetune
+#
+# Then re-export and rebuild engines:
+#   python tools/export_edgetam_onnx.py --outdir models512_aerial/ --image-size 512 \
+#       --checkpoint checkpoints/edgetam_aerial_512.pt --verify
+#   python tools/build_trt_engines.py --outdir models512_aerial/ --max-batch 4
+#
+# Compare against configs/edgetam_512.yaml (the stock checkpoint at the same
+# resolution), never against the 1024 config -- otherwise the measurement is of
+# the resolution change rather than of the training.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_aerial_512.pt
+image_size: 512                           # overrides the Hydra config's 1024
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

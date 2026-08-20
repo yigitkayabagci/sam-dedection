@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Six notebooks, meant for Colab. Everything they orchestrate lives in `src/`
+Seven notebooks, meant for Colab. Everything they orchestrate lives in `src/`
 and `tools/` and is unit-tested without a GPU — the notebooks are the recipe,
 not the implementation.
 
@@ -12,6 +12,14 @@ not the implementation.
 | 04 | `04_samurai_long_video.ipynb` | SAMURAI thresholds + a before/after | **nothing** |
 | 05 | `05_adaptive_inference_sahi.ipynb` | whether the latency margin is worth spending | 01 for the data |
 | 06 | `06_lora_vs_finetune.ipynb` | LoRA against the partial fine-tune, scored on `test` | **nothing** — it labels and trains both |
+| 07 | `07_encoder_aerial_rgbt.ipynb` | `edgetam_aerial{,_lora}_512.pt` on your Drive + a held-out instance score | an aerial RGB-T dataset staged in your Drive |
+
+**Notebook 07 is a different axis from 01–06.** Those specialise the *whole*
+tracker on thermal video; 07 trains the **image encoder alone** on static
+aerial imagery, with the memory path frozen and never executed. It is stage B
+of `docs/encoder_training_todo.md`; the architecture it implements is laid out
+in `docs/encoder_mimari.md`. Its dataset comes off your Drive rather than a
+public URL, because none of these sets has one that survives a click-through.
 
 ## Three things to know before starting
 
@@ -49,6 +57,11 @@ Each is argued where it is made; this is the index.
 
 | decision | where | one line |
 |---|---|---|
+| semantic maps decomposed into instances, not trained on directly | 07, `src/training/aerial.py` | a promptable segmenter trained on "all cars are car" pulls two adjacent cars together |
+| one encode, many prompts | 07, `src/training/image_loop.py` | the encoder is 38.7 GFLOP and does not depend on the prompt |
+| the static loop goes through `track_step` | `src/training/image_loop.py` | a still image *is* frame 0 of a clip; two code paths for it would drift |
+| no `object_score` term on static data | 07, `src/training/losses.py` | there is no `exist` label, and BCE against a constant 1 teaches the head to fire unconditionally |
+| distillation for pretraining, not MAE | 07, `src/training/distill.py` | MAE masks tokens and needs a ViT; the student side of a distillation loss is architecture-free |
 | Anti-UAV410, not HIT-UAV or LSOTB-TIR | 01, 02 | 640×512 mono thermal video with a per-frame `exist` flag, and a 512 crop is native pixels |
 | a labelling stride, not fewer sequences | `src/training/labels.py` | a skipped frame keeps `exist` and its box; at 25 fps its mask was nearly its neighbour's |
 | partial fine-tune, not LoRA | 02, `src/training/finetune.py` | the argument: 13.9 M parameters is not memory-bound, and merged LoRA is just weights |
@@ -69,7 +82,7 @@ Everything these notebooks call is tested on CPU with **nothing installed but
 numpy and torch** — no EdgeTAM, no GPU:
 
 ```bash
-python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule
+python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill
 ```
 
 `tests.test_loader` and the end-to-end labelling case in

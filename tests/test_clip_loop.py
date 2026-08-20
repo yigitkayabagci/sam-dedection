@@ -64,13 +64,21 @@ class FakeSam2(nn.Module):
         self.no_obj_ptr = nn.Parameter(torch.zeros(1, 8))
         self.prompted: list[bool] = []
         self.seen: list[int] = []
+        self.encodes: list[int] = []   # rows `track_step` was asked about
+        self.images: list[int] = []    # images each `forward_image` encoded
 
     def forward_image(self, images):
+        self.images.append(int(images.shape[0]))
         return {"features": self.image_encoder(images)}
 
     def _prepare_backbone_features(self, backbone_out):
+        # SAM 2 flattens NxCxHxW to HWxNxC before handing features on, so the
+        # batch axis a caller has to index is 1, not 0. `image_loop` selects
+        # rows along it to prompt several instances against one encode, so the
+        # stand-in has to have that shape or the test would pin a convenience.
         feats = backbone_out["features"]
-        return None, [feats], [torch.zeros_like(feats)], [(self.size, self.size)]
+        flat = feats.flatten(2).permute(2, 0, 1)
+        return None, [flat], [torch.zeros_like(flat)], [(self.size, self.size)]
 
     def _forward_sam_heads(self, backbone_features, point_inputs=None, **kwargs):
         low = self.sam_mask_decoder(backbone_features)
@@ -83,12 +91,16 @@ class FakeSam2(nn.Module):
 
     def track_step(self, frame_idx, is_init_cond_frame, current_vision_feats,
                    current_vision_pos_embeds, feat_sizes, point_inputs, mask_inputs,
-                   output_dict, num_frames, **kwargs):
+                   output_dict, num_frames, run_mem_encoder=True, **kwargs):
         self.prompted.append(point_inputs is not None)
         self.seen.append(len(output_dict["cond_frame_outputs"])
                          + len(output_dict["non_cond_frame_outputs"]))
+        self.encodes.append(int(current_vision_feats[-1].shape[1]))
 
-        features = current_vision_feats[0]
+        flat = current_vision_feats[-1]                    # HWxNxC
+        height, width = feat_sizes[-1]
+        features = flat.permute(1, 2, 0).reshape(flat.shape[1], flat.shape[2],
+                                                 height, width)
         # Condition on the memory the loop filed, so a bookkeeping mistake
         # changes the numbers instead of passing silently.
         for stored in output_dict["non_cond_frame_outputs"].values():
@@ -96,13 +108,17 @@ class FakeSam2(nn.Module):
         _, _, _, low, high, obj_ptr, score = self._forward_sam_heads(
             features, point_inputs=point_inputs
         )
-        return {
+        out = {
             "pred_masks": low,
             "pred_masks_high_res": high,
             "obj_ptr": obj_ptr,
             "object_score_logits": score,
-            "maskmem": self.memory_encoder(features),
         }
+        # The real one skips the memory encoder entirely when asked to; the
+        # static loop asks, because nothing will ever read what it would write.
+        if run_mem_encoder:
+            out["maskmem"] = self.memory_encoder(features)
+        return out
 
 
 def fake_batch(batch: int = 2, frames: int = 4, labelled=(1, 2)) -> Batch:
