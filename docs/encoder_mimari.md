@@ -4,7 +4,44 @@
 **nasıl kurulduğunu** anlatıyor: hangi parça neyi eğitiyor, veri hangi şekle
 giriyor, kayıp hangi terimlerden oluşuyor, ve hangi dosya nereden sorumlu.
 
-Çalışan hâli: `notebooks/07_encoder_aerial_rgbt.ipynb`.
+Çalışan hâli: `notebooks/07_encoder_aerial_rgbt.ipynb` (üç veri seti) ve
+`notebooks/08_encoder_vtuav_only.ipynb` (sadece VTUAV VIS).
+
+---
+
+## 0. Kısa cevap: hangi model nerede, şu an ne yapıyoruz
+
+**Evet — şu anki tek amaç encoder'i eğitmek.** Video ve hafıza yolu (aşama C)
+bu işin dışında; oraya encoder sağlamlaştıktan sonra geçilecek.
+
+Üç model adı geçiyor ve **üçü çok farklı roller**. En sık karışan yer burası:
+
+| model | bizim için ne | ne zaman çalışıyor | eğitiliyor mu |
+|---|---|---|---|
+| **SAM 2 / EdgeTAM** | **Modelin kendisi.** EdgeTAM, SAM 2'nin küçültülmüş forku (13,9 M) ve `sam2` paketi olarak kuruluyor. Eğittiğimiz ağırlıklar bunun | Her zaman — aşama A ve B'nin ikisinde de | **Evet.** Zaten iş bu |
+| **DINOv3** | **Öğretmen**, model değil. RGB yarısına bakıp öznitelik üretiyor; bizim encoder termal yarısına bakıp aynı özniteliği üretmeye çalışıyor | Yalnızca **aşama A**. Bitince atılıyor | Hayır — donuk, sadece okunuyor |
+| **SAM 3** | **Şu anda kullanılmıyor.** Değerlendirildi, bilinçli olarak ertelendi | — | — |
+
+**DINOv3 mimariyi bozmuyor.** Distilasyon `image_encoder`'ın **ağırlık
+değerlerini** değiştiriyor, başka hiçbir şeyi değil: aynı modüller, aynı
+state-dict anahtarları, aynı ONNX grafiği, aynı TensorRT motorları. Projeksiyon
+başlığı eğitim sonunda çöpe gidiyor. Üstelik aşama A sadece bir **başlangıç
+noktası**; aşama B ardından SAM 2'nin kendi hedefiyle (prompt'lu segmentasyon,
+focal + dice + IoU) gerçek maskeler üzerinde eğitiyor. DINOv3 öznitelikleri
+işe yaramasa aşama B onları geri çeker; kaybedilen tek şey GPU saati olur.
+Notebook'taki `distilled+ft` koşusu tam da bunu ölçmek için var.
+
+**SAM 3 neden yok.** Düşünülen iş şuydu: semantik haritayı örneklere ayırmak
+için `components`/`watershed` yerine SAM 3'ü kullanmak — çünkü o, görünüşe
+bakarak karar veriyor, maske geometrisine değil. İki bitişik arabayı ayırmak
+tam olarak bunu gerektiriyor. Ertelendi, çünkü **bu masrafın gerekli olup
+olmadığı henüz ölçülmedi**. Tetikleyici notebook'un füzyon sayısı: bitişik
+nesnelerin tek bileşende birleşme oranı ~%15'i geçerse SAM 3 (ya da SAM 2.1)
+ayırıcı olarak devreye girer. Altındaysa maliyeti karşılığını vermiyor.
+
+Not: VTUAV VIS'te bu sorun **hiç doğmuyor** — maskeleri zaten örnek bazlı
+(`mode="labels"`), yani `decompose`'un yeniden kurmaya çalıştığı şeyin kendisi.
+Ayırıcı sorusu sadece semantik setler (Kust4K, SegFly) için geçerli.
 
 ---
 
@@ -95,8 +132,10 @@ ediyor.
 
 Dört adım (`src/training/aerial.py`):
 
-1. **Sadece "şey" (thing) sınıfları.** Kust4K'nın 8 sınıfının 4'ü: motosiklet,
-   araba, kamyon, insan. Yol/bina/ağaç "stuff" — örneği yok, takip hedefi değil.
+1. **Sadece "şey" (thing) sınıfları.** Kust4K'nın 9 sınıfının 4'ü: motosiklet,
+   araba, kamyon, insan. Yol/bina/ağaç/trafik-tesisi "stuff" — örneği yok, takip
+   hedefi değil. (Bu paleti tahmin etmek iki kez yanlış çıktı; bkz.
+   `docs/datasets.md` "İki palet yanlıştı".)
 2. **Bağlantılı bileşen, sınıf sınıf.** Birleşim üzerinden değil: bir arabaya
    değen bir insan, birleşimde iki sınıfı kapsayan tek bileşen olurdu.
 3. **Kapılar** (`InstanceGates`) — nesne olamayacak kadar küçük, olamayacak
@@ -305,7 +344,7 @@ bağımsız. En sık karışan yer burası:
 | rol | kopyalanan şey | ne zaman | hangi model |
 |---|---|---|---|
 | **1. Sahte etiket** (mask distillation) | öğretmenin **çıktı maskesi** | Anti-UAV410 — sadece kutu etiketi var, maske yok | **SAM 2.1 Hiera Large** ✓ zaten kullanılıyor (`labels.py:Sam2Teacher`) |
-| **2. Öznitelik distilasyonu** (aşama A) | öğretmenin **iç öznitelik haritası** | RGB-T çiftleri — **hiç etiket yok** | DINOv2 *ya da* SAM 2.1 (seçilebilir) |
+| **2. Öznitelik distilasyonu** (aşama A) | öğretmenin **iç öznitelik haritası** | RGB-T çiftleri — **hiç etiket yok** | **DINOv3-ViT-B/16** (varsayılan); DINOv2 ve SAM 2.1 tek dize uzaklıkta |
 | **3. Öğretmen yok** (aşama B) | — hedef veri setinin **gerçek maskesi** | Kust4K vb. — yoğun maske zaten var | yok |
 
 Yani "neden SAM 2.1 large kullanmıyoruz" sorusunun cevabı: **kullanıyoruz** —
@@ -315,7 +354,7 @@ Yani "neden SAM 2.1 large kullanmıyoruz" sorusunun cevabı: **kullanıyoruz** �
 
 ## 8. Aşama A — modalite distilasyonu (etiketsiz)
 
-`src/training/distill.py`. AnyThermal'ın sonucu: DINOv2 sınıfı bir RGB temel
+`src/training/distill.py`. AnyThermal'ın sonucu: DINOv2/v3 sınıfı bir RGB temel
 modeli, **hizalı RGB-T çiftleri ve hiç etiket olmadan** bir termal encoder'a
 öğretmenlik edebiliyor. Öğretmen RGB yarısına, öğrenci termal yarısına bakar.
 Semantik harita hiç okunmadığı için §3'teki problem burada doğmuyor.

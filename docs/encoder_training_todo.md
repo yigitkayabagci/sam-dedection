@@ -174,9 +174,10 @@ ediyor (görüntünün %90'ından fazlasını kaplayan maskeler eleniyor).
 Uygulama:
 
 1. Semantik haritayı **bağlantılı bileşenlere** ayır.
-2. Yalnızca **"şey" (thing) sınıflarını** al — Kust4K'da 8 sınıfın 4'ü:
+2. Yalnızca **"şey" (thing) sınıflarını** al — Kust4K'da 9 sınıfın 4'ü:
    motosiklet, araba, kamyon, insan. "Şey olmayan" (stuff) sınıflar — yol,
-   bina, ağaç — takip hedefi değil, atılır ya da tek parça bırakılır.
+   bina, ağaç, trafik tesisi — takip hedefi değil, atılır ya da tek parça
+   bırakılır.
 3. Her bileşene bir nokta/kutu prompt'u ver, o bileşenin maskesini hedef al.
 4. SAM 2'nin kaybını uygula (`losses.py`'deki focal + dice + IoU, `exist`
    terimi kapalı).
