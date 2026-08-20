@@ -337,6 +337,14 @@ if not REPO.exists():
 os.chdir(REPO)
 sys.path.insert(0, str(REPO))
 
+# Drop this repo's modules so the fast-forward above actually takes effect.
+# `git pull` changes files on disk; it cannot change a module Python already
+# imported, so re-running a later cell after an update quietly keeps running
+# the old code -- which looks exactly like the fix not working. (Safe here:
+# these are pure Python. The same move on torch is not -- see the cell below.)
+for _stale in [n for n in list(sys.modules) if n.split(".")[0] in ("src", "tools")]:
+    del sys.modules[_stale]
+
 # Image mode holds fewer, larger activations than clip mode; the allocator
 # still fragments across the batch-size search, and this costs nothing.
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"

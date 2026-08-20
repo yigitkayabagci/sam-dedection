@@ -453,8 +453,19 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
         return dest
 
     chosen = recipe.chosen(parts)
-    total = sum(p.size for p in chosen)
-    print(f"{len(chosen)} archive(s), about {human(total)} to download")
+    # Report against what is actually going to be fetched. Announcing "40 GB to
+    # download" and then reading three staged copies off Drive is a confusing
+    # way to be right.
+    ready = {p.name: staged(p.name, staging) for p in chosen}
+    for name, where in ready.items():
+        if where is not None:
+            print(f"   {name}: staged at {where}, no download needed")
+    wanted = [p for p in chosen if ready[p.name] is None]
+    if wanted:
+        print(f"{len(wanted)} archive(s), about {human(sum(p.size for p in wanted))} "
+              f"to download")
+    else:
+        print("every archive is staged already; nothing to download")
 
     work = dest / "_archives"
     work.mkdir(parents=True, exist_ok=True)
