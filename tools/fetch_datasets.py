@@ -45,10 +45,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
+from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,7 +176,8 @@ def checksum(path: Path, chunk: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
-def http_download(url: str, path: Path, expect: int = 0, quiet: bool = False) -> Path:
+def http_download(url: str, path: Path, expect: int = 0, quiet: bool = False,
+                  session=None, params: dict | None = None) -> Path:
     """Stream `url` to `path`, resuming a partial file rather than restarting.
 
     Resume matters more than it looks: these are gigabyte archives over a link
@@ -182,6 +186,8 @@ def http_download(url: str, path: Path, expect: int = 0, quiet: bool = False) ->
     """
     import requests
 
+    session = session or requests.Session()
+    params = params or {}
     path.parent.mkdir(parents=True, exist_ok=True)
     have = path.stat().st_size if path.exists() else 0
     if expect and have == expect:
@@ -190,7 +196,8 @@ def http_download(url: str, path: Path, expect: int = 0, quiet: bool = False) ->
         return path
 
     headers = {"Range": f"bytes={have}-"} if have else {}
-    response = requests.get(url, headers=headers, stream=True, timeout=120)
+    response = session.get(url, params=params, headers=headers, stream=True,
+                           timeout=120)
     if have and response.status_code == 200:
         have = 0                      # server ignored the range; start over
     elif response.status_code not in (200, 206):
@@ -209,13 +216,64 @@ def http_download(url: str, path: Path, expect: int = 0, quiet: bool = False) ->
     return path
 
 
-def drive_download(file_id: str, path: Path, quiet: bool = False) -> Path:
-    """A Drive file, through `gdown`.
+QUOTA = "quota"
 
-    Not `requests`: past a few hundred megabytes Drive stops serving the file
-    and serves a "Google Drive can't scan this file for viruses" form instead,
-    with a 200 on it. A plain downloader writes that HTML to disk and reports
-    success. `gdown` replays the form, and it resumes.
+
+def staged(name: str, search: SequenceABC[str]) -> Path | None:
+    """A copy of `<name>.zip` already sitting somewhere we can read.
+
+    The escape hatch for Drive's download quota, and the reason it works: a
+    file in *your own* Drive is not a widely-shared file, so reading it through
+    the Colab mount is an ordinary authenticated read with no shared-file quota
+    attached. Three clicks in the Drive web UI ("Make a copy") turn the one
+    into the other.
+    """
+    for folder in search:
+        candidate = Path(folder).expanduser() / f"{name}.zip"
+        if candidate.is_file() and candidate.stat().st_size > 1 << 20:
+            return candidate
+    return None
+
+
+def drive_confirm(file_id: str) -> tuple[str, object, dict]:
+    """Resolve a Drive id past the "can't scan for viruses" form.
+
+    Past a few hundred megabytes Drive stops serving the file and serves that
+    form instead -- with a 200 on it, so a plain downloader saves the HTML and
+    reports success. Replaying the form's hidden fields yields the real URL.
+    Separate from gdown on purpose: it is a different code path against the
+    same endpoint, and when one is refused the other sometimes is not.
+    """
+    import requests
+
+    session = requests.Session()
+    url = f"https://drive.usercontent.google.com/download?id={file_id}&export=download"
+    response = session.get(url, stream=True, timeout=60,
+                           headers={"Range": "bytes=0-1"})
+    kind = response.headers.get("content-type", "")
+    if "text/html" not in kind:
+        response.close()
+        return url + "&confirm=t", session, {}
+
+    page = session.get(url, timeout=60).text
+    if "Too many users" in page:
+        raise RuntimeError(QUOTA)
+    fields = dict(re.findall(r'name="([^"]+)"\s+value="([^"]*)"', page))
+    action = re.search(r'action="([^"]+)"', page)
+    if not action:
+        raise RuntimeError(f"Drive served a page with no download form for {file_id}")
+    return action.group(1).replace("&amp;", "&"), session, fields
+
+
+def drive_download(file_id: str, path: Path, quiet: bool = False,
+                   attempts: int = 3) -> Path:
+    """A Drive file, by whichever of two routes answers.
+
+    Quota refusals ("Too many users have viewed or downloaded this file
+    recently") are not a property of the file so much as of who is asking:
+    Colab shares its egress addresses with a great many people, so a file that
+    serves fine elsewhere can be refused there. That makes it worth retrying,
+    and worth trying the second route, before giving up on the day.
     """
     try:
         import gdown
@@ -225,14 +283,54 @@ def drive_download(file_id: str, path: Path, quiet: bool = False) -> Path:
         import gdown
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    out = gdown.download(id=file_id, output=str(path), quiet=quiet, resume=True)
-    if out is None:
-        raise RuntimeError(
-            f"Drive refused {file_id}. The usual cause is the daily download "
-            f"quota on a widely-mirrored file; it clears in a few hours. The "
-            f"Baidu mirror on https://zhang-pengyu.github.io/DUT-VTUAV/ is the "
-            f"alternative (code ltnd).")
-    return Path(out)
+    trouble: list[str] = []
+
+    for attempt in range(1, attempts + 1):
+        try:
+            out = gdown.download(id=file_id, output=str(path), quiet=quiet,
+                                 resume=True)
+            if out is not None:
+                return Path(out)
+            trouble.append(f"gdown #{attempt}: refused without saying why")
+        except Exception as error:                       # gdown raises its own
+            trouble.append(f"gdown #{attempt}: {str(error).strip()[:90]}")
+
+        try:
+            url, session, fields = drive_confirm(file_id)
+            return http_download(url, path, quiet=quiet, session=session,
+                                 params=fields)
+        except Exception as error:
+            trouble.append(f"direct #{attempt}: {str(error).strip()[:90]}")
+
+        if attempt < attempts:
+            pause = 15 * attempt
+            print(f"   both routes refused; retrying in {pause}s "
+                  f"({attempt}/{attempts})")
+            time.sleep(pause)
+
+    raise RuntimeError(
+        f"Drive would not serve {file_id} after {attempts} attempts:\n"
+        + "\n".join(f"    {line}" for line in trouble)
+        + "\n\n  This is Drive's download quota, and it is about who is asking "
+          "rather than\n  about the file -- Colab shares its addresses with a "
+          "great many people, so a\n  file that downloads fine elsewhere can be "
+          "refused there. Three ways out:\n\n"
+          "  1. Copy it into your own Drive, which is the reliable one. Open\n"
+          "       https://drive.google.com/drive/folders/"
+          "11E-WPkCPVL49hOKRdCzfgQULmGU8pyz8\n"
+          "     right-click the zip you want, `Make a copy`, and move the copy "
+          "into\n     MyDrive/datasets/. Copying is a server-side operation and "
+          "is not a\n     download, so the quota does not apply -- and reading "
+          "your own file\n     through the Colab mount does not either. Then "
+          "re-run this cell: it\n     looks in MyDrive/datasets/ before it "
+          "touches the network at all.\n\n"
+          "  2. Wait. The refusal usually clears within a few hours.\n\n"
+          "  3. Train on Kust4K and SegFly alone for now -- figshare and the "
+          "Hub have\n     no quota. Know what it costs first: VTUAV is the only "
+          "set here whose\n     masks somebody drew, so without it the score is "
+          "measured on instances\n     `decompose` reconstructed, which grades "
+          "the reconstruction as much as\n     the model. It is also what stage "
+          "A distils from (`DISTILL_ROOT`), so\n     turn `PRETRAIN` off too.")
 
 
 # --------------------------------------------------------------------------
@@ -282,13 +380,27 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     return len(members)
 
 
+# Where a hand-staged archive is looked for before the network is touched.
+# `Make a copy` in Drive puts a shared file into MyDrive, and reading your own
+# file has no shared-file quota on it -- see `drive_download`.
+STAGING = ("/content/drive/MyDrive/datasets",
+           "/content/drive/MyDrive",
+           "/content/staging")
+
+
 def fetch_part(part: Part, dest: Path, work: Path, frames: str,
-               keep: bool, quiet: bool) -> None:
+               keep: bool, quiet: bool,
+               staging: SequenceABC[str] = STAGING) -> None:
     archive = work / f"{part.name}.zip"
     print(f"-- {part.name}"
           + (f"  ({human(part.size)})" if part.size else ""))
 
-    if part.drive:
+    already = staged(part.name, staging)
+    if already is not None:
+        print(f"   using the copy already at {already}")
+        archive = already
+        keep = True                      # never delete something we did not fetch
+    elif part.drive:
         drive_download(part.drive, archive, quiet=quiet)
     else:
         http_download(part.url, archive, expect=part.size, quiet=quiet)
@@ -308,7 +420,8 @@ def fetch_part(part: Part, dest: Path, work: Path, frames: str,
 
 def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
           frames: str = "all", keep: bool = False, quiet: bool = False,
-          limit: int | None = None) -> Path:
+          limit: int | None = None,
+          staging: SequenceABC[str] = STAGING) -> Path:
     """One dataset into `dest`, in the layout `SPECS[name]` globs."""
     recipe = RECIPES[name]
     dest = Path(dest).expanduser()
@@ -330,7 +443,7 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
     work.mkdir(parents=True, exist_ok=True)
     try:
         for part in chosen:
-            fetch_part(part, dest, work, frames, keep, quiet)
+            fetch_part(part, dest, work, frames, keep, quiet, staging)
     finally:
         if not keep and work.exists() and not any(work.iterdir()):
             work.rmdir()

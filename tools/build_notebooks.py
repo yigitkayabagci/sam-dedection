@@ -657,6 +657,19 @@ are served in a way that defeats the obvious approach:
 
 Downloads resume, and each archive is deleted once extracted, which halves the
 peak disk this needs.
+
+**If Drive refuses VTUAV** — *"Too many users have viewed or downloaded this
+file recently"* — that is a quota on **who is asking**, not on the file. Colab
+shares its egress addresses with a great many people, so the same archive can
+serve fine elsewhere while a Colab session is refused it. The fetcher retries
+and tries a second route before giving up, and prints three ways out. The
+reliable one: open the
+[mask-split folder](https://drive.google.com/drive/folders/11E-WPkCPVL49hOKRdCzfgQULmGU8pyz8),
+right-click `train_001.zip` → **Make a copy**, move the copy into
+`MyDrive/datasets/`, and re-run this cell. Copying is server-side and is not a
+download, so no quota applies — and neither does one to reading your own file
+through the mount. The cell looks in `MyDrive/datasets/` **before** it touches
+the network, so a staged copy is used as-is and never re-downloaded.
 """)
 
 # ---------------------------------------------------------------- 7
