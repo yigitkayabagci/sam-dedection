@@ -1,4 +1,4 @@
-\chapter{Encoder Eğitimi: Ne Yaptık}
+\chapter{Encoder Eğitimi}
 \label{ch:egitim}
 
 Buraya kadarki bölümler sabit ağırlıklı bir checkpoint'i hızlandırmayı
@@ -6,17 +6,16 @@ anlattı. EdgeTAM indirildiği gibi alındı, dört TensorRT motoruna taşındı
 ölçüldü. Bu bölüm ters taraf: ağırlıkların kendisini termal ve havadan
 veriyle eğitmek.
 
+Hat üç aşamalı. \textbf{A} ve \textbf{B} kurulu: kodu depoda,
+\texttt{src/training/} altındaki modüller ve üç giriş noktası
+(\texttt{tools/pretrain\_encoder.py}, \texttt{tools/train\_encoder.py},
+\texttt{tools/eval\_instances.py}), hepsi tek oturumda
+\texttt{notebooks/07\_encoder\_aerial\_rgbt.\allowbreak ipynb} ile koşuyor.
+Sıradaki iş onları koşturmak. \textbf{C} önerilen ek adım ve B ölçülmeden
+başlamıyor; sebebi \cref{sec:egitim-sirada}'de.
+
 Bölüm kasten görsel. Her şekil bir kurulumu anlatıyor, metin şekli
 açıklıyor.
-
-\begin{tasarim}
-  \textbf{Bu bölümde tek bir ölçüm yok.} Anlatılan her şey depoda çalışır
-  hâlde: \texttt{src/training/} altındaki modüller, üç giriş noktası
-  (\texttt{tools/pretrain\_encoder.py}, \texttt{tools/train\_encoder.py},
-  \texttt{tools/eval\_instances.py}) ve hepsini tek oturumda koşturan
-  \texttt{notebooks/07\_encoder\_aerial\_rgbt.\allowbreak ipynb}. Hiçbiri
-  bir GPU koşusundan geçmedi. Yazılmış olmak ölçülmüş olmak değildir.
-\end{tasarim}
 
 \section{Dört Parça, Hangisi Eğitiliyor}
 \label{sec:egitim-dort-parca}
@@ -140,10 +139,10 @@ başlamıyor.
 
     \node[esiyi, anchor=south, yshift=2.5mm] at (a.north) {kod yazıldı};
     \node[esiyi, anchor=south, yshift=2.5mm] at (b.north) {kod yazıldı};
-    \node[esnot, anchor=south, yshift=2.5mm] at (c.north) {henüz yok};
+    \node[esnot, anchor=south, yshift=2.5mm] at (c.north) {önerilen ek adım};
 
-    \node[esvurgu, anchor=north, yshift=-2.5mm, text width=60mm] at (2.35,-4.2)
-      {ölçüm burada duruyor: hiçbir aşama koşulmadı};
+    \node[esnot, anchor=north, yshift=-2.5mm, text width=62mm] at (2.35,-4.2)
+      {sıradaki iş: bu ikisini koşturmak};
   \end{tikzpicture}
   \caption{Üç aşama, her biri kendi verisi ve kendi loss'uyla. Aşama A hiç
     etiket okumuyor, B dense mask istiyor, C instance ID'li video istiyor.
@@ -275,14 +274,14 @@ feature map'inin loss'tan önce resample edilip edilmediği.
   \label{fig:egitim-ogretmen}
 \end{figure}
 
-\begin{tasarim}
-  \textbf{Hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
-  Baseline: stok EdgeTAM checkpoint'inden başlayan aşama B. Pretraining bu
-  baseline'ı geçmiyorsa harcanmış GPU saatidir. Notebook üçüncü bir koşu
-  yapıp sadece \texttt{--base}'i değiştirerek bunu ölçüyor. \textbf{Cosine
-  loss teacher'lar arasında karşılaştırılamaz.} Karşılaştırılabilir olan
-  tek sayı test split'indeki instance IoU'su.
-\end{tasarim}
+\textbf{Hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
+Baseline: stok EdgeTAM checkpoint'inden başlayan aşama B. Pretraining bu
+baseline'ı geçmiyorsa harcanmış GPU saatidir, ve bunu yalnızca
+karşılaştırma söyleyebilir. Notebook üçüncü bir koşu yapıp sadece
+\texttt{--base}'i değiştirerek bunu ölçüyor.
+
+Bir uyarı: \textbf{cosine loss teacher'lar arasında karşılaştırılamaz.}
+Karşılaştırılabilir olan tek sayı test split'indeki instance IoU'su.
 
 \subsection*{Çift bütçesi: VTUAV'ın yeri burası}
 
@@ -795,7 +794,7 @@ Yani Kust4K \texttt{train}, VTUAV VIS \texttt{all}. Gürültülü bir target'tan
   \label{fig:egitim-olcum}
 \end{figure}
 
-\section{Şu An Elde Ne Var}
+\section{Çıktı ve Dosya Haritası}
 \label{sec:egitim-durum}
 
 Bittiğinde çıkan şey sıradan bir EdgeTAM checkpoint'i: aynı anahtarlar,
@@ -839,18 +838,23 @@ koşturulmalı.
 \end{tabular}
 \end{center}
 
-\begin{tasarim}
-  \textbf{Sıradaki adım bir kod değil, bir koşu.} Aşağıdaki üç sayı, bu
-  bölümdeki her cümleyi ya doğrular ya da çöpe atar:
-  \begin{enumerate}
-    \item \textbf{Kaynaşma oranı} (GPU'suz, dakikalar içinde). Connected
-          component ayrıştırması temiz instance veriyor mu? Bütün B aşaması
-          buna bağlı.
-    \item \textbf{Baseline'a karşı aşama A.} Stok checkpoint'ten başlayan
-          B, pretrain edilmiş checkpoint'ten başlayan B'yi yeniyorsa aşama
-          A'nın gerekçesi yoktur.
-    \item \textbf{LoRA'ya karşı kısmi fine-tune}, image modunda. Clip
-          modundaki cevapla aynı çıkmak zorunda değil.
-  \end{enumerate}
-  Aşama C, ikinci sayı gelmeden başlamıyor.
-\end{tasarim}
+\section{Sıradaki Üç Ölçüm}
+\label{sec:egitim-sirada}
+
+Sıradaki adım bir kod değil, bir koşu. Aşağıdaki üç sayı bu bölümdeki her
+cümleyi ya doğruluyor ya da çöpe atıyor.
+
+\begin{enumerate}
+  \item \textbf{Kaynaşma oranı} (GPU'suz, dakikalar içinde). Connected
+        component ayrıştırması temiz instance veriyor mu? Bütün B aşaması
+        buna bağlı.
+  \item \textbf{Baseline'a karşı aşama A.} Stok checkpoint'ten başlayan B,
+        pretrain edilmiş checkpoint'ten başlayan B'yi yeniyorsa aşama A'nın
+        gerekçesi yoktur.
+  \item \textbf{LoRA'ya karşı kısmi fine-tune}, image modunda. Clip
+        modundaki cevapla aynı çıkmak zorunda değil.
+\end{enumerate}
+
+Aşama C, ikinci sayı gelmeden başlamıyor. Elde edilmiş bir encoder olmadan
+memory yolunu eğitmek, düzeltilmek istenen hata modunu ölçemeyen bir koşu
+olurdu.

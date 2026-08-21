@@ -166,12 +166,6 @@ Deneyler bölümünde (Bölüm 4) her sonuç iki kutudan biriyle işaretlidir:
 Rapordaki **her sayı** bu iki kategoriden birine girer; bekleyen (TODO) bir
 ölçüm kalmamıştır.
 
-Üçüncü bir kutu yalnızca Bölüm 6'da (encoder eğitimi) kullanılıyor:
-
-- **Mor (Tasarım kararı: kod yazıldı, ölçüm bekliyor)**: anlatılan şey
-  depoda çalışır hâlde, ama hiçbir GPU koşusundan geçmedi. O bölümde
-  **tek bir ölçüm yoktur**. Bu kutu bunu her seferinde açıkça söylüyor:
-  bir tasarım gerekçesi bir sayının yerine geçmez.
 
 ## Görsel eklemek
 

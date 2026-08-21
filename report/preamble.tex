@@ -71,8 +71,8 @@
 \usetikzlibrary{arrows.meta, positioning, fit, backgrounds, calc}
 
 % El çizimi ("Excalidraw") şekil stilleri -- yalnızca encoder eğitimi
-% bölümü kullanıyor, ama palet ve yazı tipi tanımları burada yükleniyor
-% çünkü aşağıdaki \newtcolorbox{tasarim} eskiz paletinden renk alıyor.
+% bölümü kullanıyor. tikz'den hemen sonra yükleniyor: kendi
+% \usetikzlibrary çağrıları var ve fontspec'e ihtiyaç duyuyor.
 \input{eskiz}
 
 % normalem: ulem varsayılan olarak \emph'i altı çizili yapıyor, ki raporun
@@ -119,17 +119,6 @@
   colbacktitle=vurgu, title={TODO -- cihazda ölçülüp doldurulacak}, #1,
 }
 
-% Kodu yazılmış ama henüz koşulmamış bir tasarım kararı. Encoder eğitimi
-% bölümünün tamamı bu kategoride: orada anlatılan her şey depoda çalışır
-% hâlde duruyor, hiçbiri bir GPU koşusuyla ölçülmedi. Yukarıdaki üç kutudan
-% ayrı bir kutu olmasının sebebi de bu -- "ölçülmedi" ile "ölçülecek" aynı
-% şey değil, ve bir tasarım gerekçesi bir sayı yerine geçmez.
-\newtcolorbox{tasarim}[1][]{
-  enhanced, breakable, colback=esmord!22, colframe=esmor,
-  boxrule=0.6pt, left=2mm, right=2mm, top=1mm, bottom=1mm,
-  fonttitle=\sffamily\bfseries, coltitle=white,
-  colbacktitle=esmor, title={Tasarım kararı: kod yazıldı, ölçüm bekliyor}, #1,
-}
 
 % Görsel/figür yer tutucusu: kullanıcı kendi görselini yerel olarak
 % ekleyecek, bu kutu onun yerini işaretler ve derlemeyi hiçbir zaman
