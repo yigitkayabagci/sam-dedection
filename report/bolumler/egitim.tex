@@ -296,7 +296,7 @@ loss'tan önce resample edilip edilmediği.
     \eskizbasla[19]
     \node[kmor, text width=34mm] (d3) at (0,0)
       {\textbf{DINOv3} ViT-B/16\\{\footnotesize $512/16 = 32{\times}32$}\\
-       {\footnotesize \emph{varsayılan}}};
+       {\footnotesize \emph{kod varsayılanı}}};
     \node[kgri, text width=34mm] (d2) at (5.3,0)
       {DINOv2 base\\{\footnotesize $518/14 = 37{\times}37$}\\
        {\footnotesize açık, hesap gerekmez}};
@@ -336,12 +336,15 @@ karşılaştırma yok. Asıl gerilim DINOv3 ile SAM 2.1 arasında:
         kolay, soğuk arka plandaki sıcak nesne belirgin bir kenar; eksik olan
         o kenarın \emph{ne} olduğu. SAM 2'nin feature'ları ise tasarım gereği
         sınıftan bağımsız, her şeyi segmentliyor ama ne olduğunu bilmiyor.
-  \item \textbf{SAM 2.1 lehine:} tensörler birebir uyuyor, 256 kanal ve
-        stride 16, yani projection temsili değiştirmiyor. Daha önemlisi
-        encoder'ı SAM 2'nin uzayına \emph{doğru} itiyor, ondan uzağa değil.
-        Yani bir önceki bölümdeki hiza riskini büyütmek yerine küçültüyor.
-        Bedeli hesap: Hiera-Large 1024'te koşuyor, ki EdgeTAM'ın var olma
-        sebebi tam olarak ondan kaçmak.
+  \item \textbf{SAM 2.1 lehine:} üç şey birden. Tensörler birebir uyuyor,
+        256 kanal ve stride 16, yani projection bir temsil değişikliği değil.
+        Encoder'ı SAM 2'nin uzayına \emph{doğru} itiyor, ondan uzağa değil,
+        yani bir önceki bölümdeki hiza riskini büyütmek yerine küçültüyor. Ve
+        en önemlisi: EdgeTAM \emph{zaten} SAM 2'nin distilasyonu, dolayısıyla
+        ondan ``termal girdiden SAM 2'nin RGB feature'larını üret'' demek,
+        checkpoint'in doğduğu hedefin aynısını istemek oluyor, üstüne yalnızca
+        modalite boşluğu eklenmiş hâlde. Bedeli hesap: Hiera-Large 1024'te
+        koşuyor, ki EdgeTAM'ın var olma sebebi tam olarak ondan kaçmak.
 \end{itemize}
 
 \textbf{İkisi birden kullanılmıyor,} ve sebebi teknik bir engel değil.
@@ -350,6 +353,14 @@ ve verileri iki mertebe farklı; ortak bir batch aşama A'nın çoğunu çöpe
 atardı. Aynı fikrin ucuz hâli zaten aşağıda: çapa terimi, yani feature
 distillation'ı ikinci bir teacher olarak değil regularizer olarak
 kullanmak.
+
+\textbf{Önce SAM 2.1 koşulacak.} Sebep DINOv3'ün zayıf olması değil,
+sıralamanın riski: SAM 2.1 varyantı aşama C hiç yapılmasa bile ayakta kalan
+varyant, çünkü encoder'ı memory yolunun zaten beklediği uzayda tutuyor.
+DINOv3 varyantının üst sınırı daha yüksek ama hiza riskini o taşıyor, yani
+ikinci koşu olması doğru. Aradaki tek fark bir string; veri, seed, schedule
+ve loss aynı kalıyor, dolayısıyla çıkan fark teacher'ın kendisine ait
+oluyor.
 
 \textbf{Hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
 Baseline: stok EdgeTAM checkpoint'inden başlayan aşama B. Pretraining bu
