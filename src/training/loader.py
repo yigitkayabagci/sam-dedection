@@ -59,19 +59,41 @@ def batch_clips(
     ~60000 clips, and an "epoch" over all of them is a day. A capped, reshuffled
     pass sees a different random subset each time, which is what is wanted
     anyway -- consecutive clip starts overlap in 7 of their 8 frames.
+
+    **`limit` is a floor as well as a ceiling**, and it was not always. A single
+    pass over a pool smaller than `limit * size` used to end the epoch early and
+    say nothing: VTUAV alone is ~1 400 training windows, so at batch 64 an epoch
+    asked for 400 steps and stopped after 21. Everything downstream then reads
+    as if the run happened -- there is no error, the loss curve is just short --
+    and `OneCycleLR`, built for 400 steps, never leaves its warm-up, so the run
+    trains at a fraction of the intended rate.
+
+    That also silently voided the comparison this repo is built around: a
+    three-dataset run filled its 400 steps while the VTUAV-only run did 21, so
+    "same schedule, only the data differs" was not true. The pool is now cycled
+    with a fresh permutation per pass until `limit` batches exist, which is what
+    "400 steps of batch 64" already meant everywhere it was written down.
     """
-    order = np.random.default_rng(seed).permutation(len(clips))
+    if not clips:
+        return
+    rng = np.random.default_rng(seed)
     batch: list[Clip] = []
     produced = 0
-    for i in order:
-        batch.append(clips[int(i)])
-        if len(batch) < size:
-            continue
-        yield batch
-        produced += 1
-        batch = []
-        if limit is not None and produced >= limit:
-            return
+    while True:
+        for i in rng.permutation(len(clips)):
+            batch.append(clips[int(i)])
+            if len(batch) < size:
+                continue
+            yield batch
+            produced += 1
+            batch = []
+            if limit is not None and produced >= limit:
+                return
+        # One pass done. Without a limit that is the epoch; with one, keep
+        # drawing -- a fresh permutation each time, so a small pool is reused
+        # in a different order rather than in the same order.
+        if limit is None:
+            break
     if batch and not drop_last and (limit is None or produced < limit):
         yield batch
 
