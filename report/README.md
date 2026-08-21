@@ -65,8 +65,22 @@ make
 ```
 
 Bu, `latexmk -xelatex` çalıştırır -- XeLaTeX, biber ve gereken kadar
-tekrar geçişi otomatik sırayla yapar. Çıktı: `report/main.pdf`
-(boş bir `report/` klasöründen test edilmiştir).
+tekrar geçişi otomatik sırayla yapar. İki PDF üretir:
+
+| çıktı | ne |
+|---|---|
+| `report/main.pdf` | tam rapor, 8 bölüm |
+| `report/bolum6.pdf` | yalnızca encoder eğitimi bölümü, ayrı basım |
+
+Tek başına biri isteniyorsa: `make main.pdf` ya da `make bolum6.pdf`.
+
+**`bolum6.pdf` ayrı bir kopya değil**, aynı `bolumler/egitim.tex`'i aynı
+stille derliyor; bölüme yapılan bir düzeltme ikisine birden giriyor. Bölüm
+numarası da 6 kalıyor (`\setcounter{chapter}{5}`), böylece iki PDF'te aynı
+şekle aynı numarayla atıf yapılabiliyor. Tek fark diğer bölümlere yapılan
+atıflarda: ana raporda `Bölüm 4`, ayrı basımda `ana raporun 4. bölümü`.
+Bunu `\diger` makrosu yapıyor (tanımı `preamble.tex`'te, ayrı basımdaki
+karşılığı `bolum6.tex`'in başında).
 
 Elle derlemek isterseniz:
 ```bash
@@ -77,13 +91,14 @@ xelatex main.tex
 ```
 
 Temizlik: `make clean` (yalnızca ara dosyalar) / `make cleanall`
-(+ `main.pdf`).
+(+ iki PDF).
 
 ## Yapı
 
 ```
 report/
 ├── main.tex               -- ana dosya, başlık sayfası, bölüm sırası
+├── bolum6.tex             -- yalnızca encoder eğitimi bölümü, ayrı basım
 ├── preamble.tex           -- stil: fontlar, renkler, kutu/tablo tanımları
 ├── eskiz.tex              -- el çizimi ("Excalidraw") TikZ stilleri
 ├── kaynaklar.bib          -- SAM / SAM 2 / EdgeTAM / TensorRT kaynakları

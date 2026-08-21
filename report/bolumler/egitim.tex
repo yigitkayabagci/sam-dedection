@@ -82,7 +82,8 @@ Hafıza yolu frozen kalıyor. Üç sebep var, herhangi biri tek başına yeterdi
         değişikliğin ne yaptığını zaten ölçtü: yalnızca memory encoder'ı
         nicemlemek ortalama IoU'yu 0,9397'ye düşürdü. Hasar tek karede
         kalmadı, klip boyunca birikti; çünkü onun çıktısı memory bank'a
-        yazılıp sonraki yedi karede geri okunuyor (\cref{ch:deneyler}).
+        yazılıp sonraki yedi karede geri okunuyor
+        (\diger{\cref{ch:deneyler}}{ana raporun 4. bölümü}).
   \item \textbf{ONNX yeniden yazımının zor olanı orası:} sabit memory
         slotları, döşenmiş RoPE tabloları, additive mask. O grafiklerin
         türetildiği ağırlıkları yeniden eğitmek, checkpoint ile motor
@@ -799,7 +800,8 @@ Yani Kust4K \texttt{train}, VTUAV VIS \texttt{all}. Gürültülü bir target'tan
 
 Bittiğinde çıkan şey sıradan bir EdgeTAM checkpoint'i: aynı anahtarlar,
 aynı loader, aynı ONNX export, aynı motor derlemesi. Yani
-\cref{ch:sistem-yontem}'de anlatılan dağıtım zinciri hiç değişmiyor.
+\diger{\cref{ch:sistem-yontem}'te}{ana raporun 3. bölümünde} anlatılan
+dağıtım zinciri hiç değişmiyor.
 Hafıza yolu hâlâ stok.
 
 Tek incelik: encoder ONNX grafiği mask decoder'ın \texttt{conv\_s0} /

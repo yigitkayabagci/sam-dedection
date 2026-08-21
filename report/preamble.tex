@@ -158,6 +158,15 @@
     {\gorselyertutucu{eksik dosya: {\scriptsize\texttt{\detokenize{#2}}}}}%
 }
 
+% Encoder eğitimi bölümü iki yerde derleniyor: ana raporun içinde
+% (main.tex) ve tek başına (bolum6.tex). Tek başınayken diğer bölümler
+% ortada yok, dolayısıyla onlara yapılan \cref'ler çözülemez. \diger iki
+% tam ifade alıyor: birincisi ana raporda, ikincisi ayrı basımda yazılan.
+% Ekler de ifadenin içinde ("...'de" ile "...bölümünde" aynı şey değil).
+% bolum6.tex kendi tanımını \input{preamble}'dan *önce* yapıyor, o yüzden
+% burası \providecommand.
+\providecommand{\diger}[2]{#1}
+
 % Tabloda havadan (UAV) çekim yapan veri setlerini işaretleyen yıldız.
 \newcommand{\hava}{\textsuperscript{$\star$}}
 

@@ -1,0 +1,56 @@
+% ============================================================================
+% bolum6.tex -- encoder eğitimi bölümünün tek başına, ana rapordan bağımsız
+% basımı. Aynı kaynak dosyayı (bolumler/egitim.tex) ve aynı stili kullanıyor,
+% yani iki PDF birbirinden ayrışamaz: bölüme yapılan bir düzeltme ikisine
+% birden giriyor.
+%
+% Derleme:
+%   latexmk -xelatex bolum6.tex        (ya da: make bolum6.pdf)
+%
+% Ana raporla arasındaki üç fark:
+%   1. \diger burada ikinci argümanını yazıyor, yani başka bölümlere yapılan
+%      atıflar "ana raporun 4. bölümü" gibi düz metne dönüşüyor. Ana raporda
+%      aynı yerler normal \cref. Tanım \input{preamble}'dan önce, çünkü orada
+%      \providecommand var.
+%   2. Bölüm sayacı 5'e kuruluyor: bölüm ana rapordaki gibi 6 numaralanıyor,
+%      şekiller de 6.1, 6.2 diye gidiyor. İki PDF'te aynı şekle aynı numarayla
+%      atıf yapılabilsin diye.
+%   3. Kaynakça yalnızca bu bölümün alıntıladıklarını içeriyor (biblatex
+%      zaten öyle çalışıyor, kaynaklar.bib ortak).
+% ============================================================================
+\documentclass{scrreprt}
+
+\newcommand{\diger}[2]{#2}
+
+\input{preamble}
+
+% Ayrı basım olduğunu söyleyen kısa künye. Her sayfanın altında duruyor;
+% ana raporun kapağı burada yok, okuyucunun elindeki şeyin nereden koptuğunu
+% bilmesi yeterli.
+\KOMAoptions{footsepline=true}
+\ifoot*{\sffamily\scriptsize\color{grimetin}%
+  EdgeTAM'ın Jetson AGX Orin Üzerinde TensorRT ile Hızlandırılması}
+\ofoot*{\sffamily\scriptsize\color{grimetin}Yiğit Kaya Bağcı}
+
+\begin{document}
+
+\pagenumbering{arabic}
+
+% \setchapterpreamble[o]: KOMA bunu *bölüm başlığının üstüne, aynı sayfaya*
+% koyuyor. Ayrı bir \begin{center} bloğu kullanılsaydı \chapter kendi
+% \clearpage'ini attığı için künye tek başına bir sayfada kalırdı.
+\setchapterpreamble[o]{%
+  {\sffamily\small\color{grimetin}%
+   Ana rapordan ayrı basım.\par
+   \textcolor{anarenk}{\bfseries EdgeTAM'ın Jetson AGX Orin Üzerinde
+   TensorRT ile Hızlandırılması}\par}%
+  \vspace{2mm}%
+  \textcolor{kutucerceve}{\rule{\linewidth}{0.4pt}}%
+  \vspace{2mm}}
+
+\setcounter{chapter}{5}
+\input{bolumler/egitim}
+
+\printbibliography[title={Kaynakça}]
+
+\end{document}
