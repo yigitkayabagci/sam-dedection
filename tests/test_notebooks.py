@@ -233,6 +233,14 @@ class TestTheCheckerCatchesThings(unittest.TestCase):
         self.assertEqual(check(self.notebook(
             "for d in (1, 2):\n    print(d)\n")), [])
 
+    def test_a_loop_carried_name_is_not_a_false_positive(self):
+        # `prev` is read on a line above the one that binds it, but the
+        # binding lives in the same statement and runs on the first iteration
+        # -- Python is fine with it, so the check has to be too.
+        self.assertEqual(check(self.notebook(
+            "total = 0\nfor i in range(3):\n"
+            "    if i:\n        total += prev\n    prev = i\n")), [])
+
     def test_a_comprehension_variable_is_not_reported(self):
         self.assertEqual(check(self.notebook(
             "xs = [1]\nys = [x * 2 for x in xs]\nprint(ys)\n")), [])

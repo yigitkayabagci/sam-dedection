@@ -159,6 +159,36 @@ class TestTokensToMap(unittest.TestCase):
             tokens_to_map(torch.randn(1, 8, 4), 4)
 
 
+class TestConvolutionalTeacher(unittest.TestCase):
+    """A teacher that returns a map, not tokens -- DINOv3's ConvNeXt students."""
+
+    class FakeConvModel:
+        dtype = torch.float32
+
+        def __call__(self, pixel_values):
+            batch = pixel_values.shape[0]
+            out = type("Output", (), {})()
+            # Stride 32, the ConvNeXt geometry: 512 in, 16x16 out, [B, C, h, w].
+            out.last_hidden_state = torch.randn(batch, 768, 16, 16)
+            return out
+
+    def test_a_4d_hidden_state_is_the_feature_map_itself(self):
+        teacher = FeatureTeacher.__new__(FeatureTeacher)
+        teacher.model = self.FakeConvModel()
+        teacher.size, teacher.patch = 512, 14      # patch is a ViT notion; unused here
+        maps = teacher.features(torch.randn(2, 3, 512, 512))
+        self.assertEqual(tuple(maps.shape), (2, 768, 16, 16))
+        self.assertEqual(maps.dtype, torch.float32)
+
+    def test_its_grid_still_meets_the_student_through_the_loss(self):
+        # Stride 32 against the student's 16: distill_loss resamples the
+        # teacher to the student's grid, so nothing upstream has to care.
+        teacher_map = torch.randn(1, 8, 16, 16)
+        student_map = torch.randn(1, 8, 32, 32)
+        loss, _ = distill_loss(student_map, teacher_map)
+        self.assertTrue(torch.isfinite(loss))
+
+
 class TestTeacherChoice(unittest.TestCase):
     """Which teacher a model id selects, and at what input size.
 

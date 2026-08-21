@@ -126,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--per-image", type=int, default=1)
     p.add_argument("--max-instances", type=int, default=8)
     p.add_argument("--min-area", type=int, default=48)
+    p.add_argument("--min-side", type=int, default=4)
+    p.add_argument("--max-area", type=float, default=0.9)
     p.add_argument("--fill", type=float, default=0.25)
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
@@ -136,7 +138,12 @@ def main(argv: list[str] | None = None) -> int:
     from src.training.image_loop import ImageSplit
     from tools.train_encoder import _tqdm, build_indexes, build_model
 
-    gates = InstanceGates(min_area=args.min_area, fill=args.fill)
+    # All four gates, matching train_encoder.py flag for flag: an eval that
+    # regated the instances differently would score a different population and
+    # call it the same split. (With a cached --index the gates are already
+    # baked into the instance list and these only matter on a cold rebuild.)
+    gates = InstanceGates(min_area=args.min_area, min_side=args.min_side,
+                          max_area=args.max_area, fill=args.fill)
     requests = [parse(argument, gates) for argument in args.dataset]
     print(describe(requests), "\n")
     index = build_indexes(requests, Path(args.index) if args.index else None, 8)

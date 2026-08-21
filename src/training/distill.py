@@ -135,8 +135,13 @@ class FeatureTeacher:
             model_id, dtype=getattr(torch, dtype)).to(device).eval()
         for param in self.model.parameters():
             param.requires_grad_(False)
-        self.dim = int(self.model.config.hidden_size)
-        self.patch = int(getattr(self.model.config, "patch_size", 14))
+        config = self.model.config
+        # ViT configs carry `hidden_size`; convolutional ones (DINOv3's
+        # ConvNeXt students) carry `hidden_sizes` per stage, of which the last
+        # is the map `features` returns.
+        self.dim = int(getattr(config, "hidden_size", 0)
+                       or list(getattr(config, "hidden_sizes", []))[-1])
+        self.patch = int(getattr(config, "patch_size", 14))
         # Resolved after the config is known, so the rule is one rule rather
         # than a constant per checkpoint.
         self.size = patch_aligned(size or STUDENT_SIZE, self.patch)
@@ -146,8 +151,16 @@ class FeatureTeacher:
         """`[B, D, h, w]` for ImageNet-normalised RGB `[B, 3, S, S]`."""
         resized = F.interpolate(images, size=(self.size, self.size),
                                 mode="bilinear", align_corners=False)
-        out = self.model(pixel_values=resized.to(self.model.dtype))
-        return tokens_to_map(out.last_hidden_state, self.size // self.patch)
+        hidden = self.model(pixel_values=resized.to(self.model.dtype)).last_hidden_state
+        if hidden.dim() == 4:
+            # A convolutional teacher -- DINOv3 ships ConvNeXt students
+            # distilled from its 7B ViT -- returns the map directly as
+            # [B, C, h, w]: no class token to strip, no grid to reshape, and
+            # conv-to-conv is the closer geometry for a RepViT student. Its
+            # stride need not be 16; `distill_loss` resamples the teacher to
+            # the student's grid either way.
+            return hidden.float()
+        return tokens_to_map(hidden, self.size // self.patch)
 
 
 class Sam2FeatureTeacher:

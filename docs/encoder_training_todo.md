@@ -236,6 +236,13 @@ bir arabaya değen bir insan böylece iki örnek kalıyor.
 - Veri: **AeroVIS** (örnek maskesi + kimlik, göreve en yakın),
   **UAVScenes** (her kare etiketli, kesintisiz J&F'in mümkün olduğu tek set),
   **MVUAV** (25 karede bir).
+- **Dördüncü kaynak artık kod:** VTUAV'ın ~400 dizisinin tek anotasyonu kare
+  başına bir kutu, ama `tools/make_masklets.py` bunları bir video
+  öğretmeniyle (varsayılan SAM 2.1, gated değil; SAM 3 tek string uzakta)
+  masklet'e çeviriyor. Çıktı `labels.py`'ın deposunun aynısı, yani aşama C
+  iki kaynağı tek arayüzden okuyor. Harcamadan önce ölçü var: `--calibrate`,
+  VIS bölümünün **çizilmiş** maskelerine karşı masklet IoU'sunu basıyor.
+  Ayrıntı `docs/encoder_mimari.md` sonu ve `docs/encoder_arastirma.md` §8.
 - `clip_loop.py` hazır: teacher forcing yok, model kendi yazdığı hafızayı
   okuyor — düzeltilmek istenen hata modunun tam olarak ortaya çıkacağı
   kurulum.
