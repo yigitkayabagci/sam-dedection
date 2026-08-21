@@ -60,19 +60,30 @@ def batch_clips(
     pass sees a different random subset each time, which is what is wanted
     anyway -- consecutive clip starts overlap in 7 of their 8 frames.
 
-    With `limit` set, the cap is also a floor: a pool too small to fill it is
-    reshuffled and drawn again until it does, and a pool smaller than one batch
-    yields the whole pool per batch. The callers that pass `limit` size real
-    commitments to it -- OneCycleLR's total step count, the "same budget, only
-    the data differs" comparison between the encoder notebooks, a validation
-    mean the checkpoint rule trusts -- and a VTUAV-only run has ~700 windows
-    against a 400-step epoch. Ending that epoch at step 21 would leave the
-    learning rate mid-warmup forever and no error to explain it; a validation
-    pool under one batch would score nothing, so nothing would ever be saved.
+    **`limit` is a floor as well as a ceiling**, and it was not always. A single
+    pass over a pool smaller than `limit * size` used to end the epoch early and
+    say nothing: VTUAV alone is ~1 400 training windows, so at batch 64 an epoch
+    asked for 400 steps and stopped after 21. Everything downstream then reads
+    as if the run happened -- there is no error, the loss curve is just short --
+    and `OneCycleLR`, built for 400 steps, never leaves its warm-up, so the run
+    trains at a fraction of the intended rate.
+
+    That also silently voided the comparison this repo is built around: a
+    three-dataset run filled its 400 steps while the VTUAV-only run did 21, so
+    "same schedule, only the data differs" was not true. The pool is now cycled
+    with a fresh permutation per pass until `limit` batches exist, which is what
+    "400 steps of batch 64" already meant everywhere it was written down.
+
+    A pool smaller than one batch shrinks the batch instead of filling it by
+    repeating items. That case is the validation slice, not training: scoring
+    one batch that holds the same window three times weights the mean by pool
+    size and nothing else, and the checkpoint rule reads that mean.
     """
+    if not clips:
+        return
     rng = np.random.default_rng(seed)
     if limit is not None:
-        size = min(size, max(len(clips), 1))
+        size = min(size, len(clips))
     batch: list[Clip] = []
     produced = 0
     while True:
@@ -85,7 +96,10 @@ def batch_clips(
             batch = []
             if limit is not None and produced >= limit:
                 return
-        if limit is None or not len(clips):
+        # One pass done. Without a limit that is the epoch; with one, keep
+        # drawing -- a fresh permutation each time, so a small pool is reused
+        # in a different order rather than in the same order.
+        if limit is None:
             break
     if batch and not drop_last and (limit is None or produced < limit):
         yield batch

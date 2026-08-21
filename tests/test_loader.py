@@ -67,6 +67,44 @@ class TestBatchClips(unittest.TestCase):
         seen = [c for b in batch_clips(self.clips, 4, seed=0) for c in b]
         self.assertEqual(len(seen), len(set(seen)))
 
+    def test_a_limit_is_met_even_when_the_pool_is_smaller_than_it(self):
+        """The bug that silently voided the notebooks' headline comparison.
+
+        A single pass used to end the epoch when the pool ran out, with no
+        error and nothing in the logs but a short loss curve. VTUAV alone is
+        ~1 400 training windows, so at batch 64 an epoch that asked for 400
+        steps stopped after 21 -- and `OneCycleLR`, built for 400, never left
+        its warm-up. The three-dataset run had ten times the windows and filled
+        its 400, so "same schedule, only the data differs" compared 400 steps
+        against 21.
+        """
+        pool = list(range(1400))
+        self.assertEqual(sum(1 for _ in batch_clips(pool, 64, seed=0, limit=400)),
+                         400)
+
+    def test_every_batch_is_still_full_when_the_pool_is_cycled(self):
+        batches = list(batch_clips(list(range(23)), 4, seed=0, limit=20))
+        self.assertEqual(len(batches), 20)
+        self.assertTrue(all(len(b) == 4 for b in batches))
+
+    def test_a_reused_pool_is_reshuffled_rather_than_repeated(self):
+        # Cycling in the same order would make every pass after the first an
+        # exact repeat, which is worse for training than seeing fewer steps.
+        batches = list(batch_clips(list(range(20)), 4, seed=0, limit=10))
+        self.assertNotEqual(batches[:5], batches[5:])
+
+    def test_a_pool_larger_than_the_limit_is_unaffected(self):
+        batches = list(batch_clips(list(range(9999)), 64, seed=0, limit=10))
+        self.assertEqual(len(batches), 10)
+
+    def test_an_empty_pool_ends_instead_of_cycling_forever(self):
+        self.assertEqual(list(batch_clips([], 4, seed=0, limit=400)), [])
+
+    def test_without_a_limit_it_is_still_a_single_pass(self):
+        # `limit=None` means "one epoch over the data", and cycling that would
+        # never return.
+        self.assertEqual(len(list(batch_clips(list(range(23)), 4, seed=0))), 5)
+
     def test_the_same_seed_gives_the_same_pass(self):
         a = list(batch_clips(self.clips, 4, seed=7))
         b = list(batch_clips(self.clips, 4, seed=7))
