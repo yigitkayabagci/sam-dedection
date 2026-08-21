@@ -8,8 +8,9 @@ veriyle eğitmek.
 
 Hat üç aşamalı. \textbf{A} ve \textbf{B} kurulu: kodu depoda,
 \texttt{src/training/} altındaki modüller ve üç giriş noktası
-(\texttt{tools/pretrain\_encoder.py}, \texttt{tools/train\_encoder.py},
-\texttt{tools/eval\_instances.py}), hepsi tek oturumda
+(\texttt{tools/\allowbreak pretrain\_encoder.py},
+\texttt{tools/\allowbreak train\_encoder.py},
+\texttt{tools/\allowbreak eval\_instances.py}), hepsi tek oturumda
 \texttt{notebooks/07\_encoder\_aerial\_rgbt.\allowbreak ipynb} ile koşuyor.
 Sıradaki iş onları koşturmak. \textbf{C} önerilen ek adım ve B ölçülmeden
 başlamıyor; sebebi \cref{sec:egitim-sirada}'de.
@@ -88,7 +89,10 @@ Hafıza yolu frozen kalıyor. Üç sebep var, herhangi biri tek başına yeterdi
         türetildiği ağırlıkları yeniden eğitmek, checkpoint ile motor
         arasında sessiz bir uyuşmazlık riski demek.
   \item \textbf{Piksel değil feature işliyor.} Termal ile RGB arasındaki
-        fark bir encoder problemi.
+        fark bir encoder problemi, yani memory yolunun termale özel bir
+        eğitime ihtiyacı yok. Encoder taşındıktan sonra ona \emph{yeniden}
+        hizalanması gerekip gerekmediği ayrı bir soru;
+        \cref{sec:egitim-hiza} onu ele alıyor.
 \end{enumerate}
 
 SAM~2 de aynı ayrımı yapıyor. Encoder'ı statik görüntüyle, hafıza yolunu
@@ -167,6 +171,67 @@ Her aşamada ne frozen kalıyor? Cevap tek bir çağrıda duruyor
   \bottomrule
 \end{tabular}
 \end{center}
+
+\subsection*{Aşama C neden var: feature uzayı hizası}
+\label{sec:egitim-hiza}
+
+Memory attention'ın $W_Q$ ve $W_K$ matrisleri, EdgeTAM eğitilirken image
+encoder'ın ürettiği feature dağılımına oturdu. Aşama A ve B o dağılımı
+taşıyor. Mask decoder aşama B'de encoder'la \emph{birlikte} eğitildiği için
+yeni dağılıma uyum sağlıyor. Memory yolu sağlamıyor: aşama B tek kare
+üzerinde, \mbox{\texttt{run\_mem\_encoder=False}} ile ve boş bir memory
+bank'la koşuyor, yani oraya hiç gradient gitmiyor.
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[137]
+    \node[kmavi,  text width=23mm] (enc) at (1.6,2.6)
+      {image encoder\\{\footnotesize A ve B'de hareket etti}};
+    \node[ksari,  text width=20mm] (feat) at (5.0,2.6)
+      {feature map\\{\footnotesize yeni uzay}};
+    \node[kkirmizi, text width=25mm] (ma) at (8.6,2.6)
+      {memory attention\\{\footnotesize eski uzaya oturdu}};
+    \node[kyesil, text width=20mm] (dec) at (12.2,2.6)
+      {mask decoder\\{\footnotesize B'de uyum sağladı}};
+
+    \node[kkirmizi, text width=25mm] (me) at (5.0,0.3)
+      {memory encoder\\{\footnotesize eski uzaya oturdu}};
+    \node[kgri, text width=21mm] (bank) at (8.6,0.3) {memory bank};
+
+    \draw[esok] (enc) -- (feat);
+    \draw[esok] (feat) -- node[esnot, anchor=south, yshift=0.5mm] {Q} (ma);
+    \draw[esok] (ma) -- (dec);
+    \draw[esok] (feat) -- node[esnot, anchor=west, xshift=1.5mm] {+ maske} (me);
+    \draw[esok] (me) -- (bank);
+    \draw[esok] (bank) -- node[esnot, anchor=west, xshift=1.5mm] {K, V} (ma);
+
+    \node[esnot, anchor=north, yshift=-4mm, text width=120mm] at (6.8,-0.3)
+      {kırmızı kutular A ve B boyunca hiç gradient almıyor. Aşama C tam olarak
+       onları açıyor, encoder'ı bu kez donduruyor.};
+  \end{tikzpicture}
+  \caption{Aşama A ve B bittiğinde encoder'ın yeni feature uzayını görmemiş
+    tek yer memory yolu. Aşama C'nin işi yeni bir yetenek öğretmek değil, o
+    iki kutuya yeni uzayı okumayı yeniden öğretmek.}
+  \label{fig:egitim-hiza}
+\end{figure}
+
+Bu beklenen bir çöküş değil. Attention'ın iki tarafı da aynı encoder'dan
+iniyor: Q geçerli karenin feature'ları, K ve V ise memory encoder'ın
+\emph{aynı} feature'lardan yazdığı memory. Kayma tek tarafa değil ikisine
+birden uygulanıyor. Ama $W_Q$ ve $W_K$ sabit ve kaymanın benzerlik yapısını
+koruduğunu garanti eden bir şey yok. Yani bozulmanın büyüklüğü ölçülene
+kadar bilinmiyor.
+
+Ölçen sayı da henüz elimizde değil. \cref{sec:egitim-olcum}'deki instance
+IoU tek prompt'lu tek kare skorluyor ve memory hiç devreye girmiyor, yani bu
+hasarı tanım gereği göremiyor. Görebilen tek metrik J\&F, o da aşama C'nin
+kurulumunu istiyor.
+
+\textbf{Anchor terimi bunu kapsamıyor.} \cref{sec:egitim-capa}'daki çapa
+modelin \emph{aşama B başındaki} kopyasına bağlanıyor, yani aşama A'nın
+öğrendiğini koruyor. Stok EdgeTAM'in feature uzayına değil. İkisi farklı
+hedef, ve bu bölümdeki hiza problemini çözen ikincisi olurdu.
 
 \section{Aşama A: Etiketsiz Modality Distillation}
 \label{sec:egitim-asama-a}
@@ -707,6 +772,12 @@ hangi parametreler unfreeze ediliyor, ve checkpoint nasıl yazılıyor.
     değil, Linear-only bir uygulamaya yapılan itirazdır~\cite{hu2022lora}.}
   \label{fig:egitim-lora}
 \end{figure}
+
+Karşılaştırmanın üçüncü bir ekseni var. LoRA'nın güncellemesi rank 16 ile
+sınırlı, dolayısıyla encoder'ın feature dağılımının ne kadar uzağa
+gidebileceği de sınırlı, ve \cref{sec:egitim-hiza}'deki hiza problemi tam
+olarak o mesafeye bağlı. Bu bir kanıt değil, ölçülecek bir hipotez: iki
+yöntem eşit instance IoU verse bile J\&F'de ayrışabilirler.
 
 \section{Tek Veri Seti Yetmez}
 \label{sec:egitim-veri}
