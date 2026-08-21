@@ -71,6 +71,67 @@ MVSeg) ama kaynak aileleri tamamen ayrık → **öncelikli sekizi birlikte
 kullanılabilir.**
 Güvenli kurulum: Kust4K + MVUAV'da eğitip J&F'i AeroVIS'te ölçmek.
 
+## Kontaminasyon: hangi model neyi görmüş
+
+Bir seti **held-out değerlendirme** olarak kullanmak, o setin öğretmenimizin ya
+da öğrencimizin eğitim verisinde **olmamasını** gerektiriyor. Birincil
+kaynaklardan (makale tabloları, model kartları) çıkarıldı, çıkarımdan değil:
+
+| model | MOSE gördü mü | kanıt |
+|---|---|---|
+| **SAM 2 / 2.1 yayınlanan checkpoint** | **temiz** | Makale §D.2.2: *"Yayınlanan modelimiz SA-V manual + Internal ve SA-1B ile eğitildi."* Tablo 17'nin `‡` satırları (MOSE val 71.8 / 73.5) GitHub README'deki yayınlanan checkpoint sayılarıyla birebir; MOSE **içeren** karışımın 76.6 / 77.9 satırları yayınlanmadı. İki bağımsız teyit: MOSEv2 kendi tablosunda `SAM2-L (ZS)` ile `SAM2-L`'yi ayırıyor; SAM 3 Tablo 5 SAM 2.1'in MOSEv2 sayısını `47.9†` = *zero-shot* işaretliyor |
+| `sam2.1_hiera_b+_MOSE_finetune.yaml` | — | Sadece **örnek tarif**. `training/README.md`: *"checkpoint'lerimizi MOSE üzerinde ince ayarlamak için basit bir örnek sunuyoruz."* Yayınlanan checkpoint'in tarifi değil |
+| **SAM 3** | **kontamine** | LaTeX Tablo 25: SA-Co/VIDEO-EXT medya havuzu = DAVIS2017, **MOSEv2**, YTVOS2019. Tablo 17: SA-Co/VIDEO-EXT **Train ✓**, aşama 2–4. Model kartı da listeliyor. Ayrıca makale SAM 2.1'in sayısını zero-shot işaretlerken SAM 3'ünkini işaretlemiyor |
+| **DINOv3 / LVD-1689M** | **belirlenemez** | ~17 B Instagram görüntüsünden kümeleme + retrieval; ham açık set olarak sadece ImageNet-1k/22k ve Mapillary SLS adı geçiyor. MOSE ya da herhangi bir video benchmark'ı adı yok. LVD-1689M yayınlanmadı, indeksi yok → birebir kare kontrolü **imkânsız**. Etkisi düşük: DINOv3 donuk, aşama A'da sadece RGB-T çifti görüyor, MOSE etiketine hiç dokunmuyor |
+| **EdgeTAM** — *bizim öğrencimiz* | **MOSEv1 gördü**, ama MOSEv2 val temiz | Makale §4.1: *"SA-V, SA-1B'nin %10'u, **DAVIS, MOSE, YTVOS** ile eğitiyoruz."* Ampirik bölme testi: MOSEv1-train (1 507) ⊂ MOSEv2-train, ve **MOSEv1-train ∩ MOSEv2-valid = 0** — 433 MOSEv2 val videosunun hepsi yeni |
+
+**Pratik sonuç:** MOSEv2 val bugün hem öğretmenimiz (SAM 2.1) hem öğrencimiz
+(EdgeTAM) için temiz. **Ama öğretmeni SAM 3'e çevirirsek bu biter** — SAM 3
+MOSEv2'yi eğitimde görmüş. Değerlendirmeyi dürüst tutan şey SAM 2.1'de kalmak.
+
+## MOSEv2 — sadece aşama C için
+
+| | |
+|---|---|
+| ne | 5 024 video, 468 251 kare, 10 074 nesne, 701 976 maske, 200 kategori |
+| modalite | **sadece RGB**, **yer seviyesi** — havadan/İHA/termal geçmiyor |
+| indirme | HF, anonim, ranged GET **206**, gated değil. **84,8 GB** |
+| lisans | **CC BY-NC-SA 4.0** — ticari kullanım yok |
+| aşama A | **hayır** — RGB-only, öğrencinin termal girdisi yok |
+| aşama B | **hayır** — havadan değil |
+| aşama C | **evet, listedeki en iyi aday** |
+
+Aşama C'ye uygun olmasının sebebi tam da hafıza yolunun var olma sebebi:
+%61,8 kaybolma, %50,3 yeniden görünme, yoğun örtüşme, maskelerin %50,2'si
+karenin %1'inden küçük.
+
+İki operasyonel uyarı: **val bölümü sadece ilk karenin maskesini içeriyor**
+(yerel J&F için CodaBench sunucusu ya da train'den ayrılmış bir dilim gerekiyor),
+ve **train'in 1 507 videosu MOSEv1-train** — EdgeTAM onları zaten görmüş, yeni
+sinyal değil.
+
+## SAM2DV — elendi
+
+IEEE DataPort'taki SAM2DV **yeni bir veri seti değil**, zaten indirdiğimiz
+DroneVehicle üzerine bir **etiket katmanı**: 17 990 + 1 469 örnek, DroneVehicle
+train/val bölümleriyle birebir. Yazar DroneVehicle'ın yönlü kutularını SAM2'ye
+verip çıkanı kaydetmiş, kendisi de *"insan etiketi değil, makine üretimi bir
+anotasyon kaynağı"* ve *"ikili (binary) segmentasyon türevi"* diyor.
+
+Üç sebeple elendi:
+
+1. **$40/ay IEEE DataPort aboneliği** arkasında. Sayfadaki dosya girdisi
+   `href="#"`, istek atılacak bir uç nokta yok, S3 kovası 403 dönüyor.
+   *"github.com/AirLab/SAM2DV'de yayınlandı"* iddiası **404**; bağlantılı
+   `AirAI-Lab/SAM2DV` var ama **boş depo**.
+2. Video değil → aşama C'ye yaramıyor.
+3. **Zaten ikisi de bizde.** `tools/fetch_datasets.py` DroneVehicle'ın 28 442
+   çiftini XML kutularıyla indiriyor, `tools/make_masklets.py` kutuları maskeye
+   çeviriyor — üstelik **kalibrasyonla** (`--calibrate`), yani güvenmeden önce
+   IoU'yu ölçerek. Kendi üretmek daha yeni bir öğretmen, kontrol edilebilir
+   örnek ayrımı, kalibrasyon sayısı ve SAM2DV'nin atladığı 8 980 çiftlik test
+   bölümü demek — bedeli bir çıkarım geçişi ve sıfır dolar.
+
 ## Elenenler
 
 - [UAV-VisLoc](https://github.com/IntelliSensing/UAV-VisLoc) — GT = GPS

@@ -253,11 +253,21 @@ class Sam2VideoTeacher(_VideoTeacher):
 class Sam3VideoTeacher(_VideoTeacher):
     """SAM 3's tracker through `transformers`, same call shape as SAM 2's.
 
-    What it buys over SAM 2.1 is documented on the hard end of video -- SA-V
-    +5.6, LVOSv2 +8.9, MOSEv2 +12.4 J&F -- and costs three things: the repo is
-    gated, the classes need `transformers>=5.0`, and the SAM licence carries
-    use restrictions Apache-2.0 does not. Calibrate both on the VIS split's
-    drawn masks before deciding the friction is paid for.
+    What it buys over SAM 2.1 is documented on the hard end of video: **SA-V
+    +5.6 and LVOSv2 +8.9 J&F**, both of which SAM 3's own dataset-usage table
+    marks Test-only, so the comparison is like for like.
+
+    **The MOSEv2 +12.4 that used to be quoted here is not.** MOSEv2 sits in
+    SAM 3's SA-Co/VIDEO-EXT training pool, while the SAM 2.1 number it is
+    measured against is marked zero-shot in the same table. That is an
+    in-domain model against a zero-shot one, and citing it overstates the case
+    for switching. It also means MOSEv2 stops being a clean held-out set the
+    moment SAM 3 becomes the teacher -- SAM 2.1 keeps that evaluation honest.
+
+    The costs are three: the repo is gated, the classes need
+    `transformers>=5.0`, and the SAM licence carries use restrictions
+    Apache-2.0 does not. Calibrate both on the VIS split's drawn masks before
+    deciding the friction is paid for.
     """
 
     def __init__(self, model_id: str = "facebook/sam3",
