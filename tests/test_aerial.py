@@ -415,6 +415,80 @@ class TestPerSequenceLayout(unittest.TestCase):
         self.assertEqual(flat.mask_glob("thermal"), "**/label/*.png")
 
 
+class TestPaletteProvenance(unittest.TestCase):
+    """Every spec has to say where its class ids came from.
+
+    Three palettes in this file were guessed and all three were wrong, each in
+    the same direction: `things` ended up selecting scenery. Kust4K picked
+    **tree** and missed motorcycle; SegFly made grass, vegetation, tree and
+    ground obstacle into targets; Caltech was wrong in all nine of its entries
+    and pointed at **Trees** and **Sky**. None of them raised anything -- the
+    model would just have learned to answer a prompt with a hedge.
+
+    A citation cannot make a palette right. What it does is force the author to
+    state, out loud, whether the numbers were read off the archive or off a
+    paper -- and those are very different claims.
+    """
+
+    def test_every_spec_says_where_its_palette_came_from(self):
+        for name, spec in sorted(SPECS.items()):
+            with self.subTest(spec=name):
+                self.assertTrue(
+                    spec.palette_source.strip(),
+                    f"{name}: set palette_source to where `classes` was read "
+                    f"from. If it was guessed, verify it first -- three "
+                    f"guesses here have already been wrong.")
+
+    def test_no_spec_makes_scenery_a_tracking_target(self):
+        # The shape all three failures took, as one assertion. These are names
+        # that cannot be a single trackable object, whatever the dataset.
+        scenery = {"tree", "trees", "sky", "grass", "vegetation", "shrubs",
+                   "water", "road", "terrain", "bare_ground", "rocky_terrain",
+                   "building", "road_marking", "background", "unlabelled",
+                   "unlabeled", "unknown"}
+        for name, spec in sorted(SPECS.items()):
+            with self.subTest(spec=name):
+                wrong = sorted(set(spec.things) & scenery)
+                self.assertEqual(wrong, [], f"{name}: {wrong} cannot be tracked")
+
+    def test_a_things_entry_must_exist_in_the_palette(self):
+        # `thing_ids` raises on a name that is not in `classes`, which is what
+        # would have caught a rename. Assert it stays that way.
+        for name, spec in sorted(SPECS.items()):
+            with self.subTest(spec=name):
+                self.assertEqual(len(spec.thing_ids), len(spec.things))
+
+
+class TestCaltechPalette(unittest.TestCase):
+    """Read off the archive's own colour table; the guess was wrong throughout."""
+
+    def test_the_two_archives_share_one_palette(self):
+        self.assertEqual(SPECS["caltech"].classes, SPECS["caltech_rgbt"].classes)
+
+    def test_trees_and_sky_are_not_tracking_targets(self):
+        # The guess called id 7 "vehicle" and id 8 "person"; they are Trees and
+        # Sky, so `things` selected every tree and the whole sky.
+        spec = SPECS["caltech"]
+        self.assertEqual(spec.name_of(7), "trees")
+        self.assertEqual(spec.name_of(8), "sky")
+        self.assertEqual(sorted(spec.thing_ids), [10, 11])
+
+    def test_the_singles_archive_declares_no_rgb_twin(self):
+        # It ships a `color/` directory that is 819x512 against the thermal's
+        # 640x512, and about 5 % of it is a pure black frame. Globbing it would
+        # give the teacher a different picture from the student's.
+        self.assertIsNone(SPECS["caltech"].rgb)
+        with self.assertRaises(ValueError):
+            SPECS["caltech"].glob("rgb")
+
+    def test_the_paired_archive_does_have_one(self):
+        self.assertIsNotNone(SPECS["caltech_rgbt"].rgb)
+
+    def test_both_ignore_the_two_non_classes(self):
+        for name in ("caltech", "caltech_rgbt"):
+            self.assertEqual(SPECS[name].ignore, (0, 1))
+
+
 class TestKust4kPalette(unittest.TestCase):
     """Read off the archive's own `visual.py`, pinned so it cannot drift back.
 

@@ -198,6 +198,51 @@ DRONEVEHICLE = Recipe(
     ),
 )
 
+# Verified 2026-08 against CaltechDATA record `cks6g-ps927` (InvenioRDM):
+# anonymous, 302 to a presigned S3 object on Open Storage Network, then 206
+# with `accept-ranges: bytes`. 35.7 MB/s measured. No form, no quota, no Baidu.
+#
+# Two live details this download needs and others do not:
+#   * **HEAD answers 403.** The redirect target is presigned for GET only, so
+#     a size probe has to be a ranged GET.
+#   * **The presigned URL carries `X-Amz-Expires=60`.** It must never be
+#     cached; a resumed download re-requests `/content` and gets a fresh one.
+#     `http_download` already does exactly that, since it only ever holds the
+#     original URL.
+#
+# **Two archives that are not interchangeable.** Both ship a `thermal16/`, so
+# extracting them under one root doubles it and every glob returns twice what
+# it should. `into` gives each its own.
+#
+#   labeled_rgbt_pairs.zip     4.29 GB  2 282 registered pairs at 960x600
+#   labeled_thermal_singles.zip 4.14 GB  3 076 masks at 640x512, no usable RGB
+#
+# The paired archive is the one worth the disk: stereo-rectified with the
+# thermal projected into the EO frame, 2.5 cm baseline against a ~40 m
+# altitude, measured residual 1-4 px -- the best-registered RGB-T on this list.
+# Its 2 282 pairs are small next to VTUAV's, but it is the only natural
+# terrain, water and night domain here.
+#
+# As an instance source it is poor and that is measured, not assumed: running
+# this repo's own `decompose` over all 3 076 masks yields 1 357 instances
+# (876 vehicles, 481 person) from 430 masks, median area 145 px = 0.04 % of
+# frame, and 117 of the 430 come from one flight.
+CALTECH = Recipe(
+    name="caltech",
+    note="Caltech Aerial RGB-T: 2 282 stereo-rectified pairs, natural terrain "
+         "and water (ECCV 2024, CC BY-NC-SA)",
+    parts=(
+        Part("pairs", into="pairs", size=4_287_170_398,
+             url="https://data.caltech.edu/api/records/cks6g-ps927/files/"
+                 "labeled_rgbt_pairs.zip/content",
+             md5="22f42923694e724d4b7e354bace12389"),
+        Part("singles", into="singles", size=4_141_028_864, default=False,
+             url="https://data.caltech.edu/api/records/cks6g-ps927/files/"
+                 "labeled_thermal_singles.zip/content",
+             md5="709f772dad92b50e345f5ff4def78615"),
+    ),
+)
+
 SEGFLY = Recipe(
     name="segfly",
     note=">15 000 aligned RGB-T pairs over three altitudes (ECCV 2026)",
@@ -206,7 +251,7 @@ SEGFLY = Recipe(
 )
 
 RECIPES: dict[str, Recipe] = {
-    r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, SEGFLY)}
+    r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, CALTECH, SEGFLY)}
 
 
 # --------------------------------------------------------------------------
@@ -560,7 +605,8 @@ def main(argv: list[str] | None = None) -> int:
 
     names = sorted(RECIPES) if args.dataset == "all" else [args.dataset]
     folders = {"kust4k": "Kust4K", "vtuav_vis": "VTUAV_VIS",
-               "dronevehicle": "DroneVehicle", "segfly": "SegFly"}
+               "dronevehicle": "DroneVehicle", "caltech": "Caltech",
+               "segfly": "SegFly"}
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
         fetch(name, dest, tuple(args.parts) if args.parts else None,

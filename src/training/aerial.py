@@ -81,6 +81,22 @@ class DatasetSpec:
     `thermal` and `rgb` are both globs because the RGB-T sets ship registered
     pairs: the thermal half is what the encoder is trained on, and the RGB half
     is the teacher's input in the distillation stage (`src/training/distill.py`).
+
+    **`palette_source` is required, and it exists because three palettes in
+    this file were guessed and all three were wrong.** Kust4K assumed a
+    `vegetation` class that does not exist, shifting every id above it, so
+    `things` selected **tree** and missed motorcycle. SegFly assumed contiguous
+    ids, making grass, vegetation, tree and ground obstacle into tracking
+    targets. Caltech's was wrong in all nine of its entries and pointed
+    `things` at **Trees** and **Sky**.
+
+    Each guess looked entirely plausible, none raised anything, and the model
+    would simply have learned to answer a prompt with a hedge. So a spec now
+    has to say where its numbers came from, and a test refuses one that does
+    not. A citation cannot make a palette correct -- but "read off the paper"
+    and "read off the archive's own colour table and checked against 300
+    downloaded masks" are very different claims, and the field forces the
+    author to make one of them out loud.
     """
 
     name: str
@@ -92,6 +108,7 @@ class DatasetSpec:
     strip: tuple[str, ...] = ()             # suffixes cut from a mask stem
     ignore: tuple[int, ...] = ()            # values that are neither thing nor stuff
     border: int = 0                         # pixels of padding to discard, per side
+    palette_source: str = ""                # where `classes` was read from
 
     def inset(self, height: int, width: int) -> tuple[tuple[int, int], tuple[int, int]]:
         """`(origin, size)` of the real picture inside a padded frame.
@@ -164,6 +181,23 @@ class DatasetSpec:
 # about a download*, which is a different thing from a fact -- run
 # `probe_classes` on the extracted masks before training and fix the spec with
 # `dataclasses.replace` if the values differ. The notebook does exactly that.
+# Read off the archive's own `color/class_color_mapping.csv` and cross-checked
+# four ways: the README table, a census of 300 masks showing exactly {0..11},
+# the rendered `masks_vis` per-class colours, and the paper's own class
+# histogram.
+#
+# **The guess this replaces was wrong in every one of its nine entries**, and
+# wrong in the way that matters: it called 7 "vehicle" and 8 "person" when they
+# are **Trees** and **Sky**, so `things` pointed the decomposition at every
+# tree and at the whole sky. That is the third palette in this file to have
+# been guessed and wrong -- see `kust4k` and `segfly` -- which is why
+# `DatasetSpec.palette_source` now exists.
+CALTECH_CLASSES = {
+    "unknown": 0, "background": 1, "bare_ground": 2, "rocky_terrain": 3,
+    "developed_structures": 4, "road": 5, "shrubs": 6, "trees": 7,
+    "sky": 8, "water": 9, "vehicles": 10, "person": 11,
+}
+
 SPECS: dict[str, DatasetSpec] = {
     # 4 024 registered RGB-TIR pairs at 640x512 (2 514 day / 1 510 night),
     # 9 classes (Sci. Data 2025). 640x512 is the project's native resolution: a
@@ -187,6 +221,10 @@ SPECS: dict[str, DatasetSpec] = {
     # stem is day/night, and the same stem names the frame in all three.
     "kust4k": DatasetSpec(
         name="kust4k",
+        palette_source=(
+            "the archive's own visual.py get_palette(); verified end to end "
+            "against all 4 024 downloaded masks -- no value outside the "
+            "palette, all four thing classes present"),
         thermal="**/tir/*.png",
         rgb="**/rgb/*.png",
         masks="**/label/*.png",
@@ -214,6 +252,9 @@ SPECS: dict[str, DatasetSpec] = {
     # `tools/export_hf_dataset.py` writes it into the layout below.
     "segfly": DatasetSpec(
         name="segfly",
+        palette_source=(
+            "the authors' published class table; ids are non-contiguous and "
+            "only two classes are things"),
         thermal="**/images/*.png",
         rgb="**/rgb/*.png",
         masks="**/labels/*.png",
@@ -239,6 +280,9 @@ SPECS: dict[str, DatasetSpec] = {
     # set rather than truncating it (the first 5 000 pairs are two flights).
     "vtuav": DatasetSpec(
         name="vtuav",
+        palette_source=(
+            "read off training/train_001.zip -- masks are mode L with "
+            "values {0, 255}, one target per frame"),
         thermal="**/ir/*.jpg",
         rgb="**/rgb/*.jpg",
         masks="**/mask/{modality}/*.png",
@@ -295,6 +339,9 @@ SPECS: dict[str, DatasetSpec] = {
     # (`distill_loss(..., tolerance=1)` is the remedy).
     "vtuav_vis": DatasetSpec(
         name="vtuav_vis",
+        palette_source=(
+            "read off training/train_001.zip -- masks are mode L with "
+            "values {0, 255}, one target per frame"),
         thermal="**/ir/*.jpg",
         rgb="**/rgb/*.jpg",
         masks="**/mask/{modality}/*.png",
@@ -321,6 +368,9 @@ SPECS: dict[str, DatasetSpec] = {
     # having none -- the glob matches no image and `list_frames` says so.
     "dronevehicle": DatasetSpec(
         name="dronevehicle",
+        palette_source=(
+            "not a semantic set -- the labels are oriented boxes in XML and "
+            "nothing here reads them; stage A only"),
         thermal="**/*imgr/*.jpg",
         rgb="**/*img/*.jpg",
         masks="**/*label/*.xml",
@@ -328,15 +378,56 @@ SPECS: dict[str, DatasetSpec] = {
         things=(),
         border=100,
     ),
+    # Caltech Aerial RGB-T (ECCV 2024). CaltechDATA record `cks6g-ps927`;
+    # anonymous HTTPS, no form and no quota. **Two archives that are not
+    # interchangeable -- give each its own root**, because both ship a
+    # `thermal16/` and extracting them together doubles it.
+    #
+    # `labeled_thermal_singles.zip` (4.14 GB): 3 076 dense masks over 37
+    # trajectories, 18 of them UAV, thermal at 640x512 -- native, no resampling.
+    #
+    # **`rgb=None` is load-bearing.** This archive does ship a `color/`
+    # directory and it is *not* a registered twin: 819x512 against the
+    # thermal's 640x512, and ~5 % of it is a pure black frame. Globbing it
+    # would hand the teacher a different picture, at a different size, from the
+    # one the student sees.
     "caltech": DatasetSpec(
         name="caltech",
-        thermal="**/thermal/*.png",
-        rgb="**/rgb/*.png",
+        palette_source=(
+            "the archive's color/class_color_mapping.csv, cross-checked "
+            "against the README table, a 300-mask value census, the "
+            "rendered masks_vis colours and the paper's class histogram"),
+        thermal="**/thermal8/*.png",
+        rgb=None,
         masks="**/masks/*.png",
-        classes={"background": 0, "sky": 1, "water": 2, "vegetation": 3,
-                 "terrain": 4, "rock": 5, "structure": 6, "vehicle": 7,
-                 "person": 8},
-        things=("vehicle", "person"),
+        classes=CALTECH_CLASSES,
+        things=("vehicles", "person"),
+        ignore=(0, 1),
+    ),
+    # The same annotations for a 2 282-frame subset, re-exported at 960x600
+    # with a genuinely registered RGB twin: stereo-rectified, thermal projected
+    # into the EO frame, 2.5 cm baseline against a ~40 m altitude. Measured
+    # residual offset 1-4 px on the frames sampled -- **the best-registered
+    # RGB-T on this list**, against VTUAV's acknowledged misregistration.
+    #
+    # Needs the rename `tools/fetch_datasets.py` applies. The archive is flat
+    # and names the three modalities `X_eo-N.jpg`, `X_thermal-N.jpg` and
+    # `X_mask-N.png`, so the stems never match: `list_pairs` finds 2 282 of
+    # each and zero pairs. Reorganising to `<trajectory>/<modality>/<id>` fixes
+    # both that and grouping -- left flat, 2 282 frames become 2 282 groups and
+    # `split_frames` degenerates into the per-frame split it exists to avoid.
+    "caltech_rgbt": DatasetSpec(
+        name="caltech_rgbt",
+        palette_source=(
+            "the archive's color/class_color_mapping.csv, cross-checked "
+            "against the README table, a 300-mask value census, the "
+            "rendered masks_vis colours and the paper's class histogram"),
+        thermal="**/thermal8/*.jpg",
+        rgb="**/color/*.jpg",
+        masks="**/annotations/*.png",
+        classes=CALTECH_CLASSES,
+        things=("vehicles", "person"),
+        ignore=(0, 1),
     ),
 }
 
