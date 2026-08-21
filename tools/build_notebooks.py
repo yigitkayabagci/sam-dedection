@@ -50,6 +50,7 @@ class Variant:
     datasets: str                  # the body of the DATASETS list
     fetch: str                     # the body of the download loop
     mirror: str                    # Drive folder for weights, per variant
+    distill: str                   # the stage-A block: source, crop, tolerance
     gpu: str = "A100"
 
 
@@ -82,6 +83,7 @@ def resolve(text: str) -> str:
                      "TITLE": V.title, "BLURB": V.blurb,
                      "DATASETS": V.datasets, "FETCH": V.fetch,
                      "MIRROR": V.mirror, "SIBLING": SIBLING[V.key],
+                     "DISTILL": V.distill,
                      "NOTEBOOK": Path(V.path).name, "STAMP": STAMP_VALUE}
     for tag, value in substitutions.items():
         text = text.replace("{{" + tag + "}}", value)
@@ -143,6 +145,10 @@ VARIANTS["all"] = Variant(
     ("kust4k",    f"{DATA_ROOT}/Kust4K",    []),
 ]""",
     mirror="edgetam-encoder/all",
+    distill="""DISTILL_SPEC    = "vtuav"            # where the *unlabelled* pairs come from
+DISTILL_ROOT    = f"{DATA_ROOT}/VTUAV_VIS"
+DISTILL_CROP    = 512 / 1080         # native pixels on 1920x1080; None on 640x512
+DISTILL_TOL     = 1                  # VTUAV's modalities are not pixel-aligned""",
 )
 
 VARIANTS["vtuav"] = Variant(
@@ -171,10 +177,26 @@ VARIANTS["vtuav"] = Variant(
     ("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS", ["train_001"]),
 ]""",
     mirror="edgetam-encoder/vtuav",
+    distill="""DISTILL_SPEC    = "vtuav"            # where the *unlabelled* pairs come from
+DISTILL_ROOT    = f"{DATA_ROOT}/VTUAV_VIS"
+DISTILL_CROP    = 512 / 1080         # native pixels on 1920x1080; None on 640x512
+DISTILL_TOL     = 1                  # VTUAV's modalities are not pixel-aligned""",
 )
 
-SIBLING = {"all": "08_encoder_vtuav_only.ipynb",
-           "vtuav": "07_encoder_aerial_rgbt.ipynb"}
+VARIANTS["drone"] = Variant(
+    key="drone",
+    path="notebooks/09_encoder_stage_a_dronevehicle.ipynb",
+    title="Encoder for aerial RGB-T — stage A on DroneVehicle",
+    blurb='Stage B is byte for byte `07_encoder_aerial_rgbt.ipynb` -- the same three datasets, the same schedule, the same seed. **Only the stage-A source differs**, so the gap between the two final numbers is attributable to what the encoder was pretrained on and to nothing else.\n\n07 distils from VTUAV: 26 059 pairs at 1920x1080 cropped down to 512, one campus, all daylight. This one distils from **DroneVehicle**: 28 442 pairs already at 640x512 -- the sensor size this project deploys at, so no resampling at all -- across day *and* night, from a set whose oriented-box labels make it useless for segmentation and therefore unused by anyone doing what we are doing.\n\nThe question it answers: does stage A want **resolution and one scene**, or **native pixels and variety**? Nothing in the literature settles that for aerial thermal, which is why it is a run rather than an argument.',
+    datasets=VARIANTS["all"].datasets,
+    fetch='FETCH = [\n    ("vtuav_vis",    f"{DATA_ROOT}/VTUAV_VIS",    ["train_001"]),\n    ("segfly",       f"{DATA_ROOT}/SegFly",       []),\n    ("kust4k",       f"{DATA_ROOT}/Kust4K",       []),\n    # Stage A\'s source here. 14 GB, anonymous HTTPS, no quota and no form.\n    ("dronevehicle", f"{DATA_ROOT}/DroneVehicle", []),\n]',
+    mirror="edgetam-encoder/drone",
+    distill='DISTILL_SPEC    = "dronevehicle"     # where the *unlabelled* pairs come from\nDISTILL_ROOT    = f"{DATA_ROOT}/DroneVehicle"\nDISTILL_CROP    = None               # already 640x512 once the white band is\n                                     # cropped -- resampling it would be a loss\nDISTILL_TOL     = 1                  # registered, but not claimed pixel-exact',
+)
+
+SIBLING = {"all": "08_encoder_vtuav_only.ipynb and 09_encoder_stage_a_dronevehicle.ipynb",
+           "vtuav": "07_encoder_aerial_rgbt.ipynb",
+           "drone": "07_encoder_aerial_rgbt.ipynb"}
 
 V = VARIANTS[sys.argv[1]] if len(sys.argv) > 1 else VARIANTS["all"]
 
@@ -604,13 +626,9 @@ MAX_INSTANCES      = 8               # prompts per window -- one encode covers a
 # --- Stage A: the unlabelled pretraining pass ---------------------------
 PRETRAIN        = True               # distil an RGB teacher into the encoder
 TEACHER         = "facebook/dinov3-vitb16-pretrain-lvd1689m"   # gated -- see below
-DISTILL_SPEC    = "vtuav"            # where the *unlabelled* pairs come from
-DISTILL_ROOT    = f"{DATA_ROOT}/VTUAV_VIS"   # identical in both notebooks, so
-                                     # only the stage-B data differs between them
+{{DISTILL}}
 DISTILL_STEPS   = 600
 DISTILL_PAIRS   = 20000              # sampled across the set, never truncated
-DISTILL_CROP    = 512 / 1080         # native pixels on 1920x1080; None on 640x512
-DISTILL_TOL     = 1                  # VTUAV's modalities are not pixel-aligned
 DISTILL_MOMENTS = 0.0                # anti-collapse term; small or off (docs 4)
 ANCHOR_WEIGHT   = 0.5                # stage B: how hard to hold on to stage A
 

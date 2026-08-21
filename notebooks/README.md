@@ -14,20 +14,28 @@ not the implementation.
 | 06 | `06_lora_vs_finetune.ipynb` | LoRA against the partial fine-tune, scored on `test` | **nothing** — it labels and trains both |
 | 07 | `07_encoder_aerial_rgbt.ipynb` | `edgetam_aerial{,_lora}_512.pt` on your Drive + a held-out instance score | **nothing** — it downloads VTUAV VIS, SegFly and Kust4K itself |
 | 08 | `08_encoder_vtuav_only.ipynb` | the same, from VTUAV VIS alone | **nothing** — it downloads VTUAV VIS itself |
+| 09 | `09_encoder_stage_a_dronevehicle.ipynb` | the same, with stage A distilled from DroneVehicle | **nothing** — it downloads all four sets itself |
 
-**07 and 08 are one experiment, not two notebooks.** They are generated from
+**07, 08 and 09 are one experiment, not three notebooks.** They are generated from
 the same source (`tools/build_notebooks.py`) and differ in exactly three cells:
 the title, and the two that name the datasets. Stage A — the distillation pass
 — is identical in both, on the same VTUAV pairs with the same seed, so the
 difference between their two `test/instance_iou` numbers is attributable to the
 stage-B training data and to nothing else.
 
-Run them on two runtimes at once. They write to different Drive folders
-(`edgetam-encoder/all` and `edgetam-encoder/vtuav`), and `split_frames` seeds
-each dataset by name rather than by position, so **both hold out the same VTUAV
-sequences** — which is what makes the two scores comparable at all. 07 is the
-one to trust if you only run one: an encoder is a general feature extractor,
-and 14 sequences of one campus is a narrow view of the world.
+Each isolates one variable against 07:
+
+| | vs 07 | the question |
+|---|---|---|
+| **08** | same stage A, **VTUAV-only stage B** | what did the extra two datasets buy? |
+| **09** | same stage B, **DroneVehicle stage A** | does stage A want resolution and one scene, or native pixels and variety? |
+
+Run them on separate runtimes at once. They write to different Drive folders
+(`edgetam-encoder/{all,vtuav,drone}`), and `split_frames` seeds each dataset by
+name rather than by position, so **all three hold out the same VTUAV
+sequences** — which is what makes the scores comparable at all. 07 is the one
+to trust if you only run one: an encoder is a general feature extractor, and 14
+sequences of one campus is a narrow view of the world.
 
 **Both are a different axis from 01–06.** Those specialise the *whole*
 tracker on thermal video; these train the **image encoder alone** on static
