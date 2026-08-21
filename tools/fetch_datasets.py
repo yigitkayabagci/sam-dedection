@@ -81,6 +81,9 @@ class Recipe:
     parts: tuple[Part, ...] = ()
     hub: str | None = None      # a Hugging Face dataset id instead of archives
     modality: str | None = None
+    extras: tuple[tuple[str, str], ...] = ()   # (filename, figshare file id)
+                                # small sidecar files written into the dataset
+                                # root -- manifests the reader needs, not data
 
     def chosen(self, names: tuple[str, ...] | None) -> list[Part]:
         if not names:
@@ -111,6 +114,18 @@ KUST4K = Recipe(
         Part("rgb", into="rgb", size=1_660_347_962, default=False,
              url="https://ndownloader.figshare.com/files/55979147",
              md5="d0bc9895100f339b1e13f40f2efe532f"),
+    ),
+    # Five plain-text manifests naming the 1 160 frames (29 % of the set!) that
+    # have one modality deliberately corrupted to simulate a sensor failure.
+    # A few kilobytes, always fetched, and `SPECS["kust4k"].exclude` reads them
+    # so the reader drops those frames. Without them the corruption is
+    # invisible: the images decode fine, they are just not the scene.
+    extras=(
+        ("broken_in_test_day_151.txt", "55979195"),
+        ("broken_in_test_night_91.txt", "55979198"),
+        ("broken_in_train_day_528.txt", "55979201"),
+        ("broken_in_train_night_316.txt", "55979204"),
+        ("broken_in_val_day_74.txt", "55979207"),
     ),
 )
 
@@ -548,6 +563,14 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
               f"to download")
     else:
         print("every archive is staged already; nothing to download")
+
+    for name, file_id in recipe.extras:
+        target = dest / name
+        if not target.is_file():
+            http_download(f"https://ndownloader.figshare.com/files/{file_id}",
+                          target, quiet=True)
+    if recipe.extras:
+        print(f"{len(recipe.extras)} manifest(s) alongside the data")
 
     work = dest / "_archives"
     work.mkdir(parents=True, exist_ok=True)

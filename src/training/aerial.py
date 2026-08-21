@@ -109,6 +109,7 @@ class DatasetSpec:
     ignore: tuple[int, ...] = ()            # values that are neither thing nor stuff
     border: int = 0                         # pixels of padding to discard, per side
     palette_source: str = ""                # where `classes` was read from
+    exclude: str = ""                       # glob of text files naming bad frames
 
     def inset(self, height: int, width: int) -> tuple[tuple[int, int], tuple[int, int]]:
         """`(origin, size)` of the real picture inside a padded frame.
@@ -233,6 +234,9 @@ SPECS: dict[str, DatasetSpec] = {
                  "traffic_facilities": 8},
         things=("motorcycle", "car", "truck", "human"),
         ignore=(0,),
+        # 1 160 of the 4 024 frames have one modality deliberately corrupted to
+        # simulate a sensor failure. See `excluded_keys`.
+        exclude="broken_in_*.txt",
     ),
     # >15 000 geometrically aligned RGB-T pairs at 640x512 thermal, plus
     # >20 000 RGB-only frames, over three altitudes (30/40/50 m). ECCV 2026.
@@ -485,6 +489,31 @@ def _stem(path: Path, strip: SequenceABC[str]) -> str:
     return stem
 
 
+def excluded_keys(root: Path, spec: DatasetSpec) -> set[str]:
+    """Frames the dataset itself marks unusable, read from its own manifests.
+
+    Kust4K ships five `broken_in_*.txt` files naming **1 160 of its 4 024
+    frames** -- 29 % -- where one of the two modalities is corrupt, simulating
+    a sensor failure. Nothing in the download hints at this: the images are
+    present and decode fine, they are simply not pictures of the scene. Trained
+    on, they are noise with a confident label; used cross-modally they are
+    worse, because the teacher then describes a frame the student cannot see.
+
+    The manifests do not say *which* modality broke, so the whole frame goes.
+    Entries appear with and without a `.png` suffix across the five files, so
+    the suffix is stripped.
+    """
+    if not spec.exclude:
+        return set()
+    keys: set[str] = set()
+    for manifest in sorted(Path(root).glob(spec.exclude)):
+        for line in manifest.read_text().splitlines():
+            name = line.strip()
+            if name:
+                keys.add(Path(name).stem)
+    return keys
+
+
 def _named_dirs(pattern: str) -> int:
     """How many directory levels a glob names between its prefix and the file.
 
@@ -546,7 +575,9 @@ def list_frames(root: str | Path, spec: DatasetSpec,
                  for p in sorted(root.glob(spec.glob(other)))
                  if p.suffix.lower() in IMAGE_SUFFIXES}
 
-    shared = sorted(set(images) & set(masks))
+    dropped = excluded_keys(root, spec)
+    shared = sorted((set(images) & set(masks))
+                    - {k for k in images if k.rsplit("/", 1)[-1] in dropped})
     if not shared:
         raise FileNotFoundError(
             f"{root}: no image/mask pairs for {spec.name} ({modality}).\n"
@@ -579,7 +610,9 @@ def list_pairs(root: str | Path, spec: DatasetSpec) -> list[tuple[Path, Path]]:
     rgb = {_key(p, root, spec.glob("rgb"), spec.strip): p
            for p in sorted(root.glob(spec.glob("rgb")))
            if p.suffix.lower() in IMAGE_SUFFIXES}
-    shared = sorted(set(thermal) & set(rgb))
+    dropped = excluded_keys(root, spec)
+    shared = sorted((set(thermal) & set(rgb))
+                    - {k for k in thermal if k.rsplit("/", 1)[-1] in dropped})
     if not shared:
         raise FileNotFoundError(
             f"{root}: no registered thermal/RGB pairs for {spec.name}. Found "

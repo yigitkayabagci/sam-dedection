@@ -29,6 +29,8 @@ except ImportError:                                     # pragma: no cover
     cv2 = None
 
 from src.training.aerial import (  # noqa: E402
+    list_pairs,
+    replace,
     DatasetSpec,
     Frame,
     FrameIndex,
@@ -413,6 +415,74 @@ class TestPerSequenceLayout(unittest.TestCase):
                            masks="**/label/*.png", classes={"background": 0},
                            things=())
         self.assertEqual(flat.mask_glob("thermal"), "**/label/*.png")
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is not installed")
+class TestExcludedFrames(unittest.TestCase):
+    """Frames a dataset itself marks unusable, dropped before anything reads them.
+
+    Kust4K ships five `broken_in_*.txt` manifests naming **1 160 of its 4 024
+    frames** -- 29 % -- where one modality is deliberately corrupted to
+    simulate a sensor failure. Nothing about the download hints at it: the
+    images are present and decode fine, they are simply not pictures of the
+    scene. Trained on, they are noise carrying a confident label.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.spec = DatasetSpec(
+            name="toy", thermal="**/tir/*.png", rgb="**/rgb/*.png",
+            masks="**/label/*.png", classes={"background": 0, "car": 2},
+            things=("car",), exclude="broken_*.txt")
+        for sub in ("tir", "rgb", "label"):
+            (self.root / sub).mkdir(parents=True)
+        for stem in ("00001D", "00002D", "00003D"):
+            mask = np.zeros((32, 32), dtype=np.uint8)
+            mask[8:16, 8:16] = 2
+            cv2.imwrite(str(self.root / "label" / f"{stem}.png"), mask)
+            for sub in ("tir", "rgb"):
+                cv2.imwrite(str(self.root / sub / f"{stem}.png"), mask * 40)
+
+    def write(self, name, lines):
+        (self.root / name).write_text("\n".join(lines) + "\n")
+
+    def test_a_listed_frame_is_dropped_from_frames_and_pairs(self):
+        self.write("broken_a.txt", ["00002D"])
+        self.assertEqual([f.name for f in list_frames(self.root, self.spec)],
+                         ["00001D", "00003D"])
+        self.assertEqual(len(list_pairs(self.root, self.spec)), 2)
+
+    def test_the_suffix_is_optional_because_the_manifests_disagree(self):
+        # Kust4K's own five files are inconsistent: the test lists write
+        # `01275D`, the train lists write `00261D.png`.
+        self.write("broken_a.txt", ["00002D.png"])
+        self.write("broken_b.txt", ["00003D"])
+        self.assertEqual([f.name for f in list_frames(self.root, self.spec)],
+                         ["00001D"])
+
+    def test_every_manifest_is_read_not_just_the_first(self):
+        self.write("broken_a.txt", ["00001D"])
+        self.write("broken_b.txt", ["00002D"])
+        self.assertEqual(len(list_frames(self.root, self.spec)), 1)
+
+    def test_blank_lines_are_ignored(self):
+        self.write("broken_a.txt", ["", "00002D", "   ", ""])
+        self.assertEqual(len(list_frames(self.root, self.spec)), 2)
+
+    def test_a_spec_with_no_exclude_reads_everything(self):
+        self.write("broken_a.txt", ["00002D"])
+        plain = replace(self.spec, exclude="")
+        self.assertEqual(len(list_frames(self.root, plain)), 3)
+
+    def test_no_manifest_present_is_not_an_error(self):
+        # The manifests are fetched beside the archives; an older download will
+        # not have them and must still read.
+        self.assertEqual(len(list_frames(self.root, self.spec)), 3)
+
+    def test_kust4k_is_the_spec_that_declares_them(self):
+        self.assertEqual(SPECS["kust4k"].exclude, "broken_in_*.txt")
 
 
 class TestPaletteProvenance(unittest.TestCase):
