@@ -633,6 +633,21 @@ INDEX = MIRROR / "index"
 for d in (DATA_DIR, WORK, CKPT, MIRROR, INDEX):
     d.mkdir(parents=True, exist_ok=True)
 
+# Copy a finished artefact to Drive the moment it exists. Everything below
+# writes to local disk and reaches Drive only in the last cell, which is fine
+# right up until a Colab runtime dies three runs in -- and then the whole
+# session's GPU time goes with it. Each run calls this as it finishes, so what
+# has already been paid for survives.
+def mirror_now(*paths):
+    import shutil
+    for path in paths:
+        path = Path(path)
+        if path.is_file():
+            shutil.copy(path, MIRROR / path.name)
+            print(f"   saved -> {MIRROR / path.name}")
+        else:
+            print(f"   !! {path} was not written -- the run above did not finish")
+
 import torch
 VRAM = torch.cuda.get_device_properties(0).total_memory / 2**30 if torch.cuda.is_available() else 0
 print(f"{VRAM:.0f} GiB of VRAM, {os.cpu_count()} cores -> {LOADER_WORKERS} loader threads")
@@ -1357,6 +1372,7 @@ if PRETRAIN:
         --tolerance {DISTILL_TOL} --moments {DISTILL_MOMENTS} \
         --workers {LOADER_WORKERS} --seed {SEED} \
         --json {WORK}/run_distill.json 2>&1 | tail -12
+    mirror_now(DISTILLED, WORK / "run_distill.json")
 else:
     print("skipped -- set PRETRAIN = True to run stage A")
 """)
@@ -1409,6 +1425,7 @@ COMMON = (f"{DATASET_FLAGS} --index {INDEX} "
 
 !python tools/train_encoder.py --method finetune {COMMON} \
     --out {CKPT}/edgetam_aerial_512.pt --json {WORK}/run_finetune.json 2>&1 | tail -22
+mirror_now(CKPT / "edgetam_aerial_512.pt", WORK / "run_finetune.json")
 """)
 
 # ---------------------------------------------------------------- 25
@@ -1416,6 +1433,7 @@ code(r"""
 %%time
 !python tools/train_encoder.py --method lora --lora-r {LORA_R} {COMMON} \
     --out {CKPT}/edgetam_aerial_lora_512.pt --json {WORK}/run_lora.json 2>&1 | tail -22
+mirror_now(CKPT / "edgetam_aerial_lora_512.pt", WORK / "run_lora.json")
 """)
 
 # ---------------------------------------------------------------- 26
@@ -1428,6 +1446,8 @@ if PRETRAIN:
         --base {DISTILLED} --anchor-weight {ANCHOR_WEIGHT} \
         --out {CKPT}/edgetam_aerial_distilled_512.pt \
         --json {WORK}/run_distilled.json 2>&1 | tail -22
+    mirror_now(CKPT / "edgetam_aerial_distilled_512.pt",
+               WORK / "run_distilled.json")
 else:
     print("skipped -- no stage A checkpoint to start from")
 """)
