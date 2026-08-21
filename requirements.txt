@@ -35,6 +35,28 @@ timm>=1.0
 #                                         # from_pretrained, forty minutes into
 #                                         # the session. Only the DINOv2 option
 #                                         # would run on >=4.44.
+#                                         #
+#                                         # The **SAM 3 video teacher**
+#                                         # (src/training/masklets.py) needs
+#                                         # >=5.0 on top of that -- 4.56 has no
+#                                         # Sam3TrackerVideo classes at all. It
+#                                         # says so and stops rather than
+#                                         # guessing. SAM 3 is also a *gated*
+#                                         # repo, so it wants an HF token that
+#                                         # SAM 2.1 (Apache-2.0, ungated) does
+#                                         # not.
+#                                         #
+#                                         # `facebook/sam3.1` is **not usable
+#                                         # from here at all**: it ships as a
+#                                         # bare checkpoint with no transformers
+#                                         # integration and no safetensors, and
+#                                         # the GitHub package that loads it
+#                                         # pins numpy<2 against this project's
+#                                         # numpy 2.x. Its headline feature,
+#                                         # Object Multiplex, is a throughput
+#                                         # win at many objects per frame; the
+#                                         # teacher here prompts one box on one
+#                                         # crop, so it would buy nothing.
 #   pip install "nvidia-modelopt[onnx]"   # calibrated INT8 PTQ/QAT
 #   pip install onnx onnxruntime          # export verification
 #   pip install gdown                     # only for gdrive: sources in
