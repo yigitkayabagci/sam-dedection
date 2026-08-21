@@ -38,7 +38,14 @@ from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data", required=True, help="Dataset root holding RGB-T pairs.")
+    p.add_argument("--data", required=True, action="append", metavar="[SPEC:]ROOT",
+                   help="Dataset root holding RGB-T pairs. Repeatable, and a "
+                        "root may be prefixed with its spec -- "
+                        "`dronevehicle:/content/data/DroneVehicle`. Without a "
+                        "prefix the --spec value applies. Several sources are "
+                        "read with their *own* crop and border, which is what "
+                        "lets a 1920x1080 set and a bordered 640x512 one share "
+                        "a batch.")
     p.add_argument("--spec", default="kust4k", choices=sorted(SPECS))
     p.add_argument("--thermal-glob", default=None,
                    help="Override the spec's thermal glob. The layout of a "
@@ -101,15 +108,36 @@ def main(argv: list[str] | None = None) -> int:
 
     import torch
 
-    from src.training.distill import build_teacher, pretrain, subsample
+    from src.training.distill import build_teacher, pretrain, sources, subsample
     from tools.train_encoder import _tqdm, build_model
 
-    spec = SPECS[args.spec]
-    if args.thermal_glob or args.rgb_glob:
-        spec = replace(spec, thermal=args.thermal_glob or spec.thermal,
-                       rgb=args.rgb_glob or spec.rgb)
-        print(f"globs overridden: thermal={spec.thermal!r} rgb={spec.rgb!r}")
-    found = list_pairs(Path(args.data), spec)
+    chosen = []
+    for entry in args.data:
+        name, _, root = entry.rpartition(":")
+        name = name or args.spec
+        if name not in SPECS:
+            raise SystemExit(f"--data {entry!r}: no spec named {name!r} -- "
+                             f"have {sorted(SPECS)}")
+        spec = SPECS[name]
+        if args.thermal_glob or args.rgb_glob:
+            spec = replace(spec, thermal=args.thermal_glob or spec.thermal,
+                           rgb=args.rgb_glob or spec.rgb)
+            print(f"globs overridden: thermal={spec.thermal!r} rgb={spec.rgb!r}")
+        chosen.append((spec, Path(root)))
+
+    wanted = args.crop if args.crop is not None else "auto"
+    found = []
+    for spec, root in chosen:
+        mine = sources([(spec, root)], size=args.size, crop=wanted)
+        if not mine:
+            print(f"  !! {spec.name}: no registered pairs under {root}")
+            continue
+        shown = "none" if mine[0].crop is None else f"{mine[0].crop:.3f}"
+        print(f"  {spec.name:14s} {len(mine):>7,} pairs   crop={shown:>5s}  "
+              f"border={spec.border:<4d} {root}")
+        found += mine
+    if not found:
+        raise SystemExit("no registered pairs in any of the sources given")
     pairs = subsample(found, args.pairs, seed=args.seed)
     print(f"{len(pairs)} registered pairs of {len(found)} found -- no labels "
           f"are read at this stage")
@@ -139,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         batch=args.batch, steps_per_epoch=args.steps,
         rates=Rates(neck=args.neck_lr, trunk=args.trunk_lr),
         projector_lr=args.projector_lr, moment_weight=args.moments, freeze=freeze,
-        crop=args.crop, border=spec.border, tolerance=args.tolerance,
+        crop=args.crop, tolerance=args.tolerance,
         workers=args.workers, depth=args.depth, seed=args.seed,
         device=args.device, progress=_tqdm())
     result |= {**meta, "seconds": round(time.time() - started, 1),

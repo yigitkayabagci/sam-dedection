@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 from pathlib import Path
 
 import numpy as np
@@ -429,6 +430,61 @@ def shared_window(shape: tuple[int, int], place: tuple[float, float],
     return (x0, y0), (side, side)
 
 
+class Pair(NamedTuple):
+    """One registered pair, carrying how *its own* dataset must be read.
+
+    A plain `(thermal, rgb)` tuple was enough while stage A drew from one
+    dataset. It stops being enough the moment two are mixed, because the two
+    need opposite treatment: VTUAV is 1920x1080 and has to be cropped to keep
+    native pixels, DroneVehicle is already 640x512 and cropping it would throw
+    resolution away; DroneVehicle carries a 100 px white border and VTUAV none.
+    One `crop` and one `border` for the whole batch cannot express that, and
+    the failure is silent -- the wrong one gets resized into a square, or the
+    teacher reads a margin.
+
+    Still a tuple, so anything that only wants `pair[0]` and `pair[1]` keeps
+    working unchanged.
+    """
+
+    thermal: Path
+    rgb: Path
+    crop: float | None = None
+    border: int = 0
+
+
+def sources(specs, size: int = 512, crop: float | str | None = "auto") -> list[Pair]:
+    """Every registered pair across several datasets, each tagged with its own
+    reading parameters.
+
+    `specs` is an iterable of `(DatasetSpec, root)`. `crop="auto"` derives the
+    fraction per source from the picture that is actually there -- `size`
+    divided by the shorter side once the border is off, or no crop at all when
+    the source is already at or below `size`. That is the number that keeps
+    native pixels, and deriving it removes the most error-prone hand-set knob
+    in stage A: set it too high on a 1920x1080 source and every small target is
+    resampled away before training sees it.
+    """
+    import cv2
+
+    from .aerial import list_pairs
+
+    out: list[Pair] = []
+    for spec, root in specs:
+        found = list_pairs(root, spec)
+        if not found:
+            continue
+        fraction = crop
+        if crop == "auto":
+            probe = cv2.imread(str(found[0][0]), cv2.IMREAD_UNCHANGED)
+            if probe is None:
+                raise FileNotFoundError(f"Could not read {found[0][0]}")
+            _, (width, height) = spec.inset(int(probe.shape[0]), int(probe.shape[1]))
+            shorter = min(height, width)
+            fraction = size / shorter if shorter > size else None
+        out += [Pair(t, r, fraction, spec.border) for t, r in found]
+    return out
+
+
 def collate_pairs(pairs: Sequence[tuple[Path, Path]], size: int = 512,
                   device: str = "cpu", executor=None,
                   crop: float | None = None,
@@ -453,30 +509,40 @@ def collate_pairs(pairs: Sequence[tuple[Path, Path]], size: int = 512,
     mapper = map if executor is None else executor.map
     rng = rng or np.random.default_rng()
     # One placement per pair, drawn here and used by both halves.
-    places = rng.random((len(pairs), 2)) if crop else np.zeros((len(pairs), 2))
+    wants_place = crop or any(isinstance(p, Pair) and p.crop for p in pairs)
+    places = (rng.random((len(pairs), 2)) if wants_place
+              else np.zeros((len(pairs), 2)))
 
     def read(args):
-        path, gray, place = args
+        path, gray, place, this_crop, this_border = args
         raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if raw is None:
             raise FileNotFoundError(f"Could not read image: {path}")
         # Everything below works inside whatever padding the dataset ships, so
         # a crop can never land on the margin. DroneVehicle pads both halves
-        # with 100 px of white; `border=0` leaves the frame untouched.
-        height, width = int(raw.shape[0]) - 2 * border, int(raw.shape[1]) - 2 * border
+        # with 100 px of white; a border of 0 leaves the frame untouched.
+        height = int(raw.shape[0]) - 2 * this_border
+        width = int(raw.shape[1]) - 2 * this_border
         if height <= 0 or width <= 0:
             raise ValueError(
-                f"border={border} leaves nothing of {path} "
+                f"border={this_border} leaves nothing of {path} "
                 f"({raw.shape[1]}x{raw.shape[0]})")
-        if crop:
-            origin, window = shared_window((height, width), place, crop)
+        if this_crop:
+            origin, window = shared_window((height, width), place, this_crop)
         else:
             origin, window = (0, 0), (width, height)
-        return load_image(path, (origin[0] + border, origin[1] + border),
+        return load_image(path, (origin[0] + this_border, origin[1] + this_border),
                           window, size, gray)
 
-    thermal = list(mapper(read, [(p[0], True, q) for p, q in zip(pairs, places)]))
-    rgb = list(mapper(read, [(p[1], False, q) for p, q in zip(pairs, places)]))
+    # A `Pair` carries its own; a plain `(thermal, rgb)` tuple falls back to
+    # the call's values and so behaves exactly as it always did. A `Pair` whose
+    # crop is None means *no crop* and is honoured, not overridden.
+    settings = [(p.crop, p.border) if isinstance(p, Pair) else (crop, border)
+                for p in pairs]
+    thermal = list(mapper(read, [(p[0], True, q, c, b)
+                                 for p, q, (c, b) in zip(pairs, places, settings)]))
+    rgb = list(mapper(read, [(p[1], False, q, c, b)
+                             for p, q, (c, b) in zip(pairs, places, settings)]))
     return PairBatch(thermal=normalise(np.stack(thermal), device),
                      rgb=normalise(np.stack(rgb), device))
 

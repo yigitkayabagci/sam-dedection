@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.distill import (  # noqa: E402
+    Pair,
     collate_pairs,
     SAM2_SIZE,
     STUDENT_SIZE,
@@ -371,6 +372,70 @@ class TestBorderCrop(unittest.TestCase):
             pairs = self.frames(tmp, border=10, inner=(20, 20))   # 40x40
             with self.assertRaises(ValueError):
                 collate_pairs(pairs, size=64, device="cpu", border=100)
+
+
+class TestMixedSources(unittest.TestCase):
+    """Two datasets in one stage-A batch, needing opposite treatment.
+
+    VTUAV is 1920x1080 with no border and has to be cropped to keep native
+    pixels; DroneVehicle is 840x712 with a 100 px white border and is already
+    640x512 underneath, so cropping it would throw resolution away. One `crop`
+    and one `border` for the batch cannot express both, and getting it wrong is
+    silent: either a frame is squashed into a square or the teacher reads
+    margin.
+    """
+
+    def make(self, tmp, name, size, border, value):
+        import cv2
+        import numpy as np
+
+        height, width = size
+        image = np.full((height, width, 3), 255, dtype=np.uint8)
+        image[border:height - border, border:width - border] = value
+        path = Path(tmp) / name
+        cv2.imwrite(str(path), image)
+        return path
+
+    def mixed(self, tmp):
+        # A bordered 840x712 (interior 640x512) and a clean tall 300x600.
+        bordered = [self.make(tmp, f"b{i}.png", (712, 840), 100, 60)
+                    for i in range(2)]
+        plain = [self.make(tmp, f"p{i}.png", (600, 300), 0, 90) for i in range(2)]
+        return [Pair(bordered[0], bordered[1], None, 100),
+                Pair(plain[0], plain[1], 128 / 300, 0)]
+
+    def test_each_pair_is_read_by_its_own_rules(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = collate_pairs(self.mixed(tmp), size=64, device="cpu")
+        self.assertEqual(batch.thermal.shape, (2, 3, 64, 64))
+        # Neither sample may contain white: the bordered one because its border
+        # was cropped, the plain one because it has none.
+        for index in range(2):
+            self.assertEqual(len(batch.thermal[index].flatten().unique()), 3,
+                             f"sample {index} carries more than its interior")
+
+    def test_the_batch_level_arguments_are_only_a_fallback(self):
+        # Passing border=0 must not undo a Pair that says 100 -- otherwise
+        # mixing sources would silently depend on argument order.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = collate_pairs(self.mixed(tmp), size=64, device="cpu",
+                                  crop=None, border=0)
+        self.assertEqual(len(batch.thermal[0].flatten().unique()), 3)
+
+    def test_plain_tuples_still_behave_as_before(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            a = self.make(tmp, "a.png", (712, 840), 100, 60)
+            b = self.make(tmp, "b.png", (712, 840), 100, 60)
+            kept = collate_pairs([(a, b)], size=64, device="cpu")
+            cropped = collate_pairs([(a, b)], size=64, device="cpu", border=100)
+        self.assertGreater(len(kept.thermal.flatten().unique()), 3)
+        self.assertEqual(len(cropped.thermal.flatten().unique()), 3)
 
 
 class TestSubsample(unittest.TestCase):
