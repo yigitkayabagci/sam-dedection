@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Seven notebooks, meant for Colab. Everything they orchestrate lives in `src/`
+Nine notebooks, meant for Colab. Everything they orchestrate lives in `src/`
 and `tools/` and is unit-tested without a GPU — the notebooks are the recipe,
 not the implementation.
 
@@ -16,12 +16,12 @@ not the implementation.
 | 08 | `08_encoder_vtuav_only.ipynb` | the same, from VTUAV VIS alone | **nothing** — it downloads VTUAV VIS itself |
 | 09 | `09_encoder_stage_a_dronevehicle.ipynb` | the same, with stage A distilled from DroneVehicle | **nothing** — it downloads all four sets itself |
 
-**07, 08 and 09 are one experiment, not three notebooks.** They are generated from
-the same source (`tools/build_notebooks.py`) and differ in exactly three cells:
-the title, and the two that name the datasets. Stage A — the distillation pass
-— is identical in both, on the same VTUAV pairs with the same seed, so the
-difference between their two `test/instance_iou` numbers is attributable to the
-stage-B training data and to nothing else.
+**07, 08 and 09 are one experiment, not three notebooks.** All three are
+generated from the same source (`tools/build_notebooks.py`) and differ in
+exactly four cells: the title, the build stamp, and the two that configure the
+data. Everything else — the schedule, the losses, the seed, the evaluation — is
+byte for byte the same, which is the only reason their `test/instance_iou`
+numbers can be set beside each other.
 
 Each isolates one variable against 07:
 
@@ -37,12 +37,13 @@ sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
 
-**Both are a different axis from 01–06.** Those specialise the *whole*
+**All three are a different axis from 01–06.** Those specialise the *whole*
 tracker on thermal video; these train the **image encoder alone** on static
-aerial imagery, with the memory path frozen and never executed. It is stage B
-of `docs/encoder_training_todo.md`; the architecture it implements is laid out
-in `docs/encoder_mimari.md`. Its dataset comes off your Drive rather than a
-public URL, because none of these sets has one that survives a click-through.
+aerial imagery, with the memory path frozen and never executed. They are stages
+A and B of `docs/encoder_training_todo.md`; the architecture is laid out in
+`docs/encoder_mimari.md`. They download their own data — every URL is baked
+into `tools/fetch_datasets.py` and was checked against the live host, because
+each of the four sets is served in a way that defeats the obvious approach.
 
 ## Three things to know before starting
 
