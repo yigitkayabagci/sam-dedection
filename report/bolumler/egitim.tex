@@ -6,9 +6,64 @@ anlattı. EdgeTAM indirildiği gibi alındı, dört TensorRT motoruna taşındı
 ölçüldü. Bu bölüm ters taraf: ağırlıkların kendisini termal ve havadan
 veriyle eğitmek.
 
+\textbf{Görev sınıfsız tek nesne takibi.} Operatör ekranda hedefi bir kutuyla
+işaretliyor, model o nesneyi video boyunca takip ediyor. Hiçbir yerde sınıf
+etiketi sorulmuyor: ``bu bir araç mı'' değil, ``işaretlediğim şey şimdi
+nerede''. Bu tanım aşağıdaki birkaç kararı doğrudan belirliyor, en çok da
+teacher seçimini.
+
 Hat üç aşamalı. \textbf{A} ve \textbf{B} kurulu ve kodu çalışır hâlde;
 sıradaki iş onları koşturmak. \textbf{C} önerilen ek adım ve B ölçülmeden
 başlamıyor.
+
+\textbf{Somut olarak koşulan şey} tek bir notebook ve altı adımdan ibaret:
+
+\begin{figure}[H]
+  \centering
+  \begin{tikzpicture}[font=\elyazi\small]
+    \eskizbasla[73]
+    % --- üst sıra: ucuz olan, önce ---
+    \node[esbaslik, anchor=east, text width=20mm] at (0.3,0.8)
+      {\textbf{önce ucuz}\\{\footnotesize olan}};
+    \node[kgri,  text width=30mm] (a1) at (2.5,0.8)
+      {\textbf{1} veriyi indir\\{\footnotesize iki modaliteyi\\eşleştir}};
+    \node[ksari, text width=30mm] (a2) at (7.0,0.8)
+      {\textbf{2} kaynaşmayı say\\{\footnotesize GPU'ya dokunmadan}};
+    \node[ksari, text width=30mm] (a3) at (11.5,0.8)
+      {\textbf{3} tek window'a\\overfit\\{\footnotesize kurulum doğru mu}};
+
+    \draw[esok] (a1) -- (a2);
+    \draw[esok] (a2) -- (a3);
+
+    % --- alt sıra: pahalı olan ---
+    \node[esbaslik, anchor=east, text width=20mm] at (0.3,-2.6)
+      {\textbf{sonra}\\{\footnotesize pahalı olan}};
+    \node[kmavi,  text width=30mm] (b1) at (2.5,-2.6)
+      {\textbf{4} aşama A\\{\footnotesize distilasyon}};
+    \node[kmavi,  text width=30mm] (b2) at (7.0,-2.6)
+      {\textbf{5} aşama B, $\times$\,\textbf{3}\\
+       {\footnotesize stok / A'dan / LoRA}};
+    \node[kyesil, text width=30mm] (b3) at (11.5,-2.6)
+      {\textbf{6} üçünü aynı split'te skorla};
+
+    \draw[esok] (b1) -- (b2);
+    \draw[esok] (b2) -- (b3);
+
+    % üst sıradan alt sıraya geçiş: ortadan aşağı, yani "önce bu sıra,
+    % sonra bu sıra" -- tek bir kutudan tek bir kutuya değil
+    \draw[esok] (a2.south) -- (b2.north);
+
+    \node[esvurgu, anchor=west, text width=46mm] at (7.4,-0.9)
+      {2 kötü çıkarsa 4 ve 5 boşa gider};
+  \end{tikzpicture}
+  \caption{Notebook'un adımları. Sıra keyfi değil, ucuzdan pahalıya:
+    GPU istemeyen ya da dakikalar süren kontroller önde duruyor, çünkü
+    onlardan biri kötü çıkarsa arkasındaki GPU saatlerinin hepsi bozuk bir
+    hedefin üstüne harcanmış olur.}
+  \label{fig:egitim-notebook}
+\end{figure}
+
+Bölümün geri kalanı bu adımların her birinin neden öyle olduğunu anlatıyor.
 
 Bölüm kasten görsel. Her şekil bir kurulumu anlatıyor, metin şekli
 açıklıyor.
@@ -287,65 +342,103 @@ değil, distilasyonun tanımı. Bu yüzden Orin'de asla koşamayacak kadar büy�
 bir model bile burada sorunsuz teacher olabiliyor: o çevrimdışı koşuyor,
 dağıtılan şey EdgeTAM'ın kendi 4,92 M'lik encoder'ı.
 
-Üç aday var. Aralarındaki en somut fark, teacher'ın feature map'inin
-loss'tan önce resample edilip edilmediği.
+Üç aday var. En görünür fark grid'lerinde, yani teacher'ın feature
+map'inin loss'tan önce resample edilip edilmediğinde; seçimi belirleyen ise
+başka bir şey.
 
 \begin{figure}[H]
   \centering
   \begin{tikzpicture}[font=\elyazi\small]
     \eskizbasla[19]
-    \node[kmor, text width=34mm] (d3) at (0,0)
-      {\textbf{DINOv3} ViT-B/16\\{\footnotesize $512/16 = 32{\times}32$}\\
-       {\footnotesize \emph{kod varsayılanı}}};
-    \node[kgri, text width=34mm] (d2) at (5.3,0)
+    \node[kmor, text width=34mm] (s2) at (0,0)
+      {\textbf{SAM 2.1} Hiera-B+\\{\footnotesize $1024/16 = 64{\times}64$}\\
+       {\footnotesize \emph{varsayılan}}};
+    \node[kgri, text width=34mm] (d3) at (5.3,0)
+      {DINOv3 ViT-B/16\\{\footnotesize $512/16 = 32{\times}32$}\\
+       {\footnotesize ikinci koşu}};
+    \node[kgri, text width=34mm] (d2) at (10.6,0)
       {DINOv2 base\\{\footnotesize $518/14 = 37{\times}37$}\\
        {\footnotesize açık, hesap gerekmez}};
-    \node[kgri, text width=34mm] (s2) at (10.6,0)
-      {SAM 2.1 Hiera-L\\{\footnotesize $1024/16 = 64{\times}64$}\\
-       {\footnotesize SAM 2'nin encoder'ı}};
 
     \node[ksari, text width=40mm] (g) at (5.3,-4.0)
       {student grid\\{\footnotesize $512/16 = \mathbf{32\times32}$}};
 
-    \draw[esokr=esyesil] (0,-1.15) -- (0,-4.0) -- (g.west);
-    \draw[esink] (d2) -- (g);
-    \draw[esokr=esgri] (10.6,-1.15) -- (10.6,-4.0) -- (g.east);
+    \draw[esokr=esmor]   (0,-1.15) -- (0,-4.0) -- (g.west);
+    \draw[esokr=esyesil] (d3) -- (g);
+    \draw[esink] (10.6,-1.15) -- (10.6,-4.0) -- (g.east);
 
-    \node[esiyi, anchor=west, xshift=1.5mm, text width=32mm] at (0,-2.4)
-      {\textbf{birebir}\\resample yok};
-    % iki "interpolasyon" etiketi: biri kendi çizgisinin sağında, öteki
-    % solunda -- aynı yükseklikte oldukları için aksi hâlde üst üste binerler
-    \node[esnot, anchor=east, xshift=-1.5mm, text width=24mm] at (10.6,-2.4)
-      {interpolasyon};
-    \node[esnot, anchor=west, xshift=1.5mm, text width=24mm] at (5.3,-2.4)
-      {interpolasyon};
+    % üç etiket, üçü de kendi çizgisinin farklı yanında: aynı yükseklikte
+    % oldukları için aksi hâlde üst üste binerler
+    \node[esnot, anchor=west, xshift=1.5mm, text width=26mm] at (0,-2.4)
+      {tam \textbf{2 kat}\\küçültme};
+    \node[esiyi, anchor=east, xshift=-1.5mm, text width=20mm] at (5.3,-2.4)
+      {\textbf{birebir}};
+    \node[esnot, anchor=east, xshift=-1.5mm, text width=26mm] at (10.6,-2.4)
+      {kesirli\\interpolasyon};
   \end{tikzpicture}
   \caption{Teacher adaylarının grid'i, student'ınkiyle karşılaştırmalı.
     DINOv3'ün 16 piksellik patch'i 512 girdide tam olarak student grid'ini
-    veriyor, yani teacher'ın feature map'i loss'tan önce hiç resample
-    edilmiyor. Varsayılanın DINOv3 olmasının asıl sebebi ise grid değil:
-    dense feature kalitesi o sürümün konusu~\cite{dinov32025}.}
+    veriyor; SAM 2.1'in $64\times64$'ü tam iki kat, o da temiz; yalnızca
+    DINOv2'nin 37'si kesirli bir orana düşüyor. Varsayılanı belirleyen şey
+    grid değil, bir sonraki tablo.}
   \label{fig:egitim-ogretmen}
 \end{figure}
 
-Üçü de kodda hazır, seçim tek bir string, ve aralarında ölçülmüş bir
-karşılaştırma yok. Asıl gerilim DINOv3 ile SAM 2.1 arasında:
+Üçü de kodda hazır ve seçim tek bir string. Asıl gerilim DINOv3 ile
+SAM 2.1 arasında, ve şöyle duruyor:
 
-\begin{itemize}
-  \item \textbf{DINOv3 lehine:} aradığımız şey anlam. Termalde sınır zaten
-        kolay, soğuk arka plandaki sıcak nesne belirgin bir kenar; eksik olan
-        o kenarın \emph{ne} olduğu. SAM 2'nin feature'ları ise tasarım gereği
-        sınıftan bağımsız, her şeyi segmentliyor ama ne olduğunu bilmiyor.
-  \item \textbf{SAM 2.1 lehine:} üç şey birden. Tensörler birebir uyuyor,
-        256 kanal ve stride 16, yani projection bir temsil değişikliği değil.
-        Encoder'ı SAM 2'nin uzayına \emph{doğru} itiyor, ondan uzağa değil,
-        yani bir önceki bölümdeki hiza riskini büyütmek yerine küçültüyor. Ve
-        en önemlisi: EdgeTAM \emph{zaten} SAM 2'nin distilasyonu, dolayısıyla
-        ondan ``termal girdiden SAM 2'nin RGB feature'larını üret'' demek,
-        checkpoint'in doğduğu hedefin aynısını istemek oluyor, üstüne yalnızca
-        modalite boşluğu eklenmiş hâlde. Bedeli hesap: Hiera-Large 1024'te
-        koşuyor, ki EdgeTAM'ın var olma sebebi tam olarak ondan kaçmak.
-\end{itemize}
+\begin{center}\footnotesize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{26mm}
+                  >{\raggedright\arraybackslash}p{54mm}
+                  >{\raggedright\arraybackslash}p{54mm}@{}}
+  \toprule
+   & \textbf{DINOv3} ViT-B/16 & \textbf{SAM 2.1} Hiera-B+ \\
+  \midrule
+  feature'lar ne taşıyor
+    & anlam: ``bu bir araç''
+    & sınır ve nesnelik: ``burada bir şey var, şurada bitiyor'' \\[1.2mm]
+  göreve uyumu
+    & sınıf sormuyoruz, yani anlam karşılığı olmayan bir fazlalık
+    & görev tanımının kendisi: sınıfsız tek nesne \\[1.2mm]
+  tensör uyumu
+    & 768 kanal, projection bir temsil değişikliği
+    & 256 kanal ve stride 16, student'ınkiyle birebir \\[1.2mm]
+  checkpoint'e uyumu
+    & ilgisiz bir uzay
+    & EdgeTAM zaten SAM~2'nin distilasyonu \\[1.2mm]
+  hiza riski
+    & encoder'ı memory yolunun beklediği uzaydan uzaklaştırıyor
+    & aynı uzaya doğru itiyor, yani riski küçültüyor \\[1.2mm]
+  grid
+    & $32\times32$, resample yok
+    & $64\times64$, tam iki kat küçültme \\[1.2mm]
+  adım maliyeti
+    & 512 girdide ucuz
+    & 1024 girdide yaklaşık üç katı \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Varsayılan SAM 2.1 Hiera-B+.} İlk iki satır tek başına belirleyici.
+Görev hiçbir yerde sınıf sormuyor, dolayısıyla DINOv3'ün asıl gücü olan
+anlam burada karşılığı olmayan bir fazlalık; SAM 2'nin ``ne olduğunu
+bilmeden nerede bittiğini bilme'' hâli ise görevin tanımının kendisi.
+Alttaki satırlar da aynı yöne bakıyor.
+
+Large değil B+ olmasının sebebi hesap değil. EdgeTAM'ın kendi makalesi
+teacher olarak SAM~2 Hiera-B+'yı almış ve hedef olarak stride 16'daki
+encoder feature map'ini kullanmış~\cite{zhou2025edgetam}, yani bizim
+okuduğumuz tensörün aynısını. EdgeTAM'ın gövde ağırlıkları \emph{zaten} o
+hedefe oturmuş ağırlıklar. B+'dan distile etmek o hedefi kaldığı yerden
+sürdürmek oluyor, üstüne yalnızca modalite boşluğu eklenmiş hâlde;
+Large'dan distile etmek ise student'ı başlangıç noktasının hedefinden
+\emph{başka} bir hedefe çekmek olurdu, ki bu SAM teacher'ını ilginç kılan
+tek özelliği feda etmek demek.
+
+\textbf{DINOv3 ikinci koşu olarak duruyor.} Üst sınırı daha yüksek olabilir,
+ama hiza riskini o taşıyor. Aradaki tek fark bir string; veri, seed,
+schedule ve loss aynı kalıyor, dolayısıyla çıkan fark teacher'ın kendisine
+ait oluyor.
 
 \textbf{İkisi birden kullanılmıyor,} ve sebebi teknik bir engel değil.
 Çoklu-teacher yayınlanmış bir desen, ama burada iki loss iki ayrı aşamada
@@ -353,14 +446,6 @@ ve verileri iki mertebe farklı; ortak bir batch aşama A'nın çoğunu çöpe
 atardı. Aynı fikrin ucuz hâli zaten aşağıda: çapa terimi, yani feature
 distillation'ı ikinci bir teacher olarak değil regularizer olarak
 kullanmak.
-
-\textbf{Önce SAM 2.1 koşulacak.} Sebep DINOv3'ün zayıf olması değil,
-sıralamanın riski: SAM 2.1 varyantı aşama C hiç yapılmasa bile ayakta kalan
-varyant, çünkü encoder'ı memory yolunun zaten beklediği uzayda tutuyor.
-DINOv3 varyantının üst sınırı daha yüksek ama hiza riskini o taşıyor, yani
-ikinci koşu olması doğru. Aradaki tek fark bir string; veri, seed, schedule
-ve loss aynı kalıyor, dolayısıyla çıkan fark teacher'ın kendisine ait
-oluyor.
 
 \textbf{Hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
 Baseline: stok EdgeTAM checkpoint'inden başlayan aşama B. Pretraining bu
@@ -596,7 +681,8 @@ hikâye.
     \node[esbaslik, anchor=east, text width=22mm] at (2.4,-1.9)
       {\textbf{Kust4K}\\{\footnotesize $640{\times}512$}};
     \node[kmavi,  text width=32mm] at (4.5,-1.9)
-      {{\footnotesize 4 024 çift}};
+      {{\footnotesize \textbf{2 864} çift}\\
+       {\footnotesize \textcolor{eskirmizi}{1 160 bozuk kare atıldı}}};
     \node[kyesil, text width=32mm] at (8.4,-1.9)
       {{\footnotesize semantic}\\{\footnotesize $\rightarrow$ component}};
     \node[esnot] at (12.3,-1.9) {video yok};
@@ -624,7 +710,7 @@ dense mask taşıdığı için de aşama B'yi.
 \textbf{Semantic set nasıl instance hedefi veriyor?} Aşama B'nin tamamı
 bu: hedefi biz kuruyoruz. Thing sınıflarını ayırıp sınıf sınıf
 connected component alıyoruz, her component bir prompt ve bir target
-oluyor. SegFly hacmi getiriyor (Kust4K'nın dört katı kare, üç irtifa),
+oluyor. SegFly hacmi getiriyor (temizlenmiş Kust4K'nın beş katı kare, üç irtifa),
 Kust4K en ince etiketi (dört thing sınıfı; SegFly'da yalnızca iki tane
 var). Tek set kullanmak tek sensör, tek şehir ve tek etiketleme alışkanlığı
 demek olurdu, o yüzden üçü tek havuzda birleşiyor ve bir batch üçünü aynı
@@ -638,14 +724,27 @@ Kust4K ve SegFly yalnızca eğitime giriyor; skorlama VTUAV VIS'in çizilmiş
 maskeleri üzerinden yapılıyor. Gürültülü bir target'tan öğrenmek normal,
 gürültülü bir target'la not vermek değil.
 
+Bir de \textbf{bozuk kare} ayıklaması var. Kust4K'nın 4 024 karesinin
+1 160'ında, yani yüzde 29'unda, iki modaliteden biri sensör arızasını
+taklit etmek için kasten bozulmuş. Görüntüler sorunsuz açılıyor, sadece
+sahnenin kendisi değiller, yani gözle bakmayan bir okuyucu için görünmez
+bir gürültü. Set bu kareleri kendi manifest dosyalarında adlarıyla
+sayıyor; okuyucu o listeleri okuyup kareleri atıyor, geriye 2 864 temiz
+çift kalıyor.
+
 Hizalı çift bir şeyi daha mümkün kılıyor. Güçlü bir RGB modeli RGB
 yarısında maske üretip aynı maskeyi termal yarıya taşıyabilir; böylece
 maskesiz kareler aşama B'ye veri olur, ve encoder iki modaliteyi birden
-görür. Tek şartı hizalama, ve bu bir varsayım değil ölçülecek bir şey:
-hedefler karenin yüzde biri kadar, birkaç piksellik sistematik bir kayma
-maskeyi bozar. VTUAV'ın kendi belgesi iki modalitenin piksel piksel hizalı
-\emph{olmadığını} söylüyor, o yüzden fikir setten sete ayrı ayrı
-ölçülmeden uygulanmıyor.
+görür. Tek şartı hizalama, ve bu bir varsayım değil ölçülecek bir şey.
+Sebebi geometrik: hedefler karenin yüzde biri kadar, yani onlarca piksel
+genişliğinde, ve birkaç piksellik sistematik bir kayma o boyutta maskenin
+önemli bir kısmını kaydırıyor. Aynı kayma büyük bir hedefte fark
+edilmiyor bile, yani hasar hedef boyutuyla ters orantılı ve en çok bizim
+en çok baktığımız boyutta canını yakıyor. VTUAV'ın kendi belgesi de iki
+modalitenin piksel piksel hizalı \emph{olmadığını} söylüyor. O yüzden fikir
+setten sete ayrı ayrı ölçülmeden uygulanmıyor, ve ölçüm ucuz: her set için
+bir kayma tahmini çıkarıp taşınan maskenin kendi ground truth'uyla IoU'suna
+bakmak yetiyor.
 
 VTUAV için iki ayar başka hiçbir yerde olmadığı kadar önemli, ikisi de
 $1920\times1080$ video olmasından geliyor. \textbf{Kırpma oranı 512/1080:}
