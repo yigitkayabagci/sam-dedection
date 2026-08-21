@@ -436,12 +436,13 @@ else:
 code(r"""
 # --- Dependencies -------------------------------------------------------
 # EdgeTAM installs itself *as* the package `sam2` -- it is a fork -- so Meta's
-# sam2 must never share this environment. The DINOv3 teacher goes through
-# transformers, which is independent of both.
+# sam2 must never share this environment. The teacher is loaded through
+# transformers' own Sam2Model, which is independent of both -- that is the
+# whole reason a SAM 2 teacher does not collide with the SAM 2 fork below.
 before = torch.__version__
 !bash scripts/setup_edgetam.sh 2>&1 | tail -5
 !pip install -q -r requirements.txt
-# 4.56 is the floor that knows the teachers: DINOv3 and Sam2Model both landed
+# 4.56 is the floor that knows the teachers: Sam2Model and DINOv3 both landed
 # there, and an older wheel satisfies a lower pin and then fails at
 # from_pretrained, forty minutes into the session.
 !pip install -q "transformers>=4.56" datasets
@@ -628,7 +629,7 @@ MAX_INSTANCES      = 8               # prompts per window -- one encode covers a
 
 # --- Stage A: the unlabelled pretraining pass ---------------------------
 PRETRAIN        = True               # distil an RGB teacher into the encoder
-TEACHER         = "facebook/dinov3-vitb16-pretrain-lvd1689m"   # gated -- see below
+TEACHER         = "facebook/sam2.1-hiera-base-plus"            # open -- see below
 {{DISTILL}}
 DISTILL_STEPS   = 600
 DISTILL_PAIRS   = 20000              # sampled across the set, never truncated
@@ -1269,58 +1270,58 @@ If only one more fits, make it `train_003` — the most masks and the most
 pedestrians. With all three, raising `DISTILL_PAIRS` past 20 000 starts to buy
 something too; on `train_001` alone it does not.
 
-### "We are a SAM-based model. Doesn't a DINO teacher break that?"
+### Which teacher, and why it is SAM 2 and not DINO
 
-The fair question, and the short answer is **no, but it is worth measuring
-rather than arguing** — so `TEACHER` is a string and either answer is one
-edit away.
+The task is **single-object tracking with no class in it**: the operator draws
+a box, the model follows *that* object, and nothing anywhere asks what the
+object is. That sentence decides the teacher, so it is worth putting the
+candidates side by side.
 
-*Why it cannot break anything structurally:* distillation changes **weight
-values inside `image_encoder`** and nothing else. Same modules, same
-state-dict keys, same ONNX graph, same engines. The projection head is
-discarded. And stage A is only an **initialisation** — stage B then trains
-against SAM 2's own objective (promptable segmentation, focal + dice + IoU) on
-real masks, so if the DINO features were unhelpful, stage B pulls them back and
-the only cost was the GPU time. The `distilled+ft` run below exists precisely
-to put a number on that.
+| | **SAM 2.1 Hiera-B+** (default) | DINOv3-ViT-B/16 | DINOv2-base |
+|---|---|---|---|
+| what its features encode | **class-agnostic boundaries** — something is here, it ends there | **semantics**, and specifically **dense** ones — fixing dense degradation is what the release is about | semantics |
+| fit to *this* task | the task's definition: no class is ever asked for | semantics is real, and is surplus here | same, one generation back |
+| match to our target tensor | `fpn_hidden_states[-1]` **is** 256-d at stride 16 — the projection is 256→256, not a change of representation | 768-d → projected to 256 | 768-d → projected to 256 |
+| relation to the student | EdgeTAM **is** a distillation of SAM 2; this resumes that objective across a modality gap | unrelated model | unrelated model |
+| alignment risk | pushes the encoder **toward** the space `memory_attention` expects | pushes it away — this run carries the risk stage C exists to repair | same |
+| grid at our 512 input | 1024/16 = 64×64, an exact 2× down to the student's 32 | 512/16 = **32×32 — the student's grid exactly**, no resampling | 518/14 = 37×37, a fractional ratio |
+| cost per step | ~3× a base ViT. 600 steps at batch 32 is 0.037 A100-hours — not a constraint at this size | 512 input, base-sized | 518 input, base-sized |
+| access | open | **gated** — accept the terms once, set `HF_TOKEN` | open |
 
-*The real risk, which is not structural:* stage A moves the encoder while the
-mask decoder is frozen, so the decoder can end up reading features it was never
+**Base-plus and not Large, and cost is not the reason.** EdgeTAM's own paper
+distilled from **SAM2-Hiera-B+** targeting **F16, the encoder feature map at
+stride 16** — the exact tensor this stage reads. The student's trunk weights
+already *are* a fit to that target, so B+ resumes the objective the checkpoint
+was born from, while Large would pull it toward a different one and give up the
+single property that makes a SAM teacher interesting.
+
+**DINOv3 is the second run, not a dead option.** `TEACHER` is one string, and
+everything else — data, seed, schedule, loss — is held fixed, so the difference
+between the two runs is the teacher and nothing else. It is gated: open its
+model page once, accept the terms, then
+`from huggingface_hub import login; login()` in this runtime. AnyThermal's
+published result used DINOv2, which is why `facebook/dinov2-base` is still one
+string away and needs no account.
+
+*Whichever it is, it cannot break anything structurally.* Distillation changes
+**weight values inside `image_encoder`** and nothing else: same modules, same
+state-dict keys, same ONNX graph, same engines, and the projection head is
+discarded. Stage A is only an **initialisation** — stage B then trains against
+SAM 2's own objective (promptable segmentation, focal + dice + IoU) on real
+masks, so an unhelpful teacher costs GPU time and not correctness. The
+`distilled+ft` run below exists to put a number on that.
+
+*The real risk is not structural:* stage A moves the encoder while the mask
+decoder is frozen, so the decoder can end up reading features it was never
 trained for. That is why the trunk moves at 5e-5, why there is an EMA, and why
 stage B starts with a **head-only** stage — the decoder re-adapts before the
-encoder moves again.
+encoder moves again. A SAM teacher shrinks this risk; a DINO teacher grows it.
 
-*And the case for SAM 2.1 as the teacher is genuinely good:*
-
-| | **DINOv3-ViT-B/16** (default) | DINOv2-base | SAM 2.1 Hiera-Large |
-|---|---|---|---|
-| what its features encode | **semantics**, and specifically **dense** ones — fixing dense degradation is what the release is about | semantics | **class-agnostic boundaries** — segment anything, no notion of *what* |
-| grid at our 512 input | 512/16 = **32×32 — the student's grid exactly**, no resampling | 518/14 = 37×37, interpolated down to 32 | 1024/16 = 64×64, interpolated down |
-| match to our target tensor | 768-d → projected to 256 | 768-d → projected to 256 | `fpn_hidden_states[-1]` **is** 256-d at stride 16 — the same kind of tensor |
-| relation to the student | unrelated model | unrelated model | EdgeTAM **is** a distillation of SAM 2; this continues that objective across a modality gap |
-| cost per step | 512 input, base-sized | 518 input, base-sized | 1024 input, Hiera-Large — the model EdgeTAM exists to avoid |
-| access | **gated** — accept the terms once, set `HF_TOKEN` | open | open |
-
-**Why DINOv3 is the default now.** What this stage copies is a *dense* feature
-map, position by position — and dense feature quality is exactly what DINOv3's
-release is about; its predecessor is documented to degrade at dense prediction
-as training scales, which DINOv3 set out to fix. Its 16-pixel patch is a second,
-smaller win: at 512 it produces a 32×32 grid, which is the student's grid, so
-the teacher's map is never resampled before the loss. (AnyThermal's published
-result used DINOv2 — that is the reason the option is still one string away, and
-`facebook/dinov2-base` needs no account.)
-
-The argument for a DINO teacher at all is that what a *thermal* encoder lacks is
-semantics, not boundaries — a warm object against a cool background is often an
-*easier* edge than in RGB. The argument for SAM 2.1 is column four. **Nobody
-here has measured any of them.** Change `TEACHER`, re-run this cell and the
-`distilled+ft` run, and the test split answers it. The input size is picked from
-the teacher's id: SAM 2.1's position embeddings are not interpolated, so running
-it at a ViT's resolution would silently change the teacher.
-
-**DINOv3 is a gated repository.** Open its model page once, accept the terms,
-then `from huggingface_hub import login; login()` in this runtime. If you would
-rather not, `TEACHER = "facebook/dinov2-base"` needs nothing.
+The input size is picked from the teacher's id, and for SAM 2 it is 1024 for a
+reason: the position embeddings *are* interpolated to smaller grids, but the
+features move a long way when they are — cosine similarity to the model's own
+1024 output is 0.842 for B+ at 512, 0.736 for Large. Lowering it changes the
+teacher, not only its cost.
 
 ### Holding on to it: `ANCHOR_WEIGHT`
 
@@ -1334,10 +1335,10 @@ stage B loss = 20·focal + dice + IoU  +  λ · (1 − cos(features now, feature
 ```
 
 That is feature distillation used as a **regulariser, not a teacher**. The
-reference is the model's own frozen copy — not DINOv3 — for three reasons: what
-is worth keeping is what stage A *learned*, the copy is 4.92 M parameters
-rather than 300 M, and its features are already in the student's own space so
-no projection is needed. It costs **no extra encoder pass**: `propagate_image`
+reference is the model's own frozen copy — not the stage-A teacher — for three
+reasons: what is worth keeping is what stage A *learned*, the copy is 4.92 M
+parameters rather than a foundation model, and its features are already in the
+student's own space so no projection is needed. It costs **no extra encoder pass**: `propagate_image`
 hands back the map it already computed.
 
 `ANCHOR_WEIGHT = 0` turns it off and makes the third run a pure
@@ -1687,7 +1688,7 @@ trained the decoder too, so re-export both and run parity on all four.
 | ahead on the mean, flat on small instances | it learned the trucks. The deployment does not track trucks. Raise `MAX_INSTANCES`, lower `MIN_AREA`, and check the size histogram before rerunning |
 | LoRA level with the fine-tune | the regularisation argument was real, at 3 % of the parameters and a smaller optimiser state. Prefer LoRA and record it — this is the case where `finetune.py`'s §1 needs rewriting |
 | everything level with stock | the bottleneck is upstream of the method. Look again at the fusion number in cell {{fusion}}: if the instances are fused, the targets were wrong and nothing downstream could have helped |
-| `distilled+ft` no better than `finetune` | stage A did not pay for itself **with this teacher, on this dataset**. Two things to try before dropping it: `TEACHER = "facebook/sam2.1-hiera-large"`, and more pairs — it is a data-hungry stage, and MVUAV's 53 828 pairs are the honest test of it, not Kust4K's 4 024 |
+| `distilled+ft` no better than `finetune` | stage A did not pay for itself **with this teacher, on this dataset**. Two things to try before dropping it: `TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"`, the second run, and more pairs — it is a data-hungry stage, and VTUAV's ~1.7 M pairs are the honest test of it, not Kust4K's 2 864 |
 | `distilled+ft` **worse** than `finetune` | the encoder drifted somewhere the frozen decoder cannot read. Lower `--trunk-lr`, or raise the head-only epoch count (`EPOCHS = (2, 3)`) so the decoder gets longer to re-adapt before the trunk moves |
 
 **One run is one sample.** Every command takes `--seed`; re-run each with two or

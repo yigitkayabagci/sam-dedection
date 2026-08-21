@@ -52,7 +52,12 @@ import torch.nn.functional as F
 from .aerial import load_image, normalise
 from .finetune import EMA, Rates, apply_freeze, param_groups
 
-TEACHER_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+# The two teachers worth running, named rather than spelled out at each use.
+# `TEACHER_ID` is what the pipeline runs unless told otherwise; `DINO_ID` is the
+# second run and the default for `FeatureTeacher`, so a ViT class never defaults
+# to a non-ViT checkpoint.
+TEACHER_ID = "facebook/sam2.1-hiera-base-plus"
+DINO_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 STUDENT_SIZE = 512        # what the student is trained at, and the size to match
 SAM2_SIZE = 1024          # what SAM 2.1's position embeddings were trained at
 
@@ -111,13 +116,18 @@ class FeatureTeacher:
     `features`, and everything this module reasons about -- the projection, the
     loss, the loop -- is independent of it.
 
-    **DINOv3 is the default, and the reason is the thing being distilled.** What
-    this stage copies is a *dense* feature map, position by position, and dense
+    **DINOv3 is the default *here*, and the second run overall.** What this
+    stage copies is a *dense* feature map, position by position, and dense
     feature quality is exactly what DINOv3's release is about -- its predecessor
     is documented to degrade in dense prediction as training scales, which is
     the failure DINOv3 set out to fix. Its 16-pixel patch is a second, smaller
     win: at the student's own 512 input it produces a 32x32 grid, the student's
     grid exactly, so the teacher's map is never resampled before the loss.
+
+    What it is *not* is the pipeline default any more. The task is single-object
+    tracking with no class anywhere in it -- the operator draws a box, the model
+    follows that object -- and semantics is the one thing that task never asks
+    for. `Sam2FeatureTeacher` says the rest.
 
     The DINOv3 weights are **gated** on the Hub -- accept the terms once on the
     model page and set `HF_TOKEN` -- and `build_teacher` says so rather than
@@ -125,7 +135,7 @@ class FeatureTeacher:
     ungated and remains one string away.
     """
 
-    def __init__(self, model_id: str = TEACHER_ID, device: str = "cuda",
+    def __init__(self, model_id: str = DINO_ID, device: str = "cuda",
                  dtype: str = "bfloat16", size: int | None = None) -> None:
         from transformers import AutoModel
 
@@ -164,35 +174,34 @@ class FeatureTeacher:
 
 
 class Sam2FeatureTeacher:
-    """SAM 2.1's own image encoder as the teacher, for the obvious question.
+    """SAM 2.1's own image encoder as the teacher. **The default.**
 
-    The obvious question being: this is a SAM-family model, so why distil an
-    unrelated RGB model into it rather than the thing it was distilled from?
-    It is a fair question and it deserves a measurement, not an argument, so it
-    is one `--teacher` string away. Three things are genuinely in its favour:
+    The question this used to be an answer to -- "this is a SAM-family model,
+    so why distil an *unrelated* RGB model into it?" -- turns out to have no
+    good answer, so the default moved. Four things are in its favour:
 
-    1. **The tensors match exactly.** `fpn_hidden_states[-1]` is the FPN neck's
+    1. **It is the task.** What is being built is single-object tracking with
+       no class in it: the operator draws a box and the model follows *that*
+       object, and nothing anywhere asks what the object is. SAM 2's features
+       are class-agnostic by construction -- "something is here, it ends
+       there" -- which is that task's definition rather than a limitation of
+       the teacher. DINOv3's semantics are real and are surplus here.
+    2. **The tensors match exactly.** `fpn_hidden_states[-1]` is the FPN neck's
        coarsest output at 256 channels and stride 16 -- the same kind of tensor
        `encoder_features` pulls out of the student, so the projection is 256 to
        256 rather than a change of representation.
-    2. **It continues the objective the checkpoint was born from.** EdgeTAM
+    3. **It continues the objective the checkpoint was born from.** EdgeTAM
        *is* a distillation of SAM 2. Asking it to produce SAM 2's RGB features
        from a thermal input is the same training objective it already had, with
        a modality gap added.
-    3. Nothing about "SAM-ness" has to be argued about afterwards.
+    4. **It pushes the encoder toward the space the memory path expects**,
+       not away from it, so it shrinks the alignment risk stage C exists to
+       repair rather than growing it. A DINOv3 run carries that risk instead.
 
-    And two against, which is why this is not simply the default:
-
-    1. **The features are class-agnostic by design.** SAM 2 segments anything
-       and deliberately carries no notion of *what* a region is; DINOv2's
-       features are strongly semantic. What a thermal encoder is missing is
-       arguably the semantics -- boundaries are often *easier* in thermal, a
-       warm object against a cool background -- and if so the semantic teacher
-       is the better one. Arguably. Nobody here has measured it.
-    2. **It is much more expensive.** Hiera-Large at 1024 is the model EdgeTAM
-       exists to avoid; it costs several times a DINOv2-base pass at 518, per
-       step, for the whole stage. `facebook/sam2.1-hiera-base-plus` is the
-       cheaper end of the same family.
+    The one thing against is cost, and it is small: see below. DINOv3 stays one
+    `--teacher` string away as the second run, with everything else -- data,
+    seed, schedule, loss -- held fixed, so the difference between the two runs
+    is the teacher.
 
     **Use base-plus, not large, and the reason is not cost.** EdgeTAM's own
     paper says its teacher was **SAM2-Hiera-B+**, and its distillation target
@@ -219,7 +228,7 @@ class Sam2FeatureTeacher:
     **multiple of 32** -- 500 raises, 512 does not.
     """
 
-    def __init__(self, model_id: str = "facebook/sam2.1-hiera-large",
+    def __init__(self, model_id: str = TEACHER_ID,
                  device: str = "cuda", dtype: str = "bfloat16",
                  size: int = SAM2_SIZE) -> None:
         from transformers import Sam2Model

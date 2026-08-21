@@ -9,6 +9,7 @@ rather than the reverse.
 """
 from __future__ import annotations
 
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -21,10 +22,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.distill import (  # noqa: E402
+    DINO_ID,
     Pair,
     collate_pairs,
     SAM2_SIZE,
     STUDENT_SIZE,
+    TEACHER_ID,
     FeatureTeacher,
     Projector,
     Sam2FeatureTeacher,
@@ -231,6 +234,18 @@ class TestTeacherChoice(unittest.TestCase):
                          "some-org/SAM2-finetuned"):
             seen = self.dispatch(model_id)
             self.assertEqual((seen["cls"], seen["size"]), ("sam2", SAM2_SIZE), model_id)
+
+    def test_the_default_teacher_is_sam2_and_the_vits_default_is_a_vit(self):
+        # Two defaults, and they are allowed to differ. `TEACHER_ID` is what
+        # the pipeline runs -- SAM 2, because the task is class-agnostic single
+        # object tracking and EdgeTAM's own trunk is a fit to SAM 2's stride-16
+        # map. `FeatureTeacher`'s default has to stay a ViT whatever that is
+        # set to, or constructing the ViT class directly would hand a Hiera
+        # checkpoint to AutoModel and fail somewhere further in.
+        self.assertEqual(self.dispatch(TEACHER_ID)["cls"], "sam2")
+        self.assertEqual(self.dispatch(DINO_ID)["cls"], "vit")
+        signature = inspect.signature(FeatureTeacher.__init__)
+        self.assertEqual(signature.parameters["model_id"].default, DINO_ID)
 
     def test_an_explicit_size_overrides_the_default(self):
         import src.training.distill as distill

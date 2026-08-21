@@ -20,7 +20,7 @@ istiyor:
 | okuduğu | hizalı (termal, RGB) çiftleri | görüntü + **maske** |
 | etiket | **hiç yok** | maske, tek denetim sinyali |
 | eğitilen | `image_encoder` | `image_encoder` + `mask_decoder` |
-| öğretmen | DINOv3 (donuk) | yok — hedef gerçek maske |
+| öğretmen | SAM 2.1 Hiera-B+ (donuk); DINOv3 ikinci koşu | yok — hedef gerçek maske |
 | kayıp | kosinüs mesafesi | 20·focal + dice + IoU |
 | elimizdeki veri | ~150 000 kare | ~4 000 maske |
 
@@ -63,7 +63,7 @@ aşamasından önce belirleniyor; sonra düzeltme şansı yok.
 ## 3. Aşama A tam olarak ne yapıyor
 
 ```
-   RGB yarısı  ──▶  DINOv3 (donuk)  ──▶  öznitelik haritası ─┐
+   RGB yarısı  ──▶  SAM 2.1 (donuk) ──▶  öznitelik haritası ─┐
                                                              ├─▶ kosinüs mesafesi
    termal yarısı ──▶ bizim encoder  ──▶  öznitelik haritası ─┘
 ```
@@ -75,11 +75,16 @@ Hiçbir yerde etiket okunmuyor. `distill.py`'deki veri tipinin kendi tanımı:
 
 > *"Registered thermal and RGB halves of the same scene. **No labels.**"*
 
-**Neden işe yarıyor:** DINOv3 web ölçeğinde milyarlarca görüntüyle eğitilmiş;
-kenar, nesnelik, doku, şekil gibi kavramları taşıyor. Termal görüntü aynı
-dünyayı farklı bir fizikle görüyor ama **aynı nesneleri** içeriyor. Kayıtlı çift
-bize "bu termal desen, şu RGB kavramına karşılık geliyor" eşlemesini
-etiketsiz veriyor.
+**Neden işe yarıyor:** öğretmen web ölçeğinde eğitilmiş; kenar, nesnelik,
+doku, şekil gibi kavramları taşıyor. Termal görüntü aynı dünyayı farklı bir
+fizikle görüyor ama **aynı nesneleri** içeriyor. Kayıtlı çift bize "bu termal
+desen, şu RGB kavramına karşılık geliyor" eşlemesini etiketsiz veriyor.
+
+**Neden öğretmen SAM 2.1:** görev sınıfsız tek nesne takibi, yani hiçbir yerde
+"bu ne" sorulmuyor. SAM 2'nin öznitelikleri tam olarak bunu taşıyor: sınıf
+bilgisi olmadan nesnenin nerede bittiğini. Üstüne EdgeTAM **zaten** SAM 2'nin
+distilasyonu, dolayısıyla aşama A checkpoint'in doğduğu hedefi sürdürüyor.
+Ayrıntı ve DINOv3 karşılaştırması: `docs/encoder_mimari.md`.
 
 **Neden mimariyi bozmuyor:** distilasyon yalnızca `image_encoder`'ın ağırlık
 *değerlerini* değiştiriyor. Aynı modüller, aynı state-dict anahtarları, aynı
@@ -105,9 +110,11 @@ Dürüst cevap: **fikir sağlam temelli, ama bizim özel durumumuzda ölçülmed
 - **Alan farkı.** AnyThermal yer seviyesi termalde çalıştı. Havadan bakış
   farklı: nesneler küçük (VTUAV'da hedef karenin %0.2–2'si), perspektif
   tepeden, arka plan homojen. Bunun transferi *varsayım*, kanıt değil.
-- **Öğretmen–öğrenci mimari farkı.** DINOv3 bir ViT (patch 16), bizim encoder
-  konvolüsyonel RepViT. Öznitelikler farklı uzaylarda; projeksiyon başlığı bunu
-  kapatmaya çalışıyor ama tam eşleşme garantisi yok.
+- **Öğretmen–öğrenci mimari farkı.** Öğretmen bir ViT (SAM 2'nin Hiera'sı ya
+  da DINOv3), bizim encoder konvolüsyonel RepViT. Öznitelikler farklı
+  uzaylarda; projeksiyon başlığı bunu kapatmaya çalışıyor ama tam eşleşme
+  garantisi yok. SAM 2.1 öğretmeninde bu fark en küçüğü: hedef tensör zaten
+  256 kanal ve stride 16, yani öğrencinin ürettiğinin aynı biçimi.
 - **Hizalama.** VTUAV'ın iki modalitesi piksel piksel hizalı değil.
   `tolerance=1` (3×3 komşulukta en iyi eşleşme) bunu tolere ediyor, ama
   kusursuz değil.

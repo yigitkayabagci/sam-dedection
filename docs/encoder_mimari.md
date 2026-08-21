@@ -19,15 +19,15 @@ bu işin dışında; oraya encoder sağlamlaştıktan sonra geçilecek.
 | model | bizim için ne | ne zaman çalışıyor | eğitiliyor mu |
 |---|---|---|---|
 | **SAM 2 / EdgeTAM** | **Modelin kendisi.** EdgeTAM, SAM 2'nin küçültülmüş forku (13,9 M) ve `sam2` paketi olarak kuruluyor. Eğittiğimiz ağırlıklar bunun | Her zaman — aşama A ve B'nin ikisinde de | **Evet.** Zaten iş bu |
-| **DINOv3** | **Öğretmen**, model değil. RGB yarısına bakıp öznitelik üretiyor; bizim encoder termal yarısına bakıp aynı özniteliği üretmeye çalışıyor | Yalnızca **aşama A**. Bitince atılıyor | Hayır — donuk, sadece okunuyor |
+| **Öğretmen** (varsayılan SAM 2.1 Hiera-B+; DINOv3 ikinci koşu) | **Öğretmen**, model değil. RGB yarısına bakıp öznitelik üretiyor; bizim encoder termal yarısına bakıp aynı özniteliği üretmeye çalışıyor | Yalnızca **aşama A**. Bitince atılıyor | Hayır — donuk, sadece okunuyor |
 | **SAM 3** | **Modelde yok, eğitim döngüsünde yok.** Tek yeri çevrimdışı **masklet üretimi** (aşama C verisi, `tools/make_masklets.py`) — orada da varsayılan öğretmen SAM 2.1, SAM 3 tek string uzakta | Sadece çevrimdışı, eğitimden önce bir kez | Hayır — donuk, sadece okunuyor |
 
-**DINOv3 mimariyi bozmuyor.** Distilasyon `image_encoder`'ın **ağırlık
+**Öğretmen mimariyi bozmuyor.** Distilasyon `image_encoder`'ın **ağırlık
 değerlerini** değiştiriyor, başka hiçbir şeyi değil: aynı modüller, aynı
 state-dict anahtarları, aynı ONNX grafiği, aynı TensorRT motorları. Projeksiyon
 başlığı eğitim sonunda çöpe gidiyor. Üstelik aşama A sadece bir **başlangıç
 noktası**; aşama B ardından SAM 2'nin kendi hedefiyle (prompt'lu segmentasyon,
-focal + dice + IoU) gerçek maskeler üzerinde eğitiyor. DINOv3 öznitelikleri
+focal + dice + IoU) gerçek maskeler üzerinde eğitiyor. Öğretmenin öznitelikleri
 işe yaramasa aşama B onları geri çeker; kaybedilen tek şey GPU saati olur.
 Notebook'taki `distilled+ft` koşusu tam da bunu ölçmek için var.
 
@@ -344,7 +344,7 @@ bağımsız. En sık karışan yer burası:
 | rol | kopyalanan şey | ne zaman | hangi model |
 |---|---|---|---|
 | **1. Sahte etiket** (mask distillation) | öğretmenin **çıktı maskesi** | Anti-UAV410 — sadece kutu etiketi var, maske yok | **SAM 2.1 Hiera Large** ✓ zaten kullanılıyor (`labels.py:Sam2Teacher`) |
-| **2. Öznitelik distilasyonu** (aşama A) | öğretmenin **iç öznitelik haritası** | RGB-T çiftleri — **hiç etiket yok** | **DINOv3-ViT-B/16** (varsayılan); DINOv2 ve SAM 2.1 tek dize uzaklıkta |
+| **2. Öznitelik distilasyonu** (aşama A) | öğretmenin **iç öznitelik haritası** | RGB-T çiftleri — **hiç etiket yok** | **SAM 2.1 Hiera-B+** (varsayılan); DINOv3 ve DINOv2 tek dize uzaklıkta |
 | **3. Öğretmen yok** (aşama B) | — hedef veri setinin **gerçek maskesi** | Kust4K vb. — yoğun maske zaten var | yok |
 
 Yani "neden SAM 2.1 large kullanmıyoruz" sorusunun cevabı: **kullanıyoruz** —
@@ -423,6 +423,9 @@ EdgeTAM state dict'i.
 
 ### "SAM tabanlı bir modeliz, DINO öğretmeni bozmaz mı?"
 
+Varsayılan artık SAM 2.1, yani soru asıl olarak **ikinci koşuya** ait. Cevap
+değişmiyor.
+
 **Yapısal olarak bozamaz.** Distilasyon sadece `image_encoder` içindeki
 **ağırlık değerlerini** değiştiriyor: aynı modüller, aynı state-dict
 anahtarları, aynı ONNX grafiği, aynı motorlar. Projeksiyon atılıyor. Üstelik
@@ -438,42 +441,45 @@ başlıyor — encoder tekrar oynamadan önce decoder yeniden uyum sağlıyor.
 `distilled+ft` koşusu `finetune`'dan **kötü** çıkarsa teşhis budur:
 `--trunk-lr` düşür ya da `EPOCHS = (2, 3)` yap.
 
-**Ve SAM 2.1'i öğretmen yapmanın gerçekten iyi bir gerekçesi var:**
+**Öğretmen seçimi, ve neden SAM 2.**
 
-| | **DINOv3-ViT-B/16** (varsayılan) | DINOv2-base | SAM 2.1 Hiera-Large |
+Görev **sınıfsız tek nesne takibi**: operatör bir kutu çiziyor, model *o*
+nesneyi takip ediyor, ve hiçbir yerde nesnenin ne olduğu sorulmuyor. Bu cümle
+öğretmeni belirliyor.
+
+| | **SAM 2.1 Hiera-B+** (varsayılan) | DINOv3-ViT-B/16 | DINOv2-base |
 |---|---|---|---|
-| öznitelik ne kodluyor | **semantik**, ve özellikle **yoğun** olanı — sürümün bütün derdi bu | semantik | **sınıftan bağımsız sınır** — her şeyi segmentler, *ne* olduğunu bilmez |
-| 512 girdide ızgara | 512/16 = **32×32 — öğrencinin ızgarasının aynısı**, hiç yeniden örnekleme yok | 518/14 = 37×37 → 32'ye interpolasyon | 1024/16 = 64×64 → 32'ye interpolasyon |
-| hedef tensörle uyum | 768-d → 256'ya projekte | 768-d → 256'ya projekte | `fpn_hidden_states[-1]` **zaten** 256-d, stride 16 |
-| öğrenciyle ilişkisi | ilgisiz model | ilgisiz model | EdgeTAM **zaten** SAM 2'nin distilasyonu; aynı hedefi modalite boşluğu ekleyerek sürdürmek |
-| adım maliyeti | 512 girdi, base | 518 girdi, base | 1024 girdi, Hiera-Large — EdgeTAM'ın var olma sebebi olan model |
-| erişim | **kapalı (gated)** — şartları bir kez kabul et, `HF_TOKEN` ver | açık | açık |
+| öznitelik ne kodluyor | **sınıftan bağımsız sınır ve nesnelik** — burada bir şey var, şurada bitiyor | **semantik**, ve özellikle **yoğun** olanı — sürümün bütün derdi bu | semantik |
+| bu göreve uyumu | görev tanımının kendisi | semantik gerçek, ama burada karşılığı yok | aynısı, bir kuşak geride |
+| hedef tensörle uyum | `fpn_hidden_states[-1]` **zaten** 256-d, stride 16 — projeksiyon 256→256, temsil değişikliği değil | 768-d → 256'ya projekte | 768-d → 256'ya projekte |
+| öğrenciyle ilişkisi | EdgeTAM **zaten** SAM 2'nin distilasyonu; aynı hedefi modalite boşluğu ekleyerek sürdürmek | ilgisiz model | ilgisiz model |
+| hiza riski | encoder'ı `memory_attention`'ın beklediği uzaya **doğru** itiyor | uzağa itiyor — aşama C'nin onarmak için var olduğu riski bu koşu taşıyor | aynısı |
+| 512 girdide ızgara | 1024/16 = 64×64 → öğrencinin 32'sine **tam iki kat** küçültme | 512/16 = **32×32 — öğrencinin ızgarasının aynısı**, hiç yeniden örnekleme yok | 518/14 = 37×37, kesirli oran |
+| adım maliyeti | base ViT'in ~3 katı. Batch 32'de 600 adım 0,037 A100-saati — bu ölçekte kısıt değil | 512 girdi, base | 518 girdi, base |
+| erişim | açık | **kapalı (gated)** — şartları bir kez kabul et, `HF_TOKEN` ver | açık |
 
-**Neden artık DINOv3 varsayılan.** Bu aşamanın kopyaladığı şey **yoğun** bir
-öznitelik haritası, pozisyon pozisyon — ve yoğun öznitelik kalitesi tam olarak
-DINOv3 sürümünün konusu: selefinin eğitim ölçeklendikçe yoğun tahminde
-bozulduğu belgeli, DINOv3 bunu düzeltmek için çıktı. 16-piksel yaması ikinci ve
-daha küçük bir kazanç: 512'de 32×32 ızgara üretiyor, yani **öğrencinin
-ızgarası** — öğretmenin haritası kayıptan önce hiç yeniden örneklenmiyor.
-(AnyThermal'ın yayınlanmış sonucu DINOv2 kullanıyor; seçenek bu yüzden tek
-string uzakta duruyor ve `facebook/dinov2-base` hesap istemiyor.)
+**Large değil B+, ve sebebi maliyet değil.** EdgeTAM'ın kendi makalesi öğretmen
+olarak **SAM2-Hiera-B+**'yı, hedef olarak da **F16'yı, yani stride 16'daki
+encoder öznitelik haritasını** kullanıyor — bu aşamanın okuduğu tensörün
+aynısı. Öğrencinin gövde ağırlıkları **zaten** o hedefe oturmuş ağırlıklar,
+yani B+ checkpoint'in doğduğu hedefi kaldığı yerden sürdürüyor; Large ise
+öğrenciyi başlangıç noktasının hedefinden *başka* bir hedefe çekerdi, ki bu SAM
+öğretmenini ilginç kılan tek özelliği feda etmek demek.
 
-DINO öğretmeni lehine genel argüman: **termal encoder'ın eksiği semantik, sınır
-değil** — soğuk arka plandaki sıcak nesne çoğu zaman RGB'den *daha kolay* bir
-kenar. SAM 2.1 lehine argüman: dördüncü sütunun tamamı.
-
-**Hiçbiri ölçülmedi.** O yüzden argüman değil, anahtar:
+**DINOv3 ikinci koşu, ölü seçenek değil.** Tek fark bir string; veri, seed,
+schedule ve kayıp aynı kalıyor, dolayısıyla çıkan fark öğretmene ait oluyor.
 
 ```python
-TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"   # varsayılan (gated)
+TEACHER = "facebook/sam2.1-hiera-base-plus"            # varsayılan, açık
+TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"   # ikinci koşu (gated)
 TEACHER = "facebook/dinov2-base"                       # açık, hesap gerekmez
-TEACHER = "facebook/sam2.1-hiera-large"                # SAM 2'nin kendi encoder'ı
 ```
 
 `build_teacher` sınıfı **id'den** seçiyor, ayrı bir bayraktan değil: SAM 2.1
-checkpoint'i DINOv2'nin 518'inde de yüklenir, koşar ve hiç eğitilmediği
-interpolasyonlu pozisyon gömmelerinden öznitelik üretir — sessizce yanlış.
-Girdi boyutu öğretmenle birlikte seçiliyor (ViT 518, SAM 2.1 1024).
+checkpoint'i DINOv2'nin 518'inde de yüklenir ve koşar, ama öznitelikler epey
+oynar — modelin kendi 1024 çıktısıyla kosinüs benzerliği 512'de B+ için 0,842,
+Large için 0,736. Girdi boyutu bu yüzden öğretmenle birlikte seçiliyor (ViT
+518, SAM 2.1 1024): boyutu düşürmek maliyeti değil öğretmeni değiştiriyor.
 
 **Ve hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.** Taban
 çizgisi: stok checkpoint'ten başlayan aşama B. Notebook üçüncü bir koşu yapıp

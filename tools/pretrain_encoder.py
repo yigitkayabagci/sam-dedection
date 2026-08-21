@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.aerial import SPECS, list_pairs, replace  # noqa: E402
+from src.training.distill import TEACHER_ID  # noqa: E402
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
 
 
@@ -56,17 +57,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="Where the checkpoint goes.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
-    p.add_argument("--teacher", default="facebook/dinov3-vitb16-pretrain-lvd1689m",
-                   help="Any DINOv2-class ViT, or a facebook/sam2.1-hiera-* "
-                        "checkpoint to distil SAM 2's own encoder instead. The "
-                        "class is chosen from the id; see distill.py for what "
-                        "each buys and costs.")
+    p.add_argument("--teacher", default=TEACHER_ID,
+                   help="Default: SAM 2.1's own encoder, which is what EdgeTAM "
+                        "was distilled from and what a class-agnostic tracking "
+                        "task actually wants. Any DINOv2-class ViT works too "
+                        "(facebook/dinov3-vitb16-pretrain-lvd1689m is the "
+                        "second run); the class is chosen from the id. See "
+                        "distill.py for what each buys and costs.")
     p.add_argument("--teacher-size", type=int, default=None,
                    help="Default: --size snapped up to the ViT's patch grid "
                         "(512 for a /16 model, 518 for a /14 one), or 1024 for "
-                        "SAM 2.1, whose position embeddings are not "
-                        "interpolated -- lowering that one changes the teacher, "
-                        "not only its cost.")
+                        "SAM 2.1. Its position embeddings do interpolate to "
+                        "smaller grids, but the features move -- lowering that "
+                        "one changes the teacher, not only its cost.")
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--pairs", type=int, default=None,
                    help="Cap on pairs. Sampled across the whole set, not "
