@@ -6,19 +6,14 @@ anlattı. EdgeTAM indirildiği gibi alındı, dört TensorRT motoruna taşındı
 ölçüldü. Bu bölüm ters taraf: ağırlıkların kendisini termal ve havadan
 veriyle eğitmek.
 
-Hat üç aşamalı. \textbf{A} ve \textbf{B} kurulu: kodu depoda,
-\texttt{src/training/} altındaki modüller ve üç giriş noktası
-(\texttt{tools/\allowbreak pretrain\_encoder.py},
-\texttt{tools/\allowbreak train\_encoder.py},
-\texttt{tools/\allowbreak eval\_instances.py}), hepsi tek oturumda
-\texttt{notebooks/07\_encoder\_aerial\_rgbt.\allowbreak ipynb} ile koşuyor.
-Sıradaki iş onları koşturmak. \textbf{C} önerilen ek adım ve B ölçülmeden
-başlamıyor; sebebi \cref{sec:egitim-sirada}'de.
+Hat üç aşamalı. \textbf{A} ve \textbf{B} kurulu ve kodu çalışır hâlde;
+sıradaki iş onları koşturmak. \textbf{C} önerilen ek adım ve B ölçülmeden
+başlamıyor.
 
 Bölüm kasten görsel. Her şekil bir kurulumu anlatıyor, metin şekli
 açıklıyor.
 
-\section{Dört Parça, Hangisi Eğitiliyor}
+\section{Ne Eğitiliyor}
 \label{sec:egitim-dort-parca}
 
 EdgeTAM dört parçadan oluşuyor. İkisi tek bir kareyi maskeye çeviriyor.
@@ -91,8 +86,8 @@ Hafıza yolu frozen kalıyor. Üç sebep var, herhangi biri tek başına yeterdi
   \item \textbf{Piksel değil feature işliyor.} Termal ile RGB arasındaki
         fark bir encoder problemi, yani memory yolunun termale özel bir
         eğitime ihtiyacı yok. Encoder taşındıktan sonra ona \emph{yeniden}
-        hizalanması gerekip gerekmediği ayrı bir soru;
-        \cref{sec:egitim-hiza} onu ele alıyor.
+        hizalanması gerekip gerekmediği ayrı bir soru; bir sonraki
+        bölümün son kısmı onu ele alıyor.
 \end{enumerate}
 
 SAM~2 de aynı ayrımı yapıyor. Encoder'ı statik görüntüyle, hafıza yolunu
@@ -101,9 +96,6 @@ donduruyor~\cite{ravi2024sam2}.
 
 \section{Üç Aşama}
 \label{sec:egitim-uc-asama}
-
-Plan üç aşamalı. İlk ikisinin kodu yazıldı. Üçüncüsü, ikincisi ölçülmeden
-başlamıyor.
 
 \begin{figure}[H]
   \centering
@@ -141,8 +133,8 @@ başlamıyor.
     \draw[esok]  (a) -- (b);
     \draw[esink] (b) -- (c);
 
-    \node[esiyi, anchor=south, yshift=2.5mm] at (a.north) {kod yazıldı};
-    \node[esiyi, anchor=south, yshift=2.5mm] at (b.north) {kod yazıldı};
+    \node[esiyi, anchor=south, yshift=2.5mm] at (a.north) {kurulu};
+    \node[esiyi, anchor=south, yshift=2.5mm] at (b.north) {kurulu};
     \node[esnot, anchor=south, yshift=2.5mm] at (c.north) {önerilen ek adım};
 
     \node[esnot, anchor=north, yshift=-2.5mm, text width=62mm] at (2.35,-4.2)
@@ -154,33 +146,29 @@ başlamıyor.
   \label{fig:egitim-uc-asama}
 \end{figure}
 
-Her aşamada ne frozen kalıyor? Cevap tek bir çağrıda duruyor
-(\texttt{src/\allowbreak training/\allowbreak finetune.py}):
+Her aşamada başka bir şey açılıyor, gerisi frozen kalıyor:
 
 \begin{center}\footnotesize
-\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{48mm}>{\raggedright\arraybackslash}p{50mm}@{}}
+\begin{tabular}{@{}l>{\raggedright\arraybackslash}p{95mm}@{}}
   \toprule
-  \textbf{aşama} & \textbf{açılan modüller} & \textbf{çağrı} \\
+  \textbf{aşama} & \textbf{eğitime açılan} \\
   \midrule
-  A & yalnızca image encoder (head yok)
-    & \texttt{apply\_freeze(model,\allowbreak\ "backbone")} \\
-  B & mask decoder + prompt encoder, sonra + image encoder
-    & \texttt{apply\_freeze(model,\allowbreak\ "head")} $\rightarrow$
-      \texttt{"encoder"} \\
-  C & memory attention + memory encoder & (kendi aşaması, henüz yok) \\
+  A & yalnızca image encoder \\
+  B & önce mask decoder + prompt encoder, sonra bunlara image encoder da
+      katılıyor \\
+  C & memory attention + memory encoder; image encoder bu kez frozen \\
   \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection*{Aşama C neden var: feature uzayı hizası}
-\label{sec:egitim-hiza}
+\subsection*{Aşama C neden var}
 
 Memory attention'ın $W_Q$ ve $W_K$ matrisleri, EdgeTAM eğitilirken image
 encoder'ın ürettiği feature dağılımına oturdu. Aşama A ve B o dağılımı
 taşıyor. Mask decoder aşama B'de encoder'la \emph{birlikte} eğitildiği için
 yeni dağılıma uyum sağlıyor. Memory yolu sağlamıyor: aşama B tek kare
-üzerinde, \mbox{\texttt{run\_mem\_encoder=False}} ile ve boş bir memory
-bank'la koşuyor, yani oraya hiç gradient gitmiyor.
+üzerinde ve boş bir memory bank'la koşuyor, yani oraya hiç gradient
+gitmiyor.
 
 \begin{figure}[H]
   \centering
@@ -223,17 +211,11 @@ birden uygulanıyor. Ama $W_Q$ ve $W_K$ sabit ve kaymanın benzerlik yapısını
 koruduğunu garanti eden bir şey yok. Yani bozulmanın büyüklüğü ölçülene
 kadar bilinmiyor.
 
-Ölçen sayı da henüz elimizde değil. \cref{sec:egitim-olcum}'deki instance
-IoU tek prompt'lu tek kare skorluyor ve memory hiç devreye girmiyor, yani bu
-hasarı tanım gereği göremiyor. Görebilen tek metrik J\&F, o da aşama C'nin
-kurulumunu istiyor.
+Ölçen sayı da henüz elimizde değil. Elimizdeki metrik tek prompt'lu tek kare
+skorluyor ve memory hiç devreye girmiyor, yani bu hasarı tanım gereği
+göremiyor. Görebilen tek metrik J\&F, o da aşama C'nin kurulumunu istiyor.
 
-\textbf{Anchor terimi bunu kapsamıyor.} \cref{sec:egitim-capa}'daki çapa
-modelin \emph{aşama B başındaki} kopyasına bağlanıyor, yani aşama A'nın
-öğrendiğini koruyor. Stok EdgeTAM'in feature uzayına değil. İkisi farklı
-hedef, ve bu bölümdeki hiza problemini çözen ikincisi olurdu.
-
-\section{Aşama A: Etiketsiz Modality Distillation}
+\section{Aşama A}
 \label{sec:egitim-asama-a}
 
 Aşama A'nın tek varlık sebebi şu: hizalı RGB-T çiftleri hiçbir etiket
@@ -296,10 +278,10 @@ Feature distillation'ın böyle bir şartı yok. Teacher ile student'ın
 mimarileri ilgisiz olabilir. Hizalanması gereken tek şey bir feature map,
 onu da $1{\times}1$ projection hallediyor.
 
-\subsection*{Teacher seçimi ve grid}
+\subsection*{Teacher seçimi}
 
-Üç aday var, seçim tek bir string. Aralarındaki en somut fark, teacher'ın
-feature map'inin loss'tan önce resample edilip edilmediği.
+Üç aday var. Aralarındaki en somut fark, teacher'ın feature map'inin
+loss'tan önce resample edilip edilmediği.
 
 \begin{figure}[H]
   \centering
@@ -307,7 +289,7 @@ feature map'inin loss'tan önce resample edilip edilmediği.
     \eskizbasla[19]
     \node[kmor, text width=34mm] (d3) at (0,0)
       {\textbf{DINOv3} ViT-B/16\\{\footnotesize $512/16 = 32{\times}32$}\\
-       {\footnotesize \emph{varsayılan}, gated: \texttt{HF\_TOKEN} ister}};
+       {\footnotesize \emph{varsayılan}}};
     \node[kgri, text width=34mm] (d2) at (5.3,0)
       {DINOv2 base\\{\footnotesize $518/14 = 37{\times}37$}\\
        {\footnotesize açık, hesap gerekmez}};
@@ -341,66 +323,16 @@ feature map'inin loss'tan önce resample edilip edilmediği.
 
 \textbf{Hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
 Baseline: stok EdgeTAM checkpoint'inden başlayan aşama B. Pretraining bu
-baseline'ı geçmiyorsa harcanmış GPU saatidir, ve bunu yalnızca
-karşılaştırma söyleyebilir. Notebook üçüncü bir koşu yapıp sadece
-\texttt{--base}'i değiştirerek bunu ölçüyor.
+baseline'ı geçmiyorsa harcanmış GPU saatidir. Karşılaştırılabilir olan tek
+sayı test split'indeki instance IoU'su; cosine loss teacher'lar arasında
+karşılaştırılamaz.
 
-Bir uyarı: \textbf{cosine loss teacher'lar arasında karşılaştırılamaz.}
-Karşılaştırılabilir olan tek sayı test split'indeki instance IoU'su.
+Aşama B, aşama A'nın öğrendiğinden geri kaymasın diye bir \textbf{çapa
+terimi} taşıyor: encoder'ın feature'ları aşama B başındaki hâlinden ne kadar
+uzaklaştıysa o kadar ceza. Bu çapa aşama A'yı koruyor, memory yolunun
+hizasını değil.
 
-\subsection*{Çift bütçesi: VTUAV'ın yeri burası}
-
-Aşama A hiç etiket okumuyor. Yani bir veri setinin annotation'ı bu aşamada
-alakasız, yalnızca çift sayısı önemli. Bu, listeyi baştan sıralıyor.
-
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[23]
-    % Çubuk uzunlukları logaritmik: kaba oranı gösteriyor, mutlak değeri
-    % değil. 1,7 M ile 4 024 doğrusal çizilseydi alttaki beş çubuk görünmezdi.
-    \newcommand{\cubuk}[5]{% #1 y, #2 uzunluk (cm), #3 kalem, #4 ad, #5 sayı
-      \draw[cizik, draw=#3, fill=#3!22] (0,#1) rectangle ++(#2,0.5);
-      \node[font=\elyazi\footnotesize, text=esmurekkep, anchor=west]
-        at (0.15,#1+0.25) {#4};
-      \node[esnot, anchor=west] at (#2+0.15,#1+0.25) {#5};}
-    \cubuk{0.00}{7.9}{esmavi}{VTUAV (tam set)}{$\approx$1 700 000 çift}
-    \cubuk{-0.68}{6.5}{esmavi}{VTUAV VIS bölümü}{$\approx$340 000}
-    \cubuk{-1.36}{5.3}{esmavi}{MVUAV}{$\approx$53 800}
-    \cubuk{-2.04}{4.2}{esmavi}{SegFly}{15 007}
-    \cubuk{-2.72}{4.4}{esgri}{\emph{AnyThermal'ın eğitim seti}}{16 943}
-    \cubuk{-3.40}{3.3}{esmavi}{Kust4K}{4 024}
-
-    \node[esvurgu, anchor=north west, text width=68mm] at (0,-3.85)
-      {kırmızı ok: aşama B'nin eğittiği set. Yüz kat az çift, ama maskeli.};
-    \draw[esokr=eskirmizi] (5.8,-3.15) -- (4.5,-3.15);
-    \node[esnot, anchor=north west, text width=68mm] at (0,-4.6)
-      {gri çubuk: yöntemin yayınlandığı ölçek. Havadan veriyle bile onun
-       üstüne çıkılıyor. Çubuklar logaritmik izlenim verir.};
-  \end{tikzpicture}
-  \caption{Hizalı RGB-T çifti bütçesi. ``VTUAV maskesiz, az gelmez mi?''
-    sorusunun cevabı tersine: maskesiz olmak bu aşamada hiçbir şeye mal
-    olmuyor, ve aşama B'nin eğittiği setten yüz kat fazla çifti var.}
-  \label{fig:egitim-cift-butcesi}
-\end{figure}
-
-VTUAV için iki ayar başka hiçbir yerde olmadığı kadar önemli. İkisi de
-$1920\times1080$ video olmasından geliyor:
-
-\begin{itemize}
-  \item \texttt{--crop 0.474} ($=512/1080$). 16:9 bir kareyi
-        $512\times512$'ye sıkıştırmak aspect ratio'yu bozuyor, ve küçük bir
-        aracı encoder'ın göremeyeceği boyutun altına indiriyor. Crop her
-        iki yarıdan aynı normalize konumdaki kareyi alıyor, böylece
-        hizalama korunuyor.
-  \item \texttt{--tolerance 1}. VTUAV'ın iki modalitesi piksel piksel
-        hizalı \emph{değil} (yazarların kendi notu). Tolerance, her student
-        pozisyonunu çevresindeki $3\times3$ komşuluğun en iyi teacher
-        pozisyonuyla eşleştiriyor. Bedeli uzamsal kesinlik, o yüzden hizalı
-        setlerde 0 kalıyor.
-\end{itemize}
-
-\section{Aşama B: Etiket Yanlış Tipte}
+\section{Aşama B}
 \label{sec:egitim-semantik}
 
 Havadan dense mask'li setlerin neredeyse tamamı \textbf{semantic
@@ -460,18 +392,17 @@ mask örnekleyip her birini ayrı prompt ediyor.
         {iki instance, iki prompt, iki target};
     \end{scope}
   \end{tikzpicture}
-  \caption{Semantic map'ten instance target'ına, dört adımda
-    (\texttt{src/training/aerial.py}). Thing sınıfları Kust4K'nın
+  \caption{Semantic map'ten instance target'ına. Thing sınıfları Kust4K'nın
     sekizinden dördü: motosiklet, araba, kamyon, insan. Yol, bina ve ağaç
     stuff, yani takip hedefi değil.}
   \label{fig:egitim-semantik-ornek}
 \end{figure}
 
-\subsection*{Bu adımın kendi riski: kaynaşma}
+\subsection*{Bunun kendi riski: kaynaşma}
 
 Connected component geometriyle karar veriyor. Tampon tampona park etmiş
 iki araba tek bir piksel kenarı paylaşıyorsa tek component olur, ve hiçbir
-gate bunu ayıramaz.
+eşik bunu ayıramaz.
 
 \begin{figure}[H]
   \centering
@@ -486,7 +417,7 @@ gate bunu ayıramaz.
         {\textbf{ince köprü}\\{\footnotesize distance transform'da iki tepe,
          arada vadi}};
       \node[esiyi, anchor=north, yshift=-2.5mm, text width=44mm] at (1.67,-1.75)
-        {\texttt{watershed} ayırıyor};
+        {watershed ayırıyor};
     \end{scope}
     % sağ: tam kenar -> hiçbir şey kurtaramaz
     \begin{scope}[shift={(6.6,0)}]
@@ -499,80 +430,32 @@ gate bunu ayıramaz.
         {mask geometrisiyle çalışan \emph{hiçbir} yöntem ayıramaz};
     \end{scope}
   \end{tikzpicture}
-  \caption{\texttt{watershed} modunun sınırı, ve bu sınır denenmeden önce
-    bilinmesi gereken şey. \texttt{tests/test\_aerial.py} her iki sonucu da
-    ayrı ayrı test ediyor: kurtardığını ve kurtaramadığını.}
+  \caption{Watershed'in sınırı, ve bu sınır denenmeden önce bilinmesi
+    gereken şey.}
   \label{fig:egitim-kaynasma}
 \end{figure}
 
-Bu riskin ölçüsü var, varsayımı yok. \texttt{InstanceGates.fill} (alan /
-box alanı) kaynaşmanın sinyali: kendi box'ının dörtte birini dolduran bir
-component genelde ince bir piksel köprüsüyle birleşmiş iki nesnedir.
-Notebook'un ilgili hücresi, \textbf{tek bir GPU saati harcanmadan önce},
-bunun ne sıklıkta olduğuna sayı koyuyor. O sayı bütün B aşamasının
-git/gitme kararı.
+Bu riskin ölçüsü var, varsayımı yok. Bir component'in kendi kutusunu ne
+kadar doldurduğu kaynaşmanın sinyali: dörtte birini dolduran bir component
+genelde ince bir piksel köprüsüyle birleşmiş iki nesnedir. Notebook bu
+oranı \textbf{tek bir GPU saati harcanmadan önce} sayıyor, ve o sayı bütün
+B aşamasının git/gitme kararı.
 
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[63]
-    \node[ksari, text width=28mm] (q) at (0,0)
-      {kaynaşma oranı\\{\footnotesize (notebook 07, GPU'suz)}};
+Kötü çıkarsa dört çıkış yolu var, maliyet sırasıyla: \textbf{(1)} watershed
+modunu aç, yalnızca köprü vakasını kurtarır ve bedavadır; \textbf{(2)}
+zaten instance mask veren bir set kullan, ki VTUAV VIS'te zaten var;
+\textbf{(3)} doldurma eşiğini sertleştir, daha az ama daha temiz instance;
+\textbf{(4)} \textbf{SAM'a sor.} Sonuncusu en iyisi çünkü karar
+\emph{görünüşe} göre veriliyor, mask geometrisine göre değil: SAM~3'e metin
+prompt'u veriliyor (``car'') ve o, bitişik iki arabayı bile ayrı ayrı
+maskeliyor~\cite{sam32025}. Eğitim döngüsünün dışında, çevrimdışı ve bir
+kez koşuyor.
 
-    \node[kyesil, text width=52mm] (o1) at (5.4,3.0)
-      {\textbf{1.} \texttt{mode=watershed}\\{\footnotesize yalnızca köprü
-       vakası. \emph{Maliyet: sıfır.}}};
-    \node[kmavi, text width=52mm] (o2) at (5.4,0.8)
-      {\textbf{2.} SAM 3'ü instance kaynağı yap\\{\footnotesize text prompt
-       $\rightarrow$ her araba ayrı mask. \emph{Maliyet: çevrimdışı bir
-       teacher geçişi.}}};
-    \node[kgri, text width=52mm] (o3) at (5.4,-1.45)
-      {\textbf{3.} \texttt{fill} eşiğini sertleştir\\{\footnotesize daha az
-       veri, hepsi temiz. \emph{Maliyet: instance sayısı.}}};
-    \node[kmor, text width=52mm] (o4) at (5.4,-3.7)
-      {\textbf{4.} zaten instance mask veren set kullan\\{\footnotesize
-       VTUAV VIS, zaten varsayılan}};
+\subsection*{Bir batch nasıl kuruluyor}
 
-    % shorten: ok ucu kutunun kenarında dursun, ilk satırın üstüne binmesin
-    \draw[esok, shorten >=1.5mm] (q) -- (o1);
-    \draw[esok, shorten >=1.5mm] (q) -- (o2);
-    \draw[esok, shorten >=1.5mm] (q) -- (o3);
-    \draw[esok, shorten >=1.5mm] (q) -- (o4);
-
-    \node[esvurgu, anchor=west, xshift=2.5mm, text width=32mm] at (o2.east)
-      {en iyi çare, henüz yazılmadı};
-  \end{tikzpicture}
-  \caption{Kaynaşma kötü çıkarsa dört çıkış yolu, maliyet sırasıyla.
-    \texttt{watershed}'in ne kurtarıp ne kurtaramadığı
-    \cref{fig:egitim-kaynasma}'de. İkinci yol \emph{görünüşe} göre karar
-    verdiği için bitişik nesneleri ayırabilen tek yol~\cite{sam32025}.}
-  \label{fig:egitim-cikis-yollari}
-\end{figure}
-
-\subsection*{Üç mode, üç farklı annotation}
-
-\begin{center}\footnotesize
-\begin{tabular}{@{}l l >{\raggedright\arraybackslash}p{86mm}@{}}
-  \toprule
-  \textbf{mode} & \textbf{harita ne} & \textbf{ne oluyor} \\
-  \midrule
-  \texttt{components} & semantic & sınıf sınıf connected component \\
-  \texttt{watershed}  & semantic & aynısı + ince köprüyle birleşenleri ayırma \\
-  \texttt{labels}     & \textbf{zaten instance} & hiçbir ayrıştırma yok; her
-                                                  sıfırdan farklı değer bir target \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-VTUAV'ın VIS bölümü kare başına instance mask veriyor. Tam bu sebeple
-varsayılan liste içinde; orada yukarıdaki hiçbir ayrıştırma çalışmıyor.
-
-\section{Bir Batch Nasıl Kurulur}
-\label{sec:egitim-batch}
-
-Encoder 512'de $\approx$38,7~GFLOP ve prompt'a bağlı değil. O yüzden
-görüntü bir kez encode ediliyor, window içindeki her instance aynı
-feature'lara karşı prompt ediliyor.
+Encoder prompt'a bağlı değil, yani bir görüntüyü kaç kez prompt ettiğiniz
+onun maliyetini değiştirmiyor. O yüzden görüntü bir kez encode ediliyor ve
+pencere içindeki her instance aynı feature'lara karşı prompt ediliyor.
 
 \begin{figure}[H]
   \centering
@@ -580,7 +463,7 @@ feature'lara karşı prompt ediliyor.
     \eskizbasla[71]
     \draw[cizik, draw=escizgi, fill=white] (0,-1.4) rectangle (3.2,1.4);
     \node[esbaslik, anchor=north, yshift=-2mm, text width=40mm] at (1.6,-1.4)
-      {window\\{\footnotesize $512\times512$ native piksel}};
+      {pencere\\{\footnotesize $512\times512$ native piksel}};
     \draw[cizik, draw=eskirmizi, fill=eskirmizid] (0.45,0.55) rectangle (1.35,0.95);
     \node[font=\elyazi\tiny] at (0.9,0.75) {A};
     \draw[cizik, draw=eskirmizi, fill=eskirmizid] (1.85,-0.35) rectangle (2.75,0.05);
@@ -609,323 +492,113 @@ feature'lara karşı prompt ediliyor.
       {batch artık aynı sahneyi paylaşan birden çok nesne taşıyor. Loss'un
        yapması gereken ayrım tam olarak bu.};
   \end{tikzpicture}
-  \caption{Bir batch: tek encode, instance başına bir prompt. Hem daha ucuz
-    hem daha iyi sinyal. \texttt{forward\_image} bir kez çalışıyor,
-    düzleştirilmiş feature'lar batch ekseninde instance başına seçiliyor.
-    SAM~2 zaten nesneleri batch'liyor, yani $N$ instance $N$ takip edilen
-    nesnenin bindiği makineye biniyor.}
+  \caption{Tek encode, instance başına bir prompt. Hem daha ucuz hem daha
+    iyi sinyal: aynı sahnedeki iki aracı ayırmak, loss'un öğrenmesi gereken
+    şeyin kendisi.}
   \label{fig:egitim-batch}
 \end{figure}
 
-İki ayrıntı, sessiz hata üreten türden:
+İki ayrıntı, sessiz hata üreten türden. \textbf{Split kare üzerinden
+yapılıyor, pencere üzerinden değil:} bir görüntünün iki penceresi
+piksellerinin çoğunu paylaşır, pencere seviyesinde bölmek neredeyse aynı
+görüntüleri çizginin iki yanına koyar ve held-out sayı anlamını kaybeder.
+\textbf{Kenardan kesilen instance kırpılmıyor, düşürülüyor:} piksellerinin
+sahip olmadığı bir genişliği iddia eden box, hedefsizlikten daha kötü bir
+target'tır.
 
-\begin{itemize}
-  \item \textbf{Split kare üzerinden, asla window üzerinden.} Bir
-        görüntünün iki window'u piksellerinin çoğunu paylaşır. Window
-        seviyesinde bölmek neredeyse aynı görüntüleri çizginin iki yanına
-        koyar, ve held-out sayı anlamını kaybeder.
-  \item \textbf{Kenardan kesilen instance kırpılmaz, düşürülür.}
-        Piksellerinin sahip olmadığı bir genişliği iddia eden box,
-        hedefsizlikten daha kötü bir target'tır.
-\end{itemize}
-
-\section{Loss: Hangi Terim Var, Hangisi Yok}
-\label{sec:egitim-kayip}
-
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[83]
-    % Kutular ortak bir sol kenardan başlıyor (anchor=west), böylece
-    % genişlik farkı doğrudan ağırlık farkını okutuyor. Notlar sabit bir
-    % x'te duran tek sütun -- kutu genişliğine bağlı olsalardı hizasız
-    % görünürlerdi.
-    \node[kyesil, anchor=west, minimum width=46mm, text width=42mm] (f) at (0,0)
-      {\textbf{20} $\times$ focal};
-    \node[kyesil, anchor=west, minimum width=26mm, text width=22mm] (d) at (0,-1.2)
-      {\textbf{1} $\times$ dice};
-    \node[kyesil, anchor=west, minimum width=26mm, text width=22mm] (i) at (0,-2.25)
-      {\textbf{1} $\times$ IoU-L1};
-
-    \node[esnot, anchor=west, text width=58mm] at (5.1,0)
-      {havadan bir aracın kaç piksel tuttuğunu ölçeğine yansıtan tek terim
-       bu. Baskın olması tasarım.};
-    \node[esnot, anchor=west, text width=58mm] at (5.1,-1.2)
-      {mask örtüşmesi};
-    \node[esnot, anchor=west, text width=58mm] at (5.1,-2.25)
-      {IoU head'inin kendi tahmini};
-
-    \node[esbaslik, anchor=west, text width=110mm] at (0,-3.4)
-      {\textbf{olmayan terimler}, ve sıfır ağırlıklı değil: \emph{hiç yok}};
-
-    \node[kkirmizi, anchor=west, minimum width=46mm, text width=42mm] (os) at (0,-4.8)
-      {\sout{object\_score BCE}};
-    \node[kkirmizi, anchor=west, minimum width=46mm, text width=42mm] (bp) at (0,-6.8)
-      {\sout{box\_projection}};
-
-    \node[esnot, anchor=west, text width=58mm] at (5.1,-4.8)
-      {statik sette ``mevcut'' etiketi yok. Prompt edilen her instance
-       tanım gereği mevcut. Sabit 1'e karşı BCE ``hiçbir şey öğretme''
-       değil, \textbf{koşulsuz ateşle} öğretirdi.};
-    \node[esnot, anchor=west, text width=58mm] at (5.1,-6.8)
-      {o, teacher mask'i kalite gate'inden geçemeyen kareler için yedek.
-       Burada mask \emph{zaten} ground truth.};
-  \end{tikzpicture}
-  \caption{Aşama B'nin loss'u, SAM~2'nin image pretraining hedefinin
-    aynısı. Kırmızı iki terim video yoluna ait ve bilerek dışarıda.
-    \texttt{object\_score\_logits}'in yersiz ateşlemesi, videoda memory
-    bank'ı zehirleyen şeyin ta kendisi. Etiketin gerçek olduğu yerde
-    (aşama C) eğitilecek.}
-  \label{fig:egitim-kayip}
-\end{figure}
-
-\section{Drift Riski ve Anchor Terimi}
-\label{sec:egitim-capa}
-
-Aşama A encoder'ı çok büyük bir etiketsiz sette oynatıyor. Aşama B onu iki
-mertebe küçük bir etiketli sette eğitiyor. A'nın öğrendiğinin geri
-kaymasını engelleyen hiçbir şey yok.
-
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[97]
-    \node[kmavi, text width=38mm] (a) at (0,0)
-      {\textbf{aşama A}\\{\footnotesize $\approx$1 700 000 etiketsiz çift}};
-    \node[kmavi, text width=38mm] (b) at (6.6,0)
-      {\textbf{aşama B}\\{\footnotesize 10 bin ile 50 bin arası\\etiketli kare}};
-    \draw[esok] (a) -- (b);
-    \node[esvurgu, anchor=south, yshift=1.5mm] at (3.0,0.35)
-      {iki mertebe fark};
-
-    \node[kkirmizi, text width=42mm] (drift) at (6.6,-2.1)
-      {encoder, A'nın öğrendiğinden \textbf{drift} ediyor};
-    \draw[esokr=eskirmizi] (b) -- (drift);
-
-    \node[kyesil, text width=64mm] (fix) at (2.9,-4.0)
-      {\textbf{çare: anchor loss}\\[0.5mm]
-       $\lambda \cdot \bigl(1 - \cos(\text{şimdiki},\ \text{A'nın})\bigr)$};
-    \draw[esokr=esyesil] (drift) -- (fix);
-
-    \node[esnot, anchor=north, yshift=-2.5mm, text width=118mm] at (5.0,-4.8)
-      {anchor bir foundation model değil, modelin aşama B başındaki kendi
-       kopyası. Korunmaya değer olan A'nın öğrendiği şey. 4,92 M parametre,
-       projection gerekmiyor, ekstra encoder geçişi de yok:
-       \texttt{propagate\_image} zaten hesapladığı feature map'i geri
-       veriyor. Flag: \texttt{--anchor-weight}, varsayılan kapalı.};
-  \end{tikzpicture}
-  \caption{İki loss'u toplamak yerine aşamalamak, sonra aşama A'yı bir
-    regularizer'la korumak. Toplamak bizde yanlış olurdu: veri iki mertebe
-    farklı, ortak batch ya aşama A'nın çoğunu çöpe atardı ya da iki akışlı
-    bir sampler isterdi. Aşamalamak loss ağırlıklandırma problemini de
-    tamamen ortadan kaldırıyor.}
-  \label{fig:egitim-capa}
-\end{figure}
-
-Aynı literatürden ikinci bir şey daha koda girdi: \textbf{moment terimi}
-(\texttt{--moments}). Saf yön (cosine) loss'unun göremediği bir hata var:
-feature map boyunca sabitlenmiş kanallar. Terim kanal başına ortalama ve
-standart sapmayı eşliyor, ama normalize edilmiş map'ler üzerinde. Ham
-büyüklüğü eşlemek, atılacak olan projection'ı decoder'ın pahasına eşlemek
-olurdu. Varsayılan kapalı, çünkü kaynağın kendisi ablation
-raporlamıyor~\cite{sam3distill2026}.
-
-\section{İki Yöntem, Tek Döngü}
-\label{sec:egitim-lora}
-
-\texttt{--method finetune | lora}. Aralarındaki fark tam olarak iki şey:
-hangi parametreler unfreeze ediliyor, ve checkpoint nasıl yazılıyor.
-
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[103]
-    \node[kmavi, text width=40mm] (ft) at (0,0)
-      {\textbf{kısmi fine-tune}\\{\footnotesize seçili ağırlıklar doğrudan
-       gradient alır}\\[0.5mm]{\footnotesize eğitilen: \textbf{$\approx$9,3 M}}};
-    \node[kmor, text width=40mm] (lo) at (5.2,0)
-      {\textbf{LoRA} ($r=16$)\\{\footnotesize aynı katmanların yanında
-       $B\!\cdot\!A$}\\[0.5mm]{\footnotesize eğitilen: \textbf{$\approx$0,3 M}}};
-    \node[kgri, text width=40mm] (sh) at (10.4,0)
-      {{\footnotesize ortak: aşamalar, batch sırası, seed, loss'lar,
-       one-cycle, gradient clipping, EMA, validation split}};
-    \node[esnot, anchor=north, yshift=-1.5mm, text width=44mm] at (sh.south)
-      {\texttt{src/training/schedule.py}, tek yerde};
-
-    \node[kyesil, text width=44mm] (ck) at (2.6,-2.5)
-      {\textbf{aynı checkpoint biçimi}\\{\footnotesize LoRA yazmadan önce
-       merge ediyor}};
-    \draw[esok] (ft) -- (ck);
-    \draw[esok] (lo) -- (ck);
-
-    \node[esvurgu, anchor=north, yshift=-2.5mm, text width=104mm] at (4.5,-3.3)
-      {bilerek eşitlenmeyen tek şey learning rate. LoRA $B=0$'dan başlıyor,
-       güncellemesinin gideceği yol daha uzun. Fine-tune'un oranını
-       dayatmak, LoRA'yı değil \emph{kötü ayarlanmış bir LoRA'yı} ölçmek
-       olurdu.};
-  \end{tikzpicture}
-  \caption{İki yöntem tek döngüden geçiyor, yoksa karşılaştırma iki yöntemi
-    değil iki notebook'u ölçerdi. Son satır testi adil yapan şey:
-    $k\times k$ convolution ile $1\times1$ convolution'ın bileşkesi bir
-    $k\times k$ convolution'dır, yani faktörizasyon RepViT backbone'u için
-    de tam. ``LoRA sadece \texttt{nn.Linear}'a ulaşır'' itirazı yönteme
-    değil, Linear-only bir uygulamaya yapılan itirazdır~\cite{hu2022lora}.}
-  \label{fig:egitim-lora}
-\end{figure}
-
-Karşılaştırmanın üçüncü bir ekseni var. LoRA'nın güncellemesi rank 16 ile
-sınırlı, dolayısıyla encoder'ın feature dağılımının ne kadar uzağa
-gidebileceği de sınırlı, ve \cref{sec:egitim-hiza}'deki hiza problemi tam
-olarak o mesafeye bağlı. Bu bir kanıt değil, ölçülecek bir hipotez: iki
-yöntem eşit instance IoU verse bile J\&F'de ayrışabilirler.
-
-\section{Tek Veri Seti Yetmez}
+\section{Veri}
 \label{sec:egitim-veri}
 
-\texttt{--dataset} tekrarlanabilir ve window'lar tek havuzda birleşiyor.
-Yani bir batch birden çok seti aynı adımda taşıyabiliyor.
+Üç set kullanılıyor ve üçü de aynı işi yapmıyor. Aşağıdaki tablo bütün
+hikâye.
 
 \begin{figure}[H]
   \centering
   \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[113]
-    % İş bölümü notları kutuların *içinde*: dışarıda dursalardı havuza
-    % giden üç okun geçtiği koridora düşerlerdi.
-    \node[kmor, text width=48mm] (v) at (0,2.1)
-      {\textbf{VTUAV VIS} {\footnotesize $1920{\times}1080$}\\
-       {\footnotesize \emph{gerçek} instance mask}\\
-       {\footnotesize hem eğitiyor, hem skorluyor}};
-    \node[kmavi, text width=48mm] (s) at (0,0)
-      {\textbf{SegFly} {\footnotesize $640{\times}512$, 15 007 kare}\\
-       {\footnotesize hacim: üç irtifa, sahne çeşitliliği}};
-    \node[kmavi, text width=48mm] (k) at (0,-2.0)
-      {\textbf{Kust4K} {\footnotesize $640{\times}512$, 4 024 kare}\\
-       {\footnotesize en ince etiket: 4 thing sınıfı}};
+    \eskizbasla[151]
+    % --- sütun başlıkları ---
+    \node[esbaslik, text width=34mm] at (4.5,2.35)  {\textbf{A} \\{\footnotesize ön-eğitim}};
+    \node[esbaslik, text width=34mm] at (8.4,2.35)  {\textbf{B} \\{\footnotesize fine-tune}};
+    \node[esbaslik, text width=34mm] at (12.3,2.35) {\textbf{C} \\{\footnotesize video, önerilen}};
 
-    \node[ksari, text width=24mm] (pool) at (5.6,0) {tek window havuzu};
-    \draw[esok] (v.east) -- (pool.north west);
-    \draw[esok] (2.9,0) -- (pool.west);
-    \draw[esok] (k.east) -- (pool.south west);
+    % --- VTUAV ---
+    \node[esbaslik, anchor=east, text width=22mm] at (2.4,1.0)
+      {\textbf{VTUAV}\\{\footnotesize $1920{\times}1080$}};
+    \node[kmavi,  text width=32mm] at (4.5,1.0)
+      {{\footnotesize \textbf{$\approx$1 700 000 çift}}\\{\footnotesize etiket okunmuyor}};
+    \node[kyesil, text width=32mm] at (8.4,1.0)
+      {{\footnotesize VIS bölümü: 100 dizi}\\{\footnotesize \textbf{gerçek instance mask}}};
+    \node[kmor,   text width=32mm] at (12.3,1.0)
+      {{\footnotesize kutu etiketli 400 dizi}\\{\footnotesize SAM ile mask'e çevrilir}};
 
-    \node[kyesil, text width=24mm] (batch) at (9.1,0) {karışık batch};
-    \draw[esok] (pool) -- (batch);
+    % --- SegFly ---
+    \node[esbaslik, anchor=east, text width=22mm] at (2.4,-0.55)
+      {\textbf{SegFly}\\{\footnotesize $640{\times}512$}};
+    \node[kmavi,  text width=32mm] at (4.5,-0.55)
+      {{\footnotesize 15 007 çift}};
+    \node[kyesil, text width=32mm] at (8.4,-0.55)
+      {{\footnotesize semantic}\\{\footnotesize $\rightarrow$ component}};
+    \node[esnot] at (12.3,-0.55) {video yok};
 
-    \node[esvurgu, anchor=north, yshift=-4mm, text width=108mm] at (4.5,-2.9)
-      {alternatif, yani setler arasında sırayla geçmek, backbone'un her
-       seferinde bir setin istatistiklerine oturmasına izin verirdi};
+    % --- Kust4K ---
+    \node[esbaslik, anchor=east, text width=22mm] at (2.4,-1.9)
+      {\textbf{Kust4K}\\{\footnotesize $640{\times}512$}};
+    \node[kmavi,  text width=32mm] at (4.5,-1.9)
+      {{\footnotesize 4 024 çift}};
+    \node[kyesil, text width=32mm] at (8.4,-1.9)
+      {{\footnotesize semantic}\\{\footnotesize $\rightarrow$ component}};
+    \node[esnot] at (12.3,-1.9) {video yok};
   \end{tikzpicture}
-  \caption{Üç setin iş bölümü. Encoder'ın taşıdığı şey genel görsel
-    feature. Tek veri seti demek tek sensör, tek şehir, tek etiketleme
-    alışkanlığı demek. Kust4K'nın 4 024 karesi bir head'i fine-tune etmek
-    için makul, bir backbone'u oynatmak için ince.}
-  \label{fig:egitim-veri}
+  \caption{Hangi set hangi aşamayı besliyor. Bir sette \emph{ne} olduğu
+    değil, o aşamanın \emph{ne okuduğu} belirliyor: aşama A yalnızca hizalı
+    çift sayıyor, aşama B dense mask istiyor, aşama C kimlikli video.}
+  \label{fig:egitim-veri-matris}
 \end{figure}
 
-\textbf{Hangi set neyi besliyor: \texttt{role} alanı.} \texttt{train} =
-yalnızca eğitim, \texttt{eval} = yalnızca val/test, \texttt{all} = normal
-80/10/10. Sebebi ölçümün ne demek olduğu. Semantic map'ten yeniden
-kurulmuş instance'lar taşıyan bir setin ground truth'u kendisi
-belirsizdir: ayrıştırma iki arabayı kaynaştırdıysa ``doğru'' cevap tek blob
-olur ve onları doğru ayıran model yanlış sayılır. O sayı modeli değil
-ayrıştırmayı ölçer.
+Üç soru, üç cevap:
 
-Yani Kust4K \texttt{train}, VTUAV VIS \texttt{all}. Gürültülü bir target'tan
-öğrenmek normal, gürültülü bir target'la skorlamak değil.
+\textbf{VTUAV çok büyük, maskelerini nerede kullanıyoruz?} VTUAV'ın 500
+dizisinden yalnızca 100'ünde (VIS bölümü) gerçek instance mask var; kalanın
+tek etiketi kare başına bir kutu. Maskeler aşama B'ye gidiyor, çünkü orada
+hedef bir maskedir. Setin \emph{geri kalanı}, yani asıl hacim, aşama A'ya
+gidiyor; orada hiçbir etiket okunmadığı için maskesiz olmak hiçbir şeye mal
+olmuyor. Yani VTUAV iki aşamayı iki farklı yanıyla besliyor.
 
-\section{Ölçüm: Ne Ölçüyor, Ne Ölçmüyor}
-\label{sec:egitim-olcum}
+\textbf{SegFly ve Kust4K video değil, nasıl işe yarıyor?} Aşama A ve B'nin
+ikisi de \textbf{tek kare} üzerinde çalışıyor. Video yalnızca aşama C'de
+gerekiyor. İki set de hizalı RGB-T çifti taşıdığı için aşama A'yı besliyor,
+dense mask taşıdığı için de aşama B'yi.
 
-\begin{figure}[H]
-  \centering
-  \begin{tikzpicture}[font=\elyazi\small]
-    \eskizbasla[127]
-    \node[ksari, text width=44mm] (proxy) at (0,0)
-      {\textbf{instance IoU}\\{\footnotesize (\texttt{eval\_instances.py})}\\[0.5mm]
-       {\footnotesize box gir $\rightarrow$ mask çık $\rightarrow$ IoU}\\
-       {\footnotesize \texttt{test} split, tek prompt, tek kare}};
-    \node[kgri, text width=44mm] (real) at (9.0,0)
-      {\textbf{J\&F}\\[0.5mm]{\footnotesize video object segmentation'ın
-       standart metriği}\\{\footnotesize memory bank gerektirir}};
-    \draw[esink] (proxy.east) -- (real.west);
-    \node[esnot, anchor=south, yshift=2mm, text width=30mm] at (4.5,0.15)
-      {proxy, kanıt değil};
+\textbf{Semantic set nasıl instance hedefi veriyor?} Aşama B'nin tamamı
+bu: hedefi biz kuruyoruz. Thing sınıflarını ayırıp sınıf sınıf
+connected component alıyoruz, her component bir prompt ve bir target
+oluyor. SegFly hacmi getiriyor (Kust4K'nın dört katı kare, üç irtifa),
+Kust4K en ince etiketi (dört thing sınıfı; SegFly'da yalnızca iki tane
+var). Tek set kullanmak tek sensör, tek şehir ve tek etiketleme alışkanlığı
+demek olurdu, o yüzden üçü tek havuzda birleşiyor ve bir batch üçünü aynı
+adımda taşıyabiliyor.
 
-    \node[esvurgu, anchor=north, yshift=-2mm] at (real.south) {$\Rightarrow$ aşama C};
+Bir de \textbf{skorlama} ayrımı var. Semantic map'ten \emph{yeniden
+kurulmuş} instance'ların ground truth'u kendisi belirsiz: ayrıştırma iki
+arabayı kaynaştırdıysa ``doğru'' cevap tek blob olur ve onları doğru ayıran
+model yanlış sayılır. O sayı modeli değil ayrıştırmayı ölçer. Bu yüzden
+Kust4K ve SegFly yalnızca eğitime giriyor; skorlama VTUAV VIS'in çizilmiş
+maskeleri üzerinden yapılıyor. Gürültülü bir target'tan öğrenmek normal,
+gürültülü bir target'la not vermek değil.
 
-    \node[kyesil, text width=100mm] (oku) at (4.5,-2.6)
-      {\textbf{ortalamayı değil, küçük-nesne sütununu okuyun}};
-    \node[esnot, anchor=north, yshift=-2mm, text width=104mm] at (oku.south)
-      {havadan bir setin ortalama IoU'su kamyonlarının hâkimiyetinde. Bu
-       hattın var olma sebebi olan hedefler ise yirmi piksellik olanlar.};
-  \end{tikzpicture}
-  \caption{Bu aşamanın ölçebildiği ve ölçemediği. Notebook 07'nin sayısı
-    tek prompt'lu kare skorluyor. Yani bu projenin düzeltmeye çalıştığı
-    hatayı, memory bank'ın kirlenmesini, göremez. Daha iyi bir encoder,
-    daha iyi bir tracker için \textbf{ön koşuldur, kanıt değildir}.}
-  \label{fig:egitim-olcum}
-\end{figure}
+VTUAV için iki ayar başka hiçbir yerde olmadığı kadar önemli, ikisi de
+$1920\times1080$ video olmasından geliyor. \textbf{Kırpma oranı 512/1080:}
+16:9 bir kareyi $512\times512$'ye sıkıştırmak aspect ratio'yu bozuyor ve
+küçük bir aracı encoder'ın göremeyeceği boyutun altına indiriyor; kırpma
+her iki yarıdan aynı normalize konumdaki kareyi alıyor, böylece hizalama
+korunuyor. \textbf{Bir hücrelik tolerans:} VTUAV'ın iki modalitesi piksel
+piksel hizalı değil (yazarların kendi notu), o yüzden her student pozisyonu
+çevresindeki $3\times3$ komşuluğun en iyi teacher pozisyonuyla eşleşiyor.
+Bedeli uzamsal kesinlik, o yüzden hizalı setlerde kapalı.
 
-\section{Çıktı ve Dosya Haritası}
-\label{sec:egitim-durum}
-
-Bittiğinde çıkan şey sıradan bir EdgeTAM checkpoint'i: aynı anahtarlar,
-aynı loader, aynı ONNX export, aynı motor derlemesi. Yani
-\diger{\cref{ch:sistem-yontem}'te}{ana raporun 3. bölümünde} anlatılan
-dağıtım zinciri hiç değişmiyor.
-Hafıza yolu hâlâ stok.
-
-Tek incelik: encoder ONNX grafiği mask decoder'ın \texttt{conv\_s0} /
-\texttt{conv\_s1} projeksiyonlarını içine katlıyor, ve aşama B decoder'ı da
-eğitiyor. Yani ikisi de yeniden export edilip parity dört modülde birden
-koşturulmalı.
-
-\begin{center}\footnotesize
-\begin{tabular}{@{}>{\ttfamily}l >{\raggedright\arraybackslash}p{74mm}@{}}
-  \toprule
-  \textnormal{\textbf{dosya}} & \textbf{sorumluluk} \\
-  \midrule
-  src/training/aerial.py      & veri seti düzeni, palet, semantic $\rightarrow$
-                                instance ayrıştırma, gate'ler, window geometrisi \\
-  src/training/distill.py     & teacher, projection, cosine loss, pretraining
-                                döngüsü (aşama A) \\
-  src/training/image\_loop.py & tek kare forward, batch, instance IoU
-                                (aşama B) \\
-  src/training/losses.py      & \texttt{instance\_loss} (statik) ve
-                                \texttt{frame\_loss} (video) \\
-  src/training/schedule.py    & iki aşama, EMA, checkpoint kuralı; iki veri
-                                moduna da hizmet ediyor \\
-  src/training/finetune.py    & \texttt{STAGES} / \texttt{apply\_freeze}:
-                                \texttt{backbone}, \texttt{head},
-                                \texttt{encoder} \\
-  src/training/lora.py        & PEFT; \texttt{STAGES} tablosunu fine-tune ile
-                                paylaşıyor \\
-  tools/pretrain\_encoder.py  & aşama A giriş noktası \\
-  tools/train\_encoder.py     & aşama B giriş noktası,
-                                \texttt{-{}-method finetune|lora} \\
-  tools/eval\_instances.py    & held-out instance IoU \\
-  notebooks/07\_encoder\_\allowbreak aerial\_rgbt.ipynb
-                              & hepsinin tek oturumdaki tarifi \\
-  \bottomrule
-\end{tabular}
-\end{center}
-
-\section{Sıradaki Üç Ölçüm}
-\label{sec:egitim-sirada}
-
-Sıradaki adım bir kod değil, bir koşu. Aşağıdaki üç sayı bu bölümdeki her
-cümleyi ya doğruluyor ya da çöpe atıyor.
-
-\begin{enumerate}
-  \item \textbf{Kaynaşma oranı} (GPU'suz, dakikalar içinde). Connected
-        component ayrıştırması temiz instance veriyor mu? Bütün B aşaması
-        buna bağlı.
-  \item \textbf{Baseline'a karşı aşama A.} Stok checkpoint'ten başlayan B,
-        pretrain edilmiş checkpoint'ten başlayan B'yi yeniyorsa aşama A'nın
-        gerekçesi yoktur.
-  \item \textbf{LoRA'ya karşı kısmi fine-tune}, image modunda. Clip
-        modundaki cevapla aynı çıkmak zorunda değil.
-\end{enumerate}
-
-Aşama C, ikinci sayı gelmeden başlamıyor. Elde edilmiş bir encoder olmadan
-memory yolunu eğitmek, düzeltilmek istenen hata modunu ölçemeyen bir koşu
-olurdu.
+\bigskip
+\noindent
+Sıradaki adım bir kod değil, bir koşu. İki sayı bu bölümdeki her cümleyi ya
+doğruluyor ya da çöpe atıyor: \textbf{kaynaşma oranı} (GPU'suz, dakikalar
+içinde) ve \textbf{baseline'a karşı aşama A}. Aşama C, ikincisi gelmeden
+başlamıyor.
