@@ -79,6 +79,15 @@ class Gates:
     """Four independent reasons to distrust a teacher mask.
 
     `teacher_iou`  the teacher's own confidence in the mask it drew.
+                   **Measured to be a weak gate at small target sizes.** On
+                   synthetic 12-36 px targets SAM 2's self-reported score
+                   averaged 0.92-0.94 while true IoU was 0.56-0.67 -- an
+                   over-confidence of +0.25 to +0.38, and *worse* for the
+                   larger checkpoints. At those sizes a 0.7 threshold passes
+                   essentially everything, so the acceptance rate this module
+                   reports is a floor on how bad the masks are, not a measure
+                   of how good they are. `box_iou` against the drawn
+                   annotation is the gate that carries real information.
     `box_iou`      does the mask sit where the human said the drone is?
     `area`         a mask far smaller than its box is a fragment; far larger is
                    background bleed. Both look plausible to `box_iou` alone.

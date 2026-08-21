@@ -194,9 +194,29 @@ class Sam2FeatureTeacher:
        step, for the whole stage. `facebook/sam2.1-hiera-base-plus` is the
        cheaper end of the same family.
 
-    Note the input size: SAM 2.1's position embeddings were trained at 1024 and
-    this does not interpolate them, so lowering `size` is a change to the
-    teacher and not just to its cost.
+    **Use base-plus, not large, and the reason is not cost.** EdgeTAM's own
+    paper says its teacher was **SAM2-Hiera-B+**, and its distillation target
+    was **F16, the image-encoder feature map at stride 16** -- the very tensor
+    this class pulls out of `fpn_hidden_states[-1]`. EdgeTAM's trunk weights
+    *are* the result of fitting Hiera-B+'s F16. Distilling from B+ resumes that
+    objective with a modality gap added; distilling from Large asks the student
+    to move to a *different* target than the one it was initialised against,
+    which forfeits the single property that makes a SAM teacher interesting
+    next to DINOv3. (Whether EdgeTAM used the 2.0 or 2.1 B+ checkpoint is not
+    stated -- the paper names "SAM2-HieraB+" and points only at the repo root.)
+
+    Cost is not what decides it at this scale: 600 steps at batch 32 is 0.037
+    A100-hours for B+ against 0.104 for Large. Both trivial. The 2.8x per step
+    is real but is not the argument.
+
+    Note the input size. It **is** interpolated -- `Sam2HieraDetModel`
+    bicubic-resizes `pos_embed` to the feature grid, so 512 runs -- but the
+    features still move a long way: cosine similarity to the same model's 1024
+    output is **0.842 for base-plus and 0.736 for Large** at 512, and 0.704 /
+    0.512 at 256. So lowering `size` is a change to the teacher, not just to
+    its cost, and Large degrades faster. The hard constraint is elsewhere: the
+    window embedding is tiled by integer division, so the input must be a
+    **multiple of 32** -- 500 raises, 512 does not.
     """
 
     def __init__(self, model_id: str = "facebook/sam2.1-hiera-large",
