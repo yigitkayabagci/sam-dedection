@@ -22,11 +22,20 @@ if str(ROOT) not in sys.path:
 
 from src.trackers._hydra_overrides import BACKBONE_STRIDE, image_size_overrides  # noqa: E402
 
-# The deepest stride-2 chain the model puts an input through: the trunk down to
-# the stride-16 feature map, and the memory encoder's mask downsampler doing
-# the same to the mask. A size not divisible by this hits an odd intermediate,
-# and the FPN's top-down 2x upsample then lands one pixel off its skip.
-DEEPEST_DOWNSAMPLE = 16
+# What actually binds is the **spatial perceiver**, not the FPN. It partitions
+# the stride-16 feature map into exactly 16x16 = 256 windows with a partition
+# that does not pad (`sam2/modeling/perceiver.py`), so the feature side has to
+# be a multiple of 16 -- and the feature side is size/16. Hence 256, not 16.
+#
+# This comment used to blame the FPN's 2x top-down upsample and the constant
+# was 16, which let sizes through that crash at the first forward pass:
+#
+#     640  RuntimeError: size of tensor a (256) must match tensor b (400)
+#     896  RuntimeError: shape '[1,18,3,18,3,64]' is invalid for input of size 200704
+#
+# 640/16 = 40 and 896/16 = 56, neither divisible by 16. 512, 768, 1024 and 1280
+# all are, which is why nothing had caught it.
+WINDOW_ALIGNMENT = 256
 
 
 def _configs():
@@ -65,7 +74,7 @@ def test_size_divides_through_the_architecture(size):
     768 = 3 * 2^8 passes for the same reason 512 = 2^9 and 1024 = 2^10 do; a
     size like 720 does not, and this is where that would be caught.
     """
-    assert size % DEEPEST_DOWNSAMPLE == 0
+    assert size % WINDOW_ALIGNMENT == 0
     side = size // BACKBONE_STRIDE
     # `_SelfAttentionGraph` rejects a token count that is not a perfect square.
     assert int(round((side * side) ** 0.5)) ** 2 == side * side
@@ -78,8 +87,8 @@ def test_shipped_configs_declare_a_usable_size():
     declared = dict(_configs())
     assert declared, "no config declares image_size -- the glob is wrong"
     bad = {name: size for name, size in declared.items()
-           if size % DEEPEST_DOWNSAMPLE or size <= 0}
-    assert not bad, f"image_size not divisible by {DEEPEST_DOWNSAMPLE}: {bad}"
+           if size % WINDOW_ALIGNMENT or size <= 0}
+    assert not bad, f"image_size not divisible by {WINDOW_ALIGNMENT}: {bad}"
 
 
 def test_engine_paths_match_the_resolution_they_declare():

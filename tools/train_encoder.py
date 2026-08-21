@@ -117,10 +117,37 @@ def build_indexes(requests: list[Request], cache_dir: Path | None,
     return index
 
 
+def trained_size(checkpoint: str) -> int | None:
+    """The input size a checkpoint was trained at, if it recorded one.
+
+    `finetune.save` has always written `meta["image_size"]` and, until this
+    function, **nothing ever read it**. That matters more than it sounds:
+    EdgeTAM holds no resolution in any parameter, so a 512-trained checkpoint
+    loads into a 768 build with `strict=True` and no complaint at all -- same
+    982 keys, same shapes, no warning. The mismatch is undetectable at load
+    time and shows up only as a model that quietly underperforms.
+    """
+    import torch
+
+    try:
+        blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    except Exception:
+        return None
+    meta = blob.get("meta") if isinstance(blob, dict) else None
+    size = (meta or {}).get("image_size") if isinstance(meta, dict) else None
+    return int(size) if isinstance(size, (int, float)) else None
+
+
 def build_model(size: int, checkpoint: str, device: str):
     from sam2.build_sam import build_sam2_video_predictor
 
     from src.trackers._hydra_overrides import image_size_overrides
+
+    was = trained_size(checkpoint)
+    if was is not None and was != size:
+        print(f"!! {checkpoint} records image_size={was}, building at {size}. "
+              f"The weights load either way -- EdgeTAM keeps no resolution in "
+              f"any parameter -- so this will run and may simply be worse.")
 
     model = build_sam2_video_predictor(
         "configs/edgetam.yaml", checkpoint, device=device,
