@@ -105,16 +105,15 @@ report/
 
 Bölüm 6 (`bolumler/egitim.tex`) raporun geri kalanından **kasten farklı**
 görünüyor: on dört şeklin hepsi elle çizilmiş gibi duran, Excalidraw
-tarzı TikZ kutularıyla çiziliyor. Sebebi anlatılan şeyin türü --- orada
-bir ölçüm değil bir **kurulum** anlatılıyor, ve bölüm öğretmek için
-yazıldı.
+tarzı TikZ kutularıyla çiziliyor. Sebebi anlatılan şeyin türü. Orada bir
+ölçüm değil bir **kurulum** anlatılıyor.
 
 Stiller tek dosyada, `eskiz.tex`'te:
 
 | stil | ne için |
 |---|---|
 | `kmavi` / `kyesil` / `ksari` / `kkirmizi` / `kmor` / `kgri` / `kbos` | renkli kutular; anlam sözleşmesi dosyanın başında |
-| `kdonuk` | taralı kutu = eğitilmeyen (donuk) modül |
+| `kdonuk` | taralı kutu = frozen modül |
 | `esok` / `esokr=<renk>` / `esink` / `escizik` | oklar ve çizgiler |
 | `esnot` / `esvurgu` / `esiyi` / `esbaslik` | etiketler |
 | `esisaret` | bir grubu elle daire içine alma (`fit=` ile) |
@@ -127,14 +126,14 @@ Stiller tek dosyada, `eskiz.tex`'te:
   köşeyi mekanik olmaktan çıkarıyor.
 - **Titreme sabit tohumlu.** `\eskizbasla` her şeklin başında
   `\pgfmathsetseed` çağırıyor, yani aynı kaynak her derlemede aynı PDF'i
-  veriyor --- şekiller derlemeden derlemeye "kıpırdamıyor". Bir şeklin
+  veriyor. Şekiller derlemeden derlemeye "kıpırdamıyor". Bir şeklin
   titremesi beğenilmezse tek yapılacak tohum sayısını değiştirmek.
 
 **Yazı tipi.** Şekil etiketleri **Patrick Hand** (SIL OFL 1.1) ile
 diziliyor; `report/fonts/` içinde, lisansıyla birlikte depoda duruyor, yani
 ek bir kurulum gerekmiyor. Ubuntu'nun paketlediği iki el yazısı fontu
-(`fonts-humor-sans`, `fonts-comic-neue`) `ğ`/`Ğ`/`İ` harflerini içermediği
-için Türkçe bir raporda kullanılamıyor --- seçim bu yüzden.
+(`fonts-humor-sans`, `fonts-comic-neue`) `ğ`/`Ğ`/`İ` harflerini içermiyor,
+yani Türkçe bir raporda kullanılamıyor. Seçim bu yüzden.
 
 Font dosyası silinirse rapor **yine de hatasız derlenir**: `\elyazi`
 sessizce TeX Gyre Heros'a düşer, şekiller aynı çizilir, yalnızca etiketler
@@ -154,9 +153,9 @@ Rapordaki **her sayı** bu iki kategoriden birine girer; bekleyen (TODO) bir
 
 Üçüncü bir kutu yalnızca Bölüm 6'da (encoder eğitimi) kullanılıyor:
 
-- **Mor (Tasarım kararı --- kod yazıldı, ölçüm bekliyor)**: anlatılan şey
+- **Mor (Tasarım kararı: kod yazıldı, ölçüm bekliyor)**: anlatılan şey
   depoda çalışır hâlde, ama hiçbir GPU koşusundan geçmedi. O bölümde
-  **tek bir ölçüm yoktur** ve bu kutu bunu her seferinde açıkça söyler ---
+  **tek bir ölçüm yoktur**. Bu kutu bunu her seferinde açıkça söylüyor:
   bir tasarım gerekçesi bir sayının yerine geçmez.
 
 ## Görsel eklemek

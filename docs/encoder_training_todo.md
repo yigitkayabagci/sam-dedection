@@ -12,8 +12,7 @@ A ve B aşamalarının kodu artık yazıldı — **kurulumun** nasıl olduğu
 `docs/encoder_mimari.md`'de, çalışan hâli
 `notebooks/07_encoder_aerial_rgbt.ipynb`'de, ve görsel anlatımı raporun
 6. bölümünde (`report/bolumler/egitim.tex`). Yazılmış olmak ölçülmüş olmak
-değil: aşağıdaki her madde hâlâ kendi taban çizgisine karşı sayı bekliyor —
-rapor bölümü de bunu her kutusunda açıkça söylüyor.
+değil: aşağıdaki her madde hâlâ kendi taban çizgisine karşı sayı bekliyor.
 
 Veri setleri: `docs/datasets.md` ve raporda Bölüm 5.
 
