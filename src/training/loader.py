@@ -73,10 +73,17 @@ def batch_clips(
     "same schedule, only the data differs" was not true. The pool is now cycled
     with a fresh permutation per pass until `limit` batches exist, which is what
     "400 steps of batch 64" already meant everywhere it was written down.
+
+    A pool smaller than one batch shrinks the batch instead of filling it by
+    repeating items. That case is the validation slice, not training: scoring
+    one batch that holds the same window three times weights the mean by pool
+    size and nothing else, and the checkpoint rule reads that mean.
     """
     if not clips:
         return
     rng = np.random.default_rng(seed)
+    if limit is not None:
+        size = min(size, len(clips))
     batch: list[Clip] = []
     produced = 0
     while True:

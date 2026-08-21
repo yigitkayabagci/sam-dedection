@@ -225,8 +225,35 @@ geçerse. Ama artık çare watershed değil, bu.
 | domain gap → uydu modeli | **sonuç ters**: segmentasyonda web kazanıyor | LVD varsayılan, SAT tek string |
 | 7B yerine daha küçük | doğru | ViT-B varsayılan (ızgara birebir), L bir string |
 | SAM'ı mask öğretmeni yap | gerçek etiket varken yanlış | — |
-| ama SAM 3 örnek kaynağı olarak | **en iyi çare** | tetikleyiciye bağlı, yazılmadı |
+| ama SAM 3 örnek kaynağı olarak | **en iyi çare** | pipeline hazır: `tools/make_masklets.py`, aşağıda §8 |
 | teacher'ı çevrimdışı koştur | doğru | zaten öyle |
+
+---
+
+## 8. 2026-08 taraması: aşama C öncesi literatür, ve masklet hattının kuruluşu
+
+İki soruya bakıldı: aşama A/B tarifinde ölçülebilir bir iyileştirme yayınlandı
+mı, ve SAM 3'ü "örnek kaynağı" yapmanın (§5) somut hâli ne. Her satırın hükmü
+üçlü: **şimdi** (koda girdi), **koşudan sonra** (07/08'in sayıları gelince
+denenecek hipotez), **hayır**.
+
+| bulgu | ne diyor | hüküm |
+|---|---|---|
+| **SAM 3 video API'si** (arXiv 2511.16719) | `transformers>=5.0.0`'da `Sam3TrackerVideo*` kutu-prompt'lu masklet üretiyor; SAM 2.1'e karşı fark kolay videoda küçük (MOSEv1 +0.5), zor/uzun videoda büyük (SA-V +5.6, LVOSv2 +8.9, MOSEv2 +12.4 J&F). Depo **gated**; SAM lisansı ticarete açık ama Apache olmayan kullanım kısıtları taşıyor (askerî kullanım hariç tutuluyor — projenin bağlamına göre okunmalı) | **şimdi** — `src/training/masklets.py` + `tools/make_masklets.py`: varsayılan öğretmen **SAM 2.1** (gated değil, Apache-2.0, `Sam2Video*` sınıfları), SAM 3 tek string (`--teacher facebook/sam3`). VIS bölümünün çizilmiş maskeleri kalibrasyon seti: `--calibrate` masklet-vs-çizim IoU'sunu basıyor, 400 etiketsiz diziye harcamadan önce o sayı okunuyor |
+| **Parça parça, kutuya yeniden demirlenmiş yayılım** (AeroTrack şablonu, arXiv 2607.08075) | uzun videoda tek yayılım drift biriktirir; periyodik yeniden-tespit + kısa yayılım daha iyi | **şimdi** — masklet hattı `--chunk` (varsayılan 200) parçalarında koşuyor ve her parçayı o karenin **kendi GT kutusuyla** yeniden prompt'luyor; VTUAV her karede kutu verdiği için her kare `box_iou` kapısından geçiyor — sıradan masklet madenciliğinin sahip olmadığı bir referans |
+| **DINOv3'ün ConvNeXt öğrencileri** (arXiv 2508.10104) | Meta, 7B ViT'ten distile edilmiş ConvNeXt-T/S/B/L yayınladı; conv-öğretmen → RepViT-öğrenci, geometri olarak ViT'ten daha yakın | **şimdi (ucuz kısmı)** — `FeatureTeacher` artık 4-D harita döndüren (token'sız) öğretmenleri de okuyor, yani `TEACHER = "facebook/dinov3-convnext-…"` bir string uzakta. Kazanıp kazanmadığı 07'nin üçüncü koşusuyla ölçülür, varsayılan değişmedi |
+| **FreqKD** (arXiv 2606.11572) | RGB→IR distilasyonda yüksek-frekans sapması düşük-frekansın ~2.4 katı; kaybı banda bölmek (+2.4 mAP50 KAIST) ablation'lı | **koşudan sonra** — kosinüs kaybını FFT ile banda bölmek küçük bir ek; önce mevcut tarifin taban sayısı alınmalı |
+| **CanKD** (arXiv 2511.21503) / maskeli-öznitelik terimi (Proteus, arXiv 2407.10366) | piksel-eşleme yerine çapraz-dikkat eşleme; ve mask-feature ek hedefi — ikisi de yoğun tahminde ablation'lı kazanç | **koşudan sonra** — ikisi de `distill_loss`'a eklenebilir terimler; hizasızlığa toleransları `--tolerance 1`'in yaptığı işi kısmen üstlenebilir |
+| **SAM2LoRA / FS-SAM2** (arXiv 2510.10288, 2509.12105) | rank 16–32 tatlı nokta; az-veri rejiminde tam fine-tune hemen overfit ederken LoRA etmiyor | **koşudan sonra** — `LORA_R = 16` zaten tatlı noktada; 07/08'in LoRA-vs-finetune sütunu bu bulgunun bizim verimizdeki testi. LoRA kazanırsa bu literatürle tutarlı, sürpriz değil |
+| **DAM4SAM** (arXiv 2509.13864) | SAM2-tipi hafızada dikkat dağıtıcı-farkında güncelleme; benzer küçük hedeflerde büyük kazanım | **aşama C** — hafıza yolu eğitimi başladığında bellek-seçim politikası olarak değerlendirilecek; encoder işini değiştirmiyor |
+| **CST Anti-UAV** (arXiv 2507.23473) | 220 termal dizi, minik İHA'lar; en iyi takipçi %35.9 — Anti-UAV410'dan çok daha sert | **aşama C** — zor değerlendirme seti + masklet hattından geçirilecek ek termal video adayı |
+| CosPress, TRACER, DGP vb. | özet ötesi doğrulanamadı ya da yoğun-tahmin kanıtı yok | **hayır** — kanıt gelene kadar |
+
+Masklet hattının çıktısı `labels.py`'ın run-length deposunun aynısı
+(`pseudo_masks.npz`), yani aşama C'nin okuyucusu iki kaynağı — Anti-UAV410
+sahte maskeleri ve VTUAV masklet'leri — tek arayüzden okuyor. Kapılar da aynı
+aile: `teacher_iou` kapısı videoda hiç ateşlemiyor (yayılım kare başına güven
+bildirmiyor), yükü `box_iou` taşıyor.
 
 ---
 
