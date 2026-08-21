@@ -162,6 +162,42 @@ VTUAV_VIS = Recipe(
     ),
 )
 
+# Verified 2026-08 against the mirror: anonymous HTTPS, HTTP 206 to a range
+# request, `application/zip`, real zip magic. The authors distribute this
+# through Baidu, which in practice needs an account and a Chinese phone number;
+# the mirror is what makes it usable at all.
+#
+# 28 442 registered RGB-TIR pairs from a UAV, day and night. Its labels are
+# oriented boxes in XML, so it is **stage-A data only** -- and stage A reads no
+# labels, which is exactly why a set nobody can use for segmentation is worth
+# 14 GB here.
+#
+# Layout inside the archives, read from their central directories:
+#     train/trainimg/00001.jpg    RGB          17 991
+#     train/trainimgr/00001.jpg   thermal      17 991
+#     train/trainlabel/*.xml      oriented boxes, unused
+# and the same shape for val/ and test/. Extracted as-is: the globs
+# `**/*img/*.jpg` and `**/*imgr/*.jpg` pick the two halves apart, and they
+# cannot cross-match because a glob component must match in full.
+#
+# Every image is 840x712 with a 100 px band of pure white on all four sides;
+# `SPECS["dronevehicle"].border` discards it at read time. See that spec.
+DRONEVEHICLE = Recipe(
+    name="dronevehicle",
+    note="28 442 registered RGB-TIR UAV pairs, day and night (RA-L 2022)",
+    parts=(
+        Part("train", size=8_880_000_000,
+             url="https://huggingface.co/datasets/McCheng/DroneVehicle/"
+                 "resolve/main/train.zip"),
+        Part("test", size=4_430_000_000, default=False,
+             url="https://huggingface.co/datasets/McCheng/DroneVehicle/"
+                 "resolve/main/test.zip"),
+        Part("val", size=720_000_000, default=False,
+             url="https://huggingface.co/datasets/McCheng/DroneVehicle/"
+                 "resolve/main/val.zip"),
+    ),
+)
+
 SEGFLY = Recipe(
     name="segfly",
     note=">15 000 aligned RGB-T pairs over three altitudes (ECCV 2026)",
@@ -169,7 +205,8 @@ SEGFLY = Recipe(
     modality="thermal",
 )
 
-RECIPES: dict[str, Recipe] = {r.name: r for r in (KUST4K, VTUAV_VIS, SEGFLY)}
+RECIPES: dict[str, Recipe] = {
+    r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, SEGFLY)}
 
 
 # --------------------------------------------------------------------------
@@ -522,7 +559,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     names = sorted(RECIPES) if args.dataset == "all" else [args.dataset]
-    folders = {"kust4k": "Kust4K", "vtuav_vis": "VTUAV_VIS", "segfly": "SegFly"}
+    folders = {"kust4k": "Kust4K", "vtuav_vis": "VTUAV_VIS",
+               "dronevehicle": "DroneVehicle", "segfly": "SegFly"}
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
         fetch(name, dest, tuple(args.parts) if args.parts else None,

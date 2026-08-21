@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.distill import (  # noqa: E402
+    collate_pairs,
     SAM2_SIZE,
     STUDENT_SIZE,
     FeatureTeacher,
@@ -280,6 +281,96 @@ class TestSharedWindow(unittest.TestCase):
     def test_a_scale_of_one_is_the_largest_square_that_fits(self):
         _, (side, _) = shared_window((1080, 1920), (0.5, 0.5), 1.0)
         self.assertEqual(side, 1080)
+
+
+class TestBorderCrop(unittest.TestCase):
+    """DroneVehicle pads both halves with 100 px of pure white per side.
+
+    Measured on the real archive, not read off the paper: every image in both
+    modalities is 840x712, and the picture inside the band is 640x512 -- this
+    project's native resolution. Left in, the band is a third of the frame, so
+    the teacher spends a third of its patch tokens describing white and
+    `shared_window` places crops that are partly margin.
+
+    PNG rather than JPEG for the fixtures: a hard white edge is exactly what
+    JPEG rings around, and the ringing would be indistinguishable from the
+    margin leaking through.
+    """
+
+    INTERIOR = 60
+
+    def frames(self, tmp, border=100, inner=(512, 640)):
+        import cv2
+        import numpy as np
+
+        height, width = inner[0] + 2 * border, inner[1] + 2 * border
+        paths = []
+        for name in ("a.png", "b.png"):
+            image = np.full((height, width, 3), 255, dtype=np.uint8)
+            image[border:height - border, border:width - border] = self.INTERIOR
+            path = Path(tmp) / name
+            cv2.imwrite(str(path), image)
+            paths.append(path)
+        return [(paths[0], paths[1])]
+
+    def unique(self, half):
+        return half.flatten().unique()
+
+    def test_the_white_band_is_gone_from_both_halves(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = collate_pairs(self.frames(tmp), size=64, device="cpu",
+                                  border=100)
+        # A constant interior normalises to one value per channel, so three
+        # distinct numbers and no more. White surviving anywhere would add a
+        # fourth.
+        for name, half in (("thermal", batch.thermal), ("rgb", batch.rgb)):
+            self.assertEqual(len(self.unique(half)), 3,
+                             f"{name}: {self.unique(half)}")
+
+    def test_without_the_border_the_white_survives(self):
+        # The check above is only meaningful if the same call keeps the band
+        # when it is not asked to crop -- otherwise it could be passing because
+        # the resize washed the margin out.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kept = collate_pairs(self.frames(tmp), size=64, device="cpu",
+                                 border=0)
+        self.assertGreater(len(self.unique(kept.thermal)), 3)
+
+    def test_a_crop_lands_inside_the_picture_wherever_it_is_placed(self):
+        # `shared_window` works in the inset frame, so no placement can reach
+        # the margin -- including the extremes, which is where it would.
+        import tempfile
+
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = self.frames(tmp)
+            class Fixed:                      # a Generator's `random` is read-only
+                def __init__(self, value):
+                    self.value = value
+
+                def random(self, shape):
+                    return np.full(shape, self.value)
+
+            for place in (0.0, 0.5, 1.0):
+                batch = collate_pairs(pairs, size=64, device="cpu", crop=1.0,
+                                      rng=Fixed(place), border=100)
+                self.assertEqual(len(self.unique(batch.thermal)), 3,
+                                 f"placement {place} reached the margin")
+
+    def test_a_border_that_would_eat_the_image_is_an_error(self):
+        # Better than silently returning an empty crop, which is what a spec
+        # whose border does not match the download would otherwise produce.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = self.frames(tmp, border=10, inner=(20, 20))   # 40x40
+            with self.assertRaises(ValueError):
+                collate_pairs(pairs, size=64, device="cpu", border=100)
 
 
 class TestSubsample(unittest.TestCase):

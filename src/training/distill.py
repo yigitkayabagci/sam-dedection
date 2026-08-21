@@ -432,7 +432,8 @@ def shared_window(shape: tuple[int, int], place: tuple[float, float],
 def collate_pairs(pairs: Sequence[tuple[Path, Path]], size: int = 512,
                   device: str = "cpu", executor=None,
                   crop: float | None = None,
-                  rng: np.random.Generator | None = None) -> PairBatch:
+                  rng: np.random.Generator | None = None,
+                  border: int = 0) -> PairBatch:
     """Read a batch of registered pairs at `size`, both halves normalised alike.
 
     `crop=None` resizes the whole frame, which is right for a source already
@@ -459,12 +460,20 @@ def collate_pairs(pairs: Sequence[tuple[Path, Path]], size: int = 512,
         raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
         if raw is None:
             raise FileNotFoundError(f"Could not read image: {path}")
-        shape = (int(raw.shape[0]), int(raw.shape[1]))
+        # Everything below works inside whatever padding the dataset ships, so
+        # a crop can never land on the margin. DroneVehicle pads both halves
+        # with 100 px of white; `border=0` leaves the frame untouched.
+        height, width = int(raw.shape[0]) - 2 * border, int(raw.shape[1]) - 2 * border
+        if height <= 0 or width <= 0:
+            raise ValueError(
+                f"border={border} leaves nothing of {path} "
+                f"({raw.shape[1]}x{raw.shape[0]})")
         if crop:
-            origin, window = shared_window(shape, place, crop)
+            origin, window = shared_window((height, width), place, crop)
         else:
-            origin, window = (0, 0), (shape[1], shape[0])
-        return load_image(path, origin, window, size, gray)
+            origin, window = (0, 0), (width, height)
+        return load_image(path, (origin[0] + border, origin[1] + border),
+                          window, size, gray)
 
     thermal = list(mapper(read, [(p[0], True, q) for p, q in zip(pairs, places)]))
     rgb = list(mapper(read, [(p[1], False, q) for p, q in zip(pairs, places)]))
@@ -493,7 +502,7 @@ def subsample(pairs: Sequence, count: int | None,
 def stream(pairs: Sequence[tuple[Path, Path]], batch: int, size: int = 512,
            seed: int | None = None, limit: int | None = None,
            device: str = "cuda", workers: int = 8, depth: int = 2,
-           crop: float | None = None):
+           crop: float | None = None, border: int = 0):
     """Shuffled, prefetched pair batches -- same threading as every other mode.
 
     The crop placement is drawn from a generator seeded per epoch, so a run is
@@ -506,7 +515,7 @@ def stream(pairs: Sequence[tuple[Path, Path]], batch: int, size: int = 512,
     chunks = batch_clips(pairs, batch, seed=seed, limit=limit)
     return prefetch_with(
         chunks,
-        lambda chunk, pool: collate_pairs(chunk, size, "cpu", pool, crop, rng),
+        lambda chunk, pool: collate_pairs(chunk, size, "cpu", pool, crop, rng, border),
         device=device, workers=workers, depth=depth,
     )
 
@@ -531,6 +540,7 @@ def pretrain(
     moment_weight: float = 0.0,
     freeze=apply_freeze,
     crop: float | None = None,
+    border: int = 0,
     tolerance: int = 0,
     grad_clip: float = 1.0,
     ema_decay: float = 0.999,
@@ -580,7 +590,7 @@ def pretrain(
     for epoch in range(epochs):
         batches = stream(pairs, batch, size, seed=seed + 100 * epoch,
                          limit=steps_per_epoch, device=device, workers=workers,
-                         depth=depth, crop=crop)
+                         depth=depth, crop=crop, border=border)
         if progress is not None:
             batches = progress(batches, total=steps_per_epoch, desc=f"distil e{epoch}")
 

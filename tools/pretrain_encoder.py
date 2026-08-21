@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         batch=args.batch, steps_per_epoch=args.steps,
         rates=Rates(neck=args.neck_lr, trunk=args.trunk_lr),
         projector_lr=args.projector_lr, moment_weight=args.moments, freeze=freeze,
-        crop=args.crop, tolerance=args.tolerance,
+        crop=args.crop, border=spec.border, tolerance=args.tolerance,
         workers=args.workers, depth=args.depth, seed=args.seed,
         device=args.device, progress=_tqdm())
     result |= {**meta, "seconds": round(time.time() - started, 1),

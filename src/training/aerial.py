@@ -91,6 +91,30 @@ class DatasetSpec:
     rgb: str | None = None
     strip: tuple[str, ...] = ()             # suffixes cut from a mask stem
     ignore: tuple[int, ...] = ()            # values that are neither thing nor stuff
+    border: int = 0                         # pixels of padding to discard, per side
+
+    def inset(self, height: int, width: int) -> tuple[tuple[int, int], tuple[int, int]]:
+        """`(origin, size)` of the real picture inside a padded frame.
+
+        DroneVehicle ships every image, in **both** modalities, as 840x712 with
+        a 100 px band of pure white on all four sides. Left in, that band is a
+        third of the frame: the teacher spends a third of its patch tokens
+        describing white, `shared_window` places crops that are partly margin,
+        and the normalisation statistics are pulled toward 255. Taken out, what
+        is left is 640x512 -- exactly this project's native resolution, so the
+        crop is not a workaround but the frame the sensor actually produced.
+
+        Applied when the image is read, so nothing is re-encoded and the JPEG
+        is not decoded and saved a second time.
+        """
+        b = self.border
+        if not b:
+            return (0, 0), (width, height)
+        if height <= 2 * b or width <= 2 * b:
+            raise ValueError(
+                f"{self.name}: border={b} leaves nothing of a {width}x{height} "
+                f"image. The spec's border does not match this download.")
+        return (b, b), (width - 2 * b, height - 2 * b)
 
     def glob(self, modality: str) -> str:
         """The image glob for `modality`, or a readable failure."""
@@ -280,6 +304,30 @@ SPECS: dict[str, DatasetSpec] = {
     # FLIR ADK 640x512 with hardware-synchronised RGB, 4 195 dense masks
     # (ECCV 2024). Field-focused classes -- no small vehicles -- so this is a
     # generalisation check, not a source of instances.
+    # 28 442 registered RGB-TIR pairs from a UAV, day and night, oriented-box
+    # annotation (RA-L 2022). **A stage-A set only**: its labels are boxes in
+    # XML, not masks, so `list_frames` finds nothing here and `list_pairs`
+    # finds all of it -- which is exactly what modality distillation reads.
+    #
+    # Every image, in both modalities, is 840x712 with a **100 px band of pure
+    # white on all four sides**; measured, not taken from the paper. Inside it
+    # is 640x512, this project's native resolution. `border=100` discards the
+    # band at read time -- see `DatasetSpec.inset`, and note that leaving it in
+    # would spend a third of the teacher's patch tokens on white.
+    #
+    # The authors distribute it through Baidu; the Hugging Face mirror below
+    # serves the same three archives over plain HTTPS, anonymously, with range
+    # support. `masks` names the XML directory so the spec is honest about
+    # having none -- the glob matches no image and `list_frames` says so.
+    "dronevehicle": DatasetSpec(
+        name="dronevehicle",
+        thermal="**/*imgr/*.jpg",
+        rgb="**/*img/*.jpg",
+        masks="**/*label/*.xml",
+        classes={"background": 0},
+        things=(),
+        border=100,
+    ),
     "caltech": DatasetSpec(
         name="caltech",
         thermal="**/thermal/*.png",
@@ -346,9 +394,19 @@ def _stem(path: Path, strip: SequenceABC[str]) -> str:
     return stem
 
 
-def _literal_dirs(pattern: str) -> int:
-    """How many fixed directory components a glob names before the filename."""
-    return sum(1 for part in pattern.split("/")[:-1] if "*" not in part)
+def _named_dirs(pattern: str) -> int:
+    """How many directory levels a glob names between its prefix and the file.
+
+    Counts every component except a leading `**` and the filename, **whether or
+    not it contains a wildcard**. Counting only wildcard-free components was
+    wrong the moment a dataset named its two modality directories `trainimg`
+    and `trainimgr`: the spec has to glob them as `*img` and `*imgr` (the
+    prefix changes per split), those count as zero fixed directories, and the
+    two halves then reduce to different keys -- `train/trainimg/00001` against
+    `train/trainimgr/00001` -- so `list_pairs` matches nothing at all and says
+    the download has no registered pairs.
+    """
+    return sum(1 for part in pattern.split("/")[:-1] if part != "**")
 
 
 def _key(path: Path, root: Path, pattern: str, strip: SequenceABC[str]) -> str:
@@ -369,7 +427,7 @@ def _key(path: Path, root: Path, pattern: str, strip: SequenceABC[str]) -> str:
     (`tir/00001D.png`) still reduces to `00001D`.
     """
     relative = path.relative_to(root)
-    keep = max(len(relative.parts) - _literal_dirs(pattern) - 1, 0)
+    keep = max(len(relative.parts) - _named_dirs(pattern) - 1, 0)
     return "/".join((*relative.parts[:keep], _stem(path, strip)))
 
 
