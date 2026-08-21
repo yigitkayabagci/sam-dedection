@@ -280,6 +280,13 @@ onu da $1{\times}1$ projection hallediyor.
 
 \subsection*{Teacher seçimi}
 
+Önce bir yanlış anlamayı kapatalım: \textbf{teacher hiçbir zaman EdgeTAM'ın
+içine takılmıyor.} Ayrı bir model olarak koşuyor, bir feature map üretiyor,
+ve karşılaştırılan tek şey sayılar. Mimarilerin ilgisiz olması bir sorun
+değil, distilasyonun tanımı. Bu yüzden Orin'de asla koşamayacak kadar büyük
+bir model bile burada sorunsuz teacher olabiliyor: o çevrimdışı koşuyor,
+dağıtılan şey EdgeTAM'ın kendi 4,92 M'lik encoder'ı.
+
 Üç aday var. Aralarındaki en somut fark, teacher'ın feature map'inin
 loss'tan önce resample edilip edilmediği.
 
@@ -321,6 +328,29 @@ loss'tan önce resample edilip edilmediği.
   \label{fig:egitim-ogretmen}
 \end{figure}
 
+Üçü de kodda hazır, seçim tek bir string, ve aralarında ölçülmüş bir
+karşılaştırma yok. Asıl gerilim DINOv3 ile SAM 2.1 arasında:
+
+\begin{itemize}
+  \item \textbf{DINOv3 lehine:} aradığımız şey anlam. Termalde sınır zaten
+        kolay, soğuk arka plandaki sıcak nesne belirgin bir kenar; eksik olan
+        o kenarın \emph{ne} olduğu. SAM 2'nin feature'ları ise tasarım gereği
+        sınıftan bağımsız, her şeyi segmentliyor ama ne olduğunu bilmiyor.
+  \item \textbf{SAM 2.1 lehine:} tensörler birebir uyuyor, 256 kanal ve
+        stride 16, yani projection temsili değiştirmiyor. Daha önemlisi
+        encoder'ı SAM 2'nin uzayına \emph{doğru} itiyor, ondan uzağa değil.
+        Yani bir önceki bölümdeki hiza riskini büyütmek yerine küçültüyor.
+        Bedeli hesap: Hiera-Large 1024'te koşuyor, ki EdgeTAM'ın var olma
+        sebebi tam olarak ondan kaçmak.
+\end{itemize}
+
+\textbf{İkisi birden kullanılmıyor,} ve sebebi teknik bir engel değil.
+Çoklu-teacher yayınlanmış bir desen, ama burada iki loss iki ayrı aşamada
+ve verileri iki mertebe farklı; ortak bir batch aşama A'nın çoğunu çöpe
+atardı. Aynı fikrin ucuz hâli zaten aşağıda: çapa terimi, yani feature
+distillation'ı ikinci bir teacher olarak değil regularizer olarak
+kullanmak.
+
 \textbf{Hangisi olursa olsun, hiçbir şey yapmamayı yenmek zorunda.}
 Baseline: stok EdgeTAM checkpoint'inden başlayan aşama B. Pretraining bu
 baseline'ı geçmiyorsa harcanmış GPU saatidir. Karşılaştırılabilir olan tek
@@ -331,6 +361,17 @@ Aşama B, aşama A'nın öğrendiğinden geri kaymasın diye bir \textbf{çapa
 terimi} taşıyor: encoder'ın feature'ları aşama B başındaki hâlinden ne kadar
 uzaklaştıysa o kadar ceza. Bu çapa aşama A'yı koruyor, memory yolunun
 hizasını değil.
+
+\subsection*{4,92 M parametre iki modaliteye yeter mi}
+
+Encoder küçük, ve şu an yalnızca termal öğreniyor. RGB yarısı da eğitime
+katılırsa aynı ağırlıklar iki modaliteyi birden taşımak zorunda kalır. İki
+şey bunu göründüğünden ucuz yapıyor: encoder sıfırdan öğrenmiyor, zaten
+SAM~2'nin distilasyonu; ve iki modalite ilgisiz alanlar değil, aynı sahneye
+aynı açıdan bakıyorlar. Yine de kapasite gerçek bir sınır ve ölçülmedi. En
+ucuz test: iki yarıyı da eğitip termal IoU'yu yalnızca termalle eğitilmiş
+koşuya karşı okumak. Düşerse sınır kapasitedir; düşmezse RGB bedava
+gelmiştir.
 
 \section{Aşama B}
 \label{sec:egitim-semantik}
@@ -585,6 +626,15 @@ model yanlış sayılır. O sayı modeli değil ayrıştırmayı ölçer. Bu yü
 Kust4K ve SegFly yalnızca eğitime giriyor; skorlama VTUAV VIS'in çizilmiş
 maskeleri üzerinden yapılıyor. Gürültülü bir target'tan öğrenmek normal,
 gürültülü bir target'la not vermek değil.
+
+Hizalı çift bir şeyi daha mümkün kılıyor. Güçlü bir RGB modeli RGB
+yarısında maske üretip aynı maskeyi termal yarıya taşıyabilir; böylece
+maskesiz kareler aşama B'ye veri olur, ve encoder iki modaliteyi birden
+görür. Tek şartı hizalama, ve bu bir varsayım değil ölçülecek bir şey:
+hedefler karenin yüzde biri kadar, birkaç piksellik sistematik bir kayma
+maskeyi bozar. VTUAV'ın kendi belgesi iki modalitenin piksel piksel hizalı
+\emph{olmadığını} söylüyor, o yüzden fikir setten sete ayrı ayrı
+ölçülmeden uygulanmıyor.
 
 VTUAV için iki ayar başka hiçbir yerde olmadığı kadar önemli, ikisi de
 $1920\times1080$ video olmasından geliyor. \textbf{Kırpma oranı 512/1080:}
