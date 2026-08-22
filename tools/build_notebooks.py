@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Build the encoder notebooks from plain text blocks.
 
-    python tools/build_notebooks.py          # both
+    python tools/build_notebooks.py          # all of them
     python tools/build_notebooks.py vtuav    # just that one
 
-Two notebooks come out of this one file, and they are the same experiment run
-on different data:
+Four notebooks come out of this one file. All four run the same code on the
+same schedule and the same seed; each changes exactly one thing, so the gap
+between any pair of final numbers is attributable to that one thing:
 
-    07_encoder_aerial_rgbt.ipynb   VTUAV VIS + SegFly + Kust4K
-    08_encoder_vtuav_only.ipynb    VTUAV VIS alone, at 1920x1080
+    07_encoder_aerial_rgbt.ipynb           the reference run
+    08_encoder_vtuav_only.ipynb            stage B on VTUAV alone  (data)
+    09_encoder_stage_a_dronevehicle.ipynb  stage A on DroneVehicle (pairs)
+    10_encoder_teacher_dinov3.ipynb        stage A from DINOv3     (teacher)
 
-Stage A is **identical** in both -- the same distillation, on the same VTUAV
-pairs, for the same number of steps. Only the stage-B training set differs, so
-the difference between the two final numbers is attributable to the extra data
-and not to anything else. They write to different Drive folders and different
-index directories, which is what makes running them at the same time safe.
+Every variant writes to its own Drive folder and its own index directory, and
+none of them touch the others' outputs -- running any number of them at once,
+on separate runtimes, is the intended way to use this file.
 
 The notebooks are generated rather than edited because a notebook is a JSON
 document where prose, code and cell numbers drift apart silently: three
@@ -31,7 +32,7 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 CELLS: list[tuple[str, str]] = []
@@ -51,10 +52,42 @@ class Variant:
     fetch: str                     # the body of the download loop
     mirror: str                    # Drive folder for weights, per variant
     distill: str                   # the stage-A block: source, crop, tolerance
+    teacher: str = "facebook/sam2.1-hiera-base-plus"
     gpu: str = "A100"
 
 
 VARIANTS: dict[str, Variant] = {}
+
+SAM_NOTE = """**DINOv3 is the other arm, not a dead option.** `TEACHER` is one string, and
+everything else — data, seed, schedule, loss, held-out sequences — is held
+fixed, so the difference between the two runs is the teacher and nothing else.
+`10_encoder_teacher_dinov3.ipynb` is this notebook with that one string
+changed; it can run on a second runtime at the same time as this one. DINOv3 is
+gated: open its model page once, accept the terms, then
+`from huggingface_hub import login; login()` in that runtime. AnyThermal's
+published result used DINOv2, which is why `facebook/dinov2-base` is still one
+string away and needs no account."""
+
+DINO_NOTE = """**DINOv3 is this notebook's teacher, and 07 is the arm it is measured
+against.** `TEACHER` is one string, and everything else — data, seed, schedule,
+loss, held-out sequences — is held fixed, so the gap between this run's
+`test/instance_iou` and `07_encoder_aerial_rgbt.ipynb`'s is the teacher and
+nothing else. The two are independent: different Drive folders, different index
+directories, so running them on two runtimes at the same time is the intended
+way to get the number.
+
+DINOv3 is **gated**, and accepting its terms is the one extra step this
+notebook needs. Open
+[its model page](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m),
+accept, then run `from huggingface_hub import login; login()` in this runtime
+*before* stage A. Skip it and the teacher download 401s partway into the run.
+AnyThermal's published result used DINOv2, which is why `facebook/dinov2-base`
+is still one string away and needs no account."""
+
+SAM_TROUBLE = ('`TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"`, '
+               "the other arm")
+DINO_TROUBLE = ('`TEACHER = "facebook/sam2.1-hiera-base-plus"`, '
+                "the other arm")
 
 
 def md(text: str, tag: str | None = None) -> None:
@@ -79,7 +112,17 @@ def resolve(text: str) -> str:
     anywhere. Tagging the cell and substituting at build time means they
     cannot go stale again.
     """
+    dino = "dinov3" in V.teacher
     substitutions = {**{t: str(i) for t, i in TAGS.items()},
+                     "TEACHER": V.teacher,
+                     "TEACHER_HEADING": (
+                         "### Which teacher, and why this run is the DINO arm"
+                         if dino else
+                         "### Which teacher, and why it is SAM 2 and not DINO"),
+                     "SAM_TAG": "" if dino else " (this notebook)",
+                     "DINO_TAG": " (this notebook)" if dino else "",
+                     "TEACHER_NOTE": DINO_NOTE if dino else SAM_NOTE,
+                     "OTHER_TEACHER": DINO_TROUBLE if dino else SAM_TROUBLE,
                      "TITLE": V.title, "BLURB": V.blurb,
                      "DATASETS": V.datasets, "FETCH": V.fetch,
                      "MIRROR": V.mirror, "SIBLING": SIBLING[V.key],
@@ -140,7 +183,8 @@ VARIANTS["all"] = Variant(
     f"kust4k:{DATA_ROOT}/Kust4K:thermal:components:train",
 ]""",
     fetch="""FETCH = [
-    ("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS", ["train_001"]),
+    ("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS",
+     ["train_001", "train_002", "train_003"]),
     ("segfly",    f"{DATA_ROOT}/SegFly",    []),
     ("kust4k",    f"{DATA_ROOT}/Kust4K",    []),
 ]""",
@@ -174,7 +218,8 @@ VARIANTS["vtuav"] = Variant(
     f"vtuav_vis:{DATA_ROOT}/VTUAV_VIS:thermal:labels:all",
 ]""",
     fetch="""FETCH = [
-    ("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS", ["train_001"]),
+    ("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS",
+     ["train_001", "train_002", "train_003"]),
 ]""",
     mirror="edgetam-encoder/vtuav",
     distill="""DISTILL_SPEC    = "vtuav"            # where the *unlabelled* pairs come from
@@ -189,14 +234,58 @@ VARIANTS["drone"] = Variant(
     title="Encoder for aerial RGB-T — stage A on DroneVehicle",
     blurb='Stage B is byte for byte `07_encoder_aerial_rgbt.ipynb` -- the same three datasets, the same schedule, the same seed. **Only the stage-A source differs**, so the gap between the two final numbers is attributable to what the encoder was pretrained on and to nothing else.\n\n07 distils from VTUAV: 26 059 pairs at 1920x1080 cropped down to 512, one campus, all daylight. This one distils from **DroneVehicle**: 28 442 pairs already at 640x512 -- the sensor size this project deploys at, so no resampling at all -- across day *and* night, from a set whose oriented-box labels make it useless for segmentation and therefore unused by anyone doing what we are doing.\n\nThe question it answers: does stage A want **resolution and one scene**, or **native pixels and variety**? Nothing in the literature settles that for aerial thermal, which is why it is a run rather than an argument.',
     datasets=VARIANTS["all"].datasets,
-    fetch='FETCH = [\n    ("vtuav_vis",    f"{DATA_ROOT}/VTUAV_VIS",    ["train_001"]),\n    ("segfly",       f"{DATA_ROOT}/SegFly",       []),\n    ("kust4k",       f"{DATA_ROOT}/Kust4K",       []),\n    # Stage A\'s source here. 14 GB, anonymous HTTPS, no quota and no form.\n    ("dronevehicle", f"{DATA_ROOT}/DroneVehicle", []),\n]',
+    fetch="""FETCH = [
+    ("vtuav_vis",    f"{DATA_ROOT}/VTUAV_VIS",
+     ["train_001", "train_002", "train_003"]),
+    ("segfly",       f"{DATA_ROOT}/SegFly",       []),
+    ("kust4k",       f"{DATA_ROOT}/Kust4K",       []),
+    # Stage A's source here. 14 GB, anonymous HTTPS, no quota and no form.
+    ("dronevehicle", f"{DATA_ROOT}/DroneVehicle", []),
+]""",
     mirror="edgetam-encoder/drone",
     distill='DISTILL_SPEC    = "dronevehicle"     # where the *unlabelled* pairs come from\nDISTILL_ROOT    = f"{DATA_ROOT}/DroneVehicle"\nDISTILL_CROP    = None               # already 640x512 once the white band is\n                                     # cropped -- resampling it would be a loss\nDISTILL_TOL     = 1                  # registered, but not claimed pixel-exact',
 )
 
-SIBLING = {"all": "08_encoder_vtuav_only.ipynb and 09_encoder_stage_a_dronevehicle.ipynb",
+VARIANTS["dino"] = Variant(
+    key="dino",
+    path="notebooks/10_encoder_teacher_dinov3.ipynb",
+    title="Encoder for aerial RGB-T — DINOv3 teacher",
+    blurb=(
+        "**`07_encoder_aerial_rgbt.ipynb` with one string changed.** Same three "
+        "datasets, same schedule, same seed, same held-out sequences — only the "
+        "stage-A teacher differs, so the gap between the two final numbers is "
+        "attributable to the teacher and to nothing else. The two runs share no "
+        "output directory, so the intended way to get that gap is to start both "
+        "on separate runtimes at once.\n\n"
+        "07 distils from **SAM 2.1 Hiera-B+**. That is the safe arm: EdgeTAM is "
+        "itself a distillation of SAM 2, and its published teacher was Hiera-B+ "
+        "with the stride-16 feature map as the target — the same tensor read "
+        "here. Asking it to produce those features from a thermal input is the "
+        "objective the checkpoint was born from with a modality gap added, and "
+        "it pushes the encoder *toward* the space the memory path expects.\n\n"
+        "This one distils from **DINOv3 ViT-B/16**. The argument for it is that "
+        "SAM's features are class-agnostic by design, and in thermal the "
+        "boundary is the easy part — a warm object against a cool background is "
+        "already obvious. What a thermal encoder lacks is *semantics*: whether "
+        "the bright blob is a vehicle or a rock that sat in the sun all day. "
+        "DINOv3 carries that; SAM deliberately does not. It also lands on a "
+        "32x32 token grid at this notebook's 512 input, which is the student's "
+        "grid exactly.\n\n"
+        "Higher ceiling, higher risk, and nobody has measured which wins on "
+        "aerial thermal — which is why this is a run rather than an argument. "
+        "**DINOv3 is gated:** accept its terms and `login()` before starting, or "
+        "stage A fails partway in."),
+    datasets=VARIANTS["all"].datasets,
+    fetch=VARIANTS["all"].fetch,
+    mirror="edgetam-encoder/dino",
+    distill=VARIANTS["all"].distill,
+    teacher="facebook/dinov3-vitb16-pretrain-lvd1689m",
+)
+
+SIBLING = {"all": "08_encoder_vtuav_only.ipynb, 09_encoder_stage_a_dronevehicle.ipynb and 10_encoder_teacher_dinov3.ipynb",
            "vtuav": "07_encoder_aerial_rgbt.ipynb",
-           "drone": "07_encoder_aerial_rgbt.ipynb"}
+           "drone": "07_encoder_aerial_rgbt.ipynb",
+           "dino": "07_encoder_aerial_rgbt.ipynb (the SAM 2.1 teacher)"}
 
 V = VARIANTS[sys.argv[1]] if len(sys.argv) > 1 else VARIANTS["all"]
 
@@ -629,7 +718,7 @@ MAX_INSTANCES      = 8               # prompts per window -- one encode covers a
 
 # --- Stage A: the unlabelled pretraining pass ---------------------------
 PRETRAIN        = True               # distil an RGB teacher into the encoder
-TEACHER         = "facebook/sam2.1-hiera-base-plus"            # open -- see below
+TEACHER         = "{{TEACHER}}"
 {{DISTILL}}
 DISTILL_STEPS   = 600
 DISTILL_PAIRS   = 20000              # sampled across the set, never truncated
@@ -1242,9 +1331,11 @@ at 1920×1080:
 
 The catch is disk, not labels: 1.7 M frames at 1920×1080 is far more than a
 Colab runtime holds, and the mask split alone is ~120 GB across its eight
-archives. `FETCH` therefore asks for `train_001` and stops — 9.1 GB, 14
-sequences, 26 059 pairs, already above AnyThermal's whole training set and
-enough to saturate stage A on its own (`DISTILL_PAIRS = 20 000`).
+archives. `FETCH` asks for the three **training** archives and stops there —
+43.1 GB, which a Colab disk holds and the full 120 GB does not. `train_001`
+alone would do for stage A (26 059 pairs, already above AnyThermal's whole
+training set, and enough to saturate it at `DISTILL_PAIRS = 20 000`); the other
+two are there for stage B, for the reason below.
 
 **For stage B, one archive is not enough, and the reason is not its size.**
 Reading the three training archives' listings, the target kinds are badly
@@ -1264,20 +1355,20 @@ It also decides what a held-out number is worth. 14 sequences split 11/2/1, so
 runs — which is the entire point of running this notebook against its sibling.
 All three archives give 50 sequences and a 40/5/5.
 
-So add them to `FETCH` if the Drive space is there:
-`("vtuav_vis", f"{DATA_ROOT}/VTUAV_VIS", ["train_001", "train_002", "train_003"])`.
-If only one more fits, make it `train_003` — the most masks and the most
-pedestrians. With all three, raising `DISTILL_PAIRS` past 20 000 starts to buy
-something too; on `train_001` alone it does not.
+That is why `FETCH` names all three. If the disk will not take 43 GB, cut
+`train_002` first — `train_003` carries the most masks and the most
+pedestrians, and dropping to one archive costs the held-out split its meaning.
+With all three, raising `DISTILL_PAIRS` past 20 000 starts to buy something
+too; on `train_001` alone it does not.
 
-### Which teacher, and why it is SAM 2 and not DINO
+{{TEACHER_HEADING}}
 
 The task is **single-object tracking with no class in it**: the operator draws
 a box, the model follows *that* object, and nothing anywhere asks what the
 object is. That sentence decides the teacher, so it is worth putting the
 candidates side by side.
 
-| | **SAM 2.1 Hiera-B+** (default) | DINOv3-ViT-B/16 | DINOv2-base |
+| | **SAM 2.1 Hiera-B+**{{SAM_TAG}} | DINOv3-ViT-B/16{{DINO_TAG}} | DINOv2-base |
 |---|---|---|---|
 | what its features encode | **class-agnostic boundaries** — something is here, it ends there | **semantics**, and specifically **dense** ones — fixing dense degradation is what the release is about | semantics |
 | fit to *this* task | the task's definition: no class is ever asked for | semantics is real, and is surplus here | same, one generation back |
@@ -1295,13 +1386,7 @@ already *are* a fit to that target, so B+ resumes the objective the checkpoint
 was born from, while Large would pull it toward a different one and give up the
 single property that makes a SAM teacher interesting.
 
-**DINOv3 is the second run, not a dead option.** `TEACHER` is one string, and
-everything else — data, seed, schedule, loss — is held fixed, so the difference
-between the two runs is the teacher and nothing else. It is gated: open its
-model page once, accept the terms, then
-`from huggingface_hub import login; login()` in this runtime. AnyThermal's
-published result used DINOv2, which is why `facebook/dinov2-base` is still one
-string away and needs no account.
+{{TEACHER_NOTE}}
 
 *Whichever it is, it cannot break anything structurally.* Distillation changes
 **weight values inside `image_encoder`** and nothing else: same modules, same
@@ -1688,7 +1773,7 @@ trained the decoder too, so re-export both and run parity on all four.
 | ahead on the mean, flat on small instances | it learned the trucks. The deployment does not track trucks. Raise `MAX_INSTANCES`, lower `MIN_AREA`, and check the size histogram before rerunning |
 | LoRA level with the fine-tune | the regularisation argument was real, at 3 % of the parameters and a smaller optimiser state. Prefer LoRA and record it — this is the case where `finetune.py`'s §1 needs rewriting |
 | everything level with stock | the bottleneck is upstream of the method. Look again at the fusion number in cell {{fusion}}: if the instances are fused, the targets were wrong and nothing downstream could have helped |
-| `distilled+ft` no better than `finetune` | stage A did not pay for itself **with this teacher, on this dataset**. Two things to try before dropping it: `TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"`, the second run, and more pairs — it is a data-hungry stage, and VTUAV's ~1.7 M pairs are the honest test of it, not Kust4K's 2 864 |
+| `distilled+ft` no better than `finetune` | stage A did not pay for itself **with this teacher, on this dataset**. Two things to try before dropping it: {{OTHER_TEACHER}}, and more pairs — it is a data-hungry stage, and VTUAV's ~1.7 M pairs are the honest test of it, not Kust4K's 2 864 |
 | `distilled+ft` **worse** than `finetune` | the encoder drifted somewhere the frozen decoder cannot read. Lower `--trunk-lr`, or raise the head-only epoch count (`EPOCHS = (2, 3)`) so the decoder gets longer to re-adapt before the trunk moves |
 
 **One run is one sample.** Every command takes `--seed`; re-run each with two or
@@ -1711,17 +1796,31 @@ so that stage needs its own entry in `STAGES` before it can start.
 """)
 
 
-def build() -> dict:
-    # Hashed *before* substitution, so `{{STAMP}}` is still a literal in the
-    # text being hashed and the stamp does not depend on itself. Any change to
-    # any cell -- prose included -- gives a new one.
-    global STAMP_VALUE
+def stamp_for(variant: Variant) -> str:
+    """The build id: this variant's notebook, hashed.
+
+    Hashed *before* substitution, so `{{STAMP}}` is still a literal in the
+    text and the stamp does not depend on itself. Any change to any cell --
+    prose included -- gives a new one.
+
+    The variant's own fields go in too: they are still `{{placeholders}}` in
+    the cell text, so without them every notebook would stamp identically and
+    a swapped pair would look correct. They are read off the dataclass rather
+    than listed by hand. The hand-written list this replaces named six of the
+    ten fields, and two it missed were `teacher` and `distill` -- so changing
+    10's teacher, the one setting that notebook exists to change, rebuilt it
+    to a byte-identical stamp. A stamp that cannot move is a staleness check
+    that always answers "current", which is the failure the mechanism was
+    added to catch.
+    """
     body = "\n".join(f"{kind}\n{text}" for kind, text in CELLS)
-    # The variant's own fields go in too: they are still `{{placeholders}}` in
-    # the text above, so without them both notebooks would stamp identically
-    # and a swapped pair would look correct.
-    body += "\n".join((V.key, V.title, V.blurb, V.datasets, V.fetch, V.mirror))
-    STAMP_VALUE = hashlib.sha256(body.encode()).hexdigest()[:10]
+    body += "\n".join(str(getattr(variant, f.name)) for f in fields(variant))
+    return hashlib.sha256(body.encode()).hexdigest()[:10]
+
+
+def build() -> dict:
+    global STAMP_VALUE
+    STAMP_VALUE = stamp_for(V)
     return {
         "cells": [
             {"cell_type": kind,

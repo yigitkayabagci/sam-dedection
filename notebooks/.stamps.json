@@ -1,5 +1,6 @@
 {
- "07_encoder_aerial_rgbt.ipynb": "4b33c298b9",
- "08_encoder_vtuav_only.ipynb": "0b429b6fe7",
- "09_encoder_stage_a_dronevehicle.ipynb": "2faf47b604"
+ "07_encoder_aerial_rgbt.ipynb": "034baba4ae",
+ "08_encoder_vtuav_only.ipynb": "c5527c24a6",
+ "09_encoder_stage_a_dronevehicle.ipynb": "9f89a498ea",
+ "10_encoder_teacher_dinov3.ipynb": "d36d0fbe24"
 }

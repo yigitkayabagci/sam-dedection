@@ -151,6 +151,115 @@ class TestEveryNotebook(unittest.TestCase):
             self.assertEqual(reload_calls(path), ["cell 0: importlib.reload(_t)"])
 
 
+def settings_of(path: Path) -> dict[str, str]:
+    """The `NAME = "value"` lines a generated notebook's code cells bind."""
+    import json
+    import re
+
+    found = {}
+    for cell in json.loads(path.read_text())["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        for line in cell["source"]:
+            match = re.match(r'([A-Z][A-Z0-9_]*)\s*=\s*(.+?)(?:\s+#.*)?$',
+                             line.rstrip("\n"))
+            if match:
+                found.setdefault(match.group(1), match.group(2))
+    return found
+
+
+class TestTheTwoTeacherArms(unittest.TestCase):
+    """07 and 10 are one experiment with one variable, and have to stay so.
+
+    The pair only measures the teacher if nothing else moved between them.
+    They are generated from one file, so today they agree by construction --
+    but a variant-specific edit is one keyword argument away, and a run of
+    both that differed in the schedule *and* the teacher would produce a
+    number nobody could attribute. That is a whole GPU day to discover.
+    """
+
+    SAM = ROOT / "notebooks" / "07_encoder_aerial_rgbt.ipynb"
+    DINO = ROOT / "notebooks" / "10_encoder_teacher_dinov3.ipynb"
+
+    def test_both_arms_exist(self):
+        # Otherwise every case below passes on a missing file.
+        self.assertTrue(self.SAM.is_file())
+        self.assertTrue(self.DINO.is_file())
+
+    def test_the_arms_name_the_two_teachers(self):
+        self.assertEqual(settings_of(self.SAM)["TEACHER"],
+                         '"facebook/sam2.1-hiera-base-plus"')
+        self.assertIn("dinov3", settings_of(self.DINO)["TEACHER"])
+
+    def test_nothing_but_the_teacher_and_its_bookkeeping_differs(self):
+        """Every code cell identical but for the teacher, the mirror, the name.
+
+        MIRROR and the NOTEBOOK/STAMP pair *have* to differ -- that is what
+        keeps two simultaneous runs from overwriting each other. Anything
+        else differing means the comparison has a second variable in it.
+        """
+        import json
+
+        allowed = {"TEACHER", "MIRROR", "NOTEBOOK", "STAMP"}
+        a, b = settings_of(self.SAM), settings_of(self.DINO)
+        self.assertEqual(sorted(a), sorted(b), "the arms bind different names")
+        differ = {k for k in a if a[k] != b[k]}
+        self.assertEqual(differ, allowed,
+                         f"unexpected differences: {sorted(differ - allowed)}; "
+                         f"expected but identical: {sorted(allowed - differ)}")
+
+    def test_the_arms_write_to_different_places(self):
+        """They are meant to run at the same time on two runtimes.
+
+        Same Drive, so a shared MIRROR would have each run's checkpoints and
+        its instance-index cache land on the other's. INDEX is derived from
+        MIRROR, so this one assertion covers both.
+        """
+        self.assertNotEqual(settings_of(self.SAM)["MIRROR"],
+                            settings_of(self.DINO)["MIRROR"])
+
+    def test_the_settings_reader_actually_reads_the_settings(self):
+        # A regex that matched nothing would make every case above vacuous.
+        found = settings_of(self.SAM)
+        for name in ("TEACHER", "MIRROR", "SEED", "STEPS_PER_EPOCH", "SIZE"):
+            self.assertIn(name, found)
+        self.assertEqual(found["SEED"], "0")
+
+    def test_every_variant_field_moves_the_stamp(self):
+        """Change anything a variant carries and the build id has to change.
+
+        It once folded in six of the eight fields, hand-listed. The two it
+        missed were `teacher` and `distill` -- so editing 10's teacher, the
+        single setting that notebook exists to change, rebuilt it to an
+        identical stamp. Cell 1 compares that stamp against `.stamps.json` to
+        tell you whether the file in the runtime is the file in the repo; one
+        that cannot move always answers "current", which is worse than having
+        no check at all. Reading the fields off the dataclass is what fixed
+        it, and this case is what keeps a ninth field from reopening it.
+        """
+        import dataclasses
+        import importlib
+        import unittest.mock
+
+        # The generator is a script: it reads `sys.argv[1]` at import time to
+        # pick the variant. Importing it needs a script's argv.
+        with unittest.mock.patch.object(sys, "argv", ["build_notebooks.py"]):
+            builder = importlib.import_module("tools.build_notebooks")
+        variant = builder.VARIANTS["dino"]
+        names = [f.name for f in dataclasses.fields(variant)]
+        self.assertGreaterEqual(len(names), 8)
+
+        # The generator's own function, not a copy of it -- a reimplementation
+        # here would keep passing after a regression in the real one.
+        base = builder.stamp_for(variant)
+        for name in names:
+            with self.subTest(field=name):
+                moved = dataclasses.replace(
+                    variant, **{name: str(getattr(variant, name)) + " x"})
+                self.assertNotEqual(builder.stamp_for(moved), base,
+                                    f"changing {name!r} left the stamp alone")
+
+
 class TestMagicHandling(unittest.TestCase):
     """The IPython lines, which are where this check earns its keep."""
 
