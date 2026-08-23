@@ -929,11 +929,18 @@ requests = [parse(d) for d in DATASETS]
 print(describe(requests), "\n")
 print(f"{human(shutil.disk_usage('/content').free)} of disk free\n")
 
+# Hub exports (SegFly and its RGB slice) are zipped to this Drive folder the
+# moment they finish, because for them the *export* is the expensive step --
+# a later runtime restores the zip in minutes instead of re-planning 761
+# shards. Archive datasets ignore it; VTUAV's zips are staged by hand once.
+STAGE = Path("/content/drive/MyDrive/datasets")
+STAGE.mkdir(parents=True, exist_ok=True)
+
 for name, dest, parts in FETCH:
     if Path(dest).exists() and any(Path(dest).rglob("*.png")):
         print(f"== {name}: already downloaded to {dest}")
     else:
-        fetch(name, dest, tuple(parts) or None)
+        fetch(name, dest, tuple(parts) or None, stage=STAGE)
     # Report in the modality the recipe fetched -- an RGB slice has no
     # thermal frames, and "0 labelled thermal frames" would read as a broken
     # download when it is a correct one.
@@ -1618,7 +1625,61 @@ student's own space so no projection is needed. It costs **no extra encoder pass
 hands back the map it already computed.
 
 `ANCHOR_WEIGHT = 0` turns it off and makes the third run a pure
-"did stage A survive?" test. Both are worth having; the notebook uses 0.5.
+"did stage A survive?" test. **The notebook now uses 0, and that is a measured
+change rather than a preference.** `12_encoder_probe.ipynb` re-trained stage B
+from 08's own stage-A checkpoint with the term switched off and scored it
+through the same matrix:
+
+| `distilled+ft`, box IoU @512 | |
+|---|---|
+| anchor 0.5 | 0.8536 |
+| **anchor 0** | **0.8670** |
+| plain fine-tune, no stage A | 0.8611 |
+
+So stage A did pay for itself — what was eating it was the term meant to
+protect it. Anchored at 0.5 the distilled arm finished *behind* a plain
+fine-tune; at 0 it finishes ahead. Under the weaker prompts the two anchors sit
+within a hundredth of each other, so what 0.5 cost was box precision
+specifically. 0.5 is still worth a re-test once stage A runs at the full 12 000
+steps, since the thing it protects will be larger.
+
+### What the loop is prompted with: `PROMPT`
+
+Every run before the probe trained against the exact ground-truth rectangle,
+because that is the only thing the loop could build. The probe took 08's four
+finished checkpoints and scored them under a *loose* box instead. All four came
+out **below stock EdgeTAM**, having beaten it under an exact one:
+
+| under a jittered box | @512 | @1024 |
+|---|---|---|
+| stock | 0.6293 | 0.6700 |
+| finetune | 0.5458 (−0.084) | 0.5699 (−0.100) |
+| lora | 0.5722 (−0.057) | 0.5992 (−0.071) |
+| distilled+ft | 0.5555 (−0.074) | 0.5996 (−0.070) |
+
+That is the largest single effect in the probe's table and it points the wrong
+way. A decoder shown nothing but pixel-perfect boxes learns box-to-mask as a
+tight geometric mapping, so it answers a displaced box by faithfully segmenting
+the displaced region; stock EdgeTAM inherits SAM 2's prompt-noise augmentation
+and is more forgiving.
+
+It matters more than the box column because of what comes next. **In tracking
+only frame 0 is prompted by hand.** Every frame after it is prompted by the
+memory path's own estimate, which drifts — a jittered box by another name. A
+checkpoint that loses a tenth of an IoU to a loose box is the wrong thing to
+carry into stage C.
+
+`PROMPT = "mix"` gives half the prompts a box whose every edge has moved by up
+to `PROMPT_JITTER` of its own side, chosen **per instance rather than per
+batch**: one window contributes up to `MAX_INSTANCES` prompts against a single
+encode, and a per-batch choice would correlate all of them and cut the
+effective number of draws by that factor. `"box"` reproduces every earlier run
+exactly. `"point"` and `"jitter"` are the two whole-batch extremes.
+
+**Validation always scores under `box`**, whatever this is set to. The
+validation number is what decides which epoch becomes the checkpoint, and a
+random prompt would put a second moving part into it — besides making it
+incomparable to every run taken before this knob existed.
 
 ### Two knobs from the literature, both off or small by default
 
