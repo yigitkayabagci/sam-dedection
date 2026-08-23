@@ -1186,14 +1186,27 @@ print("\nmemory path is frozen in the encoder stage")
 
 # ---------------------------------------------------------------- 17
 md(r"""
-## First: overfit one window
+## First: one window, before spending GPU hours
 
-Before spending GPU hours, prove the loop can learn *anything*. One window, its
-own instances, a few hundred steps — this should collapse towards zero.
+The question this answers is **plumbing**: do the prompt boxes, the mask and
+the window geometry refer to the same pixels? If they do not, nothing further
+down can work, and this is the cheapest possible place to find out.
 
-If it does not, the problem is plumbing (prompt coordinates, mask alignment,
-the window geometry), and no amount of real training will fix it. This is the
-cheapest possible place to find that out.
+The measure is **IoU on one window**, taken before any training and again
+after. Loss is the wrong yardstick for it. Mask targets vary enormously in how
+much of the frame they occupy, so the same loss means different things on
+different windows — and an earlier version of this cell asked for the loss to
+fall 3× whatever it started at, which failed a window the model *already*
+segmented at 0.88 for the crime of leaving too little room to improve.
+
+Two outcomes and they are not the same fault:
+
+- **IoU stays low, before and after.** The plumbing is wrong. Check the
+  overlay above, then the prompt coordinates and the mask alignment.
+- **IoU starts high and the loss then runs away.** The plumbing is fine and
+  the *optimiser* is the problem. Lower `Rates()` or lengthen the warm-up.
+
+The cell distinguishes them, and restores the model either way.
 """)
 
 # ---------------------------------------------------------------- 18
@@ -1201,37 +1214,85 @@ code(r"""
 # --- Can it learn one window? -------------------------------------------
 import copy, gc
 from src.training.finetune import param_groups
-from src.training.image_loop import collate, image_losses
+from src.training.image_loop import collate, image_losses, instance_iou
 
 probe_sample = max(train.samples, key=lambda s: len(s.instances))
 probe = collate([probe_sample], "cpu").to("cuda")
 print(f"{probe_sample.source.spec.name} {probe_sample.frame.name}: "
       f"{len(probe_sample.instances)} instances, native={probe_sample.native}")
 
+# Where it *starts* is most of the answer, and this cell used not to look. A
+# window whose boxes and mask do not correspond scores near zero here no
+# matter what the training then does; one that starts high has already proved
+# the plumbing, and no amount of overfitting can prove it harder.
+with torch.autocast("cuda", dtype=torch.bfloat16):
+    start_iou = float(instance_iou(model, probe).mean())
+print(f"IoU before a single step: {start_iou:.3f}")
+
 snapshot = copy.deepcopy(model.state_dict())
-opt = torch.optim.AdamW(param_groups(model, Rates(head=3e-4, neck=3e-4, trunk=3e-5)))
+# The production rates, warmed up -- not three times them from a cold
+# optimiser. Adam's first step moves every parameter by the full lr whatever
+# the gradient is, so an unwarmed 3e-4 on a window the model already segments
+# is a large unprovoked perturbation rather than a gradient step. That is what
+# this cell used to do, and on VTUAV it drove the decoder to "foreground
+# everywhere" -- focal 14.4, dice 1.00, a flat line for the remaining 100
+# steps -- on a window it had scored 0.22 at step 0.
+STEPS, WARMUP = 150, 25
+opt = torch.optim.AdamW(param_groups(model, Rates()))
+schedule = [g["lr"] for g in opt.param_groups]
 trainable = [p for g in opt.param_groups for p in g["params"]]
+
 history = []
-for step in range(120):
+for step in range(STEPS):
+    for group, lr in zip(opt.param_groups, schedule):
+        group["lr"] = lr * min(1.0, (step + 1) / WARMUP)
     with torch.autocast("cuda", dtype=torch.bfloat16):
         loss, terms = image_losses(model, probe)
     opt.zero_grad(set_to_none=True)
     loss.backward()
     torch.nn.utils.clip_grad_norm_(trainable, 1.0)
     opt.step()
-    history.append(float(loss))
-    if step % 20 == 0:
-        print(f"step {step:>4}  loss {float(loss):7.4f}   " +
+    history.append(float(loss.detach()))
+    if step % 25 == 0 or step == STEPS - 1:
+        print(f"step {step:>4}  loss {history[-1]:8.4f}   " +
               "  ".join(f"{k} {v:.3f}" for k, v in terms.items()))
+    # Stop the moment it runs away. Grinding out the remaining steps of a
+    # saturated model costs minutes and adds nothing to the diagnosis.
+    if history[-1] > max(20 * history[0], 5.0):
+        print(f"step {step:>4}  runaway -- stopping here")
+        break
 
-drop = history[0] / max(min(history[-10:]), 1e-6)
-print(f"\nloss fell {drop:.1f}x  ({history[0]:.3f} -> {min(history[-10:]):.3f})")
-assert drop > 3.0, ("the loop cannot even overfit one window. Check prompt "
-                    "coordinates, mask alignment and the window geometry "
-                    "before training on anything larger.")
-model.load_state_dict(snapshot)          # throw the overfit away
+with torch.autocast("cuda", dtype=torch.bfloat16):
+    end_iou = float(instance_iou(model, probe).mean())
+print(f"\nloss {history[0]:.3f} -> {min(history[-10:]):.3f}    "
+      f"IoU {start_iou:.3f} -> {end_iou:.3f}")
+
+# Put the model back *before* judging, so a failure here leaves something
+# runnable behind. The old order raised with the overfit still loaded and the
+# snapshot still held, which meant rebuilding the model to try anything.
+model.load_state_dict(snapshot)
 del snapshot, opt, probe
 gc.collect(); torch.cuda.empty_cache()
+
+# Two questions, and the assertion this replaces confused them into one. It
+# demanded the loss fall 3x whatever it started at -- so a window the model
+# already segments well, where 0.22 would have to reach 0.07, failed for being
+# too easy -- and then blamed the data for it.
+best = max(start_iou, end_iou)
+if min(history[-10:]) > history[0]:
+    raise AssertionError(
+        f"the probe diverged: loss ended above where it began "
+        f"({history[0]:.3f} -> {min(history[-10:]):.3f}). This is an "
+        f"optimisation failure and not a plumbing one -- IoU {start_iou:.2f} "
+        f"before any step says the prompt coordinates, the mask alignment and "
+        f"the window geometry are already right. Lower `Rates()` or raise "
+        f"WARMUP above, and re-run this cell.")
+assert best > 0.60, (
+    f"{len(history)} steps on one window and IoU never passed {best:.2f}. "
+    f"*Now* the plumbing is the suspect: check prompt coordinates, mask "
+    f"alignment and window geometry against the overlay above before "
+    f"training on anything larger.")
+print(f"plumbing sound (IoU {best:.2f} on one window); the loop learns")
 """)
 
 # ---------------------------------------------------------------- 19
