@@ -43,9 +43,12 @@ from src.training.aerial import (  # noqa: E402
     sample_windows,
 )
 from src.training.finetune import Rates, apply_freeze  # noqa: E402
+from src.training.clip_loop import jitter_boxes  # noqa: E402
 from src.training.image_loop import (  # noqa: E402
+    PROMPTS,
     ImageBatch,
     ImageSplit,
+    build_prompt,
     collate,
     image_losses,
     instance_iou,
@@ -141,6 +144,110 @@ class TestPropagate(unittest.TestCase):
         batch = fake_batch()
         with self.assertRaises(RuntimeError):
             propagate_image(model, batch.images, batch.boxes, batch.valid)
+
+
+class TestPrompts(unittest.TestCase):
+    """What the model is told, and that the weaker forms actually reach it.
+
+    Every number this project has recorded was taken with the ground-truth box
+    as the prompt, which on an isolated target states most of the mask -- so
+    two encoders of different quality score within a hundredth of each other
+    and the metric looks flat. `point` and `jitter` are how that is checked
+    rather than assumed, and they are worth pinning because a prompt that
+    silently fell back to the box would produce a perfectly plausible table of
+    numbers meaning nothing.
+    """
+
+    def captured(self, prompt: str, **kwargs) -> dict:
+        """The `point_inputs` dict `track_step` was actually handed."""
+        model = FakeSam2(SIZE).eval()
+        batch = fake_batch(images=1, width=1)
+        seen: list[dict] = []
+        original = model.track_step
+        model.track_step = lambda **kw: (seen.append(kw["point_inputs"]),
+                                         original(**kw))[1]
+        propagate_image(model, batch.images, batch.boxes, batch.valid,
+                        prompt, **kwargs)
+        return seen[-1]
+
+    def test_box_is_the_default_and_still_two_corners(self):
+        # The default has to stay byte-identical: it is what every recorded
+        # number was taken with, and a changed default would silently rebase
+        # every comparison against the old ones.
+        model = FakeSam2(SIZE).eval()
+        batch = fake_batch(images=1, width=1)
+        seen: list[dict] = []
+        original = model.track_step
+        model.track_step = lambda **kw: (seen.append(kw["point_inputs"]),
+                                         original(**kw))[1]
+        propagate_image(model, batch.images, batch.boxes, batch.valid)
+
+        self.assertEqual(tuple(seen[-1]["point_coords"].shape), (1, 2, 2))
+        np.testing.assert_array_equal(seen[-1]["point_labels"].numpy(), [[2, 3]])
+
+    def test_a_point_prompt_is_one_positive_click_at_the_centre(self):
+        inputs = self.captured("point")
+
+        self.assertEqual(tuple(inputs["point_coords"].shape), (1, 1, 2))
+        np.testing.assert_array_equal(inputs["point_labels"].numpy(), [[1]])
+        # fake_batch's box is (8, 8, 20, 20).
+        np.testing.assert_allclose(
+            inputs["point_coords"].reshape(2).numpy(), [14.0, 14.0])
+
+    def test_a_jittered_prompt_is_still_a_box_but_not_the_same_one(self):
+        inputs = self.captured("jitter", jitter=0.3,
+                               generator=torch.Generator().manual_seed(0))
+        corners = inputs["point_coords"].reshape(-1).numpy()
+
+        np.testing.assert_array_equal(inputs["point_labels"].numpy(), [[2, 3]])
+        self.assertFalse(np.allclose(corners, [8.0, 8.0, 20.0, 20.0]))
+        # Still recognisably the same target: 0.3 of a 12-pixel side.
+        np.testing.assert_allclose(corners, [8.0, 8.0, 20.0, 20.0], atol=12 * 0.3)
+
+    def test_zero_jitter_leaves_the_box_exactly_where_it_was(self):
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]])
+        self.assertTrue(torch.equal(jitter_boxes(boxes, 0.0), boxes))
+
+    def test_the_same_seed_perturbs_two_checkpoints_identically(self):
+        # Otherwise the gap between two rows of the probe table is partly the
+        # draw, and the whole point of the axis is that it is not.
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0], [1.0, 2.0, 9.0, 30.0]])
+        first = jitter_boxes(boxes, 0.3, torch.Generator().manual_seed(4))
+        again = jitter_boxes(boxes, 0.3, torch.Generator().manual_seed(4))
+        self.assertTrue(torch.equal(first, again))
+
+    def test_jitter_never_returns_an_inverted_rectangle(self):
+        # Edges move independently, so a large fraction can cross them; the
+        # re-sort is what keeps x0 < x1. SAM 2 would take the inverted one and
+        # segment nothing.
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]]).expand(64, 4)
+        moved = jitter_boxes(boxes, 0.9, torch.Generator().manual_seed(2))
+        self.assertTrue(bool((moved[:, 0] <= moved[:, 2]).all()))
+        self.assertTrue(bool((moved[:, 1] <= moved[:, 3]).all()))
+
+    def test_an_unknown_prompt_is_refused_rather_than_silently_boxed(self):
+        with self.assertRaises(ValueError):
+            build_prompt(torch.zeros(1, 4), "scribble")
+
+    def test_instance_iou_forwards_the_prompt(self):
+        model = FakeSam2(SIZE).eval()
+        batch = fake_batch(images=1, width=1)
+        seen: list[dict] = []
+        original = model.track_step
+        model.track_step = lambda **kw: (seen.append(kw["point_inputs"]),
+                                         original(**kw))[1]
+        instance_iou(model, batch, "point")
+
+        np.testing.assert_array_equal(seen[-1]["point_labels"].numpy(), [[1]])
+
+    def test_every_advertised_prompt_builds(self):
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]])
+        for name in PROMPTS:
+            with self.subTest(prompt=name):
+                built = build_prompt(boxes, name, 0.3,
+                                     torch.Generator().manual_seed(0))
+                self.assertEqual(built["point_coords"].shape[0], 1)
+                self.assertEqual(built["point_labels"].shape[0], 1)
 
 
 class TestAnchoring(unittest.TestCase):

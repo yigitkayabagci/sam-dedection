@@ -49,20 +49,37 @@ from src.training.datasets import describe, parse  # noqa: E402
 SMALL_SIDE = 32.0
 
 
-def score(model, split, batch: int, device: str, progress=None) -> dict:
-    """Mean IoU over every instance in `split`, and the breakdowns that matter."""
+def score(model, split, batch: int, device: str, progress=None,
+          prompt: str = "box", jitter: float = 0.0, seed: int = 0) -> dict:
+    """Mean IoU over every instance in `split`, and the breakdowns that matter.
+
+    `prompt` is what the model is told about the target -- the default `box`
+    hands it the ground-truth rectangle, `jitter` loosens each edge by up to
+    `jitter` of its own side, and `point` gives one click at the centre and
+    nothing else. See `src/training/image_loop.instance_iou` for why the
+    weaker two are the ones that can see an encoder change.
+
+    The jitter generator is seeded per call, so two checkpoints scored with the
+    same `--seed` are handed the *same* perturbed boxes and the difference
+    between their numbers is still the checkpoint.
+    """
+    import torch
+
     from src.training.image_loop import collate, instance_iou
     from src.training.loader import batch_clips
 
     ious: list[float] = []
     classes: list[str] = []
     sides: list[float] = []
+    mods: list[str] = []
 
+    generator = torch.Generator(device=device).manual_seed(seed)
     chunks = list(batch_clips(split.samples, batch, seed=0, drop_last=False))
     stream = progress(chunks, total=len(chunks), desc="scoring") if progress else chunks
     for chunk in stream:
         assembled = collate(chunk, "cpu")
-        ious.extend(instance_iou(model, assembled.to(device)).tolist())
+        ious.extend(instance_iou(model, assembled.to(device), prompt, jitter,
+                                 generator).tolist())
         for sample in chunk:
             spec = sample.source.spec if sample.source else None
             for instance in sample.instances:
@@ -75,11 +92,28 @@ def score(model, split, batch: int, device: str, progress=None) -> dict:
                 # car in a resized 4000-wide frame is not a 40-pixel car here.
                 scale = sample.size / max(sample.window)
                 sides.append(max(instance.width, instance.height) * scale)
+                # By input modality, so a mixed run can be read. A test split
+                # holding thermal and RGB windows of the same flights blends
+                # two problems into one mean; splitting on `gray` -- which is
+                # what actually changed what the model saw -- unblends it.
+                mods.append("thermal" if sample.source is None
+                            or sample.source.gray else "rgb")
 
     ious = np.asarray(ious, dtype=np.float64)
     classes = np.asarray(classes)
     sides = np.asarray(sides, dtype=np.float64)
+    mods = np.asarray(mods)
     small = sides < SMALL_SIDE
+
+    def bucket(mask: np.ndarray) -> dict:
+        tiny = mask & small
+        return {
+            "instances": int(mask.sum()),
+            "mean_iou": float(ious[mask].mean()) if mask.any() else float("nan"),
+            "iou_50": float((ious[mask] >= 0.5).mean()) if mask.any() else float("nan"),
+            "small_instances": int(tiny.sum()),
+            "small_mean_iou": float(ious[tiny].mean()) if tiny.any() else float("nan"),
+        }
 
     return {
         "instances": int(ious.size),
@@ -92,6 +126,8 @@ def score(model, split, batch: int, device: str, progress=None) -> dict:
         "per_class": {c: {"instances": int((classes == c).sum()),
                           "mean_iou": float(ious[classes == c].mean())}
                       for c in sorted(set(classes.tolist()))},
+        "per_modality": {m: bucket(mods == m)
+                         for m in sorted(set(mods.tolist()))},
     }
 
 
@@ -102,6 +138,17 @@ def report(result: dict) -> str:
         f"  small (< {SMALL_SIDE:.0f} px in the window): "
         f"{result['small_instances']} at {result['small_mean_iou']:.4f}   "
         f"larger: {result['large_mean_iou']:.4f}",
+    ]
+    modalities = result.get("per_modality", {})
+    if len(modalities) > 1:
+        # Only a mixed run prints this: with one modality the aggregate above
+        # *is* the modality and repeating it would just be noise.
+        for name, row in modalities.items():
+            lines.append(
+                f"  {name}: {row['instances']} instances  "
+                f"mean IoU {row['mean_iou']:.4f}  IoU>=0.5 {row['iou_50']:.3f}  "
+                f"small {row['small_instances']} at {row['small_mean_iou']:.4f}")
+    lines += [
         "",
         "| dataset / class | instances | mean IoU |",
         "|---|---:|---:|",
@@ -123,6 +170,24 @@ def main(argv: list[str] | None = None) -> int:
                    help="Directory holding the indexes train_encoder.py wrote.")
     p.add_argument("--split", default="test", choices=("train", "val", "test"))
     p.add_argument("--size", type=int, default=512)
+    p.add_argument("--window", type=int, default=None,
+                   help="Crop in SOURCE pixels, resized to --size. Defaults to "
+                        "--size, which is what training used and means no "
+                        "resampling. A larger one takes a wider crop and "
+                        "shrinks it, dividing every target's apparent side by "
+                        "--window/--size -- the way to reach the small-object "
+                        "bucket out of a set whose targets are all large, "
+                        "without touching the annotation.")
+    p.add_argument("--prompt", default="box", choices=("box", "jitter", "point"),
+                   help="What the model is told. `box` is the ground-truth "
+                        "rectangle and is what every training run used; it "
+                        "also states most of the mask on an isolated target, "
+                        "so scores taken this way move very little when the "
+                        "encoder changes. `jitter` loosens it, `point` gives "
+                        "one centre click and nothing else.")
+    p.add_argument("--prompt-jitter", type=float, default=0.3,
+                   help="With --prompt jitter: how far each edge may move, as "
+                        "a fraction of that side.")
     p.add_argument("--per-image", type=int, default=1)
     p.add_argument("--max-instances", type=int, default=8)
     p.add_argument("--min-area", type=int, default=48)
@@ -153,17 +218,31 @@ def main(argv: list[str] | None = None) -> int:
     chosen = split_index(index, seed=args.seed)[args.split]
     split = ImageSplit(sample_windows(
         chosen, size=args.size, per_image=args.per_image,
-        max_instances=args.max_instances, jitter=0, seed=args.seed))
+        max_instances=args.max_instances, jitter=0, seed=args.seed,
+        window=args.window))
+    window = args.window or args.size
     print(f"{args.split}: {len(chosen)} frames, {len(split.samples)} windows, "
           f"{sum(len(s.instances) for s in split.samples)} instances")
+    print(f"  {window} source px -> {args.size} model px"
+          f"{'' if window == args.size else f'  (targets shrink {window / args.size:.1f}x)'}"
+          f",  prompt: {args.prompt}"
+          f"{f' {args.prompt_jitter:g}' if args.prompt == 'jitter' else ''}")
     for name, count in split.sources.items():
         print(f"  {name:<24} {count:>6} windows")
 
     model = build_model(args.size, args.checkpoint, args.device)
-    result = score(model, split, args.batch, args.device, progress=_tqdm())
+    result = score(model, split, args.batch, args.device, progress=_tqdm(),
+                   prompt=args.prompt, jitter=args.prompt_jitter,
+                   seed=args.seed)
+    # The axes go in the JSON, not just the filename: the probe notebook reads
+    # a directory of these back into one table, and a run that cannot say how
+    # it was scored is a row that cannot be placed.
     result |= {"checkpoint": args.checkpoint, "split": args.split,
                "datasets": [r.label for r in requests],
-               "sources": split.sources}
+               "sources": split.sources,
+               "prompt": args.prompt,
+               "prompt_jitter": args.prompt_jitter if args.prompt == "jitter" else 0.0,
+               "size": args.size, "window": window}
 
     print()
     print(report(result))

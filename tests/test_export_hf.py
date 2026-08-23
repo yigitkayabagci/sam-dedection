@@ -19,7 +19,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.aerial import SPECS  # noqa: E402
-from tools.export_hf_dataset import COLUMNS, stem, verify  # noqa: E402
+from tools import export_hf_dataset  # noqa: E402
+from tools.export_hf_dataset import (  # noqa: E402
+    COLUMNS,
+    folders_for,
+    stem,
+    verify,
+)
+
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:                       # pragma: no cover
+    pa = pq = None
 
 
 class TestStem(unittest.TestCase):
@@ -107,6 +119,167 @@ class TestSegflyPalette(unittest.TestCase):
     def test_the_ids_are_the_published_ones_gaps_included(self):
         self.assertEqual(sorted(SPECS["segfly"].classes.values()),
                          [0, 1, 2, 3, 4, 6, 7, 8, 9, 13, 14, 16, 17, 33, 34, 36])
+
+
+@unittest.skipUnless(pq is not None, "pyarrow is not installed")
+class TestExportParquet(unittest.TestCase):
+    """The shard-planning path, against real parquet on local disk.
+
+    The Hub half is not tested -- it is 26 GB over the network. What is tested
+    is the part that decides whether skipping shards is *safe*: that a row's
+    name comes from its position in the split rather than in its shard, and
+    that an unselected shard is never opened.
+    """
+
+    MODALITY = ("RGB", "RGB", "thermal", "RGB", "thermal")
+
+    def shard(self, directory: Path, name: str, kinds: tuple[str, ...]) -> Path:
+        import io
+
+        import numpy as np
+        import PIL.Image
+
+        def cell(value: int) -> dict:
+            buf = io.BytesIO()
+            PIL.Image.fromarray(np.full((4, 4), value, np.uint8)).save(
+                buf, format="PNG")
+            return {"bytes": buf.getvalue(), "path": f"{value}.png"}
+
+        table = pa.table({
+            "image": [cell(1) for _ in kinds],
+            "label": [cell(13) for _ in kinds],
+            "RGB_aligned": [cell(2) for _ in kinds],
+            "scene": ["scene_05"] * len(kinds),
+            "altitude": ["40m"] * len(kinds),
+            "modality": list(kinds),
+        })
+        path = directory / name
+        pq.write_table(table, path)
+        return path
+
+    def run_export(self, dest: Path, shards: list[dict], columns,
+                   **kwargs) -> dict:
+        pulled = []
+
+        def fake_pull(dataset_id, path, into):
+            pulled.append(path)
+            copy = into / Path(path).name
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(Path(path).read_bytes())
+            return copy
+
+        original_plan, original_pull = export_hf_dataset.plan, export_hf_dataset.pull
+        export_hf_dataset.plan = lambda *a, **k: shards
+        export_hf_dataset.pull = fake_pull
+        try:
+            result = export_hf_dataset.export_parquet(
+                "owner/name", dest,
+                kwargs.pop("modality", "thermal"), "train",
+                kwargs.pop("limit", None), columns, quiet=True, **kwargs)
+        finally:
+            export_hf_dataset.plan, export_hf_dataset.pull = original_plan, original_pull
+        return result | {"pulled": pulled}
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, True)
+        # Two shards; the first holds no thermal row at all.
+        self.cold = self.shard(self.tmp, "a.parquet", ("RGB", "RGB"))
+        self.hot = self.shard(self.tmp, "b.parquet", self.MODALITY)
+        self.plan = [
+            {"path": str(self.cold), "offset": 0, "rows": 2, "keep": []},
+            {"path": str(self.hot), "offset": 2, "rows": 5, "keep": [2, 4]},
+        ]
+
+    def test_a_shard_with_no_wanted_row_is_never_downloaded(self):
+        # This is the whole point of planning: on SegFly it is 434 shards and
+        # 156 GiB that a streaming filter would fetch and throw away.
+        result = self.run_export(self.tmp / "out", self.plan, ("image", "label"))
+        self.assertEqual(result["pulled"], [str(self.hot)])
+
+    def test_names_come_from_the_row_index_in_the_split_not_the_shard(self):
+        # Rows 2 and 4 of the second shard, which starts at offset 2, are rows
+        # 4 and 6 of the split. Naming them 000002/000004 would mean an export
+        # narrowed to one modality and one widened later disagree about which
+        # file is which frame.
+        dest = self.tmp / "out"
+        self.run_export(dest, self.plan, ("image", "label"))
+        self.assertEqual(sorted(p.name for p in (dest / "images").iterdir()),
+                         ["scene_05_40m_000004.png", "scene_05_40m_000006.png"])
+
+    def test_only_the_wanted_rows_and_columns_are_written(self):
+        dest = self.tmp / "out"
+        result = self.run_export(dest, self.plan, ("image", "label"))
+        self.assertEqual(result["written"], 2)
+        self.assertEqual(result["skipped"], 5)          # 2 cold + 3 unwanted
+        self.assertEqual(result["values"], {13: 2})   # once per map, not per pixel
+        self.assertFalse((dest / "rgb").exists())       # RGB_aligned was dropped
+
+    def test_the_downloaded_shard_does_not_outlive_its_export(self):
+        # Peak disk is one shard plus the output, not the 22 GiB of shards.
+        dest = self.tmp / "out"
+        self.run_export(dest, self.plan, ("image", "label"))
+        self.assertFalse((dest / "_parquet").exists())
+
+    def test_an_rgb_export_lands_where_the_spec_rgb_glob_reads(self):
+        # On an RGB export the `image` column *is* the RGB frame. Writing it
+        # to `images/` would leave `--dataset segfly:<dest>:rgb:...` globbing
+        # an empty `rgb/` -- the export and the spec must agree on the
+        # directory, and this is the join.
+        self.assertEqual(folders_for("RGB")["image"], "rgb")
+        self.assertEqual(folders_for("thermal")["image"], "images")
+        self.assertEqual(folders_for(None)["image"], "images")
+
+        dest = self.tmp / "out"
+        plan = [{"path": str(self.hot), "offset": 0, "rows": 5,
+                 "keep": [2, 4]}]
+        self.run_export(dest, plan, ("image", "label"), modality="thermal")
+        self.assertTrue((dest / "images").exists())
+        self.assertFalse((dest / "rgb").exists())
+
+    def test_passthrough_keeps_the_publishers_bytes_and_the_labels_png(self):
+        # SegFly's RGB frames re-encode from 11 MB of JPEG to 27 MB of PNG,
+        # so the passthrough export writes the original bytes untouched. The
+        # label map is the exception both ways: it must be decoded to count
+        # its values, and must stay PNG to stay lossless.
+        dest = self.tmp / "out"
+        plan = [{"path": str(self.hot), "offset": 2, "rows": 5,
+                 "keep": [2, 4]}]
+        result = self.run_export(dest, plan, ("image", "label"),
+                                 passthrough=True)
+
+        images = sorted((dest / "images").iterdir())
+        self.assertEqual([p.suffix for p in images], [".png", ".png"])
+        # The synthetic cells store PNG bytes under a `.png` path, so a
+        # byte-for-byte copy is checkable directly.
+        table = pq.read_table(self.hot, columns=["image"])
+        self.assertEqual(images[0].read_bytes(),
+                         table.column("image")[2].as_py()["bytes"])
+        self.assertEqual(result["values"], {13: 2})   # labels still counted
+
+    def test_spread_takes_evenly_spaced_shards_not_the_first_ones(self):
+        # `--limit` alone exports the first N matching rows -- one scene.
+        # With `spread`, the N rows come from shards spaced across the whole
+        # match, and shards outside the slice are never downloaded.
+        shards = [self.shard(self.tmp, f"s{i}.parquet", self.MODALITY)
+                  for i in range(6)]
+        plan = [{"path": str(p), "offset": 5 * i, "rows": 5, "keep": [2, 4]}
+                for i, p in enumerate(shards)]
+
+        dest = self.tmp / "out"
+        result = self.run_export(dest, plan, ("image", "label"),
+                                 limit=4, spread=True)
+        self.assertEqual(result["written"], 4)
+        self.assertEqual([Path(p).name for p in result["pulled"]],
+                         ["s0.parquet", "s3.parquet"])
+
+        # Without spread: the same cap comes from the first shards only.
+        contiguous = self.run_export(self.tmp / "out2", plan,
+                                     ("image", "label"), limit=4)
+        self.assertEqual([Path(p).name for p in contiguous["pulled"]],
+                         ["s0.parquet", "s1.parquet"])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@
     python tools/build_notebooks.py          # all of them
     python tools/build_notebooks.py vtuav    # just that one
 
-Four notebooks come out of this one file. All four run the same code on the
+Five notebooks come out of this one file. All five run the same code on the
 same schedule and the same seed; each changes exactly one thing, so the gap
 between any pair of final numbers is attributable to that one thing:
 
@@ -12,6 +12,7 @@ between any pair of final numbers is attributable to that one thing:
     08_encoder_vtuav_only.ipynb            stage B on VTUAV alone  (data)
     09_encoder_stage_a_dronevehicle.ipynb  stage A on DroneVehicle (pairs)
     10_encoder_teacher_dinov3.ipynb        stage A from DINOv3     (teacher)
+    11_encoder_rgb_mixed.ipynb             RGB windows join stage B (modality)
 
 Every variant writes to its own Drive folder and its own index directory, and
 none of them touch the others' outputs -- running any number of them at once,
@@ -54,6 +55,7 @@ class Variant:
     distill: str                   # the stage-A block: source, crop, tolerance
     teacher: str = "facebook/sam2.1-hiera-base-plus"
     gpu: str = "A100"
+    disk: str = "~60 GB of free disk (VTUAV's three archives dominate it)"
 
 
 VARIANTS: dict[str, Variant] = {}
@@ -123,7 +125,7 @@ def resolve(text: str) -> str:
                      "DINO_TAG": " (this notebook)" if dino else "",
                      "TEACHER_NOTE": DINO_NOTE if dino else SAM_NOTE,
                      "OTHER_TEACHER": DINO_TROUBLE if dino else SAM_TROUBLE,
-                     "TITLE": V.title, "BLURB": V.blurb,
+                     "TITLE": V.title, "BLURB": V.blurb, "DISK": V.disk,
                      "DATASETS": V.datasets, "FETCH": V.fetch,
                      "MIRROR": V.mirror, "SIBLING": SIBLING[V.key],
                      "DISTILL": V.distill,
@@ -282,10 +284,92 @@ VARIANTS["dino"] = Variant(
     teacher="facebook/dinov3-vitb16-pretrain-lvd1689m",
 )
 
-SIBLING = {"all": "08_encoder_vtuav_only.ipynb, 09_encoder_stage_a_dronevehicle.ipynb and 10_encoder_teacher_dinov3.ipynb",
+VARIANTS["rgb"] = Variant(
+    key="rgb",
+    path="notebooks/11_encoder_rgb_mixed.ipynb",
+    title="Encoder for aerial RGB-T — RGB windows in the batch",
+    blurb=(
+        "**`07_encoder_aerial_rgbt.ipynb` with two dataset lines added**: "
+        "RGB joins the same batches, from two sources. **VTUAV's RGB half** — "
+        "already inside the three archives the thermal run extracts, nothing "
+        "new to download — brings 1920x1080 flights whose held-out RGB "
+        "windows can be *scored*. And a **3 000-frame slice of SegFly's RGB "
+        "half** (4000x3000 from 30-50 m, every scene and altitude, ~23 GB) "
+        "brings the high-altitude small-target regime in native pixels; its "
+        "instances are reconstructed from semantic maps, so it trains and is "
+        "never scored on. Same schedule, same seed, same held-out flights as "
+        "07 throughout.\n\n"
+        "**Why this is worth a run.** EdgeTAM's trunk was born on SA-1B — "
+        "ground-level RGB photographs. Thermal finetuning adapts it to a new "
+        "modality; but a nadir view of a 20-pixel car is missing from SA-1B "
+        "too, and that gap is *domain*, not modality. RGB aerial frames "
+        "attack the domain gap directly, in the modality the trunk already "
+        "speaks — and they pull against the thermal drift at the same time, "
+        "which is either regularisation or dilution. Which one is the "
+        "experiment.\n\n"
+        "**The two numbers this run is after, and the one it must not "
+        "move.** The eval reports every score split by modality:\n"
+        "* **`rgb/small IoU` against `stock`** — the target. Can an encoder "
+        "that tracks thermal targets also localise a small RGB target from "
+        "altitude better than off-the-shelf EdgeTAM? This is the number a "
+        "day-and-night deployment cares about.\n"
+        "* **`thermal/small IoU` against 07's** — the guard. The thermal "
+        "test windows are *identical* to 07's (the split is cut between "
+        "flights, and both modalities of a flight travel together), so any "
+        "drop is the price of the RGB windows and nothing else. A drop "
+        "worse than ~0.01 means RGB diluted the thermal encoder: keep 07's "
+        "checkpoint, and serve RGB from a LoRA adapter instead.\n"
+        "* `thermal/mean IoU` should ride along unharmed; it is dominated "
+        "by large targets and is not what either arm is optimising.\n\n"
+        "There is no leak behind the RGB numbers: `bike_009`'s thermal and "
+        "RGB frames land on the same side of the split by construction, so "
+        "a test flight has never been seen in either modality."),
+    datasets="""DATASETS = [
+    # Real drawn instance masks at 1920x1080. Trains, *and* is what the score
+    # is measured on -- the one set here whose annotation nobody reconstructed.
+    f"vtuav_vis:{DATA_ROOT}/VTUAV_VIS:thermal:labels:all",
+    # The same flights' RGB half -- the scoreable RGB source. `all`, not
+    # `train`: the split is cut between flights and both modalities of a
+    # flight travel together, so its held-out RGB windows are scoreable
+    # without ever leaking a test flight into training. Being scoreable is
+    # the point: rgb/small-IoU against `stock` is the number this run is for.
+    f"vtuav_vis:{DATA_ROOT}/VTUAV_VIS:rgb:labels:all",
+    # Semantic maps at 640x512 over 30/40/50 m. The bulk of the frames, and the
+    # only altitude variation on the list. Instances are reconstructed from the
+    # map, so it trains and is never scored on.
+    f"segfly:{DATA_ROOT}/SegFly:thermal:components:train",
+    # A 3 000-frame slice of the same repository's RGB half: 4000x3000 from
+    # 30-50 m, every scene and altitude, native pixels. This is the
+    # high-altitude small-object RGB source -- in a 512 window cut from
+    # 4000x3000, a vehicle is genuinely the 20-pixel target the deployment
+    # sees. Same spec and palette as the thermal export; only the modality
+    # field and the root differ. Reconstructed instances, so `train`.
+    f"segfly:{DATA_ROOT}/SegFly_RGB:rgb:components:train",
+    # Semantic maps at 640x512, 4 024 registered day/night pairs, 4 thing
+    # classes -- the finest label set of the three.
+    f"kust4k:{DATA_ROOT}/Kust4K:thermal:components:train",
+]""",
+    fetch="""FETCH = [
+    ("vtuav_vis",  f"{DATA_ROOT}/VTUAV_VIS",
+     ["train_001", "train_002", "train_003"]),
+    ("segfly",     f"{DATA_ROOT}/SegFly",     []),
+    # The RGB slice: 3 000 frames from evenly spaced shards (every scene and
+    # altitude), kept as the publisher's own JPEGs. ~23 GB, and the only
+    # download this notebook adds over 07's.
+    ("segfly_rgb", f"{DATA_ROOT}/SegFly_RGB", []),
+    ("kust4k",     f"{DATA_ROOT}/Kust4K",     []),
+]""",
+    mirror="edgetam-encoder/rgb",
+    distill=VARIANTS["all"].distill,
+    disk="~85 GB of free disk (VTUAV's three archives, plus ~23 GB for the "
+         "SegFly RGB slice)",
+)
+
+SIBLING = {"all": "08_encoder_vtuav_only.ipynb, 09_encoder_stage_a_dronevehicle.ipynb, 10_encoder_teacher_dinov3.ipynb and 11_encoder_rgb_mixed.ipynb",
            "vtuav": "07_encoder_aerial_rgbt.ipynb",
            "drone": "07_encoder_aerial_rgbt.ipynb",
-           "dino": "07_encoder_aerial_rgbt.ipynb (the SAM 2.1 teacher)"}
+           "dino": "07_encoder_aerial_rgbt.ipynb (the SAM 2.1 teacher)",
+           "rgb": "07_encoder_aerial_rgbt.ipynb (thermal-only training, the baseline its guard is read against)"}
 
 V = VARIANTS[sys.argv[1]] if len(sys.argv) > 1 else VARIANTS["all"]
 
@@ -304,8 +388,8 @@ different ways, and score both on sequences neither has seen.
 |---|---|
 | **in** | nothing staged by hand — the download cell fetches everything |
 | **out** | `edgetam_aerial_512.pt` and `edgetam_aerial_lora_512.pt` on your Drive, plus a held-out instance score for each |
-| **needs** | a CUDA GPU and ~25 GB of free disk |
-| **takes** | ~20 min to download, ~5 min to index, ~20 min to distil, ~40 min per training run |
+| **needs** | a CUDA GPU and {{DISK}} |
+| **takes** | ~40 min to download, ~5 min to index, ~20 min to distil, ~40 min per training run |
 
 This is **stage B** of `docs/encoder_training_todo.md`, with stage A beside it.
 No video and no memory bank appear anywhere in it — that is stage C, and it is
@@ -535,6 +619,10 @@ before = torch.__version__
 # there, and an older wheel satisfies a lower pin and then fails at
 # from_pretrained, forty minutes into the session.
 !pip install -q "transformers>=4.56" datasets
+# hf_transfer downloads one file over several connections. SegFly is
+# ~380 parquet shards pulled one at a time, and a single stream leaves
+# most of a Colab link idle; this is the cheapest minutes on the list.
+!pip install -q hf_transfer
 
 # The one thing an install here must not do. EdgeTAM's setup.py declares a
 # torch floor, and on a card newer than any wheel on PyPI a "helpful"
@@ -720,8 +808,15 @@ MAX_INSTANCES      = 8               # prompts per window -- one encode covers a
 PRETRAIN        = True               # distil an RGB teacher into the encoder
 TEACHER         = "{{TEACHER}}"
 {{DISTILL}}
-DISTILL_STEPS   = 600
-DISTILL_PAIRS   = 20000              # sampled across the set, never truncated
+# 12 000 steps at batch 32 is 384 000 samples -- a little over **three passes**
+# across every pair the three VTUAV archives hold, and about 2 hours. The
+# previous setting was 600 steps capped at 20 000 pairs: 19 200 samples, 16% of
+# what was on disk, and not even one pass over the subsample. 08's run
+# distilled at that budget and its `distilled+ft` arm finished *behind* plain
+# `finetune`, which a starved stage A explains on its own. One pass is 3 794
+# steps, so drop to 4 000 if the runtime will not hold two hours.
+DISTILL_STEPS   = 12000
+DISTILL_PAIRS   = None               # no cap -- use every pair on disk
 DISTILL_MOMENTS = 0.0                # anti-collapse term; small or off (docs 4)
 ANCHOR_WEIGHT   = 0.5                # stage B: how hard to hold on to stage A
 
@@ -787,7 +882,18 @@ are served in a way that defeats the obvious approach:
   hundred megabytes Drive serves a "can't scan this file for viruses" form
   instead of the file — with a 200 on it. `gdown` replays the form; `curl`
   saves the HTML.
-* **SegFly** is parquet on the Hub, not files, so it is exported into PNGs.
+* **SegFly** is parquet on the Hub, not files, so it is exported into PNGs —
+  and only an eighth of it is worth exporting. Of its 35 613 rows, 15 007 are
+  thermal at 640×512 and 20 606 are RGB at 4000×3000; they live in different
+  shards, so the 327 shards worth having are 22 GiB and the 434 that are not
+  are 156 GiB. A streaming filter drops the RGB rows *after* downloading them,
+  and the first shard holding a thermal row is number 57 — so it pays ~25 GiB
+  before writing its first frame and all 178 GiB before its last: a seven-hour
+  cell, measured. `tools/export_hf_dataset.py` reads the one-byte-per-row `modality`
+  column out of the shard footers first and downloads only the 327 shards that
+  answer, deleting each once its rows are written. It also skips `RGB_aligned`,
+  which only stage-A distillation reads and no notebook here distils from
+  SegFly.
 
 Downloads resume, and each archive is deleted once extracted, which halves the
 peak disk this needs.
@@ -823,7 +929,10 @@ for name, dest, parts in FETCH:
         print(f"== {name}: already downloaded to {dest}")
     else:
         fetch(name, dest, tuple(parts) or None)
-    print(report(name, dest, "thermal"))
+    # Report in the modality the recipe fetched -- an RGB slice has no
+    # thermal frames, and "0 labelled thermal frames" would read as a broken
+    # download when it is a correct one.
+    print(report(name, dest, "rgb" if name.endswith("_rgb") else "thermal"))
 """)
 
 # ---------------------------------------------------------------- 7b
@@ -1385,18 +1494,28 @@ at 1920×1080:
   statistics the deployment never produces. A crop takes the same square from
   **both halves at the same normalised position**, so the registration
   survives, and at this fraction it is native pixels.
-- **`DISTILL_PAIRS`.** The cap samples *across* the set rather than truncating
-  it. On a video-derived set that is not a nicety: the first 5 000 pairs of
-  VTUAV are two flights, so a truncating cap would train on two scenes and
-  report five thousand samples.
+- **`DISTILL_PAIRS`.** `None` now, meaning every pair on disk. When it *is* a
+  number the cap samples *across* the set rather than truncating it, which on
+  a video-derived set is not a nicety: the first 5 000 pairs of VTUAV are two
+  flights, so a truncating cap would train on two scenes and report five
+  thousand samples.
 
 The catch is disk, not labels: 1.7 M frames at 1920×1080 is far more than a
 Colab runtime holds, and the mask split alone is ~120 GB across its eight
 archives. `FETCH` asks for the three **training** archives and stops there —
-43.1 GB, which a Colab disk holds and the full 120 GB does not. `train_001`
-alone would do for stage A (26 059 pairs, already above AnyThermal's whole
-training set, and enough to saturate it at `DISTILL_PAIRS = 20 000`); the other
-two are there for stage B, for the reason below.
+43.1 GB, which a Colab disk holds and the full 120 GB does not. Those three
+carry **121 401 registered pairs**, and stage A now reads all of them: one
+pass at batch 32 is 3 794 steps, so `DISTILL_STEPS = 12 000` is a little over
+**three** epochs and costs about two hours.
+
+**That is a 6.6× increase over what 08 actually ran, and the reason for it is
+08's own result.** At `DISTILL_STEPS = 600` and `DISTILL_PAIRS = 20 000` the
+stage saw 19 200 samples — 16% of the pairs sitting on the disk, not once
+through even the subsample — and the checkpoint it produced finished *behind*
+the one that skipped stage A entirely. A stage starved that badly cannot be
+said to have been tested. `train_001` alone (26 059 pairs) is enough to keep
+the old budget busy, which is why it used to be the default; it is not enough
+for this one.
 
 **For stage B, one archive is not enough, and the reason is not its size.**
 Reading the three training archives' listings, the target kinds are badly
@@ -1419,8 +1538,10 @@ All three archives give 50 sequences and a 40/5/5.
 That is why `FETCH` names all three. If the disk will not take 43 GB, cut
 `train_002` first — `train_003` carries the most masks and the most
 pedestrians, and dropping to one archive costs the held-out split its meaning.
-With all three, raising `DISTILL_PAIRS` past 20 000 starts to buy something
-too; on `train_001` alone it does not.
+It also costs stage A most of its data: `DISTILL_PAIRS = None` reads whatever
+is on the disk, so dropping to `train_001` quietly takes the pretraining pass
+from 121 401 pairs down to 26 059, turning `DISTILL_STEPS = 12 000` from three
+epochs over everything into fifteen over a fifth of it.
 
 {{TEACHER_HEADING}}
 
@@ -1708,6 +1829,22 @@ for label, row in scores.items():
     print(f"{label:<14}{row['mean_iou']:>10.4f}{row['iou_50']:>10.3f}"
           f"{row['iou_75']:>10.3f}{row['small_mean_iou']:>11.4f}"
           f"{row['large_mean_iou']:>9.4f}")
+
+# When the test split holds two modalities, the aggregate above blends them
+# and neither question can be read off it. The block below unblends: the
+# thermal rows are the ones comparable with the thermal-only notebooks, and
+# the rgb rows are the new capability, floored by `stock` like everything else.
+modalities = sorted({m for row in scores.values()
+                     for m in row.get("per_modality", {})})
+if len(modalities) > 1:
+    for modality in modalities:
+        print(f"\n-- {modality} only --")
+        print(f"{'':<14}{'instances':>10}{'mean IoU':>10}{'IoU>=.5':>10}"
+              f"{'small IoU':>11}")
+        for label, row in scores.items():
+            part = row["per_modality"][modality]
+            print(f"{label:<14}{part['instances']:>10}{part['mean_iou']:>10.4f}"
+                  f"{part['iou_50']:>10.3f}{part['small_mean_iou']:>11.4f}")
 
 base = scores["stock"]
 classes = sorted({c for row in scores.values() for c in row["per_class"]})

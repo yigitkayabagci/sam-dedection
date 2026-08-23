@@ -1,6 +1,8 @@
 {
- "07_encoder_aerial_rgbt.ipynb": "8b002634fc",
- "08_encoder_vtuav_only.ipynb": "9bf4b19708",
- "09_encoder_stage_a_dronevehicle.ipynb": "da21cd24a3",
- "10_encoder_teacher_dinov3.ipynb": "35fddaab6b"
+ "07_encoder_aerial_rgbt.ipynb": "825507fba5",
+ "08_encoder_vtuav_only.ipynb": "069b879ace",
+ "09_encoder_stage_a_dronevehicle.ipynb": "2df6e16dca",
+ "10_encoder_teacher_dinov3.ipynb": "bc465ba467",
+ "11_encoder_rgb_mixed.ipynb": "ca048f9058",
+ "12_encoder_probe.ipynb": "84eae0aae5"
 }

@@ -35,7 +35,10 @@ plain `curl` gets an HTML page with a 200 on it. The folder holds eight zips --
 26 059 registered pairs and 875 RGB masks. `--parts` asks for more.
 
 **SegFly** is parquet on the Hub, not files, so it goes through
-`tools/export_hf_dataset.py`, which writes the PNG layout the spec globs.
+`tools/export_hf_dataset.py`, which writes the PNG layout the spec globs. Only
+half of it is worth fetching and the halves are mixed together, so that script
+reads the `modality` column out of the shard footers first and downloads only
+the shards that answer -- 22 GiB rather than 178 GiB. See the SEGFLY recipe.
 
 Downloads resume (`Range`), verify against the publisher's md5 where there is
 one, and delete the archive once it has been extracted, which halves the peak
@@ -81,6 +84,16 @@ class Recipe:
     parts: tuple[Part, ...] = ()
     hub: str | None = None      # a Hugging Face dataset id instead of archives
     modality: str | None = None
+    columns: tuple[str, ...] = ()   # for a `hub` recipe, the Image columns
+                                # worth writing out; empty means all of them
+    spec: str = ""              # the SPECS entry that reads the result; ""
+                                # means the recipe's own name
+    rows: int | None = None     # hub recipes: default row cap (CLI --limit
+                                # overrides); None means every matching row
+    passthrough: bool = False   # hub recipes: keep the publisher's bytes for
+                                # photographic columns instead of PNG
+    spread: bool = False        # hub recipes: a capped export samples evenly
+                                # spaced shards instead of the first ones
     extras: tuple[tuple[str, str], ...] = ()   # (filename, figshare file id)
                                 # small sidecar files written into the dataset
                                 # root -- manifests the reader needs, not data
@@ -258,15 +271,60 @@ CALTECH = Recipe(
     ),
 )
 
+# Verified 2026-08 by reading all 761 shard footers plus their `modality`
+# column: 35 613 rows / 178 GiB, of which **15 007 rows are thermal** at
+# 640x512 (~1.4 MB each) and 20 606 are RGB at 4000x3000 (~11 MB each). The two
+# are sorted into different shards -- 311 thermal-only, 434 RGB-only, 16 mixed
+# -- so the 327 shards worth having are 22 GiB and the 434 that are not are
+# 156 GiB. 88 % of this repository is a modality nothing here trains on, and
+# the first shard carrying a thermal row is number 57, so a streaming filter
+# pays ~25 GiB before it can write its first row. `export_hf_dataset` therefore plans on the
+# `modality` column and downloads only the shards that matter -- see its
+# docstring.
+#
+# `columns` drops `RGB_aligned`. It is read only by `list_pairs`, i.e. by
+# stage-A distillation, and no notebook here distils from SegFly (07, 08 and 10
+# use VTUAV, 09 uses DroneVehicle). Writing it costs ~10 GB of PNGs -- a 640x512
+# JPEG re-encodes to ~0.69 MB -- that nothing opens. Put "RGB_aligned" back if
+# you point DISTILL_SPEC at segfly.
 SEGFLY = Recipe(
     name="segfly",
-    note=">15 000 aligned RGB-T pairs over three altitudes (ECCV 2026)",
+    note="15 007 thermal 640x512 frames with semantic maps, over three "
+         "altitudes (ECCV 2026); 22 GiB of a 178 GiB repository",
     hub="markus-42/SegFly",
     modality="thermal",
+    columns=("image", "label"),
+)
+
+# The RGB half of the same repository, as a bounded slice. Full size is the
+# problem: 20 606 frames at 4000x3000, ~156 GiB of shards that would become
+# ~570 GB of PNGs -- so this takes 3 000 rows from evenly spaced shards
+# (every scene and altitude represented, ~23 GB downloaded and written) and
+# keeps the publisher's own JPEG bytes instead of re-encoding them. Native
+# pixels are the point: at 4000x3000 from 30-50 m, a vehicle is genuinely
+# small in a 512 window, which is the regime the deployment lives in and the
+# regime ground-level RGB pretraining never showed the trunk.
+#
+# It shares `SPECS["segfly"]` with the thermal export -- same palette, same
+# label directory -- and lands its frames in `rgb/`, which is the directory
+# that spec's `rgb` glob reads. Train on it with
+#     segfly:<dest>:rgb:components:train
+SEGFLY_RGB = Recipe(
+    name="segfly_rgb",
+    note="a 3 000-frame slice of SegFly's 4000x3000 RGB half, every scene "
+         "and altitude, publisher's JPEGs (~23 GB of a 156 GiB half)",
+    hub="markus-42/SegFly",
+    modality="RGB",
+    columns=("image", "label"),
+    spec="segfly",
+    rows=3000,
+    passthrough=True,
+    spread=True,
 )
 
 RECIPES: dict[str, Recipe] = {
-    r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, CALTECH, SEGFLY)}
+    r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, CALTECH, SEGFLY,
+                        SEGFLY_RGB)}
 
 
 # --------------------------------------------------------------------------
@@ -347,6 +405,33 @@ def staged(name: str, search: SequenceABC[str]) -> Path | None:
         if candidate.is_file() and candidate.stat().st_size > 1 << 20:
             return candidate
     return None
+
+
+def archive_to(dest: Path, name: str, folder: str | Path) -> Path | None:
+    """Zip an exported tree into `<folder>/<name>.zip`, where `staged` finds it.
+
+    Stored, not deflated. The tree is PNGs, which are already deflate streams,
+    so compressing them again buys a percent or two for several minutes of CPU
+    -- and the point of this file is to be read back quickly.
+
+    Written to a `.part` first and renamed, because the failure this guards
+    against is a runtime dying mid-zip and leaving a truncated archive that
+    `staged` then happily prefers over the network on every later run.
+    """
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        print(f"   !! {folder} does not exist -- not staging a copy")
+        return None
+    target = folder / f"{name}.zip"
+    partial = folder / f"{name}.zip.part"
+    files = [p for p in sorted(dest.rglob("*")) if p.is_file()]
+    print(f"   staging {len(files)} files -> {target}")
+    with zipfile.ZipFile(partial, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for path in files:
+            z.write(path, path.relative_to(dest))
+    partial.replace(target)
+    print(f"   staged ({human(target.stat().st_size)}); later runs reuse it")
+    return target
 
 
 def drive_confirm(file_id: str) -> tuple[str, object, dict]:
@@ -534,7 +619,7 @@ def fetch_part(part: Part, dest: Path, work: Path, frames: str,
 
 def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
           frames: str = "all", keep: bool = False, quiet: bool = False,
-          limit: int | None = None,
+          limit: int | None = None, stage: str | Path | None = None,
           staging: SequenceABC[str] = STAGING) -> Path:
     """One dataset into `dest`, in the layout `SPECS[name]` globs."""
     recipe = RECIPES[name]
@@ -542,11 +627,27 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
     print(f"\n=== {recipe.name}: {recipe.note}")
 
     if recipe.hub:
-        from tools.export_hf_dataset import export, verify
-        result = export(recipe.hub, dest, recipe.modality, "train", limit,
-                        streaming=True, quiet=quiet)
+        from tools.export_hf_dataset import COLUMNS, export, verify
+
+        # Same escape hatch the archive datasets get, and it is worth more
+        # here: the export is the expensive step, not the download, and its
+        # output is a few gigabytes of small PNGs. One zip on Drive turns a
+        # 30-minute cell into a 2-minute one on every later runtime.
+        already = staged(recipe.name, staging)
+        if already is not None:
+            print(f"   using the export already at {already}")
+            extract(already, dest, quiet=quiet)
+            return dest
+
+        result = export(recipe.hub, dest, recipe.modality, "train",
+                        recipe.rows if limit is None else limit,
+                        streaming=False, quiet=quiet,
+                        columns=recipe.columns or tuple(COLUMNS),
+                        passthrough=recipe.passthrough, spread=recipe.spread)
         print(f"{result['written']} rows written, {result['skipped']} skipped")
-        print(verify(result["values"], recipe.name))
+        print(verify(result["values"], recipe.spec or recipe.name))
+        if stage:
+            archive_to(dest, recipe.name, stage)
         return dest
 
     chosen = recipe.chosen(parts)
@@ -587,7 +688,8 @@ def report(name: str, dest: Path, modality: str = "thermal") -> str:
     """What the reader actually finds there -- the only check that counts."""
     from src.training.aerial import SPECS, describe_layout, list_frames, list_pairs
 
-    spec = SPECS[name]
+    recipe = RECIPES.get(name)
+    spec = SPECS[(recipe.spec or name) if recipe else name]
     lines = [f"\n--- {dest}"]
     try:
         frames = list_frames(dest, spec, modality)
@@ -623,19 +725,24 @@ def main(argv: list[str] | None = None) -> int:
                    help="Hub datasets only: stop after N rows.")
     p.add_argument("--keep", action="store_true",
                    help="Keep the archives after extracting them.")
+    p.add_argument("--stage", nargs="?", const=STAGING[0], default=None,
+                   help="Hub datasets only: after exporting, zip the result "
+                        f"into this folder (default {STAGING[0]}) so later "
+                        "runtimes read it from there instead of re-exporting.")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
     names = sorted(RECIPES) if args.dataset == "all" else [args.dataset]
     folders = {"kust4k": "Kust4K", "vtuav_vis": "VTUAV_VIS",
                "dronevehicle": "DroneVehicle", "caltech": "Caltech",
-               "segfly": "SegFly"}
+               "segfly": "SegFly", "segfly_rgb": "SegFly_RGB"}
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
         fetch(name, dest, tuple(args.parts) if args.parts else None,
               frames=args.frames, keep=args.keep, quiet=args.quiet,
-              limit=args.limit)
-        print(report(name, dest, "rgb" if name == "vtuav_vis" else "thermal"))
+              limit=args.limit, stage=args.stage)
+        print(report(name, dest,
+                     "rgb" if name in ("vtuav_vis", "segfly_rgb") else "thermal"))
 
     free = shutil.disk_usage(args.root if not args.dest else args.dest).free
     print(f"\n{human(free)} of disk left.")

@@ -43,7 +43,13 @@ import numpy as np
 import torch
 
 from .aerial import Sample, load_image, normalise, sample_masks
-from .clip_loop import _capture_head, box_prompt, check_model
+from .clip_loop import (
+    _capture_head,
+    box_prompt,
+    check_model,
+    jitter_boxes,
+    point_prompt,
+)
 
 
 # --------------------------------------------------------------------------
@@ -136,13 +142,43 @@ def collate(samples: Sequence[Sample], device: str = "cpu",
 # --------------------------------------------------------------------------
 
 
+PROMPTS = ("box", "jitter", "point")
+
+
+def build_prompt(boxes: torch.Tensor, prompt: str = "box",
+                 jitter: float = 0.0,
+                 generator: torch.Generator | None = None) -> dict:
+    """The `point_inputs` dict for one flat [N, 4] stack of boxes.
+
+    `box` is what every training run and every published number here used: the
+    ground-truth rectangle, exactly. `jitter` is the same box with each edge
+    moved by up to `jitter` of its own side, and `point` is a single click at
+    the centre. See `clip_loop.point_prompt` for why the weaker two are worth
+    scoring: they are what separates a question about the encoder from a
+    question about the prompt.
+    """
+    if prompt not in PROMPTS:
+        raise ValueError(f"prompt must be one of {PROMPTS}, got {prompt!r}")
+    if prompt == "point":
+        return point_prompt(boxes)
+    if prompt == "jitter":
+        boxes = jitter_boxes(boxes, jitter, generator)
+    return box_prompt(boxes)
+
+
 def propagate_image(model, images: torch.Tensor, boxes: torch.Tensor,
-                    valid: torch.Tensor | None = None) -> dict:
+                    valid: torch.Tensor | None = None, prompt: str = "box",
+                    jitter: float = 0.0,
+                    generator: torch.Generator | None = None) -> dict:
     """Encode `images` [B, 3, S, S] once; prompt every valid box against them.
 
     Returns the flattened per-instance view the loss works in: `rows` is the
     flat `b * K + k` index of each surviving instance, so a caller can gather
     its own targets in the same order without re-deriving the selection.
+
+    `prompt` selects how the box becomes a prompt -- see `build_prompt`. It
+    defaults to `box`, which is what the training loop wants and what every
+    number recorded before this argument existed was taken with.
     """
     check_model(model)
     batch, width = boxes.shape[:2]
@@ -175,7 +211,8 @@ def propagate_image(model, images: torch.Tensor, boxes: torch.Tensor,
             current_vision_feats=feats,
             current_vision_pos_embeds=pos_embeds,
             feat_sizes=feat_sizes,
-            point_inputs=box_prompt(boxes.reshape(-1, 4)[rows]),
+            point_inputs=build_prompt(boxes.reshape(-1, 4)[rows], prompt,
+                                      jitter, generator),
             mask_inputs=None,
             output_dict={"cond_frame_outputs": {}, "non_cond_frame_outputs": {}},
             num_frames=1,
@@ -244,7 +281,9 @@ def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
 
 
 @torch.no_grad()
-def instance_iou(model, batch: ImageBatch) -> np.ndarray:
+def instance_iou(model, batch: ImageBatch, prompt: str = "box",
+                 jitter: float = 0.0,
+                 generator: torch.Generator | None = None) -> np.ndarray:
     """Per-instance mask IoU at the deployment threshold, as a flat array.
 
     The static stand-in for J&F. It is a proxy and should be read as one: it
@@ -252,8 +291,17 @@ def instance_iou(model, batch: ImageBatch) -> np.ndarray:
     exists to fix, which only appears once a memory bank is in the loop. What
     it *can* say is whether the encoder now separates one vehicle from the one
     beside it, which is the thing this stage is trying to buy.
+
+    **`prompt` decides how much of the answer the score is given.** Under the
+    default `box` the prompt states all four edges of the target, and on a
+    large, isolated object that is most of the mask -- which is why two
+    encoders of visibly different quality can land within a hundredth of each
+    other here. `point` and `jitter` take that away; the same checkpoints
+    scored all three ways is the comparison that says whether an encoder change
+    was small or merely unmeasured.
     """
-    outputs = propagate_image(model, batch.images, batch.boxes, batch.valid)
+    outputs = propagate_image(model, batch.images, batch.boxes, batch.valid,
+                              prompt, jitter, generator)
     logits = outputs["pred_masks_high_res"]
     if logits.dim() == 4:
         logits = logits[:, 0]

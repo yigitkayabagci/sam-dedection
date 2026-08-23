@@ -119,10 +119,15 @@ class TestEveryNotebook(unittest.TestCase):
 
         for name, stamp in sorted(stamps.items()):
             with self.subTest(notebook=name):
+                # Two generators now, and sending someone to the wrong one is
+                # a confusing few minutes: rebuilding with `build_notebooks.py`
+                # leaves 12 exactly as stale as it was.
+                builder = ("build_probe_notebook" if name.startswith("12_")
+                           else "build_notebooks")
                 self.assertEqual(
                     embedded.get(name), stamp,
                     f"{name} is out of step with .stamps.json -- run: "
-                    f"python tools/build_notebooks.py")
+                    f"python tools/{builder}.py")
 
     def test_the_two_notebooks_do_not_share_a_stamp(self):
         # They are built from one file and most cells are identical, so the

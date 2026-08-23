@@ -68,6 +68,58 @@ def box_prompt(boxes: torch.Tensor) -> dict:
     return {"point_coords": coords, "point_labels": labels.expand(coords.shape[0], 2)}
 
 
+def point_prompt(boxes: torch.Tensor) -> dict:
+    """One positive click at each box's centre, labelled 1.
+
+    **The weakest honest prompt, and the reason it exists is measurement.** A
+    box states all four edges, which on a single high-contrast target is most
+    of the mask: the decoder can do well from the prompt nearly alone, and a
+    score taken that way barely moves when the encoder underneath it changes.
+    A click states position and nothing else -- extent has to come from the
+    features -- so the same comparison run this way is a question *about the
+    encoder* rather than about the prompt.
+
+    It is also the prompt the deployment actually offers first: an operator
+    taps a target long before they draw a rectangle around it.
+    """
+    boxes = boxes.reshape(-1, 4).float()
+    centres = torch.stack([(boxes[:, 0] + boxes[:, 2]) / 2.0,
+                           (boxes[:, 1] + boxes[:, 3]) / 2.0], dim=-1)
+    labels = torch.ones(centres.shape[0], 1, dtype=torch.int32,
+                        device=boxes.device)
+    return {"point_coords": centres.unsqueeze(1), "point_labels": labels}
+
+
+def jitter_boxes(boxes: torch.Tensor, fraction: float,
+                 generator: torch.Generator | None = None) -> torch.Tensor:
+    """Each box's edges pushed out or in by up to `fraction` of its own side.
+
+    The middle rung between a box and a click, and the one that matches how a
+    prompt actually arrives: an operator's rectangle is loose, and a detector's
+    is loose in a different way. Perturbing each edge independently keeps the
+    box near the target while destroying the pixel-exact agreement between
+    prompt and ground truth that makes the box-prompted score so flat.
+
+    Edges are perturbed *before* being re-sorted, so a large `fraction` cannot
+    hand back an inverted rectangle. Nothing clamps to the window: a prompt
+    that runs off the edge is a real thing that happens, and SAM 2 takes it.
+    """
+    boxes = boxes.reshape(-1, 4).float()
+    if not fraction:
+        return boxes
+    widths = (boxes[:, 2] - boxes[:, 0]).abs().clamp(min=1.0)
+    heights = (boxes[:, 3] - boxes[:, 1]).abs().clamp(min=1.0)
+    scale = torch.stack([widths, heights, widths, heights], dim=-1) * float(fraction)
+    noise = torch.empty_like(boxes).uniform_(-1.0, 1.0, generator=generator)
+    moved = boxes + noise * scale
+    return torch.stack([
+        torch.minimum(moved[:, 0], moved[:, 2]),
+        torch.minimum(moved[:, 1], moved[:, 3]),
+        torch.maximum(moved[:, 0], moved[:, 2]),
+        torch.maximum(moved[:, 1], moved[:, 3]),
+    ], dim=-1)
+
+
 @contextmanager
 def _capture_head(model):
     """Collect the SAM head's full return, which `track_step` does not pass on.

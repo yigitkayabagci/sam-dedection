@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Nine notebooks, meant for Colab. Everything they orchestrate lives in `src/`
+Twelve notebooks, meant for Colab. Everything they orchestrate lives in `src/`
 and `tools/` and is unit-tested without a GPU — the notebooks are the recipe,
 not the implementation.
 
@@ -15,13 +15,16 @@ not the implementation.
 | 07 | `07_encoder_aerial_rgbt.ipynb` | `edgetam_aerial{,_lora}_512.pt` on your Drive + a held-out instance score | **nothing** — it downloads VTUAV VIS, SegFly and Kust4K itself |
 | 08 | `08_encoder_vtuav_only.ipynb` | the same, from VTUAV VIS alone | **nothing** — it downloads VTUAV VIS itself |
 | 09 | `09_encoder_stage_a_dronevehicle.ipynb` | the same, with stage A distilled from DroneVehicle | **nothing** — it downloads all four sets itself |
+| 10 | `10_encoder_teacher_dinov3.ipynb` | the same, with stage A distilled from DINOv3 | a Hugging Face token — DINOv3 is gated |
+| 11 | `11_encoder_rgb_mixed.ipynb` | the same, with VTUAV's RGB half mixed into the batches | **nothing** — the RGB frames are already in VTUAV's archives |
+| 12 | `12_encoder_probe.ipynb` | whether 07–11's scores were measuring the encoder at all | **08**, for its checkpoints and its instance index |
 
-**07, 08 and 09 are one experiment, not three notebooks.** All three are
-generated from the same source (`tools/build_notebooks.py`) and differ in
-exactly four cells: the title, the build stamp, and the two that configure the
-data. Everything else — the schedule, the losses, the seed, the evaluation — is
-byte for byte the same, which is the only reason their `test/instance_iou`
-numbers can be set beside each other.
+**07 to 11 are one experiment, not five notebooks.** All five are generated
+from the same source (`tools/build_notebooks.py`) and differ in a handful of
+cells: the title, the build stamp, and the ones that configure the data or the
+teacher. Everything else — the schedule, the losses, the seed, the
+evaluation — is byte for byte the same, which is the only reason their
+`test/instance_iou` numbers can be set beside each other.
 
 Each isolates one variable against 07:
 
@@ -29,6 +32,21 @@ Each isolates one variable against 07:
 |---|---|---|
 | **08** | same stage A, **VTUAV-only stage B** | what did the extra two datasets buy? |
 | **09** | same stage B, **DroneVehicle stage A** | does stage A want resolution and one scene, or native pixels and variety? |
+| **10** | same everything, **DINOv3 teacher** | does stage A want semantics (DINO) or class-agnostic boundaries (SAM)? |
+| **11** | same everything, **RGB windows added** | is the gap modality, or is it domain — a nadir view of a 20-pixel car? |
+
+**12 is not one of them.** It trains almost nothing and re-scores 08's four
+finished checkpoints under three prompt strengths and two window scales. The
+reason it exists is that 07–11 all vary the *checkpoint* while holding the
+*question* fixed, and the question they hold fixed is the easiest one
+available: `eval_instances.py` prompts with the ground-truth box, which on one
+large isolated target states most of the mask. Stock EdgeTAM already clears
+IoU 0.5 on 419 of 420 held-out instances before any training at all, so a flat
+results table cannot distinguish "the encoder work bought little" from "the
+prompt was giving the answer away". 12 weakens the prompt (`jitter`, then a
+single centre `point`) and shrinks the targets (a wider crop resized to the
+same 512) and re-reads the same four checkpoints under each. It is generated
+by `tools/build_probe_notebook.py`, not by `build_notebooks.py`.
 
 Run them on separate runtimes at once. They write to different Drive folders
 (`edgetam-encoder/{all,vtuav,drone}`), and `split_frames` seeds each dataset by
@@ -37,13 +55,18 @@ sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
 
-**All three are a different axis from 01–06.** Those specialise the *whole*
+**All of them are a different axis from 01–06.** Those specialise the *whole*
 tracker on thermal video; these train the **image encoder alone** on static
 aerial imagery, with the memory path frozen and never executed. They are stages
 A and B of `docs/encoder_training_todo.md`; the architecture is laid out in
 `docs/encoder_mimari.md`. They download their own data — every URL is baked
 into `tools/fetch_datasets.py` and was checked against the live host, because
 each of the four sets is served in a way that defeats the obvious approach.
+
+None of them measures **tracking**, which is the metric this project is judged
+on: every score is over a single prompted frame, with no memory bank in the
+loop. A better encoder is a precondition for a better tracker, never evidence
+of one. That is stage C, and it has not started.
 
 ## Three things to know before starting
 

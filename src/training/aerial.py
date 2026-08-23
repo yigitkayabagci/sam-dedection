@@ -259,8 +259,13 @@ SPECS: dict[str, DatasetSpec] = {
         palette_source=(
             "the authors' published class table; ids are non-contiguous and "
             "only two classes are things"),
-        thermal="**/images/*.png",
-        rgb="**/rgb/*.png",
+        # `*.*` and not `*.png`: the thermal export writes PNG, but the RGB
+        # slice is written as the publisher's own JPEG (a 4000x3000 frame
+        # re-encoded to PNG is 27 MB against 11) -- `IMAGE_SUFFIXES` already
+        # gates what the glob may return. The *masks* stay `*.png` on purpose:
+        # a label map that is not PNG is a bug the glob should refuse to read.
+        thermal="**/images/*.*",
+        rgb="**/rgb/*.*",
         masks="**/labels/*.png",
         classes={"unlabeled": 0, "road": 1, "walkway": 2, "dirt": 3,
                  "gravel": 4, "grass": 6, "vegetation": 7, "tree": 8,
@@ -1310,7 +1315,8 @@ class Sample:
 
 def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
                 max_instances: int = 8, jitter: int = 0,
-                rng: np.random.Generator | None = None) -> list[Sample]:
+                rng: np.random.Generator | None = None,
+                window: int | None = None) -> list[Sample]:
     """Up to `per_image` windows on one frame, each anchored on an instance.
 
     An anchor is picked at random and the window centred on it, which is the
@@ -1322,12 +1328,25 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
     Every *other* indexed instance that falls entirely inside the window comes
     along for free. That is the point of the window: one encode, several
     prompts, several objects sharing a scene.
+
+    **`window` is the crop in source pixels; `size` is what the model sees.**
+    They are the same number by default, and that is the case the training
+    runs use -- a 512 crop fed at 512, no resampling. Passing a larger `window`
+    takes a wider crop and shrinks it to `size`, which divides every target's
+    apparent side by `window / size` without touching the annotation. That is
+    the only way to reach the small-target regime out of a set that has none:
+    VTUAV's masks are a median 186 source pixels across, so at `window=1536`
+    they land near 62 and the bucket `eval_instances` calls `small` finally has
+    something in it. `Sample` already carries the two separately -- `boxes` maps
+    through `map_boxes` and `load_image` resizes the crop -- so nothing
+    downstream needed changing for this.
     """
     rng = rng or np.random.default_rng()
     if not entry.instances:
         return []
 
-    fits = min(entry.size) >= size
+    crop = int(window or size)
+    fits = min(entry.size) >= crop
     order = rng.permutation(len(entry.instances))[:max(per_image, 1)]
     samples: list[Sample] = []
     for i in order:
@@ -1337,16 +1356,16 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
         # would clamp the origin to 0 and hand back a rectangle running off the
         # edge. That case is the whole-frame resize, same as an oversized
         # anchor.
-        origin = crop_window(box, entry.size, size, jitter, rng) if fits else None
+        origin = crop_window(box, entry.size, crop, jitter, rng) if fits else None
         if origin is None:
             # No crop contains the anchor, so fall back to resizing the whole
             # frame -- the same two input modes the deployment offers, and the
             # same fallback `antiuav._window_for` makes.
-            origin, window = (0, 0), entry.size
+            origin, rect = (0, 0), entry.size
         else:
-            window = (size, size)
+            rect = (crop, crop)
 
-        inside = [x for x in entry.instances if x.inside(origin, window)]
+        inside = [x for x in entry.instances if x.inside(origin, rect)]
         if not inside:
             continue
         if len(inside) > max_instances:
@@ -1356,7 +1375,7 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
             others = [x for x in inside if x.label != anchor.label]
             picked = rng.permutation(len(others))[:max(max_instances - 1, 0)]
             inside = [anchor] + [others[int(j)] for j in sorted(picked)]
-        samples.append(Sample(frame=entry.frame, origin=origin, window=window,
+        samples.append(Sample(frame=entry.frame, origin=origin, window=rect,
                               size=size, instances=tuple(inside),
                               source=entry.source))
     return samples
@@ -1364,12 +1383,18 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
 
 def sample_windows(index: SequenceABC[FrameIndex], size: int = 512,
                    per_image: int = 1, max_instances: int = 8, jitter: int = 0,
-                   seed: int | None = None) -> list[Sample]:
-    """Every frame's windows, in one list -- the epoch's pool."""
+                   seed: int | None = None,
+                   window: int | None = None) -> list[Sample]:
+    """Every frame's windows, in one list -- the epoch's pool.
+
+    `window` passes straight through to `windows_for`: the crop in source
+    pixels, defaulting to `size`. See there for what a larger one buys.
+    """
     rng = np.random.default_rng(seed)
     samples: list[Sample] = []
     for entry in index:
-        samples.extend(windows_for(entry, size, per_image, max_instances, jitter, rng))
+        samples.extend(windows_for(entry, size, per_image, max_instances, jitter,
+                                   rng, window))
     return samples
 
 
