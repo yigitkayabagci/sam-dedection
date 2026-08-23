@@ -1,0 +1,286 @@
+% ============================================================================
+% nb11_beklenti.tex -- 11_encoder_rgb_mixed.ipynb'den ne bekliyoruz?
+% Bağımsız derlenir:  latexmk -xelatex nb11_beklenti.tex
+% ============================================================================
+\documentclass[11pt, paper=a4, DIV=14, parskip=half, numbers=noenddot]{scrartcl}
+
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\setmainlanguage{turkish}
+% Dosya adıyla yükleme: fontlar TinyTeX'in texmf ağacında, macOS CoreText
+% onları aile adıyla göremez -- kpathsea dosya adıyla bulur.
+\setmainfont{texgyrepagella}[Extension=.otf, UprightFont=*-regular,
+  BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+\setsansfont{texgyreheros}[Extension=.otf, UprightFont=*-regular,
+  BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+\setmonofont{texgyrecursor}[Extension=.otf, UprightFont=*-regular,
+  BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic,
+  Scale=0.92]
+\setlength{\emergencystretch}{3em}
+
+\usepackage{xcolor}
+\definecolor{anarenk}{HTML}{1B3A6B}
+\definecolor{vurgu}{HTML}{C8551A}
+\definecolor{yesilvurgu}{HTML}{1E7A52}
+\definecolor{grimetin}{HTML}{4A4A46}
+\definecolor{acikgri}{HTML}{EDEBE4}
+\definecolor{kutucerceve}{HTML}{B9B6A9}
+% Excalidraw havası: pastel dolgular, yumuşak köşeler
+\definecolor{pastelmavi}{HTML}{DCE9F8}
+\definecolor{pastelturuncu}{HTML}{FBE4CE}
+\definecolor{pastelyesil}{HTML}{DDF0E2}
+\definecolor{pastelgri}{HTML}{EFEDE6}
+
+\addtokomafont{section}{\color{anarenk}\sffamily}
+\addtokomafont{subsection}{\color{anarenk}\sffamily}
+\addtokomafont{disposition}{\rmfamily}
+
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\captionsetup{font=small, labelfont={sf,bf,color=anarenk}, margin=1em}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, calc}
+
+\tikzset{
+  kutu/.style={draw=#1!60!grimetin, fill=#1, rounded corners=7pt,
+               line width=1.1pt, align=center, font=\sffamily\small,
+               inner sep=6pt, minimum height=2.5em},
+  kutu/.default=pastelgri,
+  donuk/.style={kutu=pastelgri, draw=kutucerceve, text=grimetin,
+                dash pattern=on 5pt off 3pt},
+  ok/.style={-{Stealth[length=3mm]}, line width=1.1pt, color=grimetin},
+  etiket/.style={font=\sffamily\footnotesize, color=grimetin, align=center},
+}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\sffamily\bfseries\color{anarenk}
+   Notebook 11 --- RGB Windows in the Batch}\\[3pt]
+  {\sffamily Beklenti ve ölçüm planı: \code{11\_encoder\_rgb\_mixed.ipynb}
+   \quad$\cdot$\quad Ağustos 2026}
+\end{center}
+\vspace{2pt}
+
+\section{Amaç ve hipotez}
+
+EdgeTAM'ın \emph{image encoder}'ı SA-1B ile, yani yer seviyesinden çekilmiş
+RGB fotoğraflarla ön-eğitildi. Bu projenin şimdiye kadarki eğitimi
+(\code{07}) encoder'ı termale uyarlıyor --- bir \emph{modality gap}
+kapanıyor. Ama ikinci bir boşluk daha var ve modaliteden bağımsız:
+\textbf{yüksek irtifadan dik bakış ve 20--30 piksellik hedefler}, SA-1B'de
+her iki modalitede de yok. Bu bir \emph{domain gap} ve RGB'de de termalde de
+aynı şekilde açık.
+
+Notebook 11, \code{07}'nin birebir kopyası: aynı schedule, aynı seed, aynı
+held-out uçuşlar. \textbf{Tek değişken veri} --- batch'lere iki RGB kaynağı
+eklenir. Böylece 07 ile 11'in final sayıları arasındaki her fark yalnızca RGB
+pencerelere atfedilebilir.
+
+\begin{itemize}\itemsep2pt
+  \item \textbf{H1 (hedef):} Havadan RGB ile eğitim, küçük RGB hedeflerde
+        hazır (stock) EdgeTAM'ı geçer --- encoder RGB'yi zaten biliyor,
+        öğrenmesi gereken \emph{domain}.
+  \item \textbf{H2 (sigorta):} Termal pencereler batch'in çoğunluğu olmaya
+        devam ettiği için termal skor düşmez; RGB, drift'e karşı
+        regularization gibi davranır.
+  \item \textbf{H3 (bonus, belirsiz):} Paylaşılan feature'lar üzerinden RGB
+        çeşitliliği termal küçük-hedef skorunu da bir miktar yukarı çekebilir.
+\end{itemize}
+
+\section{Mimari: ne eğitiliyor, ne donuk}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=5mm and 8mm]
+  % --- Lane 1: stage A -----------------------------------------------------
+  \node[etiket, anchor=west] (sa) at (0, 0)
+        {\textbf{Stage A} --- feature distillation, etiketsiz
+         (hizalı RGB--termal çiftler)};
+  \node[kutu=pastelmavi, anchor=west] (teacher) at (0, -1.15)
+        {SAM 2.1 Hiera-B+\\\footnotesize teacher (frozen), RGB girdi};
+  \node[kutu=pastelyesil, right=16mm of teacher] (stuA)
+        {Image Encoder\\\footnotesize student, termal girdi};
+  \draw[ok] (teacher) -- node[etiket, above=0.5mm] {cosine\\feature loss}
+        (stuA);
+
+  % --- Lane 2: stage B -----------------------------------------------------
+  \node[etiket, anchor=west] (sb) at (0, -3.4)
+        {\textbf{Stage B} --- supervised fine-tune, karışık batch (bu
+         notebook)};
+  \node[kutu=pastelturuncu, anchor=west] (win) at (0, -4.65)
+        {512$\times$512\\window};
+  \node[kutu=pastelyesil, right=of win] (enc)
+        {Image Encoder\\\footnotesize RepViT + FPN};
+  \node[kutu=pastelyesil, right=of enc] (dec)
+        {Prompt Enc.\\+ Mask Decoder};
+  \node[kutu=pastelturuncu, right=of dec] (out) {mask logits\\+ IoU};
+  \draw[ok] (win) -- (enc);
+  \draw[ok] (enc) -- (dec);
+  \draw[ok] (dec) -- (out);
+  \draw[ok, dashed, color=yesilvurgu]
+       (stuA.south) to[bend left=20]
+       node[etiket, right=2mm, pos=0.45] {başlangıç ağırlıkları} (enc.north);
+
+  % --- Lane 3: frozen memory path + legend ---------------------------------
+  \node[donuk, anchor=west, text width=92mm] (mem) at (0, -6.6)
+        {Memory Attention $\cdot$ Memory Encoder $\cdot$ Spatial Perceiver\\
+         \textbf{her aşamada donuk} (video = stage C)};
+  \node[kutu=pastelyesil, right=5mm of mem, minimum height=1.6em,
+        inner sep=3pt] (l1) {\footnotesize eğitilir};
+  \node[donuk, right=3mm of l1, minimum height=1.6em, inner sep=3pt] (l2)
+        {\footnotesize donuk};
+\end{tikzpicture}
+\caption{İki aşama, tek encoder. Stage A yalnızca hizalı (RGB, termal)
+çiftler okur, hiç etiket görmez; stage B'de encoder head ile birlikte, onda
+bir öğrenme hızıyla eğitilir. Memory yolu hiçbir aşamada hareket etmez ---
+modality shift bir \emph{encoder} problemidir. Teacher bu kolda SAM 2.1'dir;
+DINOv3 ayrı bir deney kolu olarak \code{10}'dadır (bkz.~\S\ref{sec:kapsam}).}
+\end{figure}
+
+\section{Veri karışımı}
+
+Beş kaynak, tek batch havuzu. Karışım oranını ayrı bir hiperparametre
+yapmadık: her kaynak, pencere havuzuna kare sayısı oranında katılır.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}llllll@{}}
+\toprule
+Kaynak & Modality & Çözünürlük & Etiket & Rol & Katkı \\
+\midrule
+VTUAV VIS      & termal & 1920$\times$1080 & instance mask & eğitim + \textbf{skor} & güvenilir GT \\
+VTUAV VIS      & RGB    & 1920$\times$1080 & instance mask & eğitim + \textbf{skor} & ölçülebilir RGB \\
+SegFly         & termal & 640$\times$512   & semantic map  & yalnız eğitim & hacim, 3 irtifa \\
+SegFly dilimi  & RGB    & 4000$\times$3000 & semantic map  & yalnız eğitim & \emph{küçük hedef} \\
+Kust4K         & termal & 640$\times$512   & semantic map  & yalnız eğitim & en ince etiket \\
+\bottomrule
+\end{tabular}
+\caption{\code{DATASETS} listesi. Semantic map'ten \emph{reconstruct} edilen
+instance'lar (connected components) hedef olarak gürültülü olabileceğinden
+asla skorlanmaz; test sayısı yalnızca elle çizilmiş VTUAV maskelerinden
+gelir.}
+\end{table}
+
+Üç not:
+
+\begin{itemize}\itemsep2pt
+  \item \textbf{Kust4K'nın \%29'u dışarıda --- otomatik.} Set, 4\,024
+        karesinin 1\,160'ında bir modaliteyi kasıtlı olarak bozar (sensor
+        failure simülasyonu) ve bozuk kareleri beş manifest dosyasında
+        listeler. İndirme hücresi manifestleri her zaman çeker; okuyucu
+        (\code{SPECS["kust4k"].exclude}) bu kareleri daha indeksleme
+        aşamasında düşürür. Elle yapılacak bir şey yok.
+  \item \textbf{SegFly RGB tam değil, dilim.} RGB yarısı 20\,606 kare /
+        156\,GiB'dir; tamamı PNG'ye açılsa $\sim$570\,GB eder. Bunun yerine
+        eşit aralıklı shard'lardan 3\,000 kare alınır (her sahne ve her
+        irtifa temsil edilir), yayıncının JPEG baytları aynen yazılır:
+        $\sim$23\,GB. 4000$\times$3000'den kesilen 512'lik pencerede bir
+        araç gerçekten $\sim$20 piksel --- deployment'ın yaşadığı rejim.
+  \item \textbf{VTUAV RGB bedava.} Kareler ve maskeleri (\code{rgb/},
+        \code{mask/rgb/}) termal koşunun zaten indirdiği üç arşivin içinde.
+\end{itemize}
+
+\section{Sızıntısız split ve iki referans}
+
+Split kareler arasında değil \textbf{uçuşlar arasında} kesilir ve bir uçuşun
+termal ve RGB kareleri \emph{aynı tarafa} düşer (unit test ile sabitlendi).
+Sonuç: held-out bir uçuş hiçbir modalitede görülmemiştir ve 11'in termal test
+pencereleri 07'ninkilerle \textbf{birebir aynıdır}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=4mm and 6mm]
+  \node[kutu=pastelmavi]  (f1) {uçuş \code{car\_08}\\\footnotesize termal + RGB};
+  \node[kutu=pastelmavi, right=of f1]  (f2) {uçuş \code{bike\_09}\\\footnotesize termal + RGB};
+  \node[kutu=pastelmavi, right=of f2]  (f3) {uçuş \code{ped\_15}\\\footnotesize termal + RGB};
+  \node[kutu=pastelyesil, below=9mm of f1, minimum width=27mm] (tr) {train};
+  \node[kutu=pastelturuncu, below=9mm of f2, minimum width=27mm] (va) {val};
+  \node[kutu=pastelgri, below=9mm of f3, minimum width=27mm] (te) {test};
+  \draw[ok] (f1) -- (tr);
+  \draw[ok] (f2) -- (va);
+  \draw[ok] (f3) -- (te);
+  \node[etiket, below=2mm of va]
+        {bir uçuşun \emph{iki modalitesi birlikte} taşınır --- çapraz modalite sızıntısı yok};
+\end{tikzpicture}
+\caption{Sequence-level split. Aynı uçuşun RGB'si train'e, termali teste
+düşemez; skor ezber değil genelleme ölçer.}
+\end{figure}
+
+Eval artık her sayıyı modalite başına ayrı raporlar; böylece iki soru iki
+ayrı satırdan okunur:
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+Metrik & Referans & Beklenti & Karar kuralı \\
+\midrule
+\code{rgb / small IoU} ($<$32\,px) & stock EdgeTAM & \textcolor{yesilvurgu}{belirgin artış} &
+  \textbf{H1 testi} --- ana hedef \\
+\code{rgb / mean IoU} & stock EdgeTAM & artış & ikincil \\
+\code{thermal / small IoU} & notebook 07 & $\Delta \geq -0.01$ &
+  düşerse: 07 kalır, RGB $\rightarrow$ LoRA \\
+\code{thermal / mean IoU} & notebook 07 & değişmez & kontrol \\
+\bottomrule
+\end{tabular}
+\caption{Karar tablosu. ``Small'' kovası kasıtlı olarak ana metriktir: havadan
+bir setin ortalama IoU'sunu büyük araçlar domine eder, deployment'ın derdi
+ise 20 pikselden küçük hedeflerdir. Termal guard aşılırsa sonuç ``RGB termali
+sulandırdı'' demektir; o durumda çözüm iki ayrı model değil, ortak taban +
+modalite başına $\sim$0.3M parametrelik LoRA adapter'dır.}
+\end{table}
+
+\section{Maliyet ve çalıştırma}
+
+Notebook uçtan uca tek \emph{Run all}'dur: veri indirme, doğrulama
+(md5), indeksleme, stage A, üç eğitim koşusu (fine-tune, LoRA,
+distilled+fine-tune) ve stock dahil dört checkpoint'in test skoru. Gated
+model yoktur; SAM 2.1 teacher anonim iner. Gereken tek onay Drive mount'tur.
+
+\begin{table}[H]
+\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Kalem & 07 & 11 \\
+\midrule
+İndirme & $\sim$43\,GB (VTUAV) + SegFly + Kust4K & + $\sim$23\,GB (SegFly RGB dilimi) \\
+Disk & $\sim$60\,GB & $\sim$85\,GB \\
+GPU (A100) & $\sim$20\,dk stage A + 3$\times\sim$40\,dk eğitim & aynı schedule, aynı adım sayısı \\
+Ek hesap & --- & yalnızca 12\,MP JPEG decode (loader'da) \\
+\bottomrule
+\end{tabular}
+\caption{11'in tek ek maliyeti veridir; adım sayısı ve schedule 07 ile
+aynıdır, GPU süresi kayda değer değişmez. Çıktılar kendi Drive klasörüne
+(\code{edgetam-encoder/rgb}) yazılır; 07 ile aynı anda ayrı runtime'da
+koşturulabilir.}
+\end{table}
+
+\section{Kapsam dışı}
+\label{sec:kapsam}
+
+\begin{itemize}\itemsep2pt
+  \item \textbf{DINOv3 teacher bu kolda yok --- kasıtlı.} Her notebook tek
+        değişken oynatır: \code{10} teacher'ı değiştirir (SAM 2.1
+        $\rightarrow$ DINOv3), \code{11} veriyi değiştirir (+RGB). İkisi
+        birden değişseydi fark hangisine atfedilecekti? Önce iki kol ayrı
+        ölçülür; DINOv3 \code{10}'da kazanırsa kombinasyon (DINOv3 + RGB)
+        bir sonraki koşudur.
+  \item \textbf{SegFly RGB'nin tamamı} (20\,606 kare) --- dilim yeterli
+        sinyal veriyorsa büyütmek bir satırlık değişikliktir
+        (\code{rows=3000}).
+  \item \textbf{Video ve memory yolu} --- stage C; encoder sayıları
+        ölçülmeden açılmaz.
+\end{itemize}
+
+\vspace{0.5em}
+\noindent\textcolor{grimetin}{\small Tek cümlelik özet: \emph{11, ``termali
+bozmadan RGB'yi bedavaya alabilir miyiz?'' sorusunu, 07 ile birebir
+karşılaştırılabilir iki sayıya --- \code{rgb/small IoU} vs stock ve
+\code{thermal/small IoU} vs 07 --- indirger.}}
+
+\end{document}

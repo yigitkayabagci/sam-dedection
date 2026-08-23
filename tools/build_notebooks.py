@@ -818,7 +818,9 @@ TEACHER         = "{{TEACHER}}"
 DISTILL_STEPS   = 12000
 DISTILL_PAIRS   = None               # no cap -- use every pair on disk
 DISTILL_MOMENTS = 0.0                # anti-collapse term; small or off (docs 4)
-ANCHOR_WEIGHT   = 0.5                # stage B: how hard to hold on to stage A
+ANCHOR_WEIGHT   = 0.0                # stage B: how hard to hold on to stage A.
+                                     # 12 measured it and 0.5 cost more than it
+                                     # bought -- see "Holding on to it" below
 
 # --- Budget -------------------------------------------------------------
 STEPS_PER_EPOCH = 400
@@ -826,7 +828,10 @@ EPOCHS          = (1, 3)             # head-only, then head + encoder
 VAL_BATCHES     = 24
 BATCH_CEILING   = 64
 LORA_R          = 16
-JITTER          = 32
+JITTER          = 32                 # pixels the 512 *window* may slide. Not
+                                     # the prompt -- that is PROMPT_JITTER
+PROMPT          = "mix"              # what the loop is prompted with while it
+PROMPT_JITTER   = 0.3                # trains. 12 found this; see below
 SEED            = 0
 LOADER_WORKERS  = min(2 * (os.cpu_count() or 4), 24)
 PREFETCH_DEPTH  = 2
@@ -1011,8 +1016,12 @@ for request in requests:
     else:
         for value, count in present.items():
             mark = ("thing" if value in spec.thing_ids
-                    else "stuff" if value in expected else "??")
-            print(f"  value {value:>3}  {expected.get(value, 'NOT IN SPEC'):<14} "
+                    else "stuff" if value in expected
+                    else "ignore" if value in spec.ignore else "??")
+            name = expected.get(value,
+                                "leftover" if value in spec.ignore
+                                else "NOT IN SPEC")
+            print(f"  value {value:>3}  {name:<14} "
                   f"{mark:<6} in {count} of {min(48, len(frames))} sampled maps")
         missing = sorted(set(spec.thing_ids) - set(present))
         assert not missing, (
@@ -1712,6 +1721,7 @@ COMMON = (f"{DATASET_FLAGS} --index {INDEX} "
           f"--size {SIZE} --per-image {PER_IMAGE} --max-instances {MAX_INSTANCES} "
           f"--min-area {MIN_AREA} --min-side {MIN_SIDE} --max-area {MAX_AREA} "
           f"--fill {FILL} --jitter {JITTER} --batch {BATCH} --accum {ACCUM} "
+          f"--prompt {PROMPT} --prompt-jitter {PROMPT_JITTER} "
           f"--steps {STEPS_PER_EPOCH} --epochs {EPOCHS[0]} {EPOCHS[1]} "
           f"--val-batches {VAL_BATCHES} --workers {LOADER_WORKERS} "
           f"--depth {PREFETCH_DEPTH} --seed {SEED}")
@@ -1876,6 +1886,8 @@ verdict = {"datasets": DATASETS, "image_size": SIZE,
            "train_windows_by_dataset": train.sources,
            "instances": len(items), "gates": gates.__dict__,
            "teacher": TEACHER if PRETRAIN else None,
+           "prompt": PROMPT, "prompt_jitter": PROMPT_JITTER,
+           "anchor_weight": ANCHOR_WEIGHT,
            "pretrained": PRETRAIN, "runs": runs, "test": scores}
 (WORK / "encoder_verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
 

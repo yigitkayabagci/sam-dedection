@@ -93,6 +93,24 @@ class TestVerify(unittest.TestCase):
         self.assertIn("absent from this", text)
         self.assertNotIn("!!", text)
 
+    def test_leftover_ids_the_spec_ignores_are_not_an_alarm(self):
+        # Measured on the real release: SegFly's own remapping (Rock into
+        # Ground Obstacle, dynamic classes into Unlabeled) left stray pixels
+        # with raw ids 5, 11, 12, 21. They are in `ignore`, so the check
+        # names them without the "!!" that means a broken export.
+        values = self.palette() | {5: 40, 11: 3, 12: 7, 21: 2}
+        text = verify(values, "segfly")
+        self.assertNotIn("!!", text)
+        self.assertIn("leftover", text)
+        self.assertIn("[5, 11, 12, 21]", text)
+
+    def test_a_stray_outside_both_palette_and_ignore_still_alarms(self):
+        values = self.palette() | {5: 40, 200: 3}
+        text = verify(values, "segfly")
+        self.assertIn("!!", text)
+        self.assertIn("200", text)
+        self.assertNotIn("5,", text.split("!!")[1])   # 5 is not in the alarm
+
     def test_with_no_spec_it_only_lists_what_it_saw(self):
         text = verify({0: 1, 13: 2}, None)
         self.assertIn("[0, 13]", text)
@@ -119,6 +137,15 @@ class TestSegflyPalette(unittest.TestCase):
     def test_the_ids_are_the_published_ones_gaps_included(self):
         self.assertEqual(sorted(SPECS["segfly"].classes.values()),
                          [0, 1, 2, 3, 4, 6, 7, 8, 9, 13, 14, 16, 17, 33, 34, 36])
+
+    def test_the_remapping_leftovers_are_ignored_not_classes(self):
+        # The release maps OccuFly's raw ontology onto the benchmark palette
+        # and missed some pixels; those raw ids are ignored, never named as
+        # classes and never things.
+        spec = SPECS["segfly"]
+        self.assertEqual(sorted(spec.ignore), [0, 5, 11, 12, 21])
+        self.assertFalse(set(spec.ignore) & set(spec.thing_ids))
+        self.assertFalse({5, 11, 12, 21} & set(spec.classes.values()))
 
 
 @unittest.skipUnless(pq is not None, "pyarrow is not installed")

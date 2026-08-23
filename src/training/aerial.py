@@ -273,7 +273,15 @@ SPECS: dict[str, DatasetSpec] = {
                  "building": 16, "roof": 17, "parking_lot": 33,
                  "construction": 34, "truck": 36},
         things=("vehicle", "truck"),
-        ignore=(0,),
+        # 0 is the authors' Unlabeled. The other four are **leftovers of their
+        # own remapping**, measured on the full 15 007-frame thermal export:
+        # the release maps OccuFly's 22 raw classes to this 16-id benchmark
+        # palette (Rock/5 and Cable Tower/22 into Ground Obstacle/9; Person,
+        # Bicycle, Cable, Crane into 0), but some pixels kept their raw ids.
+        # None is a thing class, so nothing here changes what trains -- listing
+        # them just keeps the palette check from crying wolf over ids the
+        # publisher meant to erase.
+        ignore=(0, 5, 11, 12, 21),
     ),
     # 500 sequences / ~1.7 M registered 1920x1080 RGB-T pairs (CVPR 2022).
     #

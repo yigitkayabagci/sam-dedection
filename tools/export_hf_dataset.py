@@ -402,10 +402,19 @@ def verify(values: dict[int, int], spec_name: str | None) -> str:
     if spec_name is None:
         return "\n".join(lines)
 
-    known = set(SPECS[spec_name].classes.values())
-    unexpected = sorted(set(values) - known)
+    spec = SPECS[spec_name]
+    known = set(spec.classes.values())
+    ignored = sorted((set(values) - known) & set(spec.ignore))
+    unexpected = sorted(set(values) - known - set(spec.ignore))
     missing = sorted(known - set(values))
     lines.append(f"{spec_name} palette:    {sorted(known)}")
+    if ignored:
+        # Not an error and not a mystery: ids the spec knows about and drops
+        # -- for SegFly, stray pixels the publisher's own class remapping
+        # missed. Reported so a new id showing up here is noticed, silently
+        # accepted so it never reads as a broken download.
+        lines.append(f"   {len(ignored)} leftover id(s) the spec ignores: "
+                     f"{ignored}")
     if unexpected:
         lines.append(
             f"!! {len(unexpected)} value(s) not in the palette: {unexpected[:20]}"
