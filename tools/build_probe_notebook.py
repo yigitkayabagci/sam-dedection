@@ -95,13 +95,22 @@ md(r"""
 | | mean IoU | IoU≥0.5 | IoU≥0.75 | small IoU |
 |---|---:|---:|---:|---:|
 | stock | 0.8444 | 0.998 | 0.900 | `nan` |
-| finetune | 0.8611 | 1.000 | 0.888 | `nan` |
-| lora | 0.8700 | 1.000 | **0.940** | `nan` |
-| distilled+ft | 0.8536 | 1.000 | 0.871 | `nan` |
+| finetune | 0.8609 | 1.000 | 0.888 | `nan` |
+| lora | 0.8666 | 1.000 | 0.914 | `nan` |
+| distilled+ft | 0.8360 | 1.000 | 0.871 | `nan` |
 
-Two hundred GPU-minutes for +0.017 and +0.026 mean IoU, a `small` column that
-is empty, and the two fine-tuning methods separated by less than the gap
-between two random draws of five flights.
+Two hundred GPU-minutes for +0.017 and +0.022 mean IoU, a `small` column that
+is empty, and the two fine-tuning methods tied on validation loss to four
+decimal places.
+
+**One error bar is already known, and it is uncomfortably large.** 08 was run
+twice — once with a 600-step stage A, once with 12 000 — and `finetune` and
+`lora` never touch stage A, so those two rows should have been identical
+across the pair. They were not: `finetune` moved 0.8611 → 0.8609 and `lora`
+0.8700 → 0.8666, and `lora`'s IoU≥0.75 swung 0.940 → 0.914. So **re-running
+the same configuration moves mean IoU by about 0.003**, and the tail metric by
+ten times that. The `finetune`-to-`lora` gap of 0.0057 is under two of those.
+Nothing in the matrix below separates two rows closer together than that.
 
 **A null result and an unasked question look identical from here.** That table
 varies the checkpoint and holds the question fixed, and the question it holds
@@ -150,16 +159,36 @@ no more. Read it as a direction, not as the deployment.
 
 ## And one training run
 
-`distilled+ft` finished behind plain `finetune` in 08 — val 0.1527 against
-0.1413, test 0.8536 against 0.8611. Two mechanisms explain that equally well
-and the run cannot distinguish them: stage A moved the encoder somewhere worse
-for this task, or `ANCHOR_WEIGHT = 0.5` held it there. The anchor term sat at
-0.01 for all three encoder epochs, which says the encoder never drifted — but
-not whether it *would* have.
+`distilled+ft` finished behind plain `finetune`, and **giving stage A twenty
+times more data made it worse, not better**:
 
-Cell {{anchor_run}} runs the same recipe at `--anchor-weight 0`. Free to move,
-if it catches `finetune` the anchor was the problem; if it stays behind, stage
-A was.
+| stage A budget | cosine distance | head-epoch val | best val | test mean IoU |
+|---|---:|---:|---:|---:|
+| 600 steps, 20 000 pairs | 0.2869 | 0.2388 | 0.1527 | 0.8536 |
+| 12 000 steps, 121 401 pairs | **0.1968** | **1.5461** | **0.3138** | **0.8360** |
+
+Read the first two numeric columns together, because that is the whole story.
+The distillation objective got substantially *better* — cosine distance fell
+from 0.287 to 0.197 — and the very first thing stage B measures got six times
+*worse*. That is not a starved stage. That is a stage doing exactly what it was
+asked to do, to an encoder whose decoder cannot follow it.
+
+The mechanism is not mysterious. EdgeTAM's mask decoder was trained against
+EdgeTAM's *own* encoder features. Distilling the encoder toward SAM 2.1
+Hiera-B+ moves it out of the space the decoder reads, and the harder the
+distillation pulls, the further out it goes. At 600 steps the encoder barely
+moved and the damage was small; at 12 000 it moved a long way and the head
+epoch opened at 1.5461 against 0.2065 for a run starting from stock. Three
+encoder epochs claw it back to 0.31 and there it plateaus — nowhere near the
+0.142 the other two runs reach.
+
+So the anchor question is now the narrow one: `ANCHOR_WEIGHT = 0.5` held the
+encoder at that point (the anchor term sat at 0.01 throughout, so it never
+drifted). Cell {{anchor_run}} releases it. If the encoder crawls back toward
+something the decoder can read, the recipe is salvageable — a longer head-only
+warmup, `EPOCHS = (3, 3)`, would then be the fix. If it stays at 0.31, feature
+distillation into this encoder is not salvageable by tuning and the stage
+should be dropped rather than re-tuned.
 
 ---
 
@@ -171,12 +200,14 @@ needed to score), which is the slow part of the setup.
 
 **Safe to run beside a fresh 08.** Cell {{inventory}} copies the checkpoints
 and the index off Drive to local disk before anything is scored, so a second
-runtime re-running 08 — with a larger stage-A budget, say — cannot replace
-them underneath this notebook. What that means is worth being explicit about:
-this notebook then measures **the checkpoints 08 produced the first time**, at
-`DISTILL_STEPS = 600`. That is the right target, because those are the
-checkpoints whose flat results table raised the question. A re-run of 08 with
-more stage-A data is a *different* experiment and gets scored on its own.
+runtime re-running 08 cannot replace them halfway through the matrix and turn
+it into a comparison across two experiments.
+
+What the snapshot does **not** do is choose which run it captures: 08 writes
+to one folder and overwrites it every time, so this notebook measures whatever
+08 wrote **last**. Check the timestamps cell {{inventory}} prints against the
+run you mean to be scoring. If you want to keep an older set, copy it aside
+before re-running 08 — nothing here does that for you.
 
 *This notebook is generated — edit `tools/build_probe_notebook.py`, not the
 `.ipynb`.*
@@ -477,7 +508,9 @@ if not index_files:
         f"Run 08 first.")
 
 for label, path in CHECKPOINTS.items():
-    print(f"  {label:<14} {Path(path).stat().st_size / 2**20:>6.1f} MiB  {path}")
+    _st = Path(path).stat()
+    _when = __import__("time").strftime("%Y-%m-%d %H:%M", __import__("time").localtime(_st.st_mtime))
+    print(f"  {label:<14} {_st.st_size / 2**20:>6.1f} MiB  {_when}  {path}")
 if DISTILLED.is_file():
     print(f"  {'stage A only':<14} "
           f"{DISTILLED.stat().st_size / 2**20:>6.1f} MiB  {DISTILLED}")
