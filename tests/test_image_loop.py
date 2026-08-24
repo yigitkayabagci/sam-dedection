@@ -46,9 +46,11 @@ from src.training.finetune import Rates, apply_freeze  # noqa: E402
 from src.training.clip_loop import jitter_boxes  # noqa: E402
 from src.training.image_loop import (  # noqa: E402
     PROMPTS,
+    TRAIN_PROMPTS,
     ImageBatch,
     ImageSplit,
     build_prompt,
+    mix_boxes,
     collate,
     image_losses,
     instance_iou,
@@ -242,12 +244,132 @@ class TestPrompts(unittest.TestCase):
 
     def test_every_advertised_prompt_builds(self):
         boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]])
-        for name in PROMPTS:
+        for name in TRAIN_PROMPTS:
             with self.subTest(prompt=name):
                 built = build_prompt(boxes, name, 0.3,
                                      torch.Generator().manual_seed(0))
                 self.assertEqual(built["point_coords"].shape[0], 1)
                 self.assertEqual(built["point_labels"].shape[0], 1)
+
+    def test_the_measurement_ladder_excludes_the_training_only_mode(self):
+        # `mix` is random per row, so a score taken under it would not be
+        # reproducible between two checkpoints -- which is the one property
+        # the probe's axis depends on. It must not be reachable from PROMPTS.
+        self.assertEqual(PROMPTS, ("box", "jitter", "point"))
+        self.assertNotIn("mix", PROMPTS)
+        self.assertIn("mix", TRAIN_PROMPTS)
+
+    def test_mix_is_still_a_box_prompt(self):
+        inputs = self.captured("mix", jitter=0.3,
+                               generator=torch.Generator().manual_seed(0))
+
+        self.assertEqual(tuple(inputs["point_coords"].shape), (1, 2, 2))
+        np.testing.assert_array_equal(inputs["point_labels"].numpy(), [[2, 3]])
+
+    def test_mix_leaves_some_boxes_exact_and_moves_the_rest(self):
+        # The whole point: a run under `mix` sees both distributions. If every
+        # row moved it would be `jitter` under another name, and if none moved
+        # it would be `box` -- either way the regression the probe found would
+        # simply change sign rather than close.
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]]).expand(256, 4)
+        mixed = mix_boxes(boxes, 0.3, generator=torch.Generator().manual_seed(0))
+        exact = (mixed == boxes).all(dim=1)
+
+        self.assertGreater(int(exact.sum()), 0)
+        self.assertLess(int(exact.sum()), 256)
+
+    def test_mix_holds_the_share_it_advertises(self):
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]]).expand(4096, 4)
+        mixed = mix_boxes(boxes, 0.3, share=0.25,
+                          generator=torch.Generator().manual_seed(1))
+        exact = float((mixed == boxes).all(dim=1).float().mean())
+
+        self.assertAlmostEqual(exact, 0.25, delta=0.03)
+
+    def test_mix_with_no_jitter_is_the_box_untouched(self):
+        # Otherwise `--prompt mix --prompt-jitter 0` would be a silent no-op
+        # that still looked like it was doing something.
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0], [1.0, 2.0, 9.0, 30.0]])
+        self.assertTrue(torch.equal(mix_boxes(boxes, 0.0), boxes))
+
+    def test_mix_never_returns_an_inverted_rectangle(self):
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0]]).expand(64, 4)
+        mixed = mix_boxes(boxes, 0.9, generator=torch.Generator().manual_seed(2))
+        self.assertTrue(bool((mixed[:, 0] <= mixed[:, 2]).all()))
+        self.assertTrue(bool((mixed[:, 1] <= mixed[:, 3]).all()))
+
+    def test_the_same_seed_mixes_identically(self):
+        boxes = torch.tensor([[8.0, 8.0, 20.0, 20.0], [1.0, 2.0, 9.0, 30.0]])
+        first = mix_boxes(boxes, 0.3, generator=torch.Generator().manual_seed(4))
+        again = mix_boxes(boxes, 0.3, generator=torch.Generator().manual_seed(4))
+        self.assertTrue(torch.equal(first, again))
+
+
+class TestTrainingPrompt(unittest.TestCase):
+    """The loop trains against the prompt it was told to, and scores against `box`.
+
+    `12_encoder_probe.ipynb` found 08's four checkpoints scoring 0.057 to 0.100
+    IoU *below* stock EdgeTAM under a loose box, and the cause was that the
+    loop had no prompt knob at all: every prompt it ever built was a
+    pixel-exact ground-truth rectangle. These pin the knob that fixes it, and
+    the one property it must not break -- that the validation number stays
+    comparable to every run taken before the knob existed.
+    """
+
+    def prompted(self, **kwargs) -> dict:
+        """The `point_inputs` `image_losses` actually handed the model."""
+        model = FakeSam2(SIZE).eval()
+        seen: list[dict] = []
+        original = model.track_step
+        model.track_step = lambda **kw: (seen.append(kw["point_inputs"]),
+                                         original(**kw))[1]
+        image_losses(model, fake_batch(images=1, width=1), **kwargs)
+        return seen[-1]
+
+    def test_the_loss_still_defaults_to_the_exact_box(self):
+        # Every recorded number was taken this way; a changed default would
+        # rebase them all silently.
+        inputs = self.prompted()
+
+        self.assertEqual(tuple(inputs["point_coords"].shape), (1, 2, 2))
+        np.testing.assert_allclose(
+            inputs["point_coords"].reshape(-1).numpy(), [8.0, 8.0, 20.0, 20.0])
+
+    def test_the_loss_forwards_the_prompt_it_was_given(self):
+        inputs = self.prompted(prompt="point")
+
+        np.testing.assert_array_equal(inputs["point_labels"].numpy(), [[1]])
+
+    def test_the_loss_forwards_the_jitter_amount(self):
+        # A prompt of `mix` with the fraction dropped on the floor would build
+        # exact boxes and look, from every log line, like it had worked.
+        inputs = self.prompted(prompt="jitter", jitter=0.3,
+                               generator=torch.Generator().manual_seed(0))
+        corners = inputs["point_coords"].reshape(-1).numpy()
+
+        self.assertFalse(np.allclose(corners, [8.0, 8.0, 20.0, 20.0]))
+
+    def test_validation_scores_under_box_even_when_training_mixes(self):
+        from src.training.schedule import images
+
+        loop = images(prompt="mix", jitter=0.3,
+                      generator=torch.Generator().manual_seed(0))
+        model = FakeSam2(SIZE).eval()
+        seen: list[dict] = []
+        original = model.track_step
+        model.track_step = lambda **kw: (seen.append(kw["point_inputs"]),
+                                         original(**kw))[1]
+        loop.scoring(model, fake_batch(images=1, width=1))
+
+        np.testing.assert_allclose(
+            seen[-1]["point_coords"].reshape(-1).numpy(),
+            [8.0, 8.0, 20.0, 20.0])
+
+    def test_a_mode_that_sets_no_val_loss_scores_with_its_training_loss(self):
+        # `CLIPS` sets none, and must keep behaving exactly as it did.
+        from src.training.schedule import CLIPS
+
+        self.assertIs(CLIPS.scoring, CLIPS.loss)
 
 
 class TestAnchoring(unittest.TestCase):

@@ -63,6 +63,7 @@ from src.training.aerial import (  # noqa: E402
 )
 from src.training.datasets import Request, describe, parse  # noqa: E402
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
+from src.training.image_loop import TRAIN_PROMPTS  # noqa: E402
 from src.training.schedule import Schedule, images, run_stages  # noqa: E402
 
 INDEX_FILE = "instances.json"
@@ -175,7 +176,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--per-image", type=int, default=1, help="Windows sampled per frame.")
     p.add_argument("--max-instances", type=int, default=8,
                    help="Prompts per window. One encode covers all of them.")
-    p.add_argument("--jitter", type=int, default=32)
+    p.add_argument("--jitter", type=int, default=32,
+                   help="Pixels the 512 crop window may slide around the "
+                        "instance it was placed on. This is the *window*, not "
+                        "the prompt -- see --prompt.")
+    p.add_argument("--prompt", default="box", choices=TRAIN_PROMPTS,
+                   help="How a ground-truth box becomes the prompt the loop "
+                        "trains against. `box` is the exact rectangle and is "
+                        "what every run before 12_encoder_probe.ipynb used; "
+                        "`mix` gives half the prompts a jittered box instead. "
+                        "The probe measured 08's checkpoints at 0.057-0.100 "
+                        "IoU *below* stock EdgeTAM under a loose box while "
+                        "beating it under an exact one, which is what `mix` "
+                        "exists to fix -- and it is the prompt distribution "
+                        "stage C will actually see, since only frame 0 is "
+                        "prompted by hand. Validation always scores under "
+                        "`box` whatever this is set to.")
+    p.add_argument("--prompt-jitter", type=float, default=0.3,
+                   help="With --prompt jitter or mix: how far each edge may "
+                        "move, as a fraction of its own side. Matches "
+                        "eval_instances.py's default, so a model trained "
+                        "against this distribution is scored against it.")
     p.add_argument("--min-area", type=int, default=48)
     p.add_argument("--min-side", type=int, default=4)
     p.add_argument("--max-area", type=float, default=0.9)
@@ -207,6 +228,12 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     from src.training.image_loop import ImageSplit, auto_batch_size
+
+    # Seeded off the run's own seed, so a mixed-prompt run reproduces, and
+    # created on the training device because `mix_boxes` and `jitter_boxes`
+    # draw into a tensor that already sits beside the batch.
+    prompts = torch.Generator(device=args.device)
+    prompts.manual_seed(args.seed)
 
     gates = InstanceGates(min_area=args.min_area, min_side=args.min_side,
                           max_area=args.max_area, fill=args.fill)
@@ -256,7 +283,10 @@ def main(argv: list[str] | None = None) -> int:
             "stage": "instances", "train_frames": len(splits["train"]),
             "train_instances": instances, "sources": train.sources,
             "per_image": args.per_image, "max_instances": args.max_instances,
-            "anchor_weight": args.anchor_weight, "seed": args.seed}
+            "anchor_weight": args.anchor_weight, "seed": args.seed,
+            "prompt": args.prompt,
+            "prompt_jitter": (args.prompt_jitter
+                              if args.prompt in ("jitter", "mix") else 0.0)}
 
     if args.method == "lora":
         from src.training import lora
@@ -295,7 +325,10 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     result = run_stages(model, train, val, schedule, freeze=freeze, save=save,
                         device=args.device, progress=_tqdm(),
-                        loop=images(anchor, args.anchor_weight))
+                        loop=images(anchor, args.anchor_weight,
+                                    prompt=args.prompt,
+                                    jitter=args.prompt_jitter,
+                                    generator=prompts))
     result |= {"seconds": round(time.time() - started, 1),
                "checkpoint": str(args.out),
                "peak_gib": (torch.cuda.max_memory_allocated() / 2**30

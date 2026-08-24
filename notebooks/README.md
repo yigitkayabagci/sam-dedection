@@ -48,6 +48,30 @@ single centre `point`) and shrinks the targets (a wider crop resized to the
 same 512) and re-reads the same four checkpoints under each. It is generated
 by `tools/build_probe_notebook.py`, not by `build_notebooks.py`.
 
+**12 has been run, and it changed 07–11.** Three findings, in order of size:
+
+1. **Every trained checkpoint is *worse* than stock under a loose box** —
+   0.057 to 0.100 IoU below it, at both window scales and under all three
+   training methods, while beating it under an exact one. The cause was that
+   the loop had no prompt knob at all: every prompt it ever built was a
+   pixel-exact ground-truth rectangle. This is the largest single effect in the
+   probe's table and it points the wrong way for stage C, where only frame 0 is
+   prompted by hand and every frame after it is prompted by the memory path's
+   own drifting estimate. `PROMPT = "mix"` is the fix and is now the default.
+2. **The anchor was eating stage A rather than protecting it.** `distilled+ft`
+   scores 0.8670 at `ANCHOR_WEIGHT = 0` against 0.8536 at 0.5 — and a plain
+   fine-tune with no stage A at all scores 0.8611. So stage A did pay; the
+   default is now 0.
+3. **The prompt was not hiding a gain at native scale, but it was at half
+   scale.** At window 512 the box and point gains match (+0.017 / +0.020 for
+   the fine-tune). At window 1024, with the targets halved, point pulls away:
+   +0.086 against box's +0.039. The encoder work is real and it lives on the
+   scale axis — which VTUAV cannot test, because 0 of its 420 held-out
+   instances fall under 32 px even halved. That question belongs to 07's
+   SegFly and Kust4K.
+
+None of it measures tracking. 12 answered what it was built to ask.
+
 Run them on separate runtimes at once. They write to different Drive folders
 (`edgetam-encoder/{all,vtuav,drone}`), and `split_frames` seeds each dataset by
 name rather than by position, so **all three hold out the same VTUAV
@@ -115,6 +139,10 @@ Each is argued where it is made; this is the index.
 | distillation for pretraining, not MAE | 07, `src/training/distill.py` | MAE masks tokens and needs a ViT; the student side of a distillation loss is architecture-free |
 | staged A-then-B, not one summed multi-teacher loss | `docs/encoder_arastirma.md` | the two stages' data differ by two orders of magnitude; staging also removes the loss-weighting problem outright |
 | an anchor term instead, during stage B | `src/training/image_loop.py` | stage A moves the encoder on 1.7 M pairs and stage B can undo it on 50 k; the reference is the model's own frozen copy, not a foundation model |
+| …but off by default, because it was measured | 12, `tools/train_encoder.py` | anchor 0 reached 0.8670 where 0.5 reached 0.8536 and a plain fine-tune 0.8611 — the term meant to protect stage A was the thing eating it |
+| the training prompt is mixed, not the exact box | 12, `src/training/image_loop.py` | trained on pixel-perfect boxes alone, every checkpoint fell 0.06–0.10 IoU *below stock* the moment the box was loose; in tracking, every frame after the first is prompted by a drifting estimate |
+| …but validation still scores under `box` | `src/training/schedule.py` | that number selects which epoch becomes the checkpoint, and a random prompt would put a second moving part into it |
+| box and jitter are mixed per instance, not per batch | `image_loop.mix_boxes` | one window contributes up to 8 prompts against a single encode; choosing per batch would correlate all of them |
 | the web-pretrained DINOv3, not the satellite one | `docs/encoder_arastirma.md` | DINOv3's own results: satellite pretraining wins on metric tasks, web wins on segmentation and detection |
 | Anti-UAV410, not HIT-UAV or LSOTB-TIR | 01, 02 | 640×512 mono thermal video with a per-frame `exist` flag, and a 512 crop is native pixels |
 | a labelling stride, not fewer sequences | `src/training/labels.py` | a skipped frame keeps `exist` and its box; at 25 fps its mask was nearly its neighbour's |

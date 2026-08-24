@@ -73,10 +73,25 @@ class Loop:
     `stream(split, batch, seed, limit, device, workers, depth)` yields batches;
     `loss(model, batch)` returns `(loss, terms)`. Nothing else about a run is
     allowed to depend on which mode it is in.
+
+    `val_loss` is what `validate` scores with, and it exists because the
+    training loss is allowed to be **random** while the validation number is
+    not. A mixed prompt (`image_loop.mix_boxes`) draws a fresh box-or-jitter
+    choice per row per batch; running that inside `validate` would make the
+    number move between epochs for a reason that is not the model, and the
+    epoch-selection rule reads that number to decide which checkpoint to keep.
+    Left `None` it is `loss`, so a mode with a deterministic loss says nothing
+    and behaves exactly as before.
     """
 
     stream: Callable
     loss: Callable
+    val_loss: Callable | None = None
+
+    @property
+    def scoring(self) -> Callable:
+        """What `validate` calls: `val_loss` if a mode set one, else `loss`."""
+        return self.val_loss or self.loss
 
 
 def _clip_stream(split: Split, batch: int, seed: int | None, limit: int | None,
@@ -94,7 +109,9 @@ def _clip_loss(model, batch):
 CLIPS = Loop(stream=_clip_stream, loss=_clip_loss)
 
 
-def images(anchor=None, anchor_weight: float = 0.0) -> Loop:
+def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
+           jitter: float = 0.0,
+           generator: "torch.Generator | None" = None) -> Loop:
     """The image-mode `Loop`, imported lazily.
 
     `image_loop` pulls in `aerial`, which pulls in nothing heavy but does bind
@@ -105,11 +122,22 @@ def images(anchor=None, anchor_weight: float = 0.0) -> Loop:
     `anchor` is a frozen copy of the model as this stage started; with a
     non-zero `anchor_weight` the loss gains a term for how far the encoder has
     drifted from it. See `image_loop.image_losses`.
+
+    `prompt` is how a ground-truth box becomes the prompt the loop trains
+    against -- `box` reproduces every run before `12_encoder_probe.ipynb`, and
+    `mix` is what the probe's jitter regression argues for. **Validation always
+    scores under `box`**, whatever training uses: the point of the validation
+    number is that a change in it is the model, and a random prompt would put a
+    second moving part into a number that selects checkpoints. It also keeps
+    the number comparable to every run taken before this knob existed.
     """
     from .image_loop import image_losses, stream
 
     return Loop(stream=stream,
                 loss=lambda model, batch: image_losses(
+                    model, batch, anchor=anchor, anchor_weight=anchor_weight,
+                    prompt=prompt, jitter=jitter, generator=generator),
+                val_loss=lambda model, batch: image_losses(
                     model, batch, anchor=anchor, anchor_weight=anchor_weight))
 
 
@@ -132,7 +160,7 @@ def validate(
         for batch in loop.stream(split, schedule.batch, 1, schedule.val_batches,
                                  device, schedule.workers, schedule.depth):
             with _autocast(device):
-                losses.append(float(loop.loss(model, batch)[0]))
+                losses.append(float(loop.scoring(model, batch)[0]))
     return float(np.mean(losses)) if losses else float("nan")
 
 

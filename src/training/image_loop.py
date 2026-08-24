@@ -142,7 +142,57 @@ def collate(samples: Sequence[Sample], device: str = "cpu",
 # --------------------------------------------------------------------------
 
 
+# The measurement ladder, weakest last -- what `eval_instances.py` offers and
+# what `12_encoder_probe.ipynb` scores a checkpoint through.
 PROMPTS = ("box", "jitter", "point")
+# The same three plus one that only makes sense while training; see `mix_boxes`.
+# Kept apart from `PROMPTS` so a training-only mode can never be mistaken for a
+# rung on the ladder a published number was taken from.
+TRAIN_PROMPTS = PROMPTS + ("mix",)
+
+
+def mix_boxes(boxes: torch.Tensor, fraction: float, share: float = 0.5,
+              generator: torch.Generator | None = None) -> torch.Tensor:
+    """Each box either exact or jittered, chosen per row.
+
+    **Training on nothing but exact boxes is what `12_encoder_probe.ipynb`
+    caught.** All four of 08's checkpoints score 0.057 to 0.100 IoU *below*
+    stock EdgeTAM under a jittered prompt, at both window scales and under all
+    three training methods, while beating it under an exact box. The cause is
+    not subtle: every prompt the loop has ever built came from a ground-truth
+    instance box, so the decoder learned box-to-mask as a tight geometric
+    mapping and answers a displaced box by faithfully segmenting the displaced
+    region. Stock EdgeTAM inherits SAM 2's prompt-noise augmentation and is
+    more forgiving.
+
+    That regression is the one that matters most for what comes next: in
+    tracking only frame 0 is prompted by hand, and every frame after it is
+    prompted by the memory path's own drifting estimate -- a jittered box by
+    another name. A checkpoint that loses a tenth of an IoU to a loose box is
+    the wrong thing to carry into stage C.
+
+    `share` of the rows keep their exact box, the rest are jittered, so the
+    model sees both distributions rather than trading one for the other. The
+    two are mixed **per row and not per batch** because one window contributes
+    up to `--max-instances` prompts against a single encode: per-batch choice
+    would correlate every prompt in a window and cut the effective number of
+    draws by that factor.
+
+    `point` is deliberately not in the mix. It builds one token where a box
+    builds two, so mixing it per row needs the prompt encoder's padding label,
+    which is a change to what a batch *is* rather than to what is in it. It
+    stays available as a whole-batch mode.
+    """
+    boxes = boxes.reshape(-1, 4).float()
+    if not fraction:
+        return boxes
+    moved = jitter_boxes(boxes, fraction, generator)
+    # Same idiom as `jitter_boxes`: drawn into a tensor that already sits on
+    # the boxes' device, so a CPU generator and a CUDA batch fail loudly here
+    # rather than silently sampling from somewhere else.
+    keep = torch.empty(boxes.shape[0], 1, device=boxes.device,
+                       dtype=boxes.dtype).uniform_(0.0, 1.0, generator=generator)
+    return torch.where(keep < float(share), boxes, moved)
 
 
 def build_prompt(boxes: torch.Tensor, prompt: str = "box",
@@ -150,19 +200,24 @@ def build_prompt(boxes: torch.Tensor, prompt: str = "box",
                  generator: torch.Generator | None = None) -> dict:
     """The `point_inputs` dict for one flat [N, 4] stack of boxes.
 
-    `box` is what every training run and every published number here used: the
-    ground-truth rectangle, exactly. `jitter` is the same box with each edge
-    moved by up to `jitter` of its own side, and `point` is a single click at
-    the centre. See `clip_loop.point_prompt` for why the weaker two are worth
-    scoring: they are what separates a question about the encoder from a
-    question about the prompt.
+    `box` is the ground-truth rectangle, exactly. `jitter` is the same box with
+    each edge moved by up to `jitter` of its own side, and `point` is a single
+    click at the centre. See `clip_loop.point_prompt` for why the weaker two
+    are worth scoring: they are what separates a question about the encoder
+    from a question about the prompt.
+
+    `mix` is the fourth, and it is for **training** rather than for scoring:
+    per row, either the exact box or a jittered one. `mix_boxes` says what it
+    is for.
     """
-    if prompt not in PROMPTS:
-        raise ValueError(f"prompt must be one of {PROMPTS}, got {prompt!r}")
+    if prompt not in TRAIN_PROMPTS:
+        raise ValueError(f"prompt must be one of {TRAIN_PROMPTS}, got {prompt!r}")
     if prompt == "point":
         return point_prompt(boxes)
     if prompt == "jitter":
         boxes = jitter_boxes(boxes, jitter, generator)
+    elif prompt == "mix":
+        boxes = mix_boxes(boxes, jitter, generator=generator)
     return box_prompt(boxes)
 
 
@@ -239,7 +294,9 @@ def propagate_image(model, images: torch.Tensor, boxes: torch.Tensor,
 
 
 def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
-                 anchor_weight: float = 0.0):
+                 anchor_weight: float = 0.0, prompt: str = "box",
+                 jitter: float = 0.0,
+                 generator: torch.Generator | None = None):
     """Propagate a batch and score every prompted instance in it.
 
     Every frame is scored -- there is no prompted frame to exclude the way
@@ -247,6 +304,13 @@ def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
     answer, and it is not: a box says *where*, and the target is the mask,
     which is the whole task. SAM 2's image pretraining is this and nothing
     else.
+
+    **`prompt` defaults to `box`, which is what every run before
+    `12_encoder_probe.ipynb` used, and the probe is why it is now a knob.**
+    A loop that only ever sees an exact ground-truth rectangle produces a
+    checkpoint that is worse than stock EdgeTAM the moment the rectangle is
+    loose -- measured, not supposed. `mix` is the setting that addresses it;
+    `mix_boxes` carries the numbers and the argument.
 
     **`anchor` is the answer to what stage A costs if stage B undoes it.**
     Pretraining moves the encoder over a large unlabelled set; stage B then
@@ -265,7 +329,8 @@ def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
     from .losses import Weights, instance_loss
 
     weights = weights or Weights()
-    outputs = propagate_image(model, batch.images, batch.boxes, batch.valid)
+    outputs = propagate_image(model, batch.images, batch.boxes, batch.valid,
+                              prompt, jitter, generator)
     targets = batch.masks.reshape(-1, *batch.masks.shape[-2:])[outputs["rows"]]
     loss, terms = instance_loss(outputs, targets, weights)
 
