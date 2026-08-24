@@ -142,10 +142,31 @@ class TestSegflyPalette(unittest.TestCase):
         # The release maps OccuFly's raw ontology onto the benchmark palette
         # and missed some pixels; those raw ids are ignored, never named as
         # classes and never things.
+        #
+        # **The list was two ids short until it was measured on both
+        # modalities.** It had been read off the thermal export alone; over
+        # 747 frames pulled from 16 parquet shards spanning both modalities,
+        # both cameras and every altitude, the RGB slice also carries Crane/35
+        # (46 of those frames) and one stray 10. `verify()` reported exactly
+        # those two as "not in the palette" -- the false alarm this list
+        # exists to prevent -- which is what a spec that ignores an id it
+        # never sees would never have shown.
         spec = SPECS["segfly"]
-        self.assertEqual(sorted(spec.ignore), [0, 5, 11, 12, 21])
+        self.assertEqual(sorted(spec.ignore), [0, 5, 10, 11, 12, 21, 35])
         self.assertFalse(set(spec.ignore) & set(spec.thing_ids))
-        self.assertFalse({5, 11, 12, 21} & set(spec.classes.values()))
+        self.assertFalse({5, 10, 11, 12, 21, 35} & set(spec.classes.values()))
+
+    def test_the_measured_value_set_raises_no_alarm(self):
+        # The exact histogram read off those 747 frames. Before 10 and 35 were
+        # added, this printed `!! 2 value(s) not in the palette`.
+        seen = {0: 110, 1: 281, 2: 424, 3: 557, 4: 330, 5: 252, 6: 648,
+                7: 695, 8: 536, 9: 450, 10: 1, 11: 21, 12: 84, 13: 265,
+                14: 86, 16: 343, 17: 439, 21: 49, 33: 377, 34: 399,
+                35: 46, 36: 226}
+        text = verify(seen, "segfly")
+        self.assertNotIn("!!", text)
+        self.assertIn("every value is a class id in the palette", text)
+        self.assertIn("6 leftover id(s)", text)
 
 
 @unittest.skipUnless(pq is not None, "pyarrow is not installed")

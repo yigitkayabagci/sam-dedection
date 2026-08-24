@@ -273,15 +273,24 @@ SPECS: dict[str, DatasetSpec] = {
                  "building": 16, "roof": 17, "parking_lot": 33,
                  "construction": 34, "truck": 36},
         things=("vehicle", "truck"),
-        # 0 is the authors' Unlabeled. The other four are **leftovers of their
-        # own remapping**, measured on the full 15 007-frame thermal export:
-        # the release maps OccuFly's 22 raw classes to this 16-id benchmark
-        # palette (Rock/5 and Cable Tower/22 into Ground Obstacle/9; Person,
-        # Bicycle, Cable, Crane into 0), but some pixels kept their raw ids.
-        # None is a thing class, so nothing here changes what trains -- listing
-        # them just keeps the palette check from crying wolf over ids the
-        # publisher meant to erase.
-        ignore=(0, 5, 11, 12, 21),
+        # 0 is the authors' Unlabeled. The other six are **leftovers of their
+        # own remapping**: the release maps OccuFly's 22 raw classes to this
+        # 16-id benchmark palette (Rock/5 and Cable Tower/22 into Ground
+        # Obstacle/9; Person/11, Bicycle/12, Cable/21, Crane/35 into 0), but
+        # some pixels kept their raw ids. None is a thing class, so nothing
+        # here changes what trains -- listing them just keeps the palette check
+        # from crying wolf over ids the publisher meant to erase.
+        #
+        # **35 and 10 were missing from this tuple and are the reason it was
+        # re-measured.** The earlier list came from the thermal export alone;
+        # read over 747 frames pulled from 16 parquet shards spanning both
+        # modalities, all nine scenes' worth of altitudes and both cameras,
+        # the RGB slice also carries Crane/35 (46 frames) and one stray 10
+        # (a single frame). `verify()` reported exactly those two as
+        # "not in the palette" -- the false alarm the ignore list exists to
+        # prevent. 10 has no name in the published mapping; it is listed here
+        # because it is demonstrably a leftover and not a class.
+        ignore=(0, 5, 10, 11, 12, 21, 35),
     ),
     # 500 sequences / ~1.7 M registered 1920x1080 RGB-T pairs (CVPR 2022).
     #
