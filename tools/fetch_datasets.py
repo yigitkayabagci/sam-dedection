@@ -94,6 +94,12 @@ class Recipe:
                                 # photographic columns instead of PNG
     spread: bool = False        # hub recipes: a capped export samples evenly
                                 # spaced shards instead of the first ones
+    snapshot: str | None = None  # a Hub repo of *plain files* (not parquet):
+                                # fetched with snapshot_download, each part's
+                                # `into` used as its allow_pattern
+    stream: bool = False        # the parts are consecutive slices of ONE
+                                # tar.gz: never saved to disk, decompressed
+                                # straight off the network (see LASHER)
     extras: tuple[tuple[str, str], ...] = ()   # (filename, figshare file id)
                                 # small sidecar files written into the dataset
                                 # root -- manifests the reader needs, not data
@@ -322,9 +328,84 @@ SEGFLY_RGB = Recipe(
     spread=True,
 )
 
+# Verified 2026-08: the dataset *is* the git repository (annotations in
+# normal_json/, images under normal_json/{train,val,test}), 418 MB by GitHub's
+# own size field, CC-BY-4.0. The archive endpoint streams a zip it builds on
+# the fly, so there is no content-length, no md5 and no resume -- acceptable at
+# this size, and the alternative mirrors are worse: Kaggle needs an API token,
+# and the Roboflow re-export on the Hub keeps only the person class of four.
+HITUAV = Recipe(
+    name="hituav",
+    note="2 898 thermal 640x512 frames, 24 899 boxes over person/car/bicycle/"
+         "other-vehicle at 80-130 m (CC-BY-4.0); the git repo is the dataset",
+    parts=(
+        Part("hituav",
+             url="https://github.com/suojiashun/HIT-UAV-Infrared-Thermal-"
+                 "Dataset/archive/refs/heads/main.zip"),
+    ),
+)
+
+# Verified 2026-08: the authors distribute RGBT234 through Baidu only
+# (pan.baidu.com, password b05o), which a Colab runtime cannot answer. The Hub
+# mirror `xche32/rgbt234` is one anonymous tar.gz behind an LFS endpoint that
+# answers 206 to a range request, so it resumes. Third-party mirror, so the
+# notebook counts what arrived -- 234 sequences, visible/ and infrared/ halves,
+# a visible.txt *and* an infrared.txt per sequence -- before anything trusts it.
+RGBT234 = Recipe(
+    name="rgbt234",
+    note="234 aligned RGB-T videos / 233.8 K frame pairs, boxes annotated per "
+         "modality (visible.txt + infrared.txt)",
+    parts=(
+        Part("rgbt234", size=7_665_568_241,
+             url="https://huggingface.co/datasets/xche32/rgbt234/resolve/"
+                 "main/rgbt234.tar.gz"),
+    ),
+)
+
+# LasHeR is the same layout scaled up -- 1 224 sequences, 730 K+ aligned pairs
+# -- and the same Baidu-only problem. The Hub mirror `xche32/lasher` is one
+# tar.gz cut into five ~50 GB slices, **~224 GB in all**, which is more than a
+# Colab disk. So: every part defaults to off, and fetching them does not stage
+# archives at all -- the slices are read off the network in order and
+# decompressed as one stream, extracting only the sequences asked for
+# (`--sequences`), so the disk cost is the frames kept and nothing else. The
+# network cost is still reading the stream up to the last wanted sequence;
+# there is no index to seek by in a .tar.gz. A full harvest belongs on a
+# machine with a real disk, and `docs/mask_pool_plan.md` says so out loud.
+LASHER = Recipe(
+    name="lasher",
+    note="1 224 aligned RGB-T videos / 730 K+ pairs, boxes per modality "
+         "(~224 GB; streamed, sequence-selective, never fetched by default)",
+    stream=True,
+    parts=tuple(
+        Part(f"part_{suffix}", default=False,
+             size=53_687_091_200 if suffix != "ae" else 9_350_475_511,
+             url=f"https://huggingface.co/datasets/xche32/lasher/resolve/"
+                 f"main/lasher.tar.gz.part.{suffix}")
+        for suffix in ("aa", "ab", "ac", "ad", "ae")),
+)
+
+# Verified 2026-08: plain files on the Hub (images/ + labels/ per split, the
+# ultralytics YOLO conversion), not parquet -- so it goes through
+# snapshot_download with each part's `into` as the allow_pattern. Third-party
+# mirror of the VisDrone2019-DET release; the notebook probes the class
+# histogram against `boxes.VISDRONE_NAMES` before labelling anything.
+VISDRONE = Recipe(
+    name="visdrone",
+    note="VisDrone2019-DET: 6 471 train / 548 val aerial RGB frames, dense "
+         "small-object boxes over 10 classes (YOLO-converted mirror)",
+    snapshot="banu4prasad/VisDrone-Dataset",
+    parts=(
+        Part("train", into="VisDrone2019-DET-train/**", size=1_500_000_000),
+        Part("val", into="VisDrone2019-DET-val/**", size=80_000_000),
+        Part("test-dev", into="VisDrone2019-DET-test-dev/**",
+             size=300_000_000, default=False),
+    ),
+)
+
 RECIPES: dict[str, Recipe] = {
     r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, CALTECH, SEGFLY,
-                        SEGFLY_RGB)}
+                        SEGFLY_RGB, HITUAV, RGBT234, LASHER, VISDRONE)}
 
 
 # --------------------------------------------------------------------------
@@ -392,7 +473,7 @@ QUOTA = "quota"
 
 
 def staged(name: str, search: SequenceABC[str]) -> Path | None:
-    """A copy of `<name>.zip` already sitting somewhere we can read.
+    """A copy of `<name>.zip` (or `.tar.gz`) already sitting somewhere we can read.
 
     The escape hatch for Drive's download quota, and the reason it works: a
     file in *your own* Drive is not a widely-shared file, so reading it through
@@ -401,9 +482,10 @@ def staged(name: str, search: SequenceABC[str]) -> Path | None:
     into the other.
     """
     for folder in search:
-        candidate = Path(folder).expanduser() / f"{name}.zip"
-        if candidate.is_file() and candidate.stat().st_size > 1 << 20:
-            return candidate
+        for suffix in (".zip", ".tar.gz", ".tgz"):
+            candidate = Path(folder).expanduser() / f"{name}{suffix}"
+            if candidate.is_file() and candidate.stat().st_size > 1 << 20:
+                return candidate
     return None
 
 
@@ -567,16 +649,122 @@ def masked_members(archive: zipfile.ZipFile) -> list[str]:
 
 def extract(archive_path: Path, dest: Path, into: str = "",
             frames: str = "all", quiet: bool = False) -> int:
-    """Unpack into `dest/into`, returning how many files were written."""
+    """Unpack into `dest/into`, returning how many files were written.
+
+    Zip or tar.gz, told apart by the file itself rather than its name -- a
+    staged copy may have been renamed. Tars are read in **stream** mode
+    (`r|gz`): `getmembers()` on a compressed tar decompresses the whole file
+    once just to list it and a second time to extract, which on RGBT234's
+    7.7 GB doubles a ten-minute step for nothing.
+    """
     target = dest / into if into else dest
     target.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        members = (masked_members(archive) if frames == "masked"
-                   else archive.namelist())
-        if not quiet:
-            print(f"   extracting {len(members)} entries -> {target}")
-        archive.extractall(target, members=members)
-    return len(members)
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path) as archive:
+            members = (masked_members(archive) if frames == "masked"
+                       else archive.namelist())
+            if not quiet:
+                print(f"   extracting {len(members)} entries -> {target}")
+            archive.extractall(target, members=members)
+        return len(members)
+
+    import tarfile
+
+    if not tarfile.is_tarfile(archive_path):
+        raise RuntimeError(
+            f"{archive_path}: neither a zip nor a tar. A download this size "
+            f"that is not an archive is usually an HTML error page -- delete "
+            f"it and run the cell again.")
+    count = 0
+    mode = "r|gz" if archive_path.name.endswith(("gz", "tgz")) else "r|"
+    with tarfile.open(archive_path, mode) as archive:
+        for member in archive:
+            _tar_extract(archive, member, target)
+            count += 1
+            if not quiet and count % 20_000 == 0:
+                print(f"   {count} entries so far...", flush=True)
+    if not quiet:
+        print(f"   extracted {count} entries -> {target}")
+    return count
+
+
+def _tar_extract(archive, member, target: Path) -> None:
+    """One member, through the stdlib's traversal filter where it exists."""
+    try:
+        archive.extract(member, target, filter="data")
+    except TypeError:                     # Python without the filter kwarg
+        archive.extract(member, target)
+
+
+def stream_extract(urls: SequenceABC[str], dest: Path,
+                   sequences: SequenceABC[str] | None = None,
+                   quiet: bool = False) -> int:
+    """Extract one tar.gz served as consecutive URL slices, saving no archive.
+
+    Built for LasHeR's five ~50 GB slices: concatenating them first needs
+    224 GB of disk *before* extraction starts, which no Colab has. This reads
+    the slices in order as a single gzip stream and hands it to `tarfile` in
+    stream mode, so the only disk spent is on the members kept.
+
+    `sequences` filters by path component -- only members whose path contains
+    one of the names are written. The stream still has to be *read* up to the
+    last member wanted (a tar.gz has no index to seek by), so this trades
+    network time for disk, never the reverse. Interruption loses the stream;
+    there is no resume, and the caller is told so rather than surprised.
+    """
+    import io
+    import tarfile
+
+    import requests
+
+    wanted = set(sequences) if sequences else None
+
+    class _Slices(io.RawIOBase):
+        """The slices, presented as one read-only byte stream."""
+
+        def __init__(self) -> None:
+            self.remaining = list(urls)
+            self.session = requests.Session()
+            self.current = None
+
+        def readable(self) -> bool:
+            return True
+
+        def _next(self):
+            if not self.remaining:
+                return None
+            url = self.remaining.pop(0)
+            if not quiet:
+                print(f"   streaming {url.rsplit('/', 1)[-1]}", flush=True)
+            response = self.session.get(url, stream=True, timeout=120)
+            response.raise_for_status()
+            return response.raw
+
+        def readinto(self, buffer) -> int:
+            while True:
+                if self.current is None:
+                    self.current = self._next()
+                    if self.current is None:
+                        return 0
+                got = self.current.read(len(buffer))
+                if got:
+                    buffer[:len(got)] = got
+                    return len(got)
+                self.current = None       # this slice is spent; move on
+
+    dest.mkdir(parents=True, exist_ok=True)
+    kept = 0
+    with tarfile.open(fileobj=io.BufferedReader(_Slices(), 1 << 22),
+                      mode="r|gz") as archive:
+        for member in archive:
+            if wanted is not None and not (wanted & set(Path(member.name).parts)):
+                continue
+            _tar_extract(archive, member, dest)
+            kept += 1
+            if not quiet and kept % 5_000 == 0:
+                print(f"   {kept} members kept so far...", flush=True)
+    print(f"   kept {kept} members -> {dest}")
+    return kept
 
 
 # Where a hand-staged archive is looked for before the network is touched.
@@ -590,7 +778,12 @@ STAGING = ("/content/drive/MyDrive/datasets",
 def fetch_part(part: Part, dest: Path, work: Path, frames: str,
                keep: bool, quiet: bool,
                staging: SequenceABC[str] = STAGING) -> None:
-    archive = work / f"{part.name}.zip"
+    # The work file keeps the server's own basename where there is one: naming
+    # a tar.gz `<part>.zip` would send `extract` down the wrong branch, and the
+    # sniff-by-magic there is a backstop, not an invitation.
+    basename = (Path(part.url.split("?")[0]).name if part.url
+                else f"{part.name}.zip")
+    archive = work / basename
     print(f"-- {part.name}"
           + (f"  ({human(part.size)})" if part.size else ""))
 
@@ -620,11 +813,42 @@ def fetch_part(part: Part, dest: Path, work: Path, frames: str,
 def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
           frames: str = "all", keep: bool = False, quiet: bool = False,
           limit: int | None = None, stage: str | Path | None = None,
+          sequences: SequenceABC[str] | None = None,
           staging: SequenceABC[str] = STAGING) -> Path:
-    """One dataset into `dest`, in the layout `SPECS[name]` globs."""
+    """One dataset into `dest`, in the layout its reader expects."""
     recipe = RECIPES[name]
     dest = Path(dest).expanduser()
     print(f"\n=== {recipe.name}: {recipe.note}")
+
+    if recipe.snapshot:
+        from huggingface_hub import snapshot_download
+
+        chosen = recipe.chosen(parts)
+        patterns = [p.into for p in chosen]
+        print(f"snapshot of {recipe.snapshot}: {', '.join(p.name for p in chosen)}"
+              f" (~{human(sum(p.size for p in chosen))})")
+        snapshot_download(repo_id=recipe.snapshot, repo_type="dataset",
+                          local_dir=dest, allow_patterns=patterns)
+        return dest
+
+    if recipe.stream:
+        chosen = recipe.chosen(parts)
+        if not chosen:
+            print(
+                "nothing fetched: every slice of this set defaults to OFF "
+                f"because the whole of it is ~{human(sum(p.size for p in recipe.parts))}.\n"
+                "Ask for it explicitly -- all five slices, ideally with a "
+                "sequence filter:\n"
+                "    python tools/fetch_datasets.py lasher --dest <dest> "
+                "--parts part_aa part_ab part_ac part_ad part_ae "
+                "--sequences <name> [...]\n"
+                "The stream is read start to finish (a tar.gz has no index), "
+                "so the network cost is the slices asked for even when few "
+                "sequences are kept.")
+            return dest
+        stream_extract([p.url for p in chosen], dest, sequences=sequences,
+                       quiet=quiet)
+        return dest
 
     if recipe.hub:
         from tools.export_hf_dataset import COLUMNS, export, verify
@@ -689,7 +913,12 @@ def report(name: str, dest: Path, modality: str = "thermal") -> str:
     from src.training.aerial import SPECS, describe_layout, list_frames, list_pairs
 
     recipe = RECIPES.get(name)
-    spec = SPECS[(recipe.spec or name) if recipe else name]
+    spec_name = (recipe.spec or name) if recipe else name
+    if spec_name not in SPECS:
+        # A box dataset -- no mask spec to glob by. Say what landed, in the
+        # shape its own reader (src/training/boxes.py) will look for it.
+        return f"\n--- {dest}\n{describe_layout(dest)}"
+    spec = SPECS[spec_name]
     lines = [f"\n--- {dest}"]
     try:
         frames = list_frames(dest, spec, modality)
@@ -729,20 +958,26 @@ def main(argv: list[str] | None = None) -> int:
                    help="Hub datasets only: after exporting, zip the result "
                         f"into this folder (default {STAGING[0]}) so later "
                         "runtimes read it from there instead of re-exporting.")
+    p.add_argument("--sequences", nargs="*", default=None,
+                   help="Streamed datasets (lasher): keep only members whose "
+                        "path contains one of these sequence names.")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
     names = sorted(RECIPES) if args.dataset == "all" else [args.dataset]
     folders = {"kust4k": "Kust4K", "vtuav_vis": "VTUAV_VIS",
                "dronevehicle": "DroneVehicle", "caltech": "Caltech",
-               "segfly": "SegFly", "segfly_rgb": "SegFly_RGB"}
+               "segfly": "SegFly", "segfly_rgb": "SegFly_RGB",
+               "hituav": "HIT_UAV", "rgbt234": "RGBT234",
+               "lasher": "LasHeR", "visdrone": "VisDrone"}
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
         fetch(name, dest, tuple(args.parts) if args.parts else None,
               frames=args.frames, keep=args.keep, quiet=args.quiet,
-              limit=args.limit, stage=args.stage)
+              limit=args.limit, stage=args.stage, sequences=args.sequences)
         print(report(name, dest,
-                     "rgb" if name in ("vtuav_vis", "segfly_rgb") else "thermal"))
+                     "rgb" if name in ("vtuav_vis", "segfly_rgb", "visdrone")
+                     else "thermal"))
 
     free = shutil.disk_usage(args.root if not args.dest else args.dest).free
     print(f"\n{human(free)} of disk left.")

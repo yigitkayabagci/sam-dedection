@@ -4,5 +4,7 @@
  "09_encoder_stage_a_dronevehicle.ipynb": "fa7a7d58eb",
  "10_encoder_teacher_dinov3.ipynb": "03e007018b",
  "11_encoder_rgb_mixed.ipynb": "a38eccc002",
- "12_encoder_probe.ipynb": "52383ab83c"
+ "12_encoder_probe.ipynb": "52383ab83c",
+ "13_rgb_mask_pool.ipynb": "d6e99551d0",
+ "14_thermal_mask_pool.ipynb": "e5293f2b3a"
 }

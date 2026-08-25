@@ -1,8 +1,8 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twelve notebooks, meant for Colab. Everything they orchestrate lives in `src/`
-and `tools/` and is unit-tested without a GPU — the notebooks are the recipe,
-not the implementation.
+Fourteen notebooks, meant for Colab. Everything they orchestrate lives in
+`src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
+recipe, not the implementation.
 
 | | notebook | produces | needs |
 |---|---|---|---|
@@ -18,6 +18,8 @@ not the implementation.
 | 10 | `10_encoder_teacher_dinov3.ipynb` | the same, with stage A distilled from DINOv3 | a Hugging Face token — DINOv3 is gated |
 | 11 | `11_encoder_rgb_mixed.ipynb` | the same, with VTUAV's RGB half mixed into the batches | **nothing** — the RGB frames are already in VTUAV's archives |
 | 12 | `12_encoder_probe.ipynb` | whether 07–11's scores were measuring the encoder at all | **08**, for its checkpoints and its instance index |
+| 13 | `13_rgb_mask_pool.ipynb` | an aerial-RGB mask pool: VisDrone boxes → gated teacher masks, on your Drive | **nothing** — it downloads VisDrone and Kust4K's RGB half itself; SAM 3 wants an HF token |
+| 14 | `14_thermal_mask_pool.ipynb` | the **thermal** mask pool: HIT-UAV + DroneVehicle boxes and RGBT234 masklets, with the thermal-vs-RGB-prompt route *measured* first | **nothing** — it downloads all four sets itself; SAM 3 wants an HF token |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -71,6 +73,29 @@ by `tools/build_probe_notebook.py`, not by `build_notebooks.py`.
    SegFly and Kust4K.
 
 None of it measures tracking. 12 answered what it was built to ask.
+
+**13 and 14 are a supply line, not an experiment.** Both are generated from
+`tools/build_pool_notebooks.py` and neither trains anything: they turn
+box-annotated datasets into `(image, box prompt, mask)` supervision through a
+strong promptable teacher — `facebook/sam3` by default (gated,
+transformers ≥ 5), `facebook/sam2.1-hiera-large` one string away (ungated,
+Apache-2.0), `facebook/sam3.1` measured and rejected (checkpoint-only, no
+transformers classes, and its Object Multiplex throughput win never applies
+to a one-box-per-crop labeller). The mechanics are `labels.py`'s, reused
+whole: zoom crops, the four gates, the run-length store. 13 is the RGB side
+(VisDrone; the teacher on home ground). 14 is the branch this project is for,
+and its first real output is a **measurement**: on Kust4K's drawn instances
+it scores the teacher prompted on thermal pixels against the teacher prompted
+on the registered RGB twin — per class, per size — and only then harvests
+HIT-UAV and DroneVehicle by the winning route, plus RGBT234's 234 aligned
+sequences as masklets (prompted on `visible.txt`, **gated on
+`infrared.txt`**, which is what catches the registration's residual). The
+pools are stage B's food and the masklets stage C's; wiring them into 07's
+`DATASETS` is a deliberate follow-up, so a pool can be inspected and staged
+once, then reused by every run after it. One contamination rule they create:
+**AeroVIS is VisDrone re-labelled**, so a model trained on 13's pool cannot
+be evaluated on AeroVIS — UAVScenes and MVUAV stay clean.
+`docs/mask_pool_plan.md` argues the whole design.
 
 Run them on separate runtimes at once. They write to different Drive folders
 (`edgetam-encoder/{all,vtuav,drone}`), and `split_frames` seeds each dataset by
@@ -164,7 +189,7 @@ Everything these notebooks call is tested on CPU with **nothing installed but
 numpy and torch** — no EdgeTAM, no GPU:
 
 ```bash
-python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill tests.test_datasets tests.test_notebooks
+python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill tests.test_datasets tests.test_notebooks tests.test_masklets tests.test_fetch_datasets tests.test_mask_pool
 ```
 
 `tests.test_loader` and the end-to-end labelling case in

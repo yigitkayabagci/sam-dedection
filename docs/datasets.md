@@ -211,6 +211,39 @@ Ders: **paleti ezberden yazma.** İkisi de makul görünen tahminlerdi.
 `probe_classes` indirilen maskelerde gerçekten hangi değerlerin olduğunu
 söylüyor; notebook'ların bunun için bir hücresi var.
 
+## Havuz kaynakları — kutu etiketli setler (defter 13/14)
+
+Yukarıdaki eleme ölçütü (2) — piksel maskesi — bu setlerde **bilerek**
+aranmıyor: maske havuzu boru hattı (`docs/mask_pool_plan.md`,
+`src/training/pool.py`) kutuyu güçlü bir öğretmene prompt olarak verip
+maskeyi kendisi üretiyor. Ölçüt burada: (1) gerçekten indirilebilir mi,
+(2) kutu yoğunluğu/kalitesi, (3) modalite.
+
+| Set | Ne | İndirme (2026-08 doğrulandı) | Defter |
+|---|---|---|---|
+| [VisDrone2019-DET](https://github.com/VisDrone/VisDrone-Dataset) | 6 471 train havadan RGB, 10 sınıf, yoğun küçük hedef | Resmî dağıtım kişi-başı Drive linkleri (Colab'da kota); HF aynası `banu4prasad/VisDrone-Dataset` düz dosya, `snapshot_download` | 13 |
+| [HIT-UAV](https://github.com/suojiashun/HIT-UAV-Infrared-Thermal-Dataset) | 2 898 termal 640×512, 24 899 kutu (insan/araba/bisiklet/diğer-araç), 80–130 m, CC-BY-4.0 | **Git reposu verinin kendisi** (~0,4 GB, codeload zip); COCO json `normal_json/annotations/` | 14 |
+| [RGBT234](https://github.com/mmic-lcl/Datasets-and-benchmark-code) | 234 hizalı RGB-T video / 233,8 K çift; **modalite başına ayrı kutu** (`visible.txt` + `infrared.txt`) | Resmî: Baidu-only. HF aynası `xche32/rgbt234`: tek 7,67 GB tar.gz, range destekli | 14 (masklet) |
+| [LasHeR](https://github.com/BUGPLEASEOUT/LasHeR) | 1 224 hizalı dizi / 730 K+ çift, aynı düzen | Resmî: Baidu/TeraBox. HF aynası `xche32/lasher`: 5 parçalı tar.gz **~224 GB** — Colab diskini aşar; fetcher akış halinde, dizi seçmeli açıyor (`--sequences`) | 14 (ek; varsayılan değil) |
+
+Üç not:
+
+1. **Aynalar üçüncü şahıs.** Defterlerin probe hücreleri geleni *sayarak*
+   doğruluyor (kare/kutu/sınıf histogramı, RGBT234'te dizi sayısı ≥ 200
+   asserti); raporlara öğretmenle birlikte kaynak da yazılıyor.
+2. **AeroVIS çakışması** (yukarıdaki tabloya ek): 13'ün havuzu VisDrone'dan
+   üretildiği için, bu havuzla eğitilen bir model AeroVIS'te **ölçülemez** —
+   kare kare aynı veri. Temiz video değerlendirmesi UAVScenes/MVUAV'da kalır.
+3. **DroneVehicle** iki defterde de kullanılabilir (RGB yarısı 13'te isteğe
+   bağlı, termal yarısı 14'te varsayılan) — zaten `fetch_datasets.py`'deydi;
+   OBB poligonları dik zarfa çevrilir, 100 px beyaz bant okuma anında kesilir.
+
+```
+python tools/fetch_datasets.py visdrone --dest /content/data/VisDrone
+python tools/fetch_datasets.py hituav   --dest /content/data/HIT_UAV
+python tools/fetch_datasets.py rgbt234  --dest /content/data/RGBT234
+```
+
 ## Mevcut referans
 
 [Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) (2023 · TPAMI) —

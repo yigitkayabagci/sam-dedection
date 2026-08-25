@@ -270,32 +270,19 @@ def load_masks(path: str | Path) -> tuple[tuple[int, int], dict[int, np.ndarray]
 # --------------------------------------------------------------------------
 
 
-class Sam2Teacher:
-    """SAM 2.1 through `transformers`, prompted with one box on one crop.
+class _ImageTeacher:
+    """One box on one crop in; one mask and its self-reported IoU out.
 
     Deliberately thin: everything version-sensitive about the `transformers`
     API is in `mask_for`, and everything this module actually reasons about --
     geometry, gates, storage -- is independent of it and unit-tested.
+    Subclasses set `self.processor`, `self.model`, `self.model_id`,
+    `self.device` and `self._batched`, and nothing else -- the same contract
+    `masklets._VideoTeacher` holds one axis over.
     """
 
-    def __init__(
-        self,
-        model_id: str = "facebook/sam2.1-hiera-large",
-        device: str = "cuda",
-        dtype: str = "bfloat16",
-    ) -> None:
-        import torch
-        from transformers import Sam2Model, Sam2Processor
-
-        self.device = device
-        self.processor = Sam2Processor.from_pretrained(model_id)
-        self.model = Sam2Model.from_pretrained(
-            model_id, dtype=getattr(torch, dtype)
-        ).to(device).eval()
-        # Flipped to False the first time a batched call fails, so a
-        # `transformers` version whose processor will not take a list degrades
-        # to the per-crop path instead of taking the labelling run down with it.
-        self._batched = True
+    model_id: str
+    device: str
 
     def mask_for(self, crop_rgb: np.ndarray, box: np.ndarray) -> tuple[np.ndarray, float]:
         """`(mask, teacher_iou)` for one box, in the crop's own coordinates."""
@@ -367,6 +354,104 @@ class Sam2Teacher:
             best = int(row.argmax())
             out.append((masks[best].numpy() > 0, float(row[best])))
         return out
+
+
+class Sam2Teacher(_ImageTeacher):
+    """SAM 2.1's image predictor through `transformers`. The default.
+
+    Ungated, Apache-2.0, and needs nothing newer than transformers 4.56 --
+    the floor `requirements.txt` already documents.
+    """
+
+    def __init__(
+        self,
+        model_id: str = "facebook/sam2.1-hiera-large",
+        device: str = "cuda",
+        dtype: str = "bfloat16",
+    ) -> None:
+        import torch
+        from transformers import Sam2Model, Sam2Processor
+
+        self.model_id = model_id
+        self.device = device
+        self.processor = Sam2Processor.from_pretrained(model_id)
+        self.model = Sam2Model.from_pretrained(
+            model_id, dtype=getattr(torch, dtype)
+        ).to(device).eval()
+        # Flipped to False the first time a batched call fails, so a
+        # `transformers` version whose processor will not take a list degrades
+        # to the per-crop path instead of taking the labelling run down with it.
+        self._batched = True
+
+
+class Sam3Teacher(_ImageTeacher):
+    """SAM 3's promptable-visual-segmentation head, same call shape as SAM 2's.
+
+    `Sam3TrackerModel` is SAM 3's answer to exactly this job -- point, box and
+    mask prompts on a single image, one instance per prompt -- and its
+    processor keeps SAM 2's API (`input_boxes`, `iou_scores`,
+    `post_process_masks`), which is why this class is an `__init__` and nothing
+    more. The published gaps over SAM 2.1 on image PVS favour it; whether they
+    survive an aerial thermal crop is what the calibration cell measures,
+    per dataset, before a harvest trusts it.
+
+    The costs are the same three the video teacher documents: the repo is
+    gated, the classes need `transformers>=5.0`, and the SAM licence carries
+    use restrictions Apache-2.0 does not. `facebook/sam3.1` is **not** the
+    upgrade it sounds like: it ships as a bare checkpoint with no transformers
+    integration, and its headline feature (Object Multiplex) is throughput for
+    many objects per frame -- this teacher prompts one box on one crop.
+    """
+
+    def __init__(
+        self,
+        model_id: str = "facebook/sam3",
+        device: str = "cuda",
+        dtype: str = "bfloat16",
+    ) -> None:
+        import torch
+
+        try:
+            from transformers import Sam3TrackerModel, Sam3TrackerProcessor
+        except ImportError as exc:
+            raise SystemExit(
+                f"transformers has no Sam3Tracker classes ({exc}).\n"
+                f"SAM 3 landed in transformers 5.0.0 -- `pip install -U "
+                f"'transformers>=5'` -- or use the default SAM 2.1 teacher, "
+                f"which needs nothing.") from exc
+
+        self.model_id = model_id
+        self.device = device
+        self.processor = Sam3TrackerProcessor.from_pretrained(model_id)
+        self.model = Sam3TrackerModel.from_pretrained(
+            model_id, dtype=getattr(torch, dtype)
+        ).to(device).eval()
+        self._batched = True
+
+
+def teacher_class_for(model_id: str) -> type[_ImageTeacher]:
+    """Dispatch on the id, exactly as `masklets.teacher_class_for` does.
+
+    A separate flag could disagree with the checkpoint it describes; the id
+    cannot.
+    """
+    return Sam3Teacher if "sam3" in model_id.lower() else Sam2Teacher
+
+
+def build_image_teacher(model_id: str = "facebook/sam2.1-hiera-large",
+                        device: str = "cuda",
+                        dtype: str = "bfloat16") -> _ImageTeacher:
+    try:
+        return teacher_class_for(model_id)(model_id, device=device, dtype=dtype)
+    except OSError as exc:
+        raise SystemExit(
+            f"could not load the image teacher {model_id!r}.\n\n"
+            f"If it is a gated repository -- facebook/sam3 is -- open its "
+            f"model page once, accept the terms, then set a token:\n"
+            f"    from huggingface_hub import login; login()   # or export HF_TOKEN\n\n"
+            f"An ungated teacher that needs no account: "
+            f"--teacher facebook/sam2.1-hiera-large\n\n"
+            f"original error: {exc}") from exc
 
 
 def frames_to_label(

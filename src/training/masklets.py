@@ -82,9 +82,30 @@ class VideoSequence:
     boxes: np.ndarray
     exist: np.ndarray
     gt_masks: dict[str, dict[int, Path]] = field(default_factory=dict)
+    # A second set of per-frame boxes to *gate* against, when a dataset
+    # annotates each modality separately (LasHeR and RGBT234 ship visible.txt
+    # and infrared.txt). The teacher is prompted with `boxes`; the mask is
+    # stored for the thermal half, so the reference that decides whether it
+    # still sits on the target is the thermal annotation -- which is also the
+    # one check that catches the pair's residual misalignment. None means
+    # `boxes` serves both roles, which is VTUAV's single-annotation case.
+    gate_boxes: np.ndarray | None = None
 
     def __len__(self) -> int:
         return int(self.exist.shape[0])
+
+    def gate_reference(self) -> np.ndarray:
+        """Per-frame boxes the gates measure against.
+
+        Where the gate-side annotation is missing or degenerate for a frame
+        (a NaN row), the prompt-side box fills in: a frame the thermal
+        annotator skipped should fall back to the geometric check the
+        registration supports, not sail through ungated.
+        """
+        if self.gate_boxes is None:
+            return self.boxes
+        finite = np.isfinite(self.gate_boxes).all(axis=1)
+        return np.where(finite[:, None], self.gate_boxes, self.boxes)
 
 
 def read_boxes(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
@@ -154,6 +175,65 @@ def find_sequences(root: str | Path,
             name=seq_dir.name, root=seq_dir,
             frames={m: f[:count] for m, f in frames.items()},
             boxes=boxes[:count], exist=exist[:count], gt_masks=gt))
+    return sequences
+
+
+def find_rgbt_sequences(root: str | Path,
+                        names: SequenceABC[str] | None = None
+                        ) -> list[VideoSequence]:
+    """Every LasHeR/RGBT234-shaped sequence under `root`.
+
+    The two benchmarks share one layout -- `visible/` and `infrared/` frame
+    folders beside `visible.txt` and `infrared.txt`, each box file a per-frame
+    `x y w h` for its own modality -- so one finder covers both. The visible
+    annotation is the anchor (the teacher prompts on RGB, where it was
+    trained), and the infrared one, where present, becomes `gate_boxes`: the
+    mask is stored for the thermal half, so the thermal annotation is what it
+    is measured against.
+
+    A sequence without an `infrared/` folder is skipped loudly rather than
+    read: a masklet nobody can pair with a thermal frame is not what this
+    pipeline exists to produce. Frame files are matched to box rows by sorted
+    order, trimmed to the shorter of the two -- same tolerance, same reason,
+    as `find_sequences`.
+    """
+    root = Path(root)
+    sequences = []
+    for box_file in sorted(root.rglob("visible.txt")):
+        seq_dir = box_file.parent
+        if names is not None and seq_dir.name not in names:
+            continue
+        frames = {}
+        for modality, folder_name in (("rgb", "visible"), ("ir", "infrared")):
+            folder = seq_dir / folder_name
+            if folder.is_dir():
+                frames[modality] = tuple(sorted(
+                    p for p in folder.iterdir()
+                    if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp")))
+        if not frames.get("rgb"):
+            continue
+        if not frames.get("ir"):
+            print(f"  {seq_dir.name}: visible frames but no infrared/ -- "
+                  f"skipped, the pool is thermal supervision")
+            continue
+        boxes, exist = read_boxes(box_file)
+        gate_boxes = None
+        infrared_file = seq_dir / "infrared.txt"
+        if infrared_file.is_file():
+            gate_boxes, _ = read_boxes(infrared_file)
+        count = min(len(boxes), *(len(f) for f in frames.values()))
+        if gate_boxes is not None:
+            count = min(count, len(gate_boxes))
+            gate_boxes = gate_boxes[:count]
+        if count < len(boxes):
+            print(f"  {seq_dir.name}: {len(boxes)} boxes but "
+                  f"{min(len(f) for f in frames.values())} frames -- "
+                  f"using the first {count} of both")
+        sequences.append(VideoSequence(
+            name=seq_dir.name, root=seq_dir,
+            frames={m: f[:count] for m, f in frames.items()},
+            boxes=boxes[:count], exist=exist[:count],
+            gate_boxes=gate_boxes))
     return sequences
 
 
@@ -370,6 +450,7 @@ def masklet_sequence(
     runs = visible_runs(sequence.exist, chunk, max_frames)
     iterator = progress(runs, total=len(runs), desc=sequence.name) if progress else runs
 
+    gate_boxes = sequence.gate_reference()
     shape: tuple[int, int] | None = None
     for run in iterator:
         pixels = [_read_frame(frames[i]) for i in run]
@@ -379,7 +460,7 @@ def masklet_sequence(
             # teacher_iou is pinned to 1.0: propagation reports no per-frame
             # score, so only the geometric gates decide.
             verdict = reject_reason(
-                measure(mask, sequence.boxes[index], teacher_iou=1.0), gates)
+                measure(mask, gate_boxes[index], teacher_iou=1.0), gates)
             if verdict is not None:
                 rejected[verdict] = rejected.get(verdict, 0) + 1
                 continue
@@ -398,6 +479,8 @@ def masklet_sequence(
         "rejected": rejected,
         "chunk": chunk,
         "prompt_frames": prompt_frames,
+        "gated_by": ("separate boxes" if sequence.gate_boxes is not None
+                     else "prompt boxes"),
         "teacher": getattr(teacher, "model_id", type(teacher).__name__),
         "shape": [int(shape[0]), int(shape[1])],
     }

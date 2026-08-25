@@ -43,6 +43,10 @@ from tools.fetch_datasets import (  # noqa: E402
 class TestRegistry(unittest.TestCase):
     def test_every_archive_names_exactly_one_source(self):
         for recipe in RECIPES.values():
+            if recipe.snapshot:
+                # A snapshot recipe's parts are allow_patterns on one Hub
+                # repo; the repo id is the source and the parts carry none.
+                continue
             for part in recipe.parts:
                 self.assertNotEqual(
                     bool(part.url), bool(part.drive),
