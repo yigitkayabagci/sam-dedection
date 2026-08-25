@@ -41,6 +41,7 @@ from src.training.boxes import (  # noqa: E402
     dronevehicle_frames,
     hituav_frames,
     rgbtdroneperson_frames,
+    kust4k_frames,
     summarise_frames,
     vtuavdet_frames,
     yolo_frames,
@@ -54,12 +55,17 @@ from src.training.labels import (  # noqa: E402
     teacher_class_for,
 )
 from src.training.masklets import find_rgbt_sequences, masklet_sequence  # noqa: E402
+from src.training.aerial import SPECS, read_mask  # noqa: E402
 from src.training.pool import (  # noqa: E402
     RECORD_FILE,
+    agreement_table,
+    boundary_agreement,
+    intact_modalities,
     label_boxes,
     label_many,
     calibration_table,
     label_pool,
+    modality_agreement,
     pool_report,
     summarise_pool,
     write_index,
@@ -1118,6 +1124,141 @@ class TestStreamExtract(unittest.TestCase):
                     (Path(tmp) / "lasher/seq2").exists())
         finally:
             server.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Kust4K: boxes drawn from a semantic map, and which half the map describes
+# --------------------------------------------------------------------------
+
+
+def write_kust4k(root: Path, stems=("00001D", "00002D", "00003N"),
+                 broken=(), corrupt="rgb"):
+    """A miniature Kust4K: `tir/`, `rgb/`, `label/`, and its own manifests.
+
+    Every frame holds one 12x12 car (class 4) on road (class 1). The half
+    named by `corrupt` is replaced with unrelated noise in the frames listed
+    in `broken`, which is what the real archive does to 1 160 of its 4 024.
+    """
+    import cv2
+
+    rng = np.random.default_rng(0)
+    for folder in ("tir", "rgb", "label"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+    for stem in stems:
+        semantic = np.ones((64, 64), dtype=np.uint8)
+        semantic[20:32, 24:36] = 4                      # car
+        cv2.imwrite(str(root / "label" / f"{stem}.png"), semantic)
+        scene = rng.integers(0, 40, (64, 64), dtype=np.uint8)
+        scene[20:32, 24:36] = 220                       # the car, as pixels
+        noise = rng.integers(0, 255, (64, 64), dtype=np.uint8)
+        for modality in ("rgb", "tir"):
+            spoiled = stem in broken and modality == (
+                "rgb" if corrupt == "rgb" else "tir")
+            cv2.imwrite(str(root / modality / f"{stem}.png"),
+                        noise if spoiled else scene)
+    if broken:
+        (root / f"broken_in_train_day_{len(broken)}.txt").write_text(
+            "\n".join(f"{s}.png" for s in broken) + "\n")
+
+
+@unittest.skipUnless(HAVE_CV2, "OpenCV is not installed")
+class TestSemanticFrames(unittest.TestCase):
+    """Kust4K annotates pixels, so its boxes are its components' envelopes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_the_box_is_the_component_envelope_and_carries_its_class_name(self):
+        write_kust4k(self.root)
+        frames = kust4k_frames(self.root)
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames[0].classes, ("car",))
+        np.testing.assert_allclose(frames[0].boxes[0], [24, 20, 36, 32])
+
+    def test_the_named_modality_is_the_image_and_the_other_is_the_pair(self):
+        write_kust4k(self.root)
+        rgb = kust4k_frames(self.root, modality="rgb")[0]
+        self.assertEqual(rgb.image.parent.name, "rgb")
+        self.assertEqual(rgb.pair.parent.name, "tir")
+        thermal = kust4k_frames(self.root, modality="thermal")[0]
+        self.assertEqual(thermal.image.parent.name, "tir")
+        self.assertEqual(thermal.pair.parent.name, "rgb")
+
+    def test_the_groups_split_on_the_datasets_own_manifests(self):
+        write_kust4k(self.root, broken=("00002D",))
+        self.assertEqual([f.key for f in kust4k_frames(self.root, group="clean")],
+                         ["00001D", "00003N"])
+        self.assertEqual([f.key for f in kust4k_frames(self.root, group="broken")],
+                         ["00002D"])
+        self.assertEqual(len(kust4k_frames(self.root, group="all")), 3)
+
+    def test_asking_for_broken_frames_with_no_manifest_says_why(self):
+        # `excluded_keys` globs the root and does not recurse, so a manifest
+        # one folder down is invisible and every frame reads as clean. The
+        # message has to name that, or a silently empty broken group looks
+        # like a download with nothing wrong in it.
+        write_kust4k(self.root)
+        with self.assertRaises(FileNotFoundError) as caught:
+            kust4k_frames(self.root, group="broken")
+        self.assertIn("not recursive", str(caught.exception))
+
+    def test_an_unknown_group_is_refused_before_any_globbing(self):
+        with self.assertRaises(ValueError):
+            kust4k_frames(self.root, group="daytime")
+
+
+@unittest.skipUnless(HAVE_CV2, "OpenCV is not installed")
+class TestModalityAgreement(unittest.TestCase):
+    """Which half of a broken pair still shows the scene the map annotates."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_a_matching_image_scores_far_above_an_unrelated_one(self):
+        write_kust4k(self.root, stems=("00001D",))
+        records = modality_agreement(self.root, SPECS["kust4k"])
+        self.assertGreater(records[0]["rgb"], 3.0)
+
+        noise = np.random.default_rng(1).integers(
+            0, 255, (64, 64), dtype=np.uint8)
+        semantic = read_mask(self.root / "label" / "00001D.png")
+        self.assertLess(boundary_agreement(
+            np.dstack([noise] * 3), semantic), 2.0)
+
+    def test_a_map_that_is_a_different_size_is_nan_not_a_number(self):
+        write_kust4k(self.root, stems=("00001D",))
+        semantic = read_mask(self.root / "label" / "00001D.png")
+        self.assertTrue(np.isnan(boundary_agreement(
+            np.zeros((32, 32, 3), np.uint8), semantic)))
+
+    def test_the_corrupt_half_is_the_one_dropped(self):
+        write_kust4k(self.root, stems=tuple(f"{i:05d}D" for i in range(12)),
+                     broken=("00009D", "00010D"), corrupt="rgb")
+        records = modality_agreement(self.root, SPECS["kust4k"])
+        verdicts = intact_modalities(records)
+        self.assertEqual(set(verdicts), {"00009D", "00010D"})
+        for kept in verdicts.values():
+            self.assertEqual(kept, ("thermal",))
+
+    def test_the_threshold_comes_from_the_clean_frames_not_a_constant(self):
+        write_kust4k(self.root, stems=tuple(f"{i:05d}D" for i in range(12)),
+                     broken=("00009D",), corrupt="tir")
+        records = modality_agreement(self.root, SPECS["kust4k"])
+        self.assertEqual(intact_modalities(records)["00009D"], ("rgb",))
+        with self.assertRaises(ValueError):
+            intact_modalities([r for r in records if r["broken"]])
+
+    def test_the_table_reports_what_each_broken_frame_kept(self):
+        write_kust4k(self.root, stems=tuple(f"{i:05d}D" for i in range(12)),
+                     broken=("00009D",), corrupt="rgb")
+        records = modality_agreement(self.root, SPECS["kust4k"])
+        table = agreement_table(records, intact_modalities(records))
+        self.assertIn("| clean | 11 |", table)
+        self.assertIn("| thermal | 1 |", table)
 
 
 if __name__ == "__main__":

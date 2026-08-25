@@ -586,3 +586,152 @@ def calibration_table(routes: Mapping[str, SequenceABC[dict]]) -> str:
     overall = {n: [r["iou"] for r in routes[n]] for n in names}
     lines.append(f"| **all** | | {cells(overall)} |")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Which modality a drawn map still describes
+# --------------------------------------------------------------------------
+
+
+def boundary_agreement(image, semantic) -> float:
+    """How much harder the image's edges push on the map's boundaries.
+
+    One number, and it answers one question: is this picture a picture of the
+    scene this map annotates? Class boundaries in a correct annotation sit on
+    object outlines, so the image's gradient is stronger there than it is on
+    average. The score is that ratio -- mean edge magnitude on the map's
+    boundary over mean edge magnitude across the frame -- so `1.0` is "the map
+    tells you nothing about where this image's edges are" and a registered
+    pair scores well above it.
+
+    It exists for Kust4K's 1 160 broken frames. The dataset corrupts **one of
+    the two modalities** per frame and its manifests do not record which one,
+    which leaves a choice that cannot be made from the filename: prompting a
+    teacher on the corrupt half produces a confident mask of the wrong scene,
+    and mirroring it onto the intact half produces two. Both halves share the
+    one map, so scoring each against it separates them.
+
+    Deliberately not a teacher pass. It is a Sobel over a 640x512 frame, it
+    runs over the whole set in the time a GPU takes to warm up, and it does not
+    have the failure mode a learned check would -- a strong segmenter finds
+    *something* in a corrupt frame, which is exactly what has to be detected.
+    """
+    import cv2
+
+    pixels = _read_rgb(Path(image)) if isinstance(image, (str, Path)) else image
+    grey = (cv2.cvtColor(np.asarray(pixels), cv2.COLOR_RGB2GRAY)
+            if np.ndim(pixels) == 3 else np.asarray(pixels))
+    edges = np.abs(cv2.Sobel(grey.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3))
+    edges += np.abs(cv2.Sobel(grey.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3))
+
+    semantic = np.asarray(semantic)
+    if semantic.ndim == 3:
+        semantic = semantic[..., 0]
+    if semantic.shape != edges.shape:
+        # A pair whose halves are different sizes is a different problem, and
+        # resizing the map here would invent boundaries. Say so with a score
+        # that cannot be mistaken for a measurement.
+        return float("nan")
+    boundary = np.zeros(semantic.shape, dtype=bool)
+    boundary[:-1, :] |= semantic[:-1, :] != semantic[1:, :]
+    boundary[1:, :] |= semantic[:-1, :] != semantic[1:, :]
+    boundary[:, :-1] |= semantic[:, :-1] != semantic[:, 1:]
+    boundary[:, 1:] |= semantic[:, :-1] != semantic[:, 1:]
+    if not boundary.any():
+        return float("nan")               # a map of one class annotates nothing
+
+    everywhere = float(edges.mean())
+    return float(edges[boundary].mean() / everywhere) if everywhere else float("nan")
+
+
+def modality_agreement(root: str | Path, spec, limit: int | None = None,
+                       progress=None) -> list[dict]:
+    """`boundary_agreement` for both halves of every registered pair.
+
+    One record per frame -- `{frame, broken, rgb, thermal}` -- with `broken`
+    read from the dataset's own manifests, so the clean frames in the same list
+    are the reference distribution the broken ones are judged against. They
+    have to be: a thermal frame's edges are not an RGB frame's edges, and an
+    absolute threshold shared across the two modalities would call every
+    thermal half suspicious.
+    """
+    from dataclasses import replace
+
+    from .aerial import excluded_keys, list_frames, read_mask
+
+    root = Path(root)
+    frames = list_frames(root, replace(spec, exclude=""), "rgb")
+    named = excluded_keys(root, spec)
+    if limit is not None:
+        frames = frames[:limit]
+    stream = (progress(frames, total=len(frames), desc="agreement")
+              if progress else frames)
+
+    records = []
+    for frame in stream:
+        semantic = read_mask(frame.mask)
+        records.append({
+            "frame": frame.name,
+            "broken": frame.name.rsplit("/", 1)[-1] in named,
+            "rgb": round(boundary_agreement(frame.image, semantic), 4),
+            "thermal": (round(boundary_agreement(frame.pair, semantic), 4)
+                        if frame.pair else float("nan"))})
+    return records
+
+
+def intact_modalities(records: SequenceABC[dict], quantile: float = 0.02,
+                      modalities: SequenceABC[str] = ("rgb", "thermal"),
+                      ) -> dict[str, tuple[str, ...]]:
+    """Per broken frame, which of its halves still describes the map.
+
+    The threshold per modality is a low quantile of what the *clean* frames of
+    the same dataset score -- 2 % by default, so roughly one clean frame in
+    fifty would be called corrupt if it were in this group. Read it as the
+    false-positive rate being bought, not as a tuning knob: the alternative is
+    a constant that has to be re-guessed for every dataset and every sensor.
+
+    A frame can come back with both halves intact (the corruption was mild
+    enough to leave the outlines), one half (the case this is for), or none
+    -- and none means *drop the frame*, not "pick the better one". Nothing
+    forces exactly one half to fail, and pretending otherwise would file a
+    mask of the wrong scene under a confident label, which is the failure the
+    whole check exists to avoid.
+    """
+    clean = [r for r in records if not r["broken"]]
+    if not clean:
+        raise ValueError(
+            "no clean frames to calibrate against -- `modality_agreement` was "
+            "run over a root whose broken-frame manifests cover everything, or "
+            "over none at all.")
+    floors = {}
+    for modality in modalities:
+        scores = [r[modality] for r in clean if np.isfinite(r[modality])]
+        floors[modality] = (float(np.quantile(scores, quantile))
+                            if scores else float("-inf"))
+    return {r["frame"]: tuple(m for m in modalities
+                              if np.isfinite(r[m]) and r[m] >= floors[m])
+            for r in records if r["broken"]}
+
+
+def agreement_table(records: SequenceABC[dict],
+                    verdicts: Mapping[str, SequenceABC[str]],
+                    modalities: SequenceABC[str] = ("rgb", "thermal")) -> str:
+    """The clean-versus-broken score gap, and what the verdicts did with it."""
+    def median(rows, modality):
+        scores = [r[modality] for r in rows if np.isfinite(r[modality])]
+        return f"{np.median(scores):.2f}" if scores else "—"
+
+    clean = [r for r in records if not r["broken"]]
+    broken = [r for r in records if r["broken"]]
+    lines = ["| group | frames | " + " | ".join(f"median {m}" for m in modalities) + " |",
+             "|---|---:|" + "---:|" * len(modalities)]
+    for name, rows in (("clean", clean), ("broken", broken)):
+        lines.append(f"| {name} | {len(rows)} | "
+                     + " | ".join(median(rows, m) for m in modalities) + " |")
+    kept: dict[str, int] = {}
+    for names in verdicts.values():
+        kept["+".join(names) or "neither"] = kept.get("+".join(names) or "neither", 0) + 1
+    lines += ["", "| broken frame keeps | frames |", "|---|---:|"]
+    for name, count in sorted(kept.items(), key=lambda kv: -kv[1]):
+        lines.append(f"| {name} | {count} |")
+    return "\n".join(lines)

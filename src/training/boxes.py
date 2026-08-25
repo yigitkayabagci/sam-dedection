@@ -855,6 +855,92 @@ def _birdsai_images(folder: Path) -> tuple[dict[int, Path], list[Path]]:
 
 
 # --------------------------------------------------------------------------
+# Sets that ship drawn masks instead of a box file
+# --------------------------------------------------------------------------
+
+
+def semantic_frames(root: str | Path, spec, modality: str = "rgb",
+                    group: str = "all", gates=None,
+                    progress=None) -> list[BoxFrame]:
+    """Boxes read out of a *semantic map*, for sets that annotate pixels.
+
+    Every other reader in this file parses an annotation the dataset wrote as
+    boxes. Kust4K writes pixels instead -- 4 024 registered RGB-T pairs with a
+    real 9-class map each -- and its boxes are the tight envelopes of the thing
+    classes' connected components. `aerial.decompose` draws them: the same
+    function and the same `InstanceGates` stage B trains on, so a box here and
+    an instance there are the same object rather than two readings of one file.
+
+    `group` selects on the dataset's own broken-frame manifests
+    (`aerial.excluded_keys`): `clean` is the frames no manifest names, `broken`
+    is the ones they do -- 1 160 of Kust4K's 4 024, where **one of the two
+    modalities is deliberately corrupted** to simulate a sensor failure -- and
+    `all` ignores the manifests. The distinction matters more here than
+    anywhere else in this module, because the pool's `mirror` stamps one
+    modality's mask onto the other's pixels: sound on `clean`, and on `broken`
+    a coin flip over which half was the corrupt one. The manifests do not say
+    which half broke, so `pool.modality_agreement` measures it per frame.
+
+    `modality` is which image the boxes are carried against; the other half
+    becomes `pair`, so one index serves `prompt="self"` and `prompt="pair"`
+    without being rebuilt.
+
+    Indexing decodes every map, which no other reader here does -- a box file
+    is cheap and a 4 024-PNG pass is about a minute. What it buys is the
+    `summarise_frames` census before any GPU time is spent.
+    """
+    from .aerial import (InstanceGates, decompose, excluded_keys, list_frames,
+                         read_mask)
+
+    if group not in ("all", "clean", "broken"):
+        raise ValueError(f"group must be all, clean or broken, got {group!r}")
+    root = Path(root)
+    # The manifests name what to *drop*; this reader needs to be able to ask
+    # for them, so the listing runs with the exclusion off and filters after.
+    listed = list_frames(root, replace(spec, exclude=""), modality)
+    named = excluded_keys(root, spec)
+    if group != "all":
+        want = group == "broken"
+        listed = [f for f in listed
+                  if (f.name.rsplit("/", 1)[-1] in named) == want]
+    if not listed:
+        raise FileNotFoundError(
+            f"{root}: no {group} {spec.name} frames for {modality}."
+            + (f"\n{len(named)} frame(s) are named by a manifest."
+               if named else
+               f"\nNo {spec.exclude or 'manifest'} was found *directly* under "
+               f"{root} -- the glob is not recursive, so a manifest one folder "
+               f"down reads as no manifest at all and every frame counts as "
+               f"clean."))
+
+    stream = (progress(listed, total=len(listed), desc=f"{spec.name}/{modality}")
+              if progress else listed)
+    frames: list[BoxFrame] = []
+    for frame in stream:
+        _, instances, _ = decompose(read_mask(frame.mask), spec,
+                                    gates or InstanceGates())
+        if not instances:
+            continue                     # a map with no thing class in it
+        frames.append(BoxFrame(
+            key=frame.name,
+            image=frame.image,
+            boxes=np.array([i.box for i in instances], dtype=np.float64),
+            classes=tuple(spec.name_of(i.class_id) for i in instances),
+            pair=frame.pair))
+    return frames
+
+
+def kust4k_frames(root: str | Path, modality: str = "rgb",
+                  group: str = "all", gates=None,
+                  progress=None) -> list[BoxFrame]:
+    """`semantic_frames` bound to the Kust4K spec, which owns the manifests."""
+    from .aerial import SPECS
+
+    return semantic_frames(root, SPECS["kust4k"], modality=modality,
+                           group=group, gates=gates, progress=progress)
+
+
+# --------------------------------------------------------------------------
 # Probes
 # --------------------------------------------------------------------------
 

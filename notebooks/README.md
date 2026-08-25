@@ -23,6 +23,7 @@ recipe, not the implementation.
 | 15 | `15_dronevehicle_shared_pool.ipynb` | all of DroneVehicle in four pools: the 53 % of boxes both halves annotate identically (one RGB pass, mirrored onto thermal), plus the 33 383 thermal-only and 3 797 rgb-only targets, each prompted on the half that can see them | a copy of DroneVehicle's `train.zip` in your own Drive (set `DRIVE_DIR` in cell 1); SAM 3 wants an HF token |
 | 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17 |
 | 17 | `17_vtuav_thermal_pool.ipynb` | VTUAV's **thermal** half, on `ir.txt`'s own boxes — the two halves agree on only 12 % of rows, so neither mask serves the other | the same archives; runs beside 16 on a second runtime |
+| 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of

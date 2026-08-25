@@ -75,7 +75,7 @@ kalıbı kutulara da uygulanır — sınıf id dağılımı beklenenle karşıla
 | **RGBT234** | 234 hizalı RGB-T video, 233,8 K çift, **modalite başına ayrı kutu** (`visible.txt` + `infrared.txt`) | resmî dağıtım Baidu-only; HF aynası `xche32/rgbt234` **tek 7,67 GB tar.gz** | (a) video: maske RGB'de, kapı termal kutuda |
 | **VTUAV** | 1,7 M hizalı 1920×1080 çift, kare-başına kutu | fetcher'da var; `tools/make_masklets.py` bu rotayı zaten koşuyor | (a) video — mevcut makine |
 | **LasHeR** | 1 224 hizalı dizi / 730 K+ çift, modalite başına kutu | resmî: Baidu/TeraBox. HF aynası `xche32/lasher` = 5 parçalı tar.gz, **~224 GB** — Colab diskini aşar | (a) video; **varsayılan değil.** Akış halinde (arşivi diske yazmadan) dizi-seçmeli çıkarma destekleniyor, ama ağ maliyeti 224 GB okumak; büyük diskli makineye belgelendi |
-| **Kust4K** | 4 024 hizalı çift + gerçek semantik maske | fetcher'da var (~2,7 GB: tir+rgb+label) | **kalibrasyon** — aşağıda |
+| **Kust4K** | 4 024 hizalı çift + gerçek semantik maske | fetcher'da var (~2,7 GB: tir+rgb+label) | **kalibrasyon** *ve* hasat — çizilmiş harita hem öğretmeni puanlıyor hem de prompt kutularını veriyor (defter 18) |
 
 RGBT234 ve LasHeR **yer seviyesi** RGB-T'dir (kullanıcının verdiği iki
 kaynak); havuzda havadan setlerle karışımı, encoder'ın modalite ekseni için
@@ -200,6 +200,65 @@ Kare başına tek kutu olduğu için `FRAME_GROUP = BATCH` (DroneVehicle'da
 Defter 13/14'ün `DATASETS` listesine bağlamak bilerek ayrı bırakıldı —
 önce havuzun kendisi incelensin, sonra defter üretici (
 `tools/build_pool_notebooks.py`) bir turda güncellensin.
+
+### Defter 18: Kust4K'nın çizilmiş haritaları, ve bozuk %29'un kurtarılması
+
+Kust4K bu listede kutu taşımayan tek kaynak: 4 024 hizalı 640×512 RGB-T
+çiftinin her birinde **gerçek 9 sınıflı semantik harita** var. Prompt'lar bu
+haritadan çıkıyor — `things` sınıflarının bağlantılı bileşenlerinin dik
+zarfları, `aerial.decompose` ile, yani aşama B'nin eğittiği örneklerin
+aynısı. Okuyucu `boxes.semantic_frames` / `boxes.kust4k_frames`.
+
+Defter tek kararı iki kez veriyor:
+
+**Temiz 2 864 kare (%71).** Öğretmen bir kez RGB yarısında promptlanıyor,
+maske iki havuza birden yazılıyor (`label_pool(..., mirror=...)`, 15'in
+DroneVehicle'da kullandığı mekanizmanın aynısı). Çiftler geometrik olarak
+kayıtlı olduğu için RGB maskesi **zaten** termal maskesidir; termal karede
+ikinci bir ileri geçiş, kaydın hâlihazırda cevapladığı soruya aynı GPU
+saatini harcamak olurdu. Yine de defterin bir hücresi `calibrate_spec` ile
+iki rotayı (`self` / `pair`) çizilmiş maskelere karşı puanlıyor — iddia
+değil, o indirmede ölçülmüş sayı.
+
+**Bozuk 1 160 kare (%29).** Burada aynalama **geçersiz**. Bu karelerde iki
+modaliteden **biri kasten bozulmuş** (sensör arızası simülasyonu): dosya
+sorunsuz açılıyor, sadece sahnenin resmi değil. Kust4K'nın beş
+`broken_in_*.txt` manifestosu *hangisinin* bozulduğunu söylemiyor, dolayısıyla
+aynalama yazı-tura: yarı yarıya ihtimalle maske bambaşka bir sahnenin
+pikselleri üstüne basılır.
+
+Ölçüm bunu çözüyor — `pool.boundary_agreement`: *bu görüntünün gradyanı, bu
+haritanın sınırlarında yükseliyor mu?* Doğru bir anotasyonda sınıf sınırları
+nesne konturlarına oturur, yani sınır piksellerindeki ortalama kenar şiddeti
+kare ortalamasının epeyce üstündedir. Bozuk yarı ~1,0 veriyor (ilişki yok).
+Eşik sabit değil: **aynı indirmenin temiz karelerinin** düşük bir kantili,
+modalite başına — termal kenarları RGB kenarları değildir ve ortak bir sabit
+her termal yarıyı mahkûm ederdi. `intact_modalities` kareyi üç sonuçtan
+birine düşürüyor: iki yarı da sağlam, bir yarı sağlam (asıl hedef), hiçbiri
+sağlam değil → **kare düşer**. "Daha iyi olanı seç" değil; hiçbir şey tam
+olarak bir yarının bozulmasını garanti etmiyor.
+
+Sağlam kalan yarılar kendi pikselleri üstünde, aynasız hasat ediliyor. Net
+kazanç: `aerial.py`'nin bugün (doğru biçimde) attığı ~1 160 karenin yaklaşık
+bin tanesi, çizilmiş haritasıyla birlikte geçerli bir prompt kaynağı olarak
+geri geliyor.
+
+Dört havuz, çünkü köken okunabilir kalmalı: `kust4k_rgb` /
+`kust4k_thermal` temiz çiftin tek geçişi (bir maske, iki dosya),
+`kust4k_broken_rgb` / `kust4k_broken_thermal` ise ölçümden geçmiş tekil
+yarılar. Tek klasöre karıştırmak, aynalanmış bir maskeyi doğrudan
+promptlanmış birinden ayırt edilemez yapardı.
+
+**Öğretmen: SAM 3, yedeksiz** (kullanıcı isteği). `facebook/sam3` gated ve
+`transformers>=5` istiyor; ikisi de bir dakikada düzelir. Sessizce başka bir
+modele düşmek ise aşağıda hiçbir yerde görünmeyen bir havuz üretir.
+
+Drive'daki kopya `MyDrive/datasets/kust4k` altından okunuyor — zip ya da
+açılmış klasör, ikisi de. Üç arşiv **düz** ve üçü de aynı 4 024 dosya adını
+taşıyor, dolayısıyla her biri kendi klasörüne açılmak zorunda; defter hedefi
+arşiv adından çıkarıyor (elle indirilip yeniden adlandırılmış dosyalar için).
+Manifestolar `DATA_ROOT`'un **tepesinde** olmalı — `excluded_keys` glob'u
+özyinelemeli değil — ve yoksa figshare'den (birkaç KB) çekiliyor.
 
 ## 3. Mekanik: tek boru hattı, iki dal
 

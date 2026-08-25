@@ -35,6 +35,7 @@ BUILDERS = {
     "15_": "build_shared_pool_notebook",
     "16_": "build_vtuav_pool_notebooks",
     "17_": "build_vtuav_pool_notebooks",
+    "18_": "build_kust4k_pool_notebook",
 }
 
 

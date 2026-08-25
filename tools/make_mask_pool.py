@@ -28,6 +28,13 @@ Usage:
     python tools/make_mask_pool.py label --dataset hituav \\
         --data /content/data/HIT_UAV --out /content/work/pool --split train
 
+    # Kust4K itself harvests too, off the boxes its drawn maps imply: one RGB
+    # pass mirrored onto thermal for the 71 % of frames both halves survive,
+    # then each half alone for the 29 % the dataset marks broken.
+    python tools/make_mask_pool.py label --dataset kust4k --group clean \\
+        --data /content/data/Kust4K --out /content/work/pool \\
+        --modality rgb --prompt self --mirror kust4k_thermal
+
     # SAM 3 instead: gated repo, needs transformers>=5
     python tools/make_mask_pool.py label ... --teacher facebook/sam3
 """
@@ -54,7 +61,7 @@ from src.training.pool import (  # noqa: E402
 
 DATASETS = ("visdrone", "hituav", "dronevehicle", "dronevehicle_shared",
             "dronevehicle_only", "rgbtdroneperson", "vtuavdet", "birdsai",
-            "vtuav")
+            "vtuav", "kust4k")
 
 # Which `fetch_datasets.py` recipe puts a dataset on disk. Only the readers
 # that share an archive with another dataset need an entry; everything else
@@ -65,7 +72,7 @@ RECIPE_FOR = {"dronevehicle_shared": "dronevehicle",
 
 
 def frames_for(dataset: str, data: Path, split: str, modality: str,
-               names_yaml: str | None = None):
+               names_yaml: str | None = None, group: str = "clean"):
     """The dataset's `BoxFrame` index, by its own reader."""
     from src.training import boxes
 
@@ -93,6 +100,12 @@ def frames_for(dataset: str, data: Path, split: str, modality: str,
         # so each is prompted on its own frame -- never `--prompt pair`.
         return boxes.vtuav_frames(
             data, modality="ir" if modality == "thermal" else "rgb")
+    if dataset == "kust4k":
+        # No box file at all: the boxes are the envelopes of the thing classes'
+        # components in its drawn semantic maps. `--group clean` is the 71 %
+        # with both halves intact -- the only group `--mirror` is sound on.
+        return boxes.kust4k_frames(data, modality=modality, group=group,
+                                   progress=_tqdm())
     if dataset == "rgbtdroneperson":
         return boxes.rgbtdroneperson_frames(data, split=split, modality=modality)
     if dataset == "vtuavdet":
@@ -145,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
                             "against each frame's registered twin. For "
                             "dronevehicle_shared: one teacher pass over the "
                             "RGB half supervises both modalities.")
+    label.add_argument("--group", choices=("all", "clean", "broken"),
+                       default="clean",
+                       help="kust4k: which side of its broken-frame "
+                            "manifests. `broken` is the 29 %% with one "
+                            "modality corrupted -- harvest each half on its "
+                            "own and never mirror.")
     label.add_argument("--prompt", choices=("self", "pair"), default="self",
                        help="Which pixels the teacher looks at: the frame "
                             "itself, or its registered twin (the mask is "
@@ -186,13 +205,21 @@ def main(argv: list[str] | None = None) -> int:
                                   dtype=args.dtype)
 
     if args.command == "label":
-        frames = frames_for(args.dataset, args.data, args.split, args.modality)
+        frames = frames_for(args.dataset, args.data, args.split, args.modality,
+                            group=args.group)
         print(f"{len(frames)} annotated images, teacher {args.teacher}, "
               f"prompting on {args.prompt}")
         gates = Gates(teacher_iou=args.teacher_iou, box_iou=args.box_iou,
                       component=args.component)
-        dataset = (f"{args.dataset}_{args.modality}"
-                   if args.dataset == "dronevehicle" else args.dataset)
+        dataset = args.dataset
+        if args.dataset == "dronevehicle":
+            dataset = f"{args.dataset}_{args.modality}"
+        elif args.dataset == "kust4k":
+            # The broken group is a separate pool, not a suffix-free addition
+            # to the clean one: a mask harvested off a frame whose other half
+            # is corrupt must stay distinguishable from a mirrored one.
+            dataset = (f"kust4k_{args.modality}" if args.group == "clean"
+                       else f"kust4k_{args.group}_{args.modality}")
         report = label_pool(
             frames, teacher, args.out, dataset=dataset, prompt=args.prompt,
             gates=gates, zoom=args.zoom, min_size=args.min_size,
