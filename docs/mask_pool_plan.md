@@ -42,8 +42,13 @@ Kullanıcı sorusu "Meta'nın SOTA'sı hangisi" idi; cevap ölçüldü, varsayı
    öğretmeninde kalmalı. Her maske deposu raporu öğretmenin model id'sini
    yazar; hangi maskenin hangi öğretmenden geldiği dosyadan okunur.
 2. **AeroVIS = VisDrone + UAVDT + SeaDronesSee** (kutuları SAM3 ile maskeye
-   çevrilmiş). VisDrone'dan havuz üretirsek AeroVIS o modelin held-out
-   değerlendirmesi olamaz — kare kare aynı veri. Temiz değerlendirme adayı
+   çevrilmiş). Sürüm indirilip sayıldı: 117 dizinin **52'si VisDrone-MOT
+   (21 758 kare), 39'u UAVDT (19 276), 26'sı SeaDronesSee (8 170)**.
+   Defter 13 VisDrone-**DET**'i kullanıyor ve DET statik görüntüleri MOT
+   videolarından ayrı bir koleksiyon → **bugünkü havuz AeroVIS'i kare
+   düzeyinde yakmıyor**, örtüşme sahne düzeyinde kalıyor. Ama bu üç *video*
+   setinden biri havuza ya da masklet kaynağına girerse o pay birebir yanar.
+   Ayrıntı: `docs/rgb_aerial_kaynaklar.md` §3.3. Temiz değerlendirme adayı
    olarak UAVScenes/MVUAV kalır; bu defterlerin işi eğitim havuzu, ölçüm
    seti değil.
 

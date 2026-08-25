@@ -92,10 +92,16 @@ sequences as masklets (prompted on `visible.txt`, **gated on
 `infrared.txt`**, which is what catches the registration's residual). The
 pools are stage B's food and the masklets stage C's; wiring them into 07's
 `DATASETS` is a deliberate follow-up, so a pool can be inspected and staged
-once, then reused by every run after it. One contamination rule they create:
-**AeroVIS is VisDrone re-labelled**, so a model trained on 13's pool cannot
-be evaluated on AeroVIS — UAVScenes and MVUAV stay clean.
-`docs/mask_pool_plan.md` argues the whole design.
+once, then reused by every run after it. One contamination rule they
+create, now measured rather than assumed: **AeroVIS is VisDrone-MOT, UAVDT
+and SeaDronesSee re-labelled by SAM3** — 52, 39 and 26 of its 117 sequences
+respectively, counted from the released archive. VisDrone's static DET
+images are a *separate collection* from its MOT video clips, so 13's pool
+does not burn AeroVIS at frame level; what would burn it is putting any of
+those three **video** sets into a pool or into stage C's masklets, which
+costs the matching share of AeroVIS outright. UAVScenes and MVUAV stay
+clean either way. `docs/mask_pool_plan.md` argues the whole design;
+`docs/rgb_aerial_kaynaklar.md` is the verified source list behind it.
 
 Run them on separate runtimes at once. They write to different Drive folders
 (`edgetam-encoder/{all,vtuav,drone}`), and `split_frames` seeds each dataset by

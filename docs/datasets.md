@@ -17,7 +17,7 @@ veremez.
 | [Kust4K](https://figshare.com/articles/dataset/_b_Kust4K_b_b_b_b_A_Large-scale_Multimodal_UAV_Dataset_for_Robust_Urban_Traffic_Scenes_Semantic_Segmentation_b_/29476610) ([makale](https://www.nature.com/articles/s41597-025-05994-7)) | 2025 · Sci. Data | 4 024 hizalı RGB-TIR çifti (2 514 gündüz / 1 510 gece), **640×512** — projenin native çözünürlüğü, **9 sınıf**. Palet arşivin kendi `visual.py`'sinden okundu ve gerçek indirmeye karşı uçtan uca doğrulandı; makaleden tahmin edilen eski palet **yanlıştı** (aşağıya bak) |
 | [MVUAV](https://jiwei0921.github.io/MVUAV) ([NeurIPS](https://proceedings.neurips.cc/paper_files/paper/2024/hash/78e839f96568985d18463044a064ea0f-Abstract-Conference.html)) | 2024 · NeurIPS | 413 havadan RGB-T video, 53 828 kare, 2 183 etiketli kare, 36 sınıf, gündüz/gece |
 | [Caltech Aerial RGB-T](https://github.com/aerorobotics/caltech-aerial-rgbt-dataset) ([CaltechDATA](https://data.caltech.edu/records/cks6g-ps927)) | 2024 · ECCV | **Yayınla indirme uyuşmuyor, indirilen doğrulandı.** İki arşiv: `labeled_rgbt_pairs.zip` (4,29 GB) → **2 282 kayıtlı çift, 960×600**, stereo rektifiye, termal EO çerçevesine yansıtılmış, ölçülen artık kayma **1–4 px** — listedeki **en iyi hizalanmış** RGB-T. `labeled_thermal_singles.zip` (4,14 GB) → 3 076 maske, termal 640×512, ama içindeki `color/` **kayıtlı eş değil** (819×512, ~%5'i tamamen siyah) → `rgb=None`. Makale 4 195 maske diyor, **yayın 3 076 veriyor**. Örnek kaynağı olarak zayıf: `decompose` 3 076 maskeden 1 357 örnek çıkarıyor, medyan alan 145 px. Değeri **aşama A** ve doğal arazi/su/gece alanı. CC BY-NC-SA |
-| [AeroVIS / AeroTrack](https://github.com/Dmygithub/AeroTrack) | 2026 · arXiv | 117 video / 49 204 kare, **örnek maskesi + kimlik izi** (8 279 iz) — EdgeTAM'ın çıktı tipine en yakın set |
+| [AeroVIS / AeroTrack](https://github.com/Dmygithub/AeroTrack) | 2026 · arXiv | 117 video / 49 204 kare, **örnek maskesi + kimlik izi** (8 279 iz) — EdgeTAM'ın çıktı tipine en yakın set. **Sürüm indirildi ve sayıldı**: 12,63 GiB Drive zip'i, YTVIS RLE + `track_id`; kaynak dağılımı ve kontaminasyon aritmetiği `docs/rgb_aerial_kaynaklar.md` §3 |
 | [UAVScenes](https://github.com/sijieaaa/UAVScenes) | 2025 · ICCV | 23 uçuş dizisi, **120 K karenin her biri** elle etiketli, 2448×2048, 19 sınıf — listedeki en yoğun zamansal etiketleme |
 | [SegFly](https://github.com/markus-42/SegFly) ([HF](https://huggingface.co/datasets/markus-42/SegFly)) | 2026 · ECCV | 20 606 RGB + **15 007 hizalı RGB-T çifti**, termal 640×512, 30/40/50 m irtifa. Termal sadece sahne 3, 4, 5, 9'da. **Aşama B'nin hacim kaynağı** — Kust4K'nın ~4 katı kare. İki uyarı: (1) HF'de **parquet** olarak dağıtılıyor, klasör değil → `tools/export_hf_dataset.py`; (2) sınıf id'leri **boşluklu** ve "şey" sınıfı sadece ikisi: `vehicle=13`, `truck=36` — insan/otobüs/motosiklet sınıfı **yok** |
 | [MVSeg](https://jiwei0921.github.io/Multispectral-Video-Semantic-Segmentation/) | 2023 · CVPR | 738 RGB-T video, 3 545 maske, 26 sınıf — MVUAV'ın yer seviyesi kardeşi, aynı biçim |
@@ -213,6 +213,12 @@ söylüyor; notebook'ların bunun için bir hücresi var.
 
 ## Havuz kaynakları — kutu etiketli setler (defter 13/14)
 
+> Bu bölüm bugün kullanılanları listeliyor. **Aday havuz kaynaklarının tam
+> listesi — RGB havadan, obje bazlı (kutu ya da örnek maskesi), her indirmesi
+> canlı uca karşı doğrulanmış — `docs/rgb_aerial_kaynaklar.md`'de.** Orada
+> ayrıca kutuyu maskeye çevirmiş hazır veri setleri (SAMRS, AeroVIS, UAVDB)
+> ve boru hattı repoları var.
+
 Yukarıdaki eleme ölçütü (2) — piksel maskesi — bu setlerde **bilerek**
 aranmıyor: maske havuzu boru hattı (`docs/mask_pool_plan.md`,
 `src/training/pool.py`) kutuyu güçlü bir öğretmene prompt olarak verip
@@ -231,9 +237,18 @@ maskeyi kendisi üretiyor. Ölçüt burada: (1) gerçekten indirilebilir mi,
 1. **Aynalar üçüncü şahıs.** Defterlerin probe hücreleri geleni *sayarak*
    doğruluyor (kare/kutu/sınıf histogramı, RGBT234'te dizi sayısı ≥ 200
    asserti); raporlara öğretmenle birlikte kaynak da yazılıyor.
-2. **AeroVIS çakışması** (yukarıdaki tabloya ek): 13'ün havuzu VisDrone'dan
-   üretildiği için, bu havuzla eğitilen bir model AeroVIS'te **ölçülemez** —
-   kare kare aynı veri. Temiz video değerlendirmesi UAVScenes/MVUAV'da kalır.
+2. **AeroVIS çakışması** (yukarıdaki tabloya ek) — ölçüldü, düzeltildi.
+   VisDrone'un resmî tanımı *"288 video klip → 261 908 kare **ve** 10 209
+   statik görüntü"*: statik görüntüler ile video kareleri **ayrı koleksiyon**.
+   Defter 13 VisDrone-**DET**'i (statik), AeroVIS ise VisDrone-**MOT**'u
+   (video) kullanıyor → örtüşme **kare düzeyinde değil**, sahne/kampanya
+   düzeyinde. Yani "kare kare aynı veri" fazla sıkıydı; bugünkü havuz
+   AeroVIS'i yakmıyor. Yanan senaryolar başka: AeroVIS'in 117 dizisi
+   **VisDrone 52 (21 758 kare) + UAVDT 39 (19 276) + SeaDronesSee 26
+   (8 170)** — bu üç video setinden **herhangi biri** havuza girerse o pay
+   birebir yanar. Dolayısıyla aşama C'nin masklet kaynağı bu üçü olamaz;
+   `docs/rgb_aerial_kaynaklar.md` §3.3 ve §6. Temiz video değerlendirmesi
+   UAVScenes/MVUAV'da kalır.
 3. **DroneVehicle** iki defterde de kullanılabilir (RGB yarısı 13'te isteğe
    bağlı, termal yarısı 14'te varsayılan) — zaten `fetch_datasets.py`'deydi;
    OBB poligonları dik zarfa çevrilir, 100 px beyaz bant okuma anında kesilir.
