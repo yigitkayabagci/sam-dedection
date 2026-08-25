@@ -376,7 +376,8 @@ for name, frames in FRAMES.items():
           f"{report['accepted']}/{report['attempted']} accepted "
           f"({report['acceptance_rate']:.1%}), "
           f"{report['resumed']} image(s) resumed, "
-          f"{report['no_pair']} without a pair")
+          f"{report['no_pair']} without a pair, "
+          f"{report['size_mismatch']} on a mismatched grid")
     stage_pool(name)          # to Drive the moment it exists, not at the end""",
     mirror="edgetam-pool/thermal",
     appendix="""## LasHeR, when a bigger pool is worth a bigger machine

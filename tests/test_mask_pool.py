@@ -302,6 +302,42 @@ class TestLabelPool(unittest.TestCase):
             self.assertEqual(report["no_pair"], 1)
             self.assertEqual(report["attempted"], 0)
 
+    @unittest.skipUnless(HAVE_CV2, "needs OpenCV to decode the frames")
+    def test_a_pair_on_a_different_grid_is_refused_not_stored(self):
+        """`pair` reads one image and supervises another -- same size or skip.
+
+        Nothing in this pipeline resamples between grids, so a twin at a
+        different resolution would be labelled with the frame's boxes on the
+        twin's pixels and stored at the twin's shape: wrong twice, silently.
+        Every paired set the fetcher ships has equal halves; this is the guard
+        for the one that does not.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "pairs").mkdir()
+            thermal = np.full((100, 200, 3), 40, np.uint8)
+            thermal[40:60, 70:130] = 220
+            cv2.imwrite(str(tmp / "pairs" / "t.png"), thermal)
+            cv2.imwrite(str(tmp / "pairs" / "same.png"), thermal)
+            cv2.imwrite(str(tmp / "pairs" / "double.png"),
+                        np.repeat(np.repeat(thermal, 2, 0), 2, 1))
+
+            def frame(key, twin):
+                return BoxFrame(key=key, image=tmp / "pairs" / "t.png",
+                                boxes=np.array([[70.0, 40.0, 130.0, 60.0]]),
+                                classes=("car",), pair=tmp / "pairs" / twin)
+
+            report = label_pool([frame("ok", "same.png"),
+                                 frame("bad", "double.png")],
+                                FakeImageTeacher(), tmp / "pool",
+                                dataset="toy", prompt="pair")
+            self.assertEqual(report["size_mismatch"], 1)
+            self.assertEqual(report["images"], 1, "only the matching pair ran")
+            self.assertFalse((tmp / "pool" / "toy" / "bad").exists(),
+                             "a refused frame must leave nothing behind")
+            store = open_masks(tmp / "pool" / "toy" / "ok" / MASK_STORE)
+            self.assertEqual(store.shape, thermal.shape[:2])
+
     def test_max_boxes_takes_the_largest_first(self):
         with tempfile.TemporaryDirectory() as tmp:
             frames = self.frames(Path(tmp), count=1)

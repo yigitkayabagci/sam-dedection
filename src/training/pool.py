@@ -12,6 +12,16 @@ project actually needs come from:
   (`prompt="self"`) or on its registered RGB twin (`prompt="pair"`), with the
   mask stored against the thermal frame either way.
 
+`prompt="pair"` carries one requirement and no warping: the two halves must be
+**the same size**. Nothing here resamples between grids -- the boxes are the
+frame's own annotation, the pixels are the twin's, and the mask is stored for
+the frame, so all three are the same coordinate system only when the shapes
+match. They do for every paired set this repo fetches (DroneVehicle 840x712,
+Caltech 960x600, Kust4K 640x512); a set whose halves differ is counted as
+`size_mismatch` and skipped rather than labelled onto the wrong grid. A pair
+route that needed real resampling would need a homography this pipeline does
+not have, which is the honest reason it refuses instead of guessing.
+
 Which of those two prompts to trust is not argued anywhere in this file -- it
 is measured. `calibrate_spec` runs the teacher over instances whose masks a
 dataset actually ships (Kust4K's 4 024 registered pairs are the working set:
@@ -55,6 +65,15 @@ def _read_rgb(path: Path) -> np.ndarray:
     from .masklets import _read_frame
 
     return _read_frame(path)
+
+
+def _image_shape(path: Path) -> tuple[int, int]:
+    """`(height, width)` off the file header, without decoding the pixels."""
+    from PIL import Image
+
+    with Image.open(path) as image:
+        width, height = image.size
+    return int(height), int(width)
 
 
 def iou(a: np.ndarray, b: np.ndarray) -> float:
@@ -166,8 +185,8 @@ def label_pool(
     iterator = (progress(chosen, total=len(chosen), desc=dataset)
                 if progress else chosen)
 
-    counts = {"images": 0, "resumed": 0, "no_pair": 0, "unreadable": 0,
-              "attempted": 0, "accepted": 0}
+    counts = {"images": 0, "resumed": 0, "no_pair": 0, "size_mismatch": 0,
+              "unreadable": 0, "attempted": 0, "accepted": 0}
     rejected: dict[str, int] = {}
     by_class: dict[str, int] = {}
 
@@ -184,7 +203,19 @@ def label_pool(
             continue
         try:
             pixels = _read_rgb(source)
-        except FileNotFoundError:
+            # The `pair` route reads one image and supervises another, so the
+            # two have to be on the same grid: the boxes are the *frame's*
+            # annotation and the mask is stored against the *frame*, while the
+            # pixels in hand are the twin's. Equal shapes is what makes both
+            # of those the same coordinate system. DroneVehicle (840x712 both
+            # halves) and Caltech's paired archive (960x600) satisfy it; a set
+            # whose halves differ -- SegFly's 4000x3000 RGB against a 640x512
+            # thermal -- would otherwise be stored on the twin's grid with the
+            # boxes read on the frame's, which is wrong twice and silent.
+            if prompt == "pair" and _image_shape(frame.image) != pixels.shape[:2]:
+                counts["size_mismatch"] += 1
+                continue
+        except (FileNotFoundError, OSError):
             counts["unreadable"] += 1
             continue
 
@@ -369,6 +400,14 @@ def calibrate_spec(
         instances = sorted(instances, key=lambda i: -i.area)[:per_frame]
         pixels = _read_rgb(source)
         height, width = pixels.shape[:2]
+        # Same grid requirement `label_pool` documents, for the same reason:
+        # the instance boxes and `components` are on the semantic map's grid,
+        # the pixels are the twin's, and the score compares one against the
+        # other. Kust4K's halves are both 640x512, so this never fires there --
+        # it fires the day someone points `--prompt pair` at a set whose
+        # modalities are not the same size, which is the day it should.
+        if (height, width) != semantic.shape[:2]:
+            continue
 
         crops, local_boxes, windows = [], [], []
         for instance in instances:
