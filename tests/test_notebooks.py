@@ -29,7 +29,7 @@ NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
 BUILDERS = (
     (("12_",), "build_probe_notebook"),
     (("13_", "14_"), "build_pool_notebooks"),
-    (("15_", "16_"), "build_pretrain_notebooks"),
+    (("15_", "16_", "17_"), "build_pretrain_notebooks"),
 )
 
 

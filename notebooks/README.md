@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Sixteen notebooks, meant for Colab. Everything they orchestrate lives in
+Seventeen notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -21,7 +21,8 @@ recipe, not the implementation.
 | 13 | `13_rgb_mask_pool.ipynb` | an aerial-RGB mask pool: VisDrone boxes → gated teacher masks, on your Drive | **nothing** — it downloads VisDrone and Kust4K's RGB half itself; SAM 3 wants an HF token |
 | 14 | `14_thermal_mask_pool.ipynb` | the **thermal** mask pool: HIT-UAV + DroneVehicle boxes and RGBT234 masklets, with the thermal-vs-RGB-prompt route *measured* first | **nothing** — it downloads all four sets itself; SAM 3 wants an HF token |
 | 15 | `15_pretrain_automask.ipynb` | stage A's **mask arm**: an encoder pretrained against its own features through a mask it generates itself | **nothing** — no teacher, so no HF token |
-| 16 | `16_pretrain_convnext.ipynb` | stage A's **teacher arm**: the same encoder distilled from a frozen DINOv3 ConvNeXt, with the RGB-teacher-on-thermal question *measured* first | a Hugging Face token — DINOv3 is gated |
+| 16 | `16_pretrain_vitb.ipynb` | stage A's **teacher arm**, from a frozen DINOv3 **ViT-B/16**, with the RGB-teacher-on-thermal question *measured* first | a Hugging Face token — DINOv3 is gated |
+| 17 | `17_pretrain_convnext.ipynb` | the same, from a frozen DINOv3 **ConvNeXt-Small** — one string different from 16 | a Hugging Face token — DINOv3 is gated |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -106,11 +107,14 @@ sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
 
-**15 and 16 are stage A, as a choice rather than a route.** Both are generated
-from `tools/build_pretrain_notebooks.py`, and they are *one experiment with four
-arms*, not two notebooks: `ARM` is a setting and either can run any of `none`,
-`mask`, `distil` or `both`. What differs is the default arm, the one diagnostic
-that arm needs before it spends GPU hours, and the prose that argues it.
+**15 to 17 are stage A, as a choice rather than a route.** All three are
+generated from `tools/build_pretrain_notebooks.py`, and they are *one
+experiment with four arms*, not three notebooks: `ARM` is a setting and any of
+them can run any of `none`, `mask`, `distil` or `both`. What differs is the
+default arm, the one diagnostic that arm needs before it spends GPU hours, and
+the prose that argues it. **16 and 17 differ in one string** — the teacher —
+and every code cell that trains is byte for byte identical between them, which
+is the only reason their stage-B numbers can be set beside each other.
 
 The architecture is the point. **All four arms write the same artifact** — an
 ordinary EdgeTAM state dict plus a `stage_a.json` manifest naming the arm, the
@@ -123,19 +127,26 @@ Each answers a different question:
 | | the question | what decides it |
 |---|---|---|
 | **15** | can a thermal-only corpus, in the deployment's own modality, add anything a teacher cannot reach? | stage B, against `none` — and `MASK_MODE = "green"` (ColorMAE, no parameters) is what a *self-generated* mask has to beat to have earned itself |
-| **16** | is a teacher matched to the student better than a bigger one, and can an RGB teacher read a thermal frame at all? | the modality probe, before training, and then stage B |
+| **16** | can an RGB teacher read a thermal frame at all, and does the teacher the measured literature points at pay for itself? | the modality probe, before training, and then stage B |
+| **17** | does **conv-to-conv** transfer better into a convolutional student than ViT-to-conv does? | stage B, against 16 — the one question the published tables cannot answer |
 
-16 runs a measurement first and it is the interesting half: it scores the
+16 and 17 run a measurement first and it is the interesting half: it scores the
 teacher's features on the RGB half of registered pairs against its features on
 the thermal half, read against chance and against the teacher's own noise
 floor. That number decides whether thermal-only corpora can feed the
 distillation arm at all — and the answer published for this exact domain is
 split, because a foundation model's *outputs* collapse on thermal while its
 *features* mostly survive. `docs/encoder_pretrain_stage_a.md` carries the
-numbers and the whole argument, including the uncomfortable one: at matched
-parameters DINOv3's **ViT** students carry stronger dense features than its
-ConvNeXt ones, so `TEACHER = "facebook/dinov3-vitb16-pretrain-lvd1689m"` is the
-run to make if there is only time for one.
+numbers and the whole argument.
+
+**Run 16 before 17.** Two independent studies that held a compact student fixed
+and swapped the teacher both put the optimum near ViT-B's 86 M, and at matched
+parameters DINOv3's ViT students carry stronger dense features than its
+ConvNeXt ones (48.8 against 42.7 ADE20k mIoU at 29 M). ViT-B is also the
+*cheaper* of the two here: its stride-16 map already is the student's 32×32
+grid at 512, while a stride-32 ConvNeXt has to be run at 1024 to produce the
+same grid. 17 is the control that asks whether matching the student's
+*geometry* buys anything the published tables never tested.
 
 They do not replace 07–11's inline stage A; they make it a thing you can vary
 and re-use. Point 07's `--base` at what these produce.
@@ -199,11 +210,11 @@ Each is argued where it is made; this is the index.
 | no `object_score` term on static data | 07, `src/training/losses.py` | there is no `exist` label, and BCE against a constant 1 teaches the head to fire unconditionally |
 | distillation for pretraining, not MAE | 07, `src/training/distill.py` | MAE masks tokens and needs a ViT; the student side of a distillation loss is architecture-free |
 | …but masking is *not* closed off, it is an arm | 15, `src/training/automask.py` | what MAE needs a ViT for is *dropping* masked tokens; a feature target with no decoder needs neither that nor sparse convolution |
-| stage A is four arms with one artifact | 15, 16, `src/training/pretrain.py` | a baseline reached by a different code path is a baseline that drifts, so `none` writes a checkpoint and a manifest too |
+| stage A is four arms with one artifact | 15–17, `src/training/pretrain.py` | a baseline reached by a different code path is a baseline that drifts, so `none` writes a checkpoint and a manifest too |
 | the teacher's input is chosen so its grid is never coarser than the student's | `distill.teacher_input` | a stride-32 ConvNeXt fed 512 supervises four student cells with one, which is the resolution a twenty-pixel target lives in |
 | …and its stride is measured, not read | `distill.probe_geometry` | DINOv3's ConvNeXt configs carry no `patch_size`, so anything that reads one is wrong by a factor of two |
 | an RGB corpus feeds the student its own luminance | `pretrain.ROUTES` | full colour would teach the encoder a channel the sensor does not have; luminance keeps the shape of the real task |
-| whether thermal-only data can feed a teacher is measured first | 16, `pretrain.modality_gap` | published for this domain: a foundation model's *outputs* collapse on thermal (SAM AP 0.018 vs 0.538) while its *features* mostly survive (frozen DINOv2 0.706 mIoU vs 0.725 end-to-end) |
+| whether thermal-only data can feed a teacher is measured first | 16, 17, `pretrain.modality_gap` | published for this domain: a foundation model's *outputs* collapse on thermal (SAM AP 0.018 vs 0.538) while its *features* mostly survive (frozen DINOv2 0.706 mIoU vs 0.725 end-to-end) |
 | staged A-then-B, not one summed multi-teacher loss | `docs/encoder_arastirma.md` | the two stages' data differ by two orders of magnitude; staging also removes the loss-weighting problem outright |
 | an anchor term instead, during stage B | `src/training/image_loop.py` | stage A moves the encoder on 1.7 M pairs and stage B can undo it on 50 k; the reference is the model's own frozen copy, not a foundation model |
 | …but off by default, because it was measured | 12, `tools/train_encoder.py` | anchor 0 reached 0.8670 where 0.5 reached 0.8536 and a plain fine-tune 0.8611 — the term meant to protect stage A was the thing eating it |

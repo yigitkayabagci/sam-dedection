@@ -187,7 +187,8 @@ kayıtları modalite başına yönlendiriliyor:
 * `thermal` → ikisi de termal — ama önce `pretrain.modality_gap` ölçülüyor
 
 Defterler: `notebooks/15_pretrain_automask.ipynb`,
-`notebooks/16_pretrain_convnext.ipynb`.
+`notebooks/16_pretrain_vitb.ipynb`, `notebooks/17_pretrain_convnext.ipynb`.
+Son ikisi tek string farkla aynı deney; sıra **önce 16**.
 
 ---
 

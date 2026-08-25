@@ -7,8 +7,9 @@ kararlaştıracağını söylüyor.
 
 Kod: `src/training/pretrain.py` (hub), `src/training/automask.py` (maske kolu),
 `tools/pretrain_stage_a.py` (giriş noktası).
-Defterler: `notebooks/15_pretrain_automask.ipynb`,
-`notebooks/16_pretrain_convnext.ipynb`.
+Defterler: `notebooks/15_pretrain_automask.ipynb` (maske kolu),
+`notebooks/16_pretrain_vitb.ipynb` ve `notebooks/17_pretrain_convnext.ipynb`
+(öğretmen kolu — **tek string** farkla, eğiten her kod hücresi bayt bayt aynı).
 
 ---
 
@@ -98,25 +99,25 @@ kat tehlikeli bölge** — 6 M'lik bir encoder için **30 M – 90 M**.
 | öğretmen | param | 6 M'ye oran | ADE20k mIoU (DINOv3'ün kendi tablosu) | stride |
 |---|---|---|---|---|
 | ConvNeXt-T | 29 M | 4.8× | 42.7 | 32 |
-| **ConvNeXt-S** *(16'nın varsayılanı)* | **50 M** | **8×** | **44.8** | 32 |
+| **ConvNeXt-S** *(defter 17)* | **50 M** | **8×** | **44.8** | 32 |
 | ConvNeXt-B | 89 M | 15× | 46.3 | 32 |
 | ViT-S/16 | 21 M | 3.5× | 47.0 | 16 |
 | ViT-S+/16 | 29 M | 4.8× | **48.8** | 16 |
-| ViT-B/16 | 86 M | 14× | **51.8** | 16 |
+| **ViT-B/16** *(defter 16)* | **86 M** | **14×** | **51.8** | 16 |
 | ViT-L/16 | 300 M | 50× | 54.9 | 16 |
 
-Son iki sütun birlikte okununca sonuç 16 numaralı defterin kendi başlığı için
-rahatsız edici: **eşit parametrede DINOv3'ün ViT öğrencileri ConvNeXt
-öğrencilerinden gözle görülür şekilde daha güçlü yoğun öznitelik taşıyor** —
-29 M'de 48.8'e karşı 42.7 — ve ViT-B/16 hem yukarıdaki iki çalışmanın ölçülmüş
-optimumu hem de burada *daha ucuz* olan seçenek, çünkü stride-32 bir ConvNeXt
-öğrencinin 32×32 gridini üretmek için 1024'te koşmak zorunda.
+Son iki sütun birlikte okununca: **eşit parametrede DINOv3'ün ViT öğrencileri
+ConvNeXt öğrencilerinden gözle görülür şekilde daha güçlü yoğun öznitelik
+taşıyor** — 29 M'de 48.8'e karşı 42.7. Üstelik ViT-B/16 burada *daha ucuz*,
+çünkü stride-16 haritası 512'de zaten öğrencinin 32×32 gridi; stride-32 bir
+ConvNeXt aynı gridi üretmek için 1024'te koşmak zorunda.
 
-Peki neden varsayılan bir ConvNeXt? Çünkü bu sayıların söyleyemediği tek şey,
+Bu yüzden sıra net: **önce 16 (ViT-B), sonra 17 (ConvNeXt-S).** 17 bir
+alternatif değil bir **kontrol**: o sayıların söyleyemediği tek şey,
 **konv→konv** aktarımının evrişimsel bir öğrenciye ViT→konv'dan daha iyi geçip
-geçmediği, ve bu deneyi kimse koşmamış. Bir string ve bir yeniden koşu; ikisi
-de aynı çıktıyı yazdığı için aşama B doğrudan sıralıyor. **Tek koşuluk vaktin
-varsa `vitb16` koş.**
+geçmediği — EdgeTAM'ın gövdesi RepViT, ve yayınlanmış her öğretmen-boyutu
+sonucu bir transformer'a ölçülmüş. Bir string ve bir yeniden koşu; ikisi de
+aynı çıktıyı yazdığı için aşama B doğrudan sıralıyor.
 
 Kesin olan: **ViT-L/16 ve üstü kullanma.** 50 kat, iki ölçülmüş çalışmanın da
 kaybettiği oran.
@@ -239,7 +240,72 @@ veriyor. **Külliyatları karıştır.**
 
 ---
 
-## 6. Ne zaman bitmiş sayılır
+## 6. Aşama B'nin verisi aşama A'ya verilebilir mi?
+
+**Evet, ve normal olan bu.** Aşama A hiçbir etiket okumuyor — `paired` kolunda
+öğretmen RGB yarısına, öğrenci termal yarısına bakıyor; `rgb` kolunda öğrenci
+aynı görüntünün luminansına bakıyor; `mask` kolunda hiçbir öğretmen yok. Yani
+bu aşamanın yiyebileceği şey **çözülebilen her görüntü**, ve aşama B'nin
+kullandığı setler de buna dahil. SAM 2'nin kendi tarifi de böyle: statik
+görüntü aşama C'de bile atılmıyor, videoyla dönüşümlü besleniyor.
+
+Üç gerçek uyarı var, ve üçü de "yapma" değil "şunu bil" biçiminde.
+
+### 6.1 Aşama B'nin *not verdiği* kareler
+
+En önemlisi ve tek ciddi olanı. Aşama B `split_frames` ile **dizi bazında**
+train/val/test ayırıyor. Aşama A o test dizilerinin karelerini de görürse,
+aşama B'nin `test/instance_iou` sayısı şişer — etiket sızıntısı değil ama
+**transdüktif ön-eğitim**, ve ölçülmüş bir etkisi var: SCOTT'un kendi tablosu
+1 020 → 8 189 görüntüde 74.25 → 97.15 gidiyor ve bunun büyük kısmı eğitim
+setinin test setini içermesinden geliyor.
+
+Bu deponun kuralı zaten net: **yeniden kurulmuş setler eğitir, gerçek maskeli
+setler not verir** (`aerial.Source.role`). Not veren set **VTUAV VIS** — gerçek
+örnek maskesi taşıyan tek set. Yani pratik kural:
+
+> Her şeyi ver, **ama VTUAV VIS'i aşama A'ya koyarken bunu raporda söyle** —
+> ya da koyma. DroneVehicle, VisDrone, HIT-UAV, SegFly, Kust4K, RGBT234,
+> LasHeR: hiçbiri not vermiyor, hepsi serbest.
+
+En temiz sayıyı istiyorsan VTUAV VIS'i aşama A'nın külliyatından çıkar. Bu
+kadar. (Dizi-bazlı bir dışlama filtresi yazmak mümkün ama iki tarafın grup
+anahtarını *tam olarak* aynı hesaplaması gerekiyor, ve sessizce hiçbir şey
+dışlamayan bir filtre bu deponun en sevmediği hata biçimi.)
+
+### 6.2 Ardışık kareler neredeyse aynı görüntü
+
+Bu setlerin çoğu videodan geliyor. VTUAV 500 dizi × ~3 400 kare; ilk 5 000
+çift **iki uçuş** demek. `Corpus(..., limit=N)` bunu çözüyor: külliyat boyunca
+**yayarak** örnekliyor, baştan kesmiyor. 20 000 karelik bir `limit` genelde
+20 000 karelik bir külliyattan daha çeşitli.
+
+### 6.3 Dar külliyat kapsamadığı şeye zarar veriyor
+
+AnyThermal'ın ölçümü: **yalnızca** havadan veriyle distile edilen varyant,
+kentsel sahnelerde *distile edilmemiş RGB modelden daha kötü* çıkıyor. Aynı
+çalışmanın sonucu — "çeşitlilik ölçekten daha kritik" — bu aşamanın külliyat
+listesinin neden karışık olması gerektiği. Havadan termal + havadan RGB +
+yerden RGB-T karışımı, saf havadan termalden iyi.
+
+### 6.4 Peki hangi setler?
+
+| set | modalite | aşama A'da rolü |
+|---|---|---|
+| DroneVehicle | `paired` | 28 442 çift, 640×512 (100 px beyaz bant kırpıldıktan sonra), gündüz **ve gece** — çapraz-modal dayanağın çoğu |
+| Kust4K | `paired` | 4 024 çift, en temiz kayıt — **modalite probunun evi** |
+| SegFly / Caltech RGB-T | `paired` | çeşitlilik; Caltech donanım-senkronize havadan |
+| RGBT234 / LasHeR | `paired` | yerden RGB-T; havadan değil, ama §6.3'ün istediği çeşitlilik |
+| VisDrone | `rgb` | havadan RGB, termal ikizi yok — `rgb->gray` vekil yolu, ve genel kapasitenin kaynağı |
+| HIT-UAV | `thermal` | 2 898 havadan termal kare — küçük ama dağıtımın kendi modalitesi |
+| Anti-UAV410 | `thermal` | 410 dizi, minik İHA'lar; maske kolunun doğal yemi |
+| VTUAV VIS | `paired` | 1.7 M çift — **ama aşama B bunun üzerinde not veriyor**, §6.1 |
+
+Yani mentorun haklı: aşama B'nin verisini de ver. Tek istisna not veren set.
+
+---
+
+## 7. Ne zaman bitmiş sayılır
 
 Aşama A'nın ürettiği kayıp bir **vekil**, ve iki kolun vekilleri aynı ölçeği
 bile paylaşmıyor. Karar veren sayı şu üç koşunun tablosu:
@@ -248,7 +314,8 @@ bile paylaşmıyor. Karar veren sayı şu üç koşunun tablosu:
 |---|---|
 | `none` | — |
 | `mask` (defter 15) | — |
-| `distil` (defter 16) | — |
+| `distil`, ViT-B (defter 16) | — |
+| `distil`, ConvNeXt-S (defter 17) | — |
 
 Diğer her şey — veri setleri, program, seed, prompt karışımı — sabit tutulmak
 zorunda; yoksa sayılar karşılaştırılabilir değil ve karşılaştırma bu aşamayı

@@ -263,40 +263,33 @@ If it collapses: lower `MASK_RATIO`, raise `TARGET_EMA` toward 0.9995, or set
 `TARGET = "frozen"`, which cannot collapse because the target never moves.''',
 )
 
-VARIANTS["teacher"] = Variant(
-    key="teacher",
-    path="notebooks/16_pretrain_convnext.ipynb",
-    arm="distil",
-    title="Stage A — a frozen DINOv3 ConvNeXt teaching the thermal encoder",
-    blurb=(
-        "Runs the **teacher arm**: a frozen foundation model looks at one half "
-        "of the scene, the encoder looks at the other, and the encoder is "
-        "trained to reproduce the dense feature map the teacher saw. The "
-        "default teacher is **DINOv3 ConvNeXt-Small (50 M)** — chosen for its "
-        "*ratio* to a 6 M student rather than its size, which is the one "
-        "teacher-selection finding that has been measured more than once. "
-        "Before it trains anything it measures whether an RGB teacher shown a "
-        "thermal frame is describing the scene at all, because that number "
-        "decides which of your datasets this arm can even eat."),
-    needs="a CUDA GPU, ~6 GB of free disk at the default corpora, and a "
-          "**Hugging Face token** — every `facebook/dinov3-*` checkpoint is "
-          "gated",
-    takes="~10 min to download, ~3 min for the modality probe in cell "
-          "{{check}}, and 45–120 min to train at the default 4 000 steps",
-    settings='''ARM     = "distil"           # none | mask | distil | both
-TEACHER = "facebook/dinov3-convnext-small-pretrain-lvd1689m"
+# The teacher arm is **two** notebooks, and they differ in one string.
+#
+# That is the whole design: 16 runs the teacher the measured literature points
+# at, 17 runs the one nobody has tested against a convolutional student, and
+# every other thing about them -- corpora, schedule, seed, loss, freeze,
+# checkpoint format -- is identical, so stage B ranks them directly. Composed
+# from shared blocks rather than copied, because a copied notebook drifts.
+
+TEACHER_NEEDS = (
+    "a CUDA GPU, ~6 GB of free disk at the default corpora, and a "
+    "**Hugging Face token** — every `facebook/dinov3-*` checkpoint is gated")
+
+TEACHER_SETTINGS = """ARM     = "distil"           # none | mask | distil | both
+TEACHER = "__TEACHER__"
 TEACHER_SIZE = None          # None derives it from the teacher's *measured*
                              # stride so its map is never coarser than the
-                             # student's: 1024 for a stride-32 ConvNeXt at
-                             # SIZE 512, 512 for a /16 ViT.
+                             # student's: 512 for a stride-16 ViT at SIZE 512,
+                             # 1024 for a stride-32 ConvNeXt.
 LOSS    = "cosine"           # cosine | feature | frequency
 LAYERS  = 1                  # align against the teacher's last N blocks
 GRAM    = 0.0                # weight of the relational term; try 1.0
 JITTER  = 0                  # pixels of teacher-window offset; try 2-4 on
                              # DroneVehicle, whose pairs are not pixel-exact
 TOLERANCE = 0                # cosine-only: match against the best cell in a
-                             # (2r+1)^2 neighbourhood instead of exactly p''',
-    gate='''# --- Hugging Face: DINOv3 is gated --------------------------------------
+                             # (2r+1)^2 neighbourhood instead of exactly p"""
+
+TEACHER_GATE = """# --- Hugging Face: DINOv3 is gated --------------------------------------
 # Every facebook/dinov3-* repository requires accepting its terms once, on the
 # model page, with the same account as the token below. Done here rather than
 # at first use: the download happens forty minutes in, and a 401 there costs
@@ -315,8 +308,9 @@ except Exception as exc:
         f"cannot reach {TEACHER}: {exc}\\n\\n"
         f"Open https://huggingface.co/{TEACHER} , accept the terms, and re-run "
         f"this cell. An ungated fallback that needs no account at all: "
-        f"TEACHER = 'facebook/dinov2-base'.")''',
-    check_md='''## The measurement that decides which datasets this arm can eat
+        f"TEACHER = 'facebook/dinov2-base'.")"""
+
+TEACHER_CHECK_MD = """## The measurement that decides which datasets this arm can eat
 
 The teacher is an RGB model. The deployment is thermal. Registered pairs let
 the teacher work on the modality it was trained on — but registered aerial
@@ -342,8 +336,9 @@ thermal-specific FTNet's 0.613). This stage copies features and never touches a
 prediction, which is why the question is worth asking rather than assuming.
 
 The verdict the cell prints is a rule, not a judgement, so two runs cannot
-disagree about what the same numbers meant.''',
-    check='''# --- How much of the teacher survives a thermal input? ------------------
+disagree about what the same numbers meant."""
+
+TEACHER_CHECK = """# --- How much of the teacher survives a thermal input? ------------------
 from src.training import pretrain
 from src.training.distill import build_teacher
 
@@ -365,12 +360,14 @@ del probe_teacher
 import gc; gc.collect()
 import torch
 if DEVICE.startswith("cuda"):
-    torch.cuda.empty_cache()''',
-    invoke='''ARGS = (f"--arm {ARM} --teacher {TEACHER} --loss {LOSS} "
+    torch.cuda.empty_cache()"""
+
+TEACHER_INVOKE = """ARGS = (f"--arm {ARM} --teacher {TEACHER} --loss {LOSS} "
         f"--layers {LAYERS} --gram {GRAM} --jitter {JITTER} "
         f"--tolerance {TOLERANCE}"
-        + (f" --teacher-size {TEACHER_SIZE}" if TEACHER_SIZE else ""))''',
-    report='''# --- What the teacher arm produced --------------------------------------
+        + (f" --teacher-size {TEACHER_SIZE}" if TEACHER_SIZE else ""))"""
+
+TEACHER_REPORT = """# --- What the teacher arm produced --------------------------------------
 print(f"teacher      {RESULT['teacher']}")
 print(f"loss         {RESULT['loss']}")
 print(f"final        {RESULT['final_loss']:.4f}")
@@ -383,11 +380,13 @@ print()
 print("This number is a proxy and a small one. Two runs with different "
       "teachers do not even share a scale -- a cosine distance to "
       "ConvNeXt-Small's 768-d map and one to ViT-B's 768-d map are different "
-      "quantities. Only stage B ranks them.")''',
-    appendix='''## Which teacher, and why the default is what it is
+      "quantities. Only stage B ranks them.")"""
 
-`TEACHER` is the setting this notebook exists to vary, and the evidence behind
-it is worth stating plainly because it is thinner than it looks.
+TEACHER_APPENDIX = """## Which teacher, and why this notebook runs the one it runs
+
+__ARGUMENT__
+
+## The evidence, which is thinner than it looks
 
 **The one finding that has been measured more than once:** teacher capacity
 should be *matched* to the student, not maximised. EdgeCrafter (arXiv
@@ -410,39 +409,33 @@ sits inside it except the last.
 | teacher | params | ratio to 6 M | ADE20k mIoU (DINOv3's own table) | stride |
 |---|---|---|---|---|
 | `dinov3-convnext-tiny-…` | 29 M | 4.8x | 42.7 | 32 |
-| **`dinov3-convnext-small-…`** *(default)* | **50 M** | **8x** | **44.8** | 32 |
+| `dinov3-convnext-small-…` | 50 M | 8x | 44.8 | 32 |
 | `dinov3-convnext-base-…` | 89 M | 15x | 46.3 | 32 |
 | `dinov3-vits16-…` | 21 M | 3.5x | 47.0 | 16 |
-| `dinov3-vitsplus16-…` | 29 M | 4.8x | **48.8** | 16 |
-| `dinov3-vitb16-…` | 86 M | 14x | **51.8** | 16 |
+| `dinov3-vitsplus16-…` | 29 M | 4.8x | 48.8 | 16 |
+| `dinov3-vitb16-…` | 86 M | 14x | 51.8 | 16 |
 | `dinov3-vitl16-…` | 300 M | 50x | 54.9 | 16 |
 
-Read the last two columns together and the honest conclusion is uncomfortable
-for this notebook's own title: **at matched parameters DINOv3's ViT students
-carry visibly stronger dense features than its ConvNeXt ones** — 48.8 against
-42.7 at 29 M — and ViT-B/16 is both the measured optimum in the two studies
-above and, at stride 16, the *cheaper* option here, because a stride-32
-ConvNeXt has to be run at 1024 to produce the student's 32x32 grid.
-
-So why is a ConvNeXt the default? Because the one thing those numbers cannot
-tell us is whether **conv-to-conv** transfers better into a convolutional
-student than ViT-to-conv does, and nobody has run that experiment. It is one
-string and one re-run to find out, and both runs write the same artifact, so
-stage B ranks them directly. If you only have time for one, run `vitb16`.
+Read the last two columns together and one thing is uncomfortable for the
+ConvNeXt side: **at matched parameters DINOv3's ViT students carry visibly
+stronger dense features than its ConvNeXt ones** — 48.8 against 42.7 at 29 M.
+Whether that survives contact with a *convolutional* student is the question
+16 and 17 exist to answer, and nobody has published it.
 
 **What is not in doubt:** do not use ViT-L/16 or anything above it. 50x is the
 ratio at which both measured studies lost ground.
 
-## Why the ConvNeXt teacher is fed 1024 and the ViT 512
+## Why a ConvNeXt teacher is fed 1024 and a ViT 512
 
 A ConvNeXt's final stage is stride **32**; the student's map is stride **16**.
 Fed the same 512 the teacher would produce a 16x16 map against the student's
 32x32, and the loss would upsample it — supervising four student cells with one
 teacher cell, which throws away exactly the resolution that matters when a
 target is twenty pixels across. `TEACHER_SIZE = None` therefore resolves to
-`(512 / 16) x 32 = 1024`, giving the teacher a 32x32 map over the same field of
-view. It costs a forward pass on an upsampled image, under `no_grad` and
-bfloat16, and buys an exact correspondence.
+`(512 / 16) x 32 = 1024` for a ConvNeXt and to 512 for a /16 ViT, giving both
+a 32x32 map over the same field of view. For the ConvNeXt that costs a forward
+pass on an upsampled image, under `no_grad` and bfloat16, and buys an exact
+correspondence; the ViT gets it for free, which is a real part of its case.
 
 The stride is **measured**, not read off the config: DINOv3's ConvNeXt configs
 carry no `patch_size` field at all, so anything that reads one gets a default
@@ -491,7 +484,94 @@ decides.
 One warning from the literature that applies directly to a run configured with
 one corpus: AnyThermal reports that a variant distilled **only** on aerial data
 came out *worse than the undistilled RGB model* on urban scenes. Narrow
-distillation damages what it does not cover. Mix the corpora.''',
+distillation damages what it does not cover. Mix the corpora."""
+
+
+def teacher_variant(*, key: str, path: str, title: str, blurb: str,
+                    teacher_id: str, takes: str, argument: str) -> Variant:
+    """One teacher notebook. Everything but the string and the argument is shared."""
+    return Variant(
+        key=key, path=path, arm="distil", title=title, blurb=blurb,
+        needs=TEACHER_NEEDS, takes=takes,
+        settings=TEACHER_SETTINGS.replace("__TEACHER__", teacher_id),
+        gate=TEACHER_GATE, check_md=TEACHER_CHECK_MD, check=TEACHER_CHECK,
+        invoke=TEACHER_INVOKE, report=TEACHER_REPORT,
+        appendix=TEACHER_APPENDIX.replace("__ARGUMENT__", argument.strip()),
+    )
+
+
+VARIANTS["vitb"] = teacher_variant(
+    key="vitb",
+    path="notebooks/16_pretrain_vitb.ipynb",
+    teacher_id="facebook/dinov3-vitb16-pretrain-lvd1689m",
+    title="Stage A — a frozen DINOv3 ViT-B/16 teaching the thermal encoder",
+    blurb=(
+        "Runs the **teacher arm** with **DINOv3 ViT-B/16 (86 M)** — the "
+        "teacher the measured literature points at for a student this size, "
+        "and the cheaper of the two because its stride-16 map already *is* "
+        "the student's 32x32 grid at 512. This is the run to make if there is "
+        "only time for one. Its sibling `17_pretrain_convnext.ipynb` swaps in "
+        "a ConvNeXt and changes nothing else. Before either trains anything it "
+        "measures whether an RGB teacher shown a thermal frame is describing "
+        "the scene at all, because that number decides which of your datasets "
+        "this arm can even eat."),
+    takes="~10 min to download, ~2 min for the modality probe in cell "
+          "{{check}}, and 40–100 min to train at the default 4 000 steps",
+    argument="""**This notebook's teacher is `dinov3-vitb16` (86 M), and it is the one to run
+first.** Two independent studies that held a compact student fixed and swapped
+the teacher both put the optimum at roughly this size — EdgeCrafter's inverted
+U peaks at DINOv3-B, and Proteus degrades steeply above it. At 14x a 6 M
+student it sits inside the 5–15x band those studies describe, and DINOv3's own
+table gives it the strongest dense features of any candidate under 300 M
+(51.8 ADE20k mIoU).
+
+It is also the **cheaper** of the two teacher notebooks, which is the part that
+surprises people. Its patch is 16, so at the student's own 512 input it
+produces a 32x32 grid — the student's grid exactly, with no resampling
+anywhere. A ConvNeXt teacher has stride 32 and must be fed 1024 to produce the
+same grid.
+
+`17_pretrain_convnext.ipynb` is the control, not the alternative: it asks
+whether **conv-to-conv** transfers better into a convolutional student than
+ViT-to-conv does, which is the one thing the numbers below cannot say and
+nobody has published. Both write the same artifact, so stage B ranks them
+directly. Run this one first.""",
+)
+
+VARIANTS["convnext"] = teacher_variant(
+    key="convnext",
+    path="notebooks/17_pretrain_convnext.ipynb",
+    teacher_id="facebook/dinov3-convnext-small-pretrain-lvd1689m",
+    title="Stage A — a frozen DINOv3 ConvNeXt-Small teaching the thermal encoder",
+    blurb=(
+        "Runs the **teacher arm** with **DINOv3 ConvNeXt-Small (50 M)** — the "
+        "same experiment as `16_pretrain_vitb.ipynb` with one string changed. "
+        "It exists to answer the question the published tables cannot: does "
+        "**conv-to-conv** transfer better into a convolutional student than "
+        "ViT-to-conv does? Everything else — corpora, schedule, seed, loss, "
+        "freeze, checkpoint format — is identical to 16, which is the only "
+        "reason the two stage-B numbers can be set beside each other."),
+    takes="~10 min to download, ~3 min for the modality probe in cell "
+          "{{check}}, and 50–130 min to train at the default 4 000 steps — "
+          "slower than 16, because a stride-32 teacher runs at 1024",
+    argument="""**This notebook's teacher is `dinov3-convnext-small` (50 M), and it is a
+control rather than a favourite.** At 8x a 6 M student the *ratio* is close to
+the middle of the band the two measured studies describe, which is the honest
+part of its case. The dishonest part would be to stop there: at matched
+parameters DINOv3's ConvNeXt students carry visibly weaker dense features than
+its ViT students (44.8 ADE20k mIoU at 50 M against ViT-B's 51.8 at 86 M and
+ViT-S+'s 48.8 at 29 M), and the studies that found the inverted U used **ViT**
+teachers throughout.
+
+So why run it at all? Because the one thing those numbers cannot tell us is
+whether **conv-to-conv** transfers better into a convolutional student —
+EdgeTAM's trunk is a RepViT, and every published teacher-size result was
+measured into a transformer. A stage-wise convolutional teacher matches the
+student's geometry in a way a token grid does not, and nobody has tested
+whether that is worth anything. It is one string and one re-run to find out.
+
+`16_pretrain_vitb.ipynb` is the run to make first if there is only time for
+one. This is the second, and the pair is the experiment.""",
 )
 
 
@@ -712,6 +792,27 @@ Feeding the student full colour on an `rgb` corpus would teach it to use a
 channel the sensor does not have, and the deployed encoder has never seen
 colour in its life. Graying the student's half instead keeps the structure of
 the real task.
+
+### What may be fed in, and the one thing that may not
+
+This stage reads **no labels at all**, so anything the pipeline can decode is
+fair game — including the sets stage B trains on. That is not a loophole, it is
+how SAM 2's own recipe works.
+
+The one exception is the set stage B **grades on**. This repo's rule is that
+reconstructed sets train and real-mask sets grade (`aerial.Source.role`), and
+the set that grades is **VTUAV VIS** — the only one shipping real instance
+masks. Pretraining on its frames and then reporting stage B's held-out number
+is transductive: no label leaks, but the encoder has seen the test scenes, and
+the measured size of that effect in the literature is not small. Everything
+else — DroneVehicle, VisDrone, HIT-UAV, SegFly, Kust4K, RGBT234, LasHeR,
+Anti-UAV410 — is free.
+
+Two smaller things. `limit=` samples **across** a corpus rather than truncating
+it, which matters because most of these sets come from video and the first
+5 000 frames of VTUAV are two flights. And mix the corpora: AnyThermal reports
+a variant distilled *only* on aerial data coming out **worse than the
+undistilled RGB model** on urban scenes.
 
 ### The schedule
 
@@ -939,17 +1040,18 @@ comparison was the only reason to run this.
 
 ### What a result looks like
 
-Three numbers, from three stage-B runs that differ in one flag:
+Four numbers, from four stage-B runs that differ in one flag:
 
-| stage A | stage B `test/instance_iou` |
-|---|---|
-| `none` | — |
-| this arm | — |
-| the other notebook's arm | — |
+| stage A | notebook | stage B `test/instance_iou` |
+|---|---|---|
+| `none` | any, `--arm none` | — |
+| `mask` | 15 | — |
+| `distil`, ViT-B/16 | 16 | — |
+| `distil`, ConvNeXt-S | 17 | — |
 
-If this arm does not beat `none`, it cost GPU hours and bought nothing, and
-that is a finding worth writing down rather than a run worth hiding. The
-literature is full of exactly that outcome at this model scale.
+If an arm does not beat `none`, it cost GPU hours and bought nothing, and that
+is a finding worth writing down rather than a run worth hiding. The literature
+is full of exactly that outcome at this model scale.
 
 ---
 
