@@ -420,6 +420,58 @@ Bu, önerilen akışın kaybettiği ~48 000 örneği geri alıyor ve RGB maskesi
 mümkün olan her yerde yine üretiyor. Sıfır ek indirme: iki etiket klasörü
 (`*label/` ve `*labelr/`) aynı arşivde.
 
+#### Termal tarafta: evet, ve listedeki en büyük kaynak
+
+Defter 14'ün varsayılanı zaten bu (`mask_pool_plan.md` §2, rota (b) —
+öğretmeni doğrudan termal karede promptla). Ölçek karşılaştırması niye
+böyle olduğunu anlatıyor:
+
+| termal kutu kaynağı | kare | kutu | çözünürlük | irtifa |
+|---|---:|---:|---|---|
+| HIT-UAV | 2 898 | 24 899 | 640×512 | 80–130 m |
+| **DroneVehicle — IR** | **28 439** | **500 517** | **640×512** (bant çıkınca) | 80–120 m |
+
+**Yirmi kat.** Ve çözünürlük tam olarak projenin native girdisi.
+
+Ama "kullanılabilir mi"nin gerçek testi ölçek değil: öğretmenin termal
+karede **tutunacak bir kenar** bulup bulamaması. Ölçüldü — 26 çiftte, her
+kutunun içi ile çevresindeki halka arasındaki ortalama fark, karenin kendi
+standart sapmasına bölünerek:
+
+| ne | n | medyan \|iç−halka\|/σ | kenarı zayıf (< 0,25 σ) |
+|---|---:|---:|---:|
+| RGB kutuları, RGB karede | 445 | 0,50 | %25,6 |
+| IR kutuları **RGB eşi olan**, IR karede | 450 | **0,51** | %22,9 |
+| IR kutuları **RGB eşi olmayan**, IR karede | 107 | **0,46** | %22,4 |
+
+İki sonuç:
+
+1. **Termal kenar, RGB kenarı kadar var.** 0,51'e karşı 0,50, ve zayıf
+   kenar oranı termalde bir tık *daha düşük*. Yani öğretmenin termalde
+   çalışamayacağını varsaymak için bir sebep yok — DroneVehicle'ın termali
+   maskesiz değil, sadece maskesi henüz üretilmemiş.
+2. **RGB'nin kaybettiği gece nesneleri termalde marjinal değil.** Eşi
+   olmayan 107 kutunun kontrast medyanı 0,46 — eşi olanların 0,51'inden
+   ancak biraz düşük. §4.3'te "RGB'den sürme" denmesinin ikinci sebebi bu:
+   o nesneler termalde gayet promptlanabilir durumda.
+
+**Ama kontrast IoU değil.** Bu ölçüm kenarın *var olduğunu* söylüyor,
+öğretmenin onu *bulduğunu* değil. DroneVehicle'ın **gerçek maskesi yok**,
+o yüzden kalibrasyon yeri olamaz — kalibrasyon Kust4K'nın (ve §5'e göre
+SegFly'ın) çizilmiş maskesinde kalır, DroneVehicle **hasat** tarafıdır.
+
+**Yükleyici tuzağı:** IR JPEG'leri **8-bit**, çoğu 3 kanallı (712×840×3),
+ama 26'lık örneklemde **biri tek kanallı** (712×840). Radyometrik 16-bit
+yok — görüntü zaten görüntüleme aralığına indirilmiş, yani öğretmenin
+normal ön işlemesi olduğu gibi çalışır; buna karşılık `img[..., :3]`
+varsayan bir okuyucu o ~%4'te patlar. İki durumu da karşılamak gerekiyor.
+
+**Tek eksik, irtifa.** DroneVehicle 80–120 m'de ve termal tarafın
+alternatifi HIT-UAV de 80–130 m'de — yani hedef bandın (~20–60 m) altında
+**termal kutu kaynağı yok**. RGB tarafında AU-AIR/CODrone ile çözülen şey
+termalde çözülmüyor; ölçülen nesne boyutu (medyan 40 px) bandı geçtiği için
+bugün sorun değil, ama raporun bunu bir kısıt olarak yazması gerekiyor.
+
 **Bir de sınıf adı tuzağı:** freight car sınıfı dosyalarda **iki farklı
 yazımla** geçiyor — `feright_car` *ve* `feright car` (ikisi de "freight"
 yazım hatasıyla). Örneklemde RGB'de 13 + 7, IR'de 41 + 8. Tek yazıma
@@ -550,6 +602,12 @@ açıldı ve 70 karenin **her iki** etiket klasörü (`vallabel/` = RGB,
 kayma, kutu merkezleri 40 px eşiğiyle açgözlü eşleştirilerek ölçüldü;
 eşleşmeyenler "yalnız şu modalitede" sayıldı. XML'lerin bir kısmında
 kaçırılmamış `&` var, ayrıştırıcı bunu onarıyor.
+
+Kenar kontrastı ayrı bir turda, 26 çiftin **görüntüleri de indirilerek**:
+her kutu için `|ortalama(iç) − ortalama(halka)| / σ(kare)`, halka kutunun
+her yönde %60 genişletilmişi eksi kutunun kendisi. Ölçü kasıtlı olarak
+sadeleştirilmiş — kenarın *varlığını* gösterir, öğretmenin onu bulduğunu
+değil; DroneVehicle'da gerçek maske olmadığı için IoU hesaplanamaz.
 
 **Yapılamayan — üçü de bu sandbox'ın kısıtı, setin kusuru değil:**
 
