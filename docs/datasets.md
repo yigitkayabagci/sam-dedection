@@ -244,6 +244,126 @@ python tools/fetch_datasets.py hituav   --dest /content/data/HIT_UAV
 python tools/fetch_datasets.py rgbt234  --dest /content/data/RGBT234
 ```
 
+## İkinci tarama: hizalı havadan RGB-T ve termal, **örnek bazlı** etiketli
+
+Bu bölümün ölçütü yukarıdakinden farklı — ve bilerek. Yoğun (semantik)
+maske aranmıyor, çünkü havuz boru hattı (`docs/mask_pool_plan.md`) maskeyi
+kutudan kendisi üretiyor. Aranan: (1) havadan, (2) hizalı RGB-T ya da salt
+termal, (3) etiket **nesne bazlı** — kutu ya da örnek maskesi, sınıf haritası
+değil, (4) forma/hesaba takılmadan indirilebilir.
+
+Aşağıdaki her satır 2026-08'de **canlı sunucuda** doğrulandı: Drive
+klasörlerinin merkezi dizini `Range` isteğiyle okundu (arşivi indirmeden içini
+saymanın yolu), LILA'nın blob'ları ve Zenodo'nun API'si sorgulandı. Sayılar
+makaleden kopyalanmadı; makale ile indirmenin uyuşmadığı iki yer aşağıda
+ayrıca yazılı.
+
+### Bağlandı — `tools/fetch_datasets.py` bu dördünü indiriyor
+
+| Set | Modalite | Etiket | Doğrulanan indirme | Lisans |
+|---|---|---|---|---|
+| [RGBTDronePerson](https://nnnnerd.github.io/RGBTDronePerson/) (arşivde adı *WHU-DroneDual*) · ISPRS 2023 | hizalı havadan RGB-T, 640×512 | 6 125 çift, **70 880 kutu**, 4 sınıf (person / rider / crowd / uncertain); hem COCO json hem kare başına Pascal-VOC xml | Drive `18zm2Ca…`, **1 573 829 771 B**, onaylı URL 206 dönüyor (resume var). Zip'in içi `train/{annotation,thermal,visible}` + `val/{…}`: 4 900 + 1 225 çift, 12 250 jpg, 6 125 xml | CC BY 4.0 |
+| [VTUAV-det](https://nnnnerd.github.io/RGBTDronePerson/) (aynı ekibin VTUAV yeniden etiketlemesi) | hizalı havadan RGB-T, **1920×1080** | 11 392 train + 5 378 test kare, **124 869 kutu**, aynı 4 sınıf | Drive `1TLmMOQ…`, **6 314 183 652 B**, 206. İçi `train/{anno,ir,rgb}` + `test/{anno,ir,rgb}` | (sayfa CC BY 4.0 diyor) |
+| [BIRDSAI](https://lila.science/datasets/conservationdrones) · WACV 2020 | **salt termal** (LWIR), havadan, gece | 48 gerçek dizi / ~62 K kare, ~166 K kutu **+ iz kimliği**, MOT csv (`frame,id,x,y,w,h,class,species,occlusion,noise`) | LILA Azure blob, **2 271 707 323 B** (TrainReal) + **1 761 788 520 B** (TestReal), 206. TrainReal 32 dizi / 40 661 kare / 32 csv; TestReal 16 / 21 336 / 16 | **CDLA-Permissive-1.0** — listedeki tek ticari-serbest set |
+| [AIResQ Benchmark](https://zenodo.org/records/17405074) · Sci. Data 2026 | salt termal, havadan (DJI) | 1 988 kare + 1 988 YOLO txt, tek sınıf (person) | Zenodo, **1 609 176 235 B**, yayıncı md5'i var, 206. İçi `Benchmark/{images,labels}` | CC BY 4.0 |
+
+```
+python tools/fetch_datasets.py rgbtdroneperson --dest /content/data/RGBTDronePerson
+python tools/fetch_datasets.py vtuavdet        --dest /content/data/VTUAV_det
+python tools/fetch_datasets.py birdsai         --dest /content/data/BIRDSAI
+python tools/fetch_datasets.py airesq          --dest /content/data/AIResQ
+```
+
+Dördü birlikte ~87 K yeni kutu-etiketli kare getiriyor ve bunun ~79 K'sı
+termal tarafta — havuz defteri 14'ün asıl ihtiyacı olan şey.
+
+### Makale ile indirmenin uyuşmadığı iki yer
+
+**AIResQ 9 788 kare değil, 1 988.** Makalenin öne çıkardığı 2048×1536'lık
+6 506 + 3 282 görüntülük asıl set Zenodo'da `access_right: restricted` —
+API boş `files` listesi döndürüyor, erişim için yazarlara başvurmak
+gerekiyor. Açık olan tek kayıt 640×512'lik benchmark ve **içinde 1 988
+görüntü var**. Küçük ama temiz; sadece adı vaat ettiği şey değil.
+
+**NII-CU 9,1 GB değil, 26,2 GB.** Detay bir alttaki tabloda.
+
+### Ölçülen iki sayı — ikisi de prompt kararını değiştiriyor
+
+**RGBTDronePerson'da iki modalitenin kutuları 11,7 px ayrı.** Set "piksel
+düzeyinde hizalı" diye tanıtılıyor, ama `sub_train_thermal.json` ile
+`sub_train_visible.json` aynı 1 010 karenin aynı kişilerini iki kez
+etiketliyor ve fark ölçülebiliyor: aynı sınıf, en yakın merkez, 40 px kapı ile
+11 648 örneğin %94,5'i eşleşiyor, eşleşenlerin **merkez farkı medyan 11,7 px**
+(p90 = 21,7 px), yalnız %15,4'ü 5 px içinde. Aynı dosyadaki hedeflerin medyan
+büyüklüğü **√alan = 11–12 px**, yani fark bir hedef çapı kadar. Bu bir
+kayıt hatası mı yoksa iki ayrı çizim mi — sonuç aynı: **termal kutu, görünür
+karede kullanılabilir bir prompt değil.** Ayrıca hedeflerin %93'ü 16 px
+altında; kutu-prompt'lu bir öğretmen için bu setin zoom-crop'suz hiçbir
+şansı yok.
+
+**VTUAV-det'te tek kutu kümesi iki modalitede paylaşılıyor.** Zip'teki xml
+`<folder>rgb</folder>` diyor ve `train/00001.jpg` için (769,217)-(793,258)
+veriyor; yanındaki `train_ir.json` aynı kare için `[768,216,24,41]` veriyor —
+kapsayıcı/dışlayıcı sınır farkı dışında **aynı dikdörtgen**. Yani etiket bir
+modalitede çizilip diğerine olduğu gibi taşınmış. VTUAV'ın iki yarısının
+piksel piksel hizalı olmadığı zaten biliniyordu (bkz. `docs/encoder_mimari.md`
+§3); VTUAV-det bunu düzeltmiyor, **sessizce devralıyor**. Buna karşılık
+hedefler kutu-prompt için yeterince büyük: medyan √alan train'de 69 px,
+val'de 48 px — RGBTDronePerson'daki 11 px'in yanında başka bir dünya.
+
+Pratik sonuç: **termal havuzun prompt kaynağı VTUAV-det, RGBTDronePerson
+değil.** RGBTDronePerson'ın değeri prompt değil, defter 14'ün kalibrasyon
+tablosuna "modaliteler arası kutu transferi ne kadar bozuyor" sorusunun
+ölçülmüş bir cevabını koymak.
+
+### Doğrulandı ama bağlanmadı — ve neden
+
+| Set | Ne | Engel |
+|---|---|---|
+| [NII-CU MAPD](https://www.nii-cu-multispectral.org/) · J. Field Robotics 2022 | 5 880 hizalı RGB (3840×2160) + FIR (640×512) çift, 20–50 m, 45° eğim, lens distorsiyonu düzeltilmiş + homografi ile bindirilmiş, kişi kutusu, CC BY-NC-SA 3.0 | Dağıtım bir **Dropbox klasörü**. Dosya bazlı link (`…/NII_CU_MAPD_dataset.zip?rlkey=…&dl=1`) *"No Access"* dönüyor; klasör linki `dl=1` ile çalışıyor ama iki arşivi birden **26 212 695 407 B tek akış** olarak veriyor — `Range` yok, resume yok, üyeler akış halinde (boyutları başta bilinmiyor), üstelik istemediğimiz 15,2 GB'lık ham videoyu da içeriyor. 9,1 GB'lık asıl arşivi tek başına almanın bir yolu bulunamadı |
+| [Anti-UAV-RGBT](https://huggingface.co/datasets/CornBac0n/Anti-UAV-RGBT) | 318 eşli video: dizi başına `visible.mp4` + `infrared.mp4` + modalite başına json, ayrıca `label_new/{train,val,test}.json`; HF aynası 6,7 GB, anonim | Bakış **yerden göğe** — hedef gökyüzündeki İHA, havadan sahne değil. Projede zaten Anti-UAV410 var |
+| [WiSARD](https://sites.google.com/uw.edu/wisard/) · IROS 2022 | 15 453 eşzamanlı görsel-termal çift (toplam ~56 K etiketli görüntü), YOLO kutusu, tek sınıf (human), termal 640×512, izin verici lisans, 40,54 GB tek Drive dosyası | Çiftler yalnız **zamansal** senkron. Makale görsel-termal kaydı (registration) *çözülmemiş problem* olarak sunuyor — hizalı RGB-T sayılmaz |
+| [RGBT-Tiny](https://github.com/XinyiYing/RGBT-Tiny) · TPAMI 2025 | 115 hizalı dizi / 93 K kare / **1,2 M kutu + iz kimliği**, 7 sınıf, 8 sahne tipi — listedeki en zengin RGB-T kutu seti | Erişim **form arkasında** (Google/Microsoft Forms). Otomatik indirilemiyor; istenirse elle alınıp `staged()` yoluna konabilir |
+| [VTSaR](https://github.com/zxq309/VTSaR) · TGRS 2024 | Hizalı görünür-IR havadan kişi seti (A-VTSaR) + sentetik yarısı (AS-VTSaR) | **Baidu-only** (`pan.baidu.com`, kod `qqru`); Colab yanıtlayamaz, HF aynası bulunamadı |
+| [AVIID-1/2/3](https://github.com/silver-hzh/Averial-visible-to-infrared-image-translation) · J. Remote Sensing 2023 | 3 363 hizalı havadan görünür-IR çift, 434×434 ve 512×512 | **Baidu-only**; ayrıca görev görüntü çevirisi — **kutu etiketi yok** |
+| [VEDAI](https://huggingface.co/datasets/ckyrkou/vedai) | Havadan araç tespiti, yönlü kutu | Modalite RGB + **NIR**, termal değil; HF aynası 52 MB, yayının tamamı değil |
+
+### Yer seviyesi olduğu için elenenler
+
+LLVIP, M3FD, KAIST-multispectral, CVC-14, CAMEL — hepsi hizalı RGB-T ve
+kutu etiketli, HF aynaları da var (`Frencis/LLVIP_RGBT`, `Frencis/M3FD_RGBT`,
+`nonameplease/M3FD_Detecion`), ama hiçbiri havadan değil. Aynı sebeple MVSeg
+zaten yukarıda "MVUAV'ın yer seviyesi kardeşi" olarak duruyor.
+`Frencis/NIICU_RGBT` havadan, ama 129 GB'lık sıkıştırılmamış TIFF dökümü —
+resmî 9,1 GB'lık arşivin yanında anlamsız.
+
+### Kutuyu maskeye çevirmiş hatlar
+
+Sorunun ikinci yarısı — "bazıları pipeline kurup kutuyu maskeye çevirmiş
+olabilir" — üç örnekle karşılandı, üçü de aynı deseni izliyor:
+
+| Hat | Girdi → çıktı | Durum |
+|---|---|---|
+| **AeroVIS** | VisDrone + UAVDT + SeaDronesSee kutuları → SAM 3 → örnek maskesi + kimlik izi | Yukarıda öncelikli listede; **defter 13'ün havuzuyla eğitilen model burada ölçülemez** (aynı VisDrone kareleri) |
+| **SAM2DV** | DroneVehicle yönlü kutuları → SAM 2 → ikili maske | Yukarıda gerekçesiyle elendi: IEEE DataPort aboneliği arkasında, video değil, ve aynısını `make_masklets.py` kalibrasyonla üretiyor |
+| [**UAVDB**](https://arxiv.org/html/2409.06490v6) | yörünge **noktası** → Patch Intensity Convergence ile kutu → SAM 2 → örnek maskesi | Deseni doğruluyor ama bize uymuyor: RGB, ve hedef yine gökyüzündeki İHA |
+
+Üçünün ortak dersi bu repodaki karara denk düşüyor: kutuyu maskeye çeviren
+tarafın elinde kalibrasyon yoksa çıktı denetlenemez bir etiket katmanı
+oluyor. `src/training/pool.py`'nin dört kapısı ve `--calibrate` yolu tam da
+bunun için var.
+
+### Çakışma riski — yeni satırlar
+
+- **VTUAV → VTUAV-det.** Aynı çekim. Defter 07/08 VTUAV'da eğitiyorsa
+  VTUAV-det bir **değerlendirme** seti olamaz; prompt kaynağı olarak
+  kullanılabilir, ölçüm için kullanılamaz.
+- **RGBTDronePerson, BIRDSAI, AIResQ, NII-CU** listedeki hiçbir setle kaynak
+  paylaşmıyor — dördü de kendi çekimi.
+- **Anti-UAV-RGBT ↔ Anti-UAV410.** İkisi de Anti-UAV yarışma ailesinden;
+  410'un termal dizileri RGB-T sürümündekilerle örtüşebilir. İkisi birden
+  kullanılacaksa dizi adları karşılaştırılmalı.
+
 ## Mevcut referans
 
 [Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) (2023 · TPAMI) —

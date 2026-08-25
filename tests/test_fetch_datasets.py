@@ -27,13 +27,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.aerial import SPECS  # noqa: E402
+from tools import fetch_datasets  # noqa: E402
 from tools.fetch_datasets import (  # noqa: E402
+    AIRESQ,
+    BIRDSAI,
     KUST4K,
+    RGBTDRONEPERSON,
     STAGING,
     RECIPES,
+    VTUAVDET,
     VTUAV_VIS,
     drive_download,
     extract,
+    fetch_extra,
     human,
     masked_members,
     staged,
@@ -230,6 +236,114 @@ class TestQuotaMessage(unittest.TestCase):
         text = str(caught.exception)
         for attempt in ("gdown #1", "direct #1", "gdown #2", "direct #2"):
             self.assertIn(attempt, text)
+
+
+class TestBoxLabelledSets(unittest.TestCase):
+    """The four sets added for the mask pool: box labels, no dense masks.
+
+    Every number here was read off the live host in 2026-08 -- the Drive
+    folders' central directories over a range request, LILA's blobs, Zenodo's
+    API -- so a test that drifts from the recipe means the recipe drifted from
+    what was measured, not that the numbers were rounded.
+    """
+
+    def test_each_archive_keeps_its_own_top_level_layout(self):
+        # All four zips already carry their split at the top (`train/`, `val/`,
+        # `TrainReal/`, `Benchmark/`), so an `into` would bury it a level down
+        # -- the same reason VTUAV's parts have none.
+        for recipe in (RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ):
+            for part in recipe.parts:
+                self.assertEqual(part.into, "", f"{recipe.name}/{part.name}")
+
+    def test_the_coco_jsons_are_sidecars_not_archive_members(self):
+        # They sit beside the zip as separate Drive files; fetching them as
+        # parts would send them through `extract`.
+        for recipe, count in ((RGBTDRONEPERSON, 4), (VTUAVDET, 2)):
+            self.assertEqual(len(recipe.extras), count, recipe.name)
+            self.assertEqual(len(recipe.parts), 1, recipe.name)
+            for name, source in recipe.extras:
+                self.assertTrue(name.endswith(".json"), name)
+                self.assertTrue(source.startswith("drive:"), source)
+
+    def test_rgbtdroneperson_carries_both_modalities_annotations(self):
+        # The visible json is the whole point of keeping it: it is what the
+        # 11.7 px modality disagreement was measured from.
+        names = {name for name, _ in RGBTDRONEPERSON.extras}
+        self.assertIn("sub_train_thermal.json", names)
+        self.assertIn("sub_train_visible.json", names)
+
+    def test_the_42_gb_synthetic_half_of_birdsai_is_off_by_default(self):
+        chosen = [p.name for p in BIRDSAI.chosen(None)]
+        self.assertEqual(chosen, ["train_real", "test_real"])
+        simulation = {p.name: p for p in BIRDSAI.parts}["train_simulation"]
+        self.assertGreater(simulation.size, 39 << 30)   # 39.3 GiB
+
+    def test_zenodo_gives_a_checksum_so_it_is_kept(self):
+        # Same rule as Kust4K: where the publisher hands out an md5, a
+        # truncated download must not pass for a complete one.
+        part, = AIRESQ.parts
+        self.assertEqual(part.md5, "6a7e8920ee62c6c8234e0f08e631410a")
+        self.assertEqual(len(part.md5), 32)
+
+    def test_every_new_part_says_how_big_it_is(self):
+        for recipe in (RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ):
+            for part in recipe.parts:
+                self.assertGreater(part.size, 1 << 20,
+                                   f"{recipe.name}/{part.name}")
+
+    def test_the_notes_do_not_promise_masks(self):
+        # These sets are prompts for the teacher, not ground truth for J&F.
+        for recipe in (RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ):
+            self.assertIn("box", recipe.note.lower(), recipe.name)
+
+
+class TestTheCliKnowsEveryRecipe(unittest.TestCase):
+    def test_every_recipe_has_a_default_folder(self):
+        # `--dest` is optional, and without it main() looks the dataset up in a
+        # hand-written table. A recipe missing from it fails with a KeyError
+        # halfway through `fetch_datasets.py all`, after the earlier sets have
+        # already been downloaded.
+        source = (ROOT / "tools" / "fetch_datasets.py").read_text()
+        table = source.split("folders = {", 1)[1].split("}", 1)[0]
+        for name in RECIPES:
+            self.assertIn(f'"{name}":', table, f"{name} has no default folder")
+
+
+class TestFetchExtra(unittest.TestCase):
+    """Three hosts behind one field, because the sets do not share one."""
+
+    def dispatch(self, source):
+        calls = {}
+        original = (fetch_datasets.drive_download, fetch_datasets.http_download)
+
+        def fake_drive(file_id, path, **kwargs):
+            calls["drive"] = file_id
+            return path
+
+        def fake_http(url, path, **kwargs):
+            calls["http"] = url
+            return path
+
+        fetch_datasets.drive_download = fake_drive
+        fetch_datasets.http_download = fake_http
+        try:
+            fetch_extra(source, Path("/tmp/never-written.json"))
+        finally:
+            fetch_datasets.drive_download, fetch_datasets.http_download = original
+        return calls
+
+    def test_a_drive_id_goes_through_the_virus_scan_form(self):
+        self.assertEqual(self.dispatch("drive:abc123"), {"drive": "abc123"})
+
+    def test_a_full_url_is_fetched_as_it_stands(self):
+        calls = self.dispatch("https://example.org/train.json")
+        self.assertEqual(calls, {"http": "https://example.org/train.json"})
+
+    def test_a_bare_id_is_still_read_as_figshare(self):
+        # Kust4K's palette script predates the other two forms.
+        calls = self.dispatch("57140510")
+        self.assertEqual(
+            calls, {"http": "https://ndownloader.figshare.com/files/57140510"})
 
 
 class TestHuman(unittest.TestCase):

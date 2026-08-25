@@ -26,13 +26,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.boxes import (  # noqa: E402
+    BIRDSAI_SPECIES,
     VISDRONE_NAMES,
     BoxFrame,
+    birdsai_frames,
     class_histogram,
     coco_frames,
     dronevehicle_frames,
     hituav_frames,
+    rgbtdroneperson_frames,
     summarise_frames,
+    vtuavdet_frames,
     yolo_frames,
 )
 from src.training.labels import (  # noqa: E402
@@ -234,6 +238,173 @@ class TestDroneVehicleFrames(unittest.TestCase):
                      boxes=np.zeros((2, 4)), classes=("car",))
 
 
+class TestRgbtDronePersonFrames(unittest.TestCase):
+    """The jsons ship beside the zip, and the boxes are on the thermal half."""
+
+    def fixture(self, tmp: Path, split: str = "train",
+                folder: str = "train") -> Path:
+        root = tmp / "rdp"
+        for side in ("thermal", "visible"):
+            (root / folder / side).mkdir(parents=True)
+            (root / folder / side / "00000.jpg").write_bytes(b"jpg")
+        (root / f"{split}_thermal.json").write_text(json.dumps({
+            "images": [{"id": 0, "file_name": "00000.jpg",
+                        "height": 512, "width": 640}],
+            "categories": [{"id": 0, "name": "person"},
+                           {"id": 2, "name": "crowd"},
+                           {"id": 3, "name": "uncertain"}],
+            "annotations": [
+                {"image_id": 0, "category_id": 0, "bbox": [329, 343, 16, 28]},
+                {"image_id": 0, "category_id": 2, "bbox": [10, 10, 40, 40]},
+                {"image_id": 0, "category_id": 3, "bbox": [1, 1, 4, 4]},
+            ]}))
+        return root
+
+    def test_uncertain_is_dropped_and_crowd_is_kept(self):
+        # `crowd` stays so the component gate's rejection rate on group boxes
+        # shows up in the report instead of being hidden by the reader.
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = rgbtdroneperson_frames(self.fixture(Path(tmp)))
+            self.assertEqual(frames[0].classes, ("person", "crowd"))
+            np.testing.assert_allclose(frames[0].boxes[0], [329, 343, 345, 371])
+
+    def test_the_visible_twin_is_attached_as_the_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frame, = rgbtdroneperson_frames(self.fixture(Path(tmp)))
+            self.assertIsNotNone(frame.pair)
+            self.assertEqual(frame.pair.parent.name, "visible")
+            self.assertEqual(frame.image.parent.name, "thermal")
+
+    def test_the_sub_train_subset_reads_its_images_out_of_train(self):
+        # `sub_train_*.json` is the publisher's 1 013-frame subset; its frames
+        # live in `train/`, not in a folder of its own.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), split="sub_train", folder="train")
+            frame, = rgbtdroneperson_frames(root, split="sub_train")
+            self.assertEqual(frame.image.parent.parent.name, "train")
+
+    def test_a_missing_json_says_which_command_fetches_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError) as caught:
+                rgbtdroneperson_frames(tmp)
+            self.assertIn("fetch_datasets.py rgbtdroneperson",
+                          str(caught.exception))
+
+
+class TestVtuavDetFrames(unittest.TestCase):
+    """`val_ir.json` annotates the folder called `test/` -- map, do not assume."""
+
+    def fixture(self, tmp: Path, stem: str, folder: str) -> Path:
+        root = tmp / "vd"
+        for side in ("ir", "rgb"):
+            (root / folder / side).mkdir(parents=True)
+            (root / folder / side / "00001.jpg").write_bytes(b"jpg")
+        (root / f"{stem}_ir.json").write_text(json.dumps({
+            "images": [{"id": 0, "file_name": "00001.jpg",
+                        "height": 1080, "width": 1920}],
+            "categories": [{"id": 0, "name": "person"}],
+            "annotations": [{"image_id": 0, "category_id": 0,
+                             "bbox": [768, 216, 24, 41]}]}))
+        return root
+
+    def test_val_reads_the_test_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), stem="val", folder="test")
+            frame, = vtuavdet_frames(root, split="val")
+            self.assertEqual(frame.image.parent.parent.name, "test")
+            self.assertEqual(frame.image.parent.name, "ir")
+
+    def test_test_is_accepted_as_a_name_for_the_same_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), stem="val", folder="test")
+            self.assertEqual(len(vtuavdet_frames(root, split="test")), 1)
+
+    def test_the_rgb_half_is_prompted_with_the_same_boxes_and_pairs_back(self):
+        # One box set serves both modalities in this dataset; the reader must
+        # not pretend there is a second one.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), stem="train", folder="train")
+            thermal, = vtuavdet_frames(root, modality="thermal")
+            rgb, = vtuavdet_frames(root, modality="rgb")
+            np.testing.assert_allclose(thermal.boxes, rgb.boxes)
+            self.assertEqual(rgb.image.parent.name, "rgb")
+            self.assertEqual(rgb.pair.parent.name, "ir")
+
+    def test_an_unknown_split_is_refused_before_any_globbing(self):
+        with self.assertRaises(ValueError):
+            vtuavdet_frames("/nowhere", split="trainval")
+
+
+class TestBirdsaiFrames(unittest.TestCase):
+    """MOT csv per sequence, and the noise flag means interpolated."""
+
+    SEQUENCE = "0000000060_0000000000"
+
+    def fixture(self, tmp: Path, numbers=(278, 279)) -> Path:
+        root = tmp / "birdsai"
+        annotations = root / "TrainReal" / "annotations"
+        images = root / "TrainReal" / "images" / self.SEQUENCE
+        annotations.mkdir(parents=True)
+        images.mkdir(parents=True)
+        for number in numbers:
+            (images / f"{self.SEQUENCE}_{number:010d}.jpg").write_bytes(b"jpg")
+        # frame, id, x, y, w, h, class, species, occlusion, noise
+        (annotations / f"{self.SEQUENCE}.csv").write_text(
+            "278,1,354,118,9,11,1,0,0,0\n"
+            "278,2,380,102,9,11,0,1,0,0\n"
+            "279,1,353,116,10,13,1,-1,0,1\n")
+        (annotations / "water_metadata.txt").write_text("not a sequence")
+        return root
+
+    def test_species_names_come_from_the_published_legend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = birdsai_frames(self.fixture(Path(tmp)))
+            first = {f.key: f for f in frames}[f"{self.SEQUENCE}/000278"]
+            self.assertEqual(first.classes, ("human", "elephant"))
+            np.testing.assert_allclose(first.boxes[0], [354, 118, 363, 129])
+
+    def test_an_interpolated_box_is_left_out_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp))
+            self.assertEqual([f.key for f in birdsai_frames(root)],
+                             [f"{self.SEQUENCE}/000278"])
+            kept = birdsai_frames(root, drop_noisy=False)
+            self.assertEqual(len(kept), 2)
+            # species -1 with class 1 falls back to the coarse column.
+            self.assertEqual(kept[1].classes, ("human",))
+
+    def test_the_txt_beside_the_csvs_is_not_read_as_a_sequence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = birdsai_frames(self.fixture(Path(tmp)))
+            self.assertTrue(all(f.key.startswith(self.SEQUENCE) for f in frames))
+
+    def test_a_sequence_numbered_from_zero_still_finds_its_frames(self):
+        # Filenames carry the video's own offset in some sequences; the reader
+        # falls back to position in the sorted listing rather than dropping it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = tmp_root = Path(tmp) / "b2"
+            annotations = root / "TrainReal" / "annotations"
+            images = root / "TrainReal" / "images" / "seq"
+            annotations.mkdir(parents=True)
+            images.mkdir(parents=True)
+            for name in ("frame_a.jpg", "frame_b.jpg"):
+                (images / name).write_bytes(b"jpg")
+            (annotations / "seq.csv").write_text("0,1,10,10,5,5,1,0,0,0\n")
+            frame, = birdsai_frames(tmp_root)
+            self.assertEqual(frame.image.name, "frame_a.jpg")
+
+    def test_a_missing_split_says_which_command_fetches_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError) as caught:
+                birdsai_frames(tmp)
+            self.assertIn("fetch_datasets.py birdsai", str(caught.exception))
+
+    def test_the_legend_matches_the_published_table(self):
+        self.assertEqual(BIRDSAI_SPECIES[0], "human")
+        self.assertEqual(BIRDSAI_SPECIES[8], "rhino")
+        self.assertEqual(len(BIRDSAI_SPECIES), 10)
+
+
 class TestProbes(unittest.TestCase):
     def test_histogram_counts_boxes_not_images(self):
         frames = [BoxFrame(key="a", image=Path("a"), boxes=np.zeros((2, 4)),
@@ -433,6 +604,19 @@ class TestNewRecipes(unittest.TestCase):
             (part,) = RECIPES[name].parts
             self.assertTrue(part.url.startswith("https://"), name)
             self.assertIn(marker, part.url)
+
+    def test_every_pool_dataset_has_both_a_reader_and_a_fetch_recipe(self):
+        # `--dataset` on `make_mask_pool.py` and the recipe list on
+        # `fetch_datasets.py` are two hand-written lists that have to agree:
+        # a dataset the CLI offers but cannot fetch is a dead end at 3 a.m.
+        from tools.make_mask_pool import DATASETS, frames_for  # noqa: F401
+        from src.training import boxes
+
+        for dataset in DATASETS:
+            self.assertIn(dataset, RECIPES, f"{dataset} has no fetch recipe")
+        for dataset in ("rgbtdroneperson", "vtuavdet", "birdsai"):
+            self.assertIn(dataset, DATASETS)
+            self.assertTrue(hasattr(boxes, f"{dataset}_frames"), dataset)
 
     def test_a_staged_tarball_is_found_like_a_staged_zip(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -82,6 +82,60 @@ kaynak); havuzda havadan setlerle karışımı, encoder'ın modalite ekseni içi
 çeşitlilik sayılır — ama etiketde `dataset` alanı durur, aşama B/C istediğini
 seçerek okur.
 
+### İkinci tarama (2026-08): dört yeni kutu kaynağı
+
+İlk taramanın açığı şuydu: termal dalın havadan kutuları HIT-UAV (2 898 kare)
+ve DroneVehicle'ın TIR yarısıyla sınırlıydı, video tarafı ise yer seviyesi
+(RGBT234 / LasHeR) ya da erişilemez (LasHeR'in 224 GB'ı). İkinci tarama
+bunu dolduran dördünü buldu; gerekçeleri, ölçülen sayıları ve indirme
+doğrulamaları `docs/datasets.md` → *"İkinci tarama"* bölümünde.
+
+| set | ne | rota | havuzdaki rolü |
+|---|---|---|---|
+| **VTUAV-det** | 16 770 kare 1920×1080, 124 869 kişi kutusu, hizalı RGB-T | (b) doğrudan termal, (a) ile kıyaslanabilir | **termal dalın yeni ana prompt kaynağı** — hedefler medyan √alan 48–69 px, yani kutu-prompt'un anlam taşıdığı ilk havadan RGB-T set |
+| **BIRDSAI** | 48 gece TIR dizisi / ~62 K kare, kutu **+ iz kimliği**, CDLA-Permissive | (b) doğrudan termal; masklet grup-by ile bedava | gece alanı ve **tracker koşmadan masklet** |
+| **AIResQ Benchmark** | 1 988 havadan termal kare, YOLO kişi kutusu | (b) | küçük ama temiz; SAR alanı |
+| **RGBTDronePerson** | 6 125 hizalı çift 640×512, 70 880 kutu | — | **prompt değil, kalibrasyon**: modaliteler arası kutu transferinin maliyeti burada ölçülüyor (aşağı bak) |
+
+İki ölçüm bu dört seti nasıl kullanacağımızı doğrudan belirledi:
+
+- **RGBTDronePerson'ın iki modalitesinin kutuları medyan 11,7 px ayrı**,
+  hedeflerin medyan büyüklüğü ise 11–12 px. Fark bir hedef çapı kadar →
+  bu sette (a) rotası (maskeyi RGB'de üretip termalde kapıla) **kurulamaz**;
+  ölçüm tablosunun "ne kadar bozulur" satırı olarak değerli.
+- **VTUAV-det'in xml'i ile `train_ir.json`'ı aynı dikdörtgeni veriyor** —
+  etiket bir modalitede çizilip diğerine taşınmış. VTUAV'ın bilinen
+  hizalama kayması burada **etiketlenmemiş, devralınmış** durumda; 14'ün
+  kalibrasyon hücresi bunu `box_iou` kapısının ret oranından görecektir.
+
+Üçü de `tools/make_mask_pool.py`'nin `--dataset` seçeneğine bağlandı,
+okuyucuları `src/training/boxes.py`'de (`rgbtdroneperson_frames`,
+`vtuavdet_frames`, `birdsai_frames`):
+
+```
+python tools/fetch_datasets.py vtuavdet --dest /content/data/VTUAV_det
+python tools/make_mask_pool.py label --dataset vtuavdet \
+    --data /content/data/VTUAV_det --out /content/pool/thermal \
+    --split train --modality thermal
+
+python tools/fetch_datasets.py birdsai --dest /content/data/BIRDSAI
+python tools/make_mask_pool.py label --dataset birdsai \
+    --data /content/data/BIRDSAI --out /content/pool/thermal --split train
+```
+
+BIRDSAI okuyucusunun tek bilinçli varsayılanı: `noise=1` satırları atılıyor.
+Yayıncının kendi açıklamasına göre o bayrak kutunun komşu karelerden
+**ara değerlenmiş** olduğunu söylüyor — 10 px'lik bir hedefte ara değerlenmiş
+bir dikdörtgenle öğretmeni promptlamak, oraya ne denk geldiyse onu
+segmentlemesini istemek olur. Okuyucunun `drop_noisy=False` argümanıyla geri
+açılabiliyor (CLI'da bayrağı yok; defterden çağrılırken verilir).
+`occlusion=1` ise **atılmıyor**:
+örtülü hedef zaten hafıza yolunun var olma sebebi.
+
+Defter 13/14'ün `DATASETS` listesine bağlamak bilerek ayrı bırakıldı —
+önce havuzun kendisi incelensin, sonra defter üretici (
+`tools/build_pool_notebooks.py`) bir turda güncellensin.
+
 ## 3. Mekanik: tek boru hattı, iki dal
 
 Anti-UAV410 etiketleyicisinin ispatlanmış üç kararı aynen taşınır

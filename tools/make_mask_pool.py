@@ -52,7 +52,8 @@ from src.training.pool import (  # noqa: E402
     write_index,
 )
 
-DATASETS = ("visdrone", "hituav", "dronevehicle")
+DATASETS = ("visdrone", "hituav", "dronevehicle", "rgbtdroneperson",
+            "vtuavdet", "birdsai")
 
 
 def frames_for(dataset: str, data: Path, split: str, modality: str,
@@ -71,6 +72,16 @@ def frames_for(dataset: str, data: Path, split: str, modality: str,
         return boxes.hituav_frames(data, split=split)
     if dataset == "dronevehicle":
         return boxes.dronevehicle_frames(data, modality=modality)
+    if dataset == "rgbtdroneperson":
+        return boxes.rgbtdroneperson_frames(data, split=split, modality=modality)
+    if dataset == "vtuavdet":
+        return boxes.vtuavdet_frames(data, split=split, modality=modality)
+    if dataset == "birdsai":
+        # Thermal-only, so `modality` has nothing to select; `split` names the
+        # archive half instead of a json (TrainReal / TestReal).
+        return boxes.birdsai_frames(data, split="TestReal"
+                                    if split in ("val", "test", "TestReal")
+                                    else "TrainReal")
     raise SystemExit(f"dataset must be one of {DATASETS}, got {dataset!r}")
 
 
@@ -101,10 +112,13 @@ def main(argv: list[str] | None = None) -> int:
     label.add_argument("--out", required=True, type=Path,
                        help="Pool root; stores land under <out>/<dataset>/.")
     label.add_argument("--split", default="train",
-                       help="visdrone/hituav: which split's annotations.")
+                       help="visdrone/hituav/rgbtdroneperson/vtuavdet: which "
+                            "split's annotations. birdsai reads it as "
+                            "TrainReal unless it says val/test.")
     label.add_argument("--modality", choices=("thermal", "rgb"),
                        default="thermal",
-                       help="dronevehicle: which half the pool supervises.")
+                       help="dronevehicle/rgbtdroneperson/vtuavdet: which half "
+                            "the pool supervises. birdsai is thermal-only.")
     label.add_argument("--prompt", choices=("self", "pair"), default="self",
                        help="Which pixels the teacher looks at: the frame "
                             "itself, or its registered twin (the mask is "

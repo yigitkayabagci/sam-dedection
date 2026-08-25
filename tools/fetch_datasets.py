@@ -100,9 +100,12 @@ class Recipe:
     stream: bool = False        # the parts are consecutive slices of ONE
                                 # tar.gz: never saved to disk, decompressed
                                 # straight off the network (see LASHER)
-    extras: tuple[tuple[str, str], ...] = ()   # (filename, figshare file id)
+    extras: tuple[tuple[str, str], ...] = ()   # (filename, source)
                                 # small sidecar files written into the dataset
-                                # root -- manifests the reader needs, not data
+                                # root -- manifests the reader needs, not data.
+                                # `source` is a full URL, a `drive:<file id>`,
+                                # or a bare figshare file id (Kust4K's form,
+                                # which predates the other two)
 
     def chosen(self, names: tuple[str, ...] | None) -> list[Part]:
         if not names:
@@ -403,9 +406,128 @@ VISDRONE = Recipe(
     ),
 )
 
+# Verified 2026-08 against the live Drive folder
+# (`drive.google.com/drive/folders/1Mi3NXQ-YG1iiIWkPbe3GQoDK68dARMN6`), not the
+# paper: the zip is 1 573 829 771 B and Drive answers 206 to a range request on
+# the confirmed URL, so it resumes. Its central directory says
+# `train/{annotation,thermal,visible}` and `val/{...}` -- 4 900 + 1 225 pairs,
+# 12 250 jpgs, 6 125 Pascal-VOC xmls -- so the archive keeps its own layout and
+# no part needs an `into`.
+#
+# The xml is drawn on the **thermal** frame (`<folder>Thermal</folder>`,
+# `<depth>1</depth>`, and box (330,344)-(346,372) is COCO `[329,343,16,28]`
+# off by the inclusive-max convention). The four COCO jsons live beside the zip
+# as separate Drive files, which is why they are `extras` rather than members.
+#
+# Two numbers the notebook should see before it trusts this set as a prompt
+# source, both measured off the jsons: the median target is sqrt(area) = 11 px
+# and 93 % of them are under 16 px, and matching the thermal boxes to the
+# visible ones (same class, nearest centre, 40 px gate, 94.5 % matched) puts
+# the median centre disagreement at **11.7 px** -- about one target diameter,
+# with only 15 % inside 5 px. Whether that is registration error or two
+# annotators drawing the same person twice does not matter downstream: a
+# thermal box is not a usable prompt on the visible frame here.
+RGBTDRONEPERSON = Recipe(
+    name="rgbtdroneperson",
+    note="RGBTDronePerson (WHU-DroneDual): 6 125 aerial RGB-T pairs at "
+         "640x512, 70 880 person/rider/crowd/uncertain boxes drawn on the "
+         "thermal half (CC BY 4.0)",
+    parts=(
+        Part("rgbtdroneperson", drive="18zm2CaJS73a6eUHXUQ6_cjjbrurSkm9C",
+             size=1_573_829_771),
+    ),
+    extras=(
+        ("train_thermal.json", "drive:1P5FNdig1_IEq9xGfL3zAzMxQf-Jeg7_2"),
+        ("val_thermal.json", "drive:1H_hHqoqaVPBa3LBTEgveZLxE-eovaOmE"),
+        ("sub_train_thermal.json", "drive:1Cxp6Hau20jRQowEAU7ST5wwI_kRUQq65"),
+        ("sub_train_visible.json", "drive:1aAlgSY8tWA4RDIi88l83mFtrdvj0KAGa"),
+    ),
+)
+
+# The detection re-annotation of VTUAV, from the same authors' Drive folder
+# (`1kBomGd7bu-9MiUDGmViHqmV9baN739iG`). Verified the same way: 6 314 183 652 B,
+# range-resumable, central directory `train/{anno,ir,rgb}` (11 392 each) plus
+# `test/{anno,ir,rgb}` (5 378), so again no `into`.
+#
+# Worth knowing before using it as a *thermal* prompt source: the xml says
+# `<folder>rgb</folder>` at 1920x1080x3, and its box for `train/00001.jpg` is
+# (769,217)-(793,258) while `train_ir.json` gives `[768,216,24,41]` for the
+# same frame -- the identical rectangle. **One box set is shared by both
+# modalities**, so whatever residual misregistration VTUAV has (see
+# `docs/encoder_mimari.md` -- the two halves are not pixel-exact) is inherited
+# silently rather than annotated. Against that, the targets are big enough for
+# a box prompt to mean something: median sqrt(area) 69 px on train, 48 px on
+# val, versus 11 px in RGBTDronePerson.
+VTUAVDET = Recipe(
+    name="vtuavdet",
+    note="VTUAV-det: 11 392 train / 5 378 test aligned RGB-T frames at "
+         "1920x1080, 124 869 person boxes shared by both modalities",
+    parts=(
+        Part("vtuavdet", drive="1TLmMOQWE5otkjJQmCWFVdWgWv05V1BO-",
+             size=6_314_183_652),
+    ),
+    extras=(
+        ("train_ir.json", "drive:13dguRNo6Cb84jYMWaYOnyT1d_xjqAts0"),
+        ("val_ir.json", "drive:1bpECNDRZ6enewHyASGJOBdqhSt66k2ES"),
+    ),
+)
+
+# BIRDSAI, hosted by LILA as "Conservation Drones". Anonymous Azure blobs that
+# answer 206, no form and no account, and -- unusually for this list --
+# **CDLA-Permissive-1.0**, read off the page's schema.org block rather than
+# assumed. Central directories read over a range request: TrainReal is 32
+# sequences / 40 661 frames / 32 csv, TestReal is 16 / 21 336 / 16, which is the
+# paper's 48 real videos and ~62 K frames.
+#
+# Layout is `TrainReal/{images,annotations}/<sequence>/`, one MOT csv per
+# sequence: `frame, id, x, y, w, h, class, species, occlusion, noise`. The `id`
+# column is what makes it interesting here -- it is the only thermal aerial set
+# on this list that ships **track ids**, so a masklet is a group-by rather than
+# a tracker run. The targets are tiny (9-14 px boxes in the sample sequence),
+# which is the same caveat RGBTDronePerson carries.
+#
+# The 42 GB synthetic half is AirSim renders; off by default.
+BIRDSAI = Recipe(
+    name="birdsai",
+    note="BIRDSAI: 48 night-time aerial TIR sequences, ~62 K frames, 166 K "
+         "boxes with track ids over humans and animals (CDLA-Permissive-1.0)",
+    parts=(
+        Part("train_real", size=2_271_707_323,
+             url="https://lilawildlife.blob.core.windows.net/lila-wildlife/"
+                 "conservationdrones/v01/conservation_drones_train_real.zip"),
+        Part("test_real", size=1_761_788_520,
+             url="https://lilawildlife.blob.core.windows.net/lila-wildlife/"
+                 "conservationdrones/v01/conservation_drones_test_real.zip"),
+        Part("train_simulation", default=False, size=42_222_672_278,
+             url="https://lilawildlife.blob.core.windows.net/lila-wildlife/"
+                 "conservationdrones/v01/"
+                 "conservation_drones_train_simulation.zip"),
+    ),
+)
+
+# AIResQ (Sci. Data 2026). Read the two Zenodo records rather than the paper's
+# headline: the 9 788-image, 2048x1536 half is `access_right: restricted` --
+# the API returns an empty `files` list and you have to ask the authors -- and
+# the only open record is the benchmark, 1 609 176 235 B with a publisher md5.
+# Its central directory is `Benchmark/{images,labels}`, 1 988 DJI thermal JPGs
+# and 1 988 YOLO txts, one class (person). So: a small, clean, CC BY 4.0
+# thermal SAR set, not the 9 788 images the abstract advertises.
+AIRESQ = Recipe(
+    name="airesq",
+    note="AIResQ benchmark: 1 988 aerial thermal frames with YOLO person "
+         "boxes (CC BY 4.0; the 2048x1536 half is access-restricted)",
+    parts=(
+        Part("airesq", size=1_609_176_235,
+             md5="6a7e8920ee62c6c8234e0f08e631410a",
+             url="https://zenodo.org/records/17405074/files/"
+                 "AIResQ_Benchmark.zip?download=1"),
+    ),
+)
+
 RECIPES: dict[str, Recipe] = {
     r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, CALTECH, SEGFLY,
-                        SEGFLY_RGB, HITUAV, RGBT234, LASHER, VISDRONE)}
+                        SEGFLY_RGB, HITUAV, RGBT234, LASHER, VISDRONE,
+                        RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ)}
 
 
 # --------------------------------------------------------------------------
@@ -775,6 +897,22 @@ STAGING = ("/content/drive/MyDrive/datasets",
            "/content/staging")
 
 
+def fetch_extra(source: str, target: Path) -> Path:
+    """One sidecar file -- a manifest or a COCO json -- next to the data.
+
+    Three hosts, because the sets that need a sidecar do not share one:
+    Kust4K's palette script is a bare figshare file id (the form this argument
+    had first), RGBTDronePerson and VTUAV-det keep their COCO jsons as separate
+    Drive files beside the image zip, and anything else is a plain URL.
+    """
+    if source.startswith("drive:"):
+        return drive_download(source[len("drive:"):], target, quiet=True)
+    if source.startswith(("http://", "https://")):
+        return http_download(source, target, quiet=True)
+    return http_download(f"https://ndownloader.figshare.com/files/{source}",
+                         target, quiet=True)
+
+
 def fetch_part(part: Part, dest: Path, work: Path, frames: str,
                keep: bool, quiet: bool,
                staging: SequenceABC[str] = STAGING) -> None:
@@ -889,11 +1027,10 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
     else:
         print("every archive is staged already; nothing to download")
 
-    for name, file_id in recipe.extras:
+    for name, source in recipe.extras:
         target = dest / name
         if not target.is_file():
-            http_download(f"https://ndownloader.figshare.com/files/{file_id}",
-                          target, quiet=True)
+            fetch_extra(source, target)
     if recipe.extras:
         print(f"{len(recipe.extras)} manifest(s) alongside the data")
 
@@ -969,7 +1106,9 @@ def main(argv: list[str] | None = None) -> int:
                "dronevehicle": "DroneVehicle", "caltech": "Caltech",
                "segfly": "SegFly", "segfly_rgb": "SegFly_RGB",
                "hituav": "HIT_UAV", "rgbt234": "RGBT234",
-               "lasher": "LasHeR", "visdrone": "VisDrone"}
+               "lasher": "LasHeR", "visdrone": "VisDrone",
+               "rgbtdroneperson": "RGBTDronePerson", "vtuavdet": "VTUAV_det",
+               "birdsai": "BIRDSAI", "airesq": "AIResQ"}
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
         fetch(name, dest, tuple(args.parts) if args.parts else None,

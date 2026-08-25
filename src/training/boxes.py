@@ -4,8 +4,10 @@ The mask-pool stage (`src/training/pool.py`) turns *detection* annotations --
 one image, many boxes -- into teacher masks. The datasets that carry those
 boxes each ship a different format: VisDrone is YOLO text next to the images,
 HIT-UAV is one COCO json per split, DroneVehicle is VOC-ish XML whose boxes are
-oriented polygons. This module reads each into a `BoxFrame` and nothing else;
-everything downstream -- zoom crops, gates, storage -- is format-blind.
+oriented polygons, RGBTDronePerson and VTUAV-det keep their COCO jsons *outside*
+the image archive, and BIRDSAI is one MOT csv per sequence. This module reads
+each into a `BoxFrame` and nothing else; everything downstream -- zoom crops,
+gates, storage -- is format-blind.
 
 Two decisions the readers share:
 
@@ -27,7 +29,7 @@ from __future__ import annotations
 import json
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Sequence as SequenceABC
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +44,14 @@ IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 # download; if the yaml in the download disagrees, trust the download.
 VISDRONE_NAMES = ("pedestrian", "people", "bicycle", "car", "van", "truck",
                   "tricycle", "awning-tricycle", "bus", "motor")
+
+# BIRDSAI's MOT csv carries two class columns, and the legend is the LILA
+# dataset page's own ("Annotation format"), read there rather than inferred:
+# `class` is 0 for animals and 1 for humans, `species` refines it. 3 and 4
+# appear only in the real half, 5-8 only in the synthetic one.
+BIRDSAI_SPECIES = {-1: "unknown", 0: "human", 1: "elephant", 2: "lion",
+                   3: "giraffe", 4: "dog", 5: "crocodile", 6: "hippo",
+                   7: "zebra", 8: "rhino"}
 
 
 @dataclass(frozen=True)
@@ -311,6 +321,214 @@ def hituav_frames(root: str | Path, split: str = "train",
             and (base / split / first["file_name"]).is_file():
         images_root = base / split
     return coco_frames(annotations, images_root, drop=drop)
+
+
+def _with_pair(frames: SequenceABC[BoxFrame], pair_root: Path) -> list[BoxFrame]:
+    """Attach each frame's twin in the other modality, when the folder is there.
+
+    Matched by stem rather than by full name so a mirror that re-encodes one
+    half (`.jpg` beside `.png`) still pairs up; a frame whose twin is missing
+    keeps `pair=None` and the pool falls back to prompting on itself.
+    """
+    twins = _images_by_stem(pair_root)
+    if not twins:
+        return list(frames)
+    return [replace(frame, pair=twins.get(frame.image.stem)) for frame in frames]
+
+
+def _find_json(root: Path, name: str, hint: str) -> Path:
+    found = sorted(root.rglob(name))
+    if not found:
+        raise FileNotFoundError(
+            f"{root}: no {name} anywhere underneath. It is a separate Drive "
+            f"file, not a member of the image zip -- {hint}")
+    return found[0]
+
+
+def rgbtdroneperson_frames(root: str | Path, split: str = "train",
+                           modality: str = "thermal",
+                           drop: tuple[str, ...] = ("uncertain", "dontcare",
+                                                    "ignore")) -> list[BoxFrame]:
+    """RGBTDronePerson, whose boxes are drawn on the **thermal** half.
+
+    Layout, read off the archive's central directory:
+    `train/{annotation,thermal,visible}` and `val/{...}`, with the COCO jsons
+    shipped separately (`tools/fetch_datasets.py` puts them in the dataset
+    root). `split` is `train`, `val`, or `sub_train` -- the publisher's
+    1 013-frame subset, whose images live in `train/` and which is the only
+    split annotated on **both** modalities.
+
+    Two things to know before prompting a teacher with these boxes. The
+    targets are tiny: median sqrt(area) is 11-12 px and 93 % are under 16 px,
+    so the pool's zoom crop is doing all the work. And the two modalities
+    disagree: matching `sub_train_thermal.json` to `sub_train_visible.json`
+    (same class, nearest centre) puts the median centre offset at 11.7 px --
+    about one target diameter -- so `pair` is set for completeness but
+    `--prompt pair` on this dataset prompts the teacher next to the target,
+    not on it. Measured numbers and method: `docs/datasets.md`.
+
+    `crowd` boxes are kept on purpose: they are group rectangles, the
+    `component` gate rejects most of them, and seeing that rejection rate in
+    the report is more useful than silently dropping them. `uncertain` is
+    dropped, being the dataset's own "do not score this" marker.
+    """
+    if modality not in ("thermal", "rgb"):
+        raise ValueError(f"modality must be thermal or rgb, got {modality!r}")
+    root = Path(root)
+    side = "thermal" if modality == "thermal" else "visible"
+    annotations = _find_json(
+        root, f"{split}_{side}.json",
+        f"fetch it with `python tools/fetch_datasets.py rgbtdroneperson "
+        f"--dest {root}`. Only sub_train is annotated on the visible half.")
+
+    folder = "train" if split.startswith("sub_train") else split
+    images_root = next(
+        (p for p in sorted(root.rglob(f"{folder}/{side}")) if p.is_dir()), None)
+    if images_root is None:
+        raise FileNotFoundError(f"{root}: no {folder}/{side}/ folder underneath.")
+    other = "visible" if side == "thermal" else "thermal"
+    return _with_pair(coco_frames(annotations, images_root, drop=drop),
+                      images_root.parent / other)
+
+
+def vtuavdet_frames(root: str | Path, split: str = "train",
+                    modality: str = "thermal",
+                    drop: tuple[str, ...] = ("uncertain", "dontcare",
+                                             "ignore")) -> list[BoxFrame]:
+    """VTUAV-det: VTUAV re-annotated for detection, 1920x1080, person classes.
+
+    The publisher's two names disagree by one word, so this maps them: the
+    jsons are `train_ir.json` and `val_ir.json`, while the zip's folders are
+    `train/` and `test/`. Either `val` or `test` selects the second one.
+
+    **One box set serves both modalities.** The zip's xml says
+    `<folder>rgb</folder>` and gives (769,217)-(793,258) for `train/00001.jpg`;
+    `train_ir.json` gives `[768,216,24,41]` for the same frame -- the same
+    rectangle, off only by the inclusive-max convention. So the annotation was
+    drawn once and carried across, and VTUAV's known residual misregistration
+    (`docs/encoder_mimari.md` section 3) is inherited rather than annotated.
+    That makes the pool's `box_iou` gate the thing to watch here: its rejection
+    rate on the thermal half *is* the misregistration measurement.
+
+    Against that, the targets are large enough for a box prompt to mean
+    something -- median sqrt(area) 69 px on train, 48 px on val -- which is why
+    this, and not RGBTDronePerson, is the thermal branch's prompt source.
+    """
+    if modality not in ("thermal", "rgb"):
+        raise ValueError(f"modality must be thermal or rgb, got {modality!r}")
+    if split not in ("train", "val", "test"):
+        raise ValueError(f"split must be train, val or test, got {split!r}")
+    root = Path(root)
+    stem = "train" if split == "train" else "val"
+    folder = "train" if split == "train" else "test"
+    side = "ir" if modality == "thermal" else "rgb"
+    annotations = _find_json(
+        root, f"{stem}_ir.json",
+        f"fetch it with `python tools/fetch_datasets.py vtuavdet --dest {root}`.")
+
+    images_root = next(
+        (p for p in sorted(root.rglob(f"{folder}/{side}")) if p.is_dir()), None)
+    if images_root is None:
+        raise FileNotFoundError(f"{root}: no {folder}/{side}/ folder underneath.")
+    other = "rgb" if side == "ir" else "ir"
+    return _with_pair(coco_frames(annotations, images_root, drop=drop),
+                      images_root.parent / other)
+
+
+def birdsai_frames(root: str | Path, split: str = "TrainReal",
+                   drop_noisy: bool = True,
+                   drop_occluded: bool = False) -> list[BoxFrame]:
+    """BIRDSAI's night-time thermal sequences, one `BoxFrame` per frame.
+
+    Layout: `<split>/annotations/<sequence>.csv` beside
+    `<split>/images/<sequence>/`, one MOT row per box:
+    `frame, id, x, y, w, h, class, species, occlusion, noise`.
+
+    `drop_noisy` is on by default and it is the decision worth arguing about.
+    The dataset page says the noise flag marks boxes whose position was
+    **interpolated** from neighbouring frames rather than observed; a teacher
+    prompted with an interpolated rectangle on a 10 px target is being asked
+    to segment whatever happens to sit there. They are kept out of the pool
+    and counted in the report instead. `drop_occluded` is off, because an
+    occluded target is exactly the case the memory path is meant to survive.
+
+    The csv's `id` column -- this is the only aerial thermal set on the list
+    that ships track ids -- is parsed but not carried: `BoxFrame` has no field
+    for it, and grouping frames into masklets belongs to
+    `src/training/masklets.py`. Class names come from `BIRDSAI_SPECIES`, with
+    the coarse animal/human column as the fallback when species is unknown.
+    """
+    root = Path(root)
+    annotation_dirs = [p for p in sorted(root.rglob(f"{split}/annotations"))
+                       if p.is_dir()]
+    if not annotation_dirs:
+        raise FileNotFoundError(
+            f"{root}: no {split}/annotations/ underneath -- fetch it with "
+            f"`python tools/fetch_datasets.py birdsai --dest {root}`.")
+
+    frames: list[BoxFrame] = []
+    for annotation_dir in annotation_dirs:
+        images_dir = annotation_dir.parent / "images"
+        for csv_path in sorted(annotation_dir.glob("*.csv")):
+            sequence = csv_path.stem
+            by_number, ordered = _birdsai_images(images_dir / sequence)
+            if not ordered:
+                continue
+            rows: dict[int, list[tuple[list[float], str]]] = {}
+            for line in csv_path.read_text().splitlines():
+                cells = [c.strip() for c in line.split(",")]
+                if len(cells) < 10 or not cells[0].lstrip("-").isdigit():
+                    continue
+                number = int(cells[0])
+                x, y, w, h = (float(v) for v in cells[2:6])
+                kind, species = int(float(cells[6])), int(float(cells[7]))
+                occluded, noisy = int(float(cells[8])), int(float(cells[9]))
+                if (drop_noisy and noisy) or (drop_occluded and occluded):
+                    continue
+                name = BIRDSAI_SPECIES.get(species, "unknown")
+                if name == "unknown":
+                    name = "human" if kind == 1 else "animal"
+                rows.setdefault(number, []).append(([x, y, x + w, y + h], name))
+
+            for number, boxes in sorted(rows.items()):
+                image = by_number.get(number)
+                if image is None and number < len(ordered):
+                    # Some sequences number their frames from the video's own
+                    # offset rather than from zero. Falling back to position in
+                    # the sorted listing keeps those usable; a sequence where
+                    # neither works simply contributes nothing.
+                    image = ordered[number]
+                if image is None:
+                    continue
+                frames.append(BoxFrame(
+                    key=f"{sequence}/{number:06d}", image=image,
+                    boxes=np.asarray([b[0] for b in boxes], dtype=np.float64),
+                    classes=tuple(b[1] for b in boxes)))
+    if not frames:
+        raise ValueError(
+            f"{root}: {split} had annotations but no row survived -- with "
+            f"drop_noisy={drop_noisy}, check whether this split is entirely "
+            f"interpolated.")
+    return frames
+
+
+def _birdsai_images(folder: Path) -> tuple[dict[int, Path], list[Path]]:
+    """`({frame number: path}, [paths in order])` for one BIRDSAI sequence.
+
+    Frame numbers live in the filename's trailing field
+    (`0000000060_0000000000_0000000278.jpg`), which is what the csv's first
+    column indexes -- when the two agree. The ordered list is the fallback.
+    """
+    if not folder.is_dir():
+        return {}, []
+    ordered = [p for p in sorted(folder.iterdir())
+               if p.suffix.lower() in IMAGE_SUFFIXES]
+    by_number: dict[int, Path] = {}
+    for path in ordered:
+        tail = path.stem.rsplit("_", 1)[-1]
+        if tail.isdigit():
+            by_number.setdefault(int(tail), path)
+    return by_number, ordered
 
 
 # --------------------------------------------------------------------------
