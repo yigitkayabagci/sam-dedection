@@ -29,6 +29,7 @@ from src.training.pretrain import (  # noqa: E402
     LOSSES,
     MODALITIES,
     ROUTES,
+    STUDENTS,
     Batch,
     Corpus,
     Item,
@@ -36,6 +37,7 @@ from src.training.pretrain import (  # noqa: E402
     centre,
     channel_normalise,
     feature_loss,
+    for_student,
     frequency_loss,
     from_pixels,
     gram_loss,
@@ -129,6 +131,65 @@ class TestCorpus(unittest.TestCase):
         self.assertFalse(teacher_gray)
 
 
+class TestForStudent(unittest.TestCase):
+    """Two models are two pretrainings, and the difference between them is
+    entirely in what the student's half is."""
+
+    def setUp(self):
+        self.rows = [
+            Corpus("paired", "/a", "paired", spec="dronevehicle"),
+            Corpus("colour", "/b", "rgb", rgb="**/*.jpg"),
+            Corpus("heat", "/c", "thermal", thermal="**/*.jpg"),
+        ]
+
+    def test_the_two_students_are_the_two_the_design_argues_for(self):
+        self.assertEqual(set(STUDENTS), {"thermal", "rgb"})
+
+    def test_a_thermal_student_keeps_every_corpus_and_its_default_route(self):
+        kept = for_student(self.rows, "thermal", log=lambda *_: None)
+        self.assertEqual([c.routing for c in kept],
+                         ["rgb->thermal", "rgb->gray", "thermal->thermal"])
+
+    def test_an_rgb_student_gets_same_modality_distillation_everywhere(self):
+        """The canonical published recipe: teacher and student on the identical
+        view, the student trained to reproduce the teacher's map."""
+        kept = for_student(self.rows, "rgb", log=lambda *_: None)
+        self.assertEqual([c.name for c in kept], ["paired", "colour"])
+        self.assertTrue(all(c.routing == "rgb->rgb" for c in kept))
+        for corpus in kept:
+            student, gray, teacher, teacher_gray = ROUTES[corpus.routing]
+            self.assertEqual((student, teacher), ("rgb", "rgb"))
+            self.assertFalse(gray or teacher_gray)
+
+    def test_a_paired_corpus_contributes_only_its_rgb_half_to_an_rgb_student(self):
+        kept = for_student(self.rows, "rgb", log=lambda *_: None)
+        self.assertEqual(kept[0].wants(), ("rgb", "rgb"))
+        kept[0].check()                       # and the route is satisfiable
+
+    def test_dropping_a_thermal_corpus_is_announced_not_silent(self):
+        """A corpus list that silently shrinks is how a run reports a sample
+        count nobody checked."""
+        said = []
+        for_student(self.rows, "rgb", log=said.append)
+        self.assertTrue(any("heat" in line for line in said))
+
+    def test_rerouting_twice_changes_nothing(self):
+        # The notebook reroutes before indexing and the CLI reroutes again from
+        # the JSON it was handed; the second pass has to be a no-op.
+        once = for_student(self.rows, "rgb", log=lambda *_: None)
+        twice = for_student(once, "rgb", log=lambda *_: None)
+        self.assertEqual([(c.name, c.routing) for c in once],
+                         [(c.name, c.routing) for c in twice])
+
+    def test_an_all_thermal_list_refuses_rather_than_returning_nothing(self):
+        with self.assertRaises(SystemExit):
+            for_student([self.rows[2]], "rgb", log=lambda *_: None)
+
+    def test_an_unknown_student_is_refused(self):
+        with self.assertRaises(ValueError):
+            for_student(self.rows, "visible")
+
+
 @unittest.skipUnless(HAVE_CV2, "indexing reads real image files")
 class TestIndex(unittest.TestCase):
     def setUp(self):
@@ -190,6 +251,30 @@ class TestIndex(unittest.TestCase):
         # and at a size the source is already below, no crop at all
         big = index(self.corpora(), size=128, log=lambda *_: None)
         self.assertIsNone(big[0].crop)
+
+    def test_frames_the_dataset_marks_unusable_are_dropped_on_both_paths(self):
+        """Kust4K ships five manifests naming **1 160 of its 4 024 frames** as
+        broken -- 29 % -- where one modality is corrupt. They decode fine and
+        are simply not pictures of the scene. `list_pairs` already drops them;
+        a corpus routed `thermal->thermal` reads a flat listing instead and
+        would otherwise train on them silently."""
+        (self.root / "heat" / "broken_in_night.txt").write_text(
+            "0000.png\n0002\n")
+        said = []
+        rows = [Corpus("heat", self.root / "heat", "thermal",
+                       thermal="**/ir/*.png", crop=None,
+                       exclude="broken_in_*.txt")]
+        items = index(rows, size=32, log=said.append)
+        stems = {i.student.stem for i in items}
+        self.assertEqual(stems, {"0001", "0003"})
+        self.assertTrue(any("unusable" in line for line in said))
+
+    def test_the_exclusion_glob_is_inherited_from_a_named_spec(self):
+        # The real case: `spec="kust4k"` must bring `broken_in_*.txt` with it,
+        # so the row that reads simplest is also the row that is correct.
+        self.assertEqual(Corpus("k", "/tmp", "paired", spec="kust4k").excludes(),
+                         "broken_in_*.txt")
+        self.assertEqual(Corpus("x", "/tmp", "rgb", rgb="**/*.png").excludes(), "")
 
     def test_a_missing_root_and_an_empty_glob_are_reported_not_raised(self):
         said = []

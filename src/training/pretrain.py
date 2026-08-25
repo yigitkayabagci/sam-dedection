@@ -182,6 +182,7 @@ class Corpus:
     border: int | None = None
     limit: int | None = None
     strip: tuple[str, ...] = ()
+    exclude: str = ""                # glob of manifests naming unusable frames
 
     def __post_init__(self) -> None:
         if self.modality not in MODALITIES:
@@ -216,6 +217,16 @@ class Corpus:
 
     def strips(self) -> tuple[str, ...]:
         return self.strip or (tuple(SPECS[self.spec].strip) if self.spec else ())
+
+    def excludes(self) -> str:
+        """The glob of manifests naming frames the dataset itself calls broken.
+
+        Inherited from the spec where there is one -- Kust4K's five
+        `broken_in_*.txt` files name 1 160 of its 4 024 frames -- and
+        declarable per row for a set nobody has written a spec for, which is
+        the point of the row form.
+        """
+        return self.exclude or (SPECS[self.spec].exclude if self.spec else "")
 
     def wants(self) -> tuple[str, str | None]:
         """`(student half, teacher half)` as modality names."""
@@ -304,12 +315,13 @@ def _spec_for(corpus: Corpus) -> DatasetSpec:
     from dataclasses import replace as _replace
 
     if base is not None:
-        return _replace(base, thermal=thermal, rgb=rgb,
-                        border=corpus.padding(), strip=corpus.strips())
+        return _replace(base, thermal=thermal, rgb=rgb, border=corpus.padding(),
+                        strip=corpus.strips(), exclude=corpus.excludes())
     return DatasetSpec(
         name=corpus.name, masks="", classes={}, things=(),
         thermal=thermal, rgb=rgb, strip=corpus.strips(),
-        border=corpus.padding(), palette_source="stage A reads no labels")
+        border=corpus.padding(), exclude=corpus.excludes(),
+        palette_source="stage A reads no labels")
 
 
 def _listing(root: Path, pattern: str) -> list[Path]:
@@ -348,7 +360,7 @@ def index(corpora: Sequence[Corpus], size: int = 512,
     reason `distill.subsample` gives: most of these sets come from video, so
     the first N files are two flights.
     """
-    from .aerial import list_pairs
+    from .aerial import _stem, excluded_keys, list_pairs
 
     out: list[Item] = []
     for corpus in corpora:
@@ -374,6 +386,18 @@ def index(corpora: Sequence[Corpus], size: int = 512,
                 log(f"  !! {corpus.name}: nothing matched {pattern!r} under "
                     f"{root} -- skipped")
                 continue
+            # The frames a set marks unusable have to go here too, not only on
+            # the paired path. Kust4K ships five `broken_in_*.txt` files naming
+            # **1 160 of its 4 024 frames** -- 29 % -- where one modality is
+            # corrupt; they decode fine and are simply not pictures of the
+            # scene. `list_pairs` already drops them, and a corpus routed
+            # `thermal->thermal` would otherwise quietly train on them.
+            dropped = excluded_keys(root, _spec_for(corpus))
+            if dropped:
+                before = len(files)
+                files = [f for f in files if _stem(f, corpus.strips()) not in dropped]
+                log(f"  {corpus.name}: {before - len(files):,} frame(s) the "
+                    f"dataset itself marks unusable were dropped")
             found = [(f, f if teacher_half is not None else None) for f in files]
 
         if not found:
@@ -392,6 +416,61 @@ def index(corpora: Sequence[Corpus], size: int = 512,
         log(f"  {corpus.name:14s} {len(found):>8,} samples  {corpus.routing:<17s}"
             f" crop={shown:>5s} border={border}")
     return out
+
+
+STUDENTS = ("thermal", "rgb")
+
+
+def for_student(corpora: Sequence[Corpus], student: str = "thermal",
+                log=print) -> list[Corpus]:
+    """The same corpus list, routed for whichever encoder is being pretrained.
+
+    Two models are two pretrainings, and the difference between them is
+    entirely in **what the student's half is**. Spelling that out per row is
+    a dozen `route=` arguments and one of them will eventually be wrong, so it
+    is one call instead:
+
+        CORPORA = for_student(CORPORA, "rgb")
+
+    For a **thermal** student the defaults already apply: a paired corpus gives
+    the teacher its RGB half and the student the registered thermal one, an
+    RGB-only corpus gives the student that image's luminance, and a
+    thermal-only corpus puts both sides on the thermal frame.
+
+    For an **RGB** student every route becomes `rgb->rgb` -- the canonical
+    same-modality feature distillation of arXiv 2205.14141 and Proteus, where
+    teacher and student see the identical augmented view and the student is
+    trained to reproduce the teacher's map. A paired corpus contributes its RGB
+    half and nothing else.
+
+    **Thermal-only corpora are dropped for an RGB student, not routed.** They
+    could be fed to the mask arm -- it needs no teacher -- but the images would
+    be thermal, and an encoder that deploys on colour has no use for a pretext
+    task solved on radiometry it will never see. Dropping is the honest
+    behaviour and it says which rows it dropped, because a corpus list that
+    silently shrinks is how a run reports a sample count nobody checked.
+    """
+    if student not in STUDENTS:
+        raise ValueError(f"student must be one of {STUDENTS}, got {student!r}")
+    if student == "thermal":
+        return list(corpora)
+
+    from dataclasses import replace as _replace
+
+    kept, dropped = [], []
+    for corpus in corpora:
+        if corpus.modality == "thermal":
+            dropped.append(corpus.name)
+            continue
+        kept.append(_replace(corpus, route="rgb->rgb"))
+    if dropped:
+        log(f"{len(dropped)} thermal-only corpus/corpora dropped for an RGB "
+            f"student: {', '.join(dropped)}")
+    if not kept:
+        raise SystemExit(
+            "every corpus is thermal-only, so an RGB student has nothing to "
+            "train on. Add a `paired` or `rgb` row.")
+    return kept
 
 
 def subsample(items: Sequence, count: int | None, seed: int = 0) -> list:

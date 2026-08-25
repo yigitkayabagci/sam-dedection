@@ -761,9 +761,9 @@ code(r"""
 from google.colab import drive
 
 drive.mount("/content/drive")
-MIRROR = Path("/content/drive/MyDrive/edgetam-pretrain/{{ARM}}")
-MIRROR.mkdir(parents=True, exist_ok=True)
-print("output ->", MIRROR)
+DRIVE = Path("/content/drive/MyDrive/edgetam-pretrain")
+DRIVE.mkdir(parents=True, exist_ok=True)
+print("output root ->", DRIVE, "(the per-run folder is named in the settings cell)")
 """)
 
 # ---------------------------------------------------------------- 5
@@ -780,7 +780,14 @@ pairing key is the one `list_pairs` already gets right, and the index cell
 prints what it found per corpus — including a loud `!!` for a glob that matched
 nothing, which is the way this goes wrong.
 
-Three modalities, three routes, and the routes are the substance:
+Three modalities, three routes, and the routes are the substance. The
+table below is for a **thermal** student, which is what `STUDENT`
+defaults to; set `STUDENT = "rgb"` and every route becomes `rgb->rgb` —
+teacher and student on the identical view, which is the canonical
+published feature-distillation recipe — while the thermal-only corpora
+are dropped, because an encoder that deploys on colour has no use for a
+pretext task solved on radiometry it will never see.
+
 
 | modality | teacher sees | student sees | what it is |
 |---|---|---|---|
@@ -831,6 +838,12 @@ from src.training.pretrain import Corpus
 DATA_ROOT = Path("/content/data")
 WORK      = Path("/content/work"); WORK.mkdir(parents=True, exist_ok=True)
 
+STUDENT = "thermal"  # thermal | rgb -- WHICH encoder this run pretrains.
+                     # Two deployed models are two pretrainings, and the
+                     # only difference between them is what the student's
+                     # half is: "rgb" reroutes every corpus to
+                     # same-modality distillation and drops the
+                     # thermal-only ones.
 SIZE   = 512        # the student's input, and the resolution it deploys at
 BATCH  = 8
 STEPS  = 4000       # batches per epoch
@@ -863,8 +876,13 @@ CORPORA = [
     Corpus("hituav", DATA_ROOT / "HIT_UAV", "thermal",
            thermal="**/normal_json/**/*.jpg"),
 ]
-OUT = WORK / f"edgetam_stage_a_{{ARM}}_{SIZE}.pt"
+# Named after the student and the arm, both of which vary across runs, so
+# two runs cannot overwrite each other's checkpoint on the same Drive.
+OUT = WORK / f"edgetam_stage_a_{STUDENT}_{{ARM}}_{SIZE}.pt"
+MIRROR = DRIVE / f"{STUDENT}-{{ARM}}"
+MIRROR.mkdir(parents=True, exist_ok=True)
 print(f"{len(CORPORA)} corpora configured -> {OUT.name}")
+print(f"output -> {MIRROR}")
 """)
 
 # ---------------------------------------------------------------- 7
@@ -922,6 +940,7 @@ code(r"""
 # this goes wrong, and it is loud here rather than silent an hour later.
 from src.training import pretrain
 
+CORPORA = pretrain.for_student(CORPORA, STUDENT)
 ITEMS = pretrain.index(CORPORA, size=SIZE, seed=SEED)
 print()
 print(pretrain.summarise(ITEMS))
@@ -966,12 +985,14 @@ import json as _cjson
 CORPORA_JSON.write_text(_cjson.dumps(
     [{"name": c.name, "root": str(c.root), "modality": c.modality,
       "spec": c.spec, "thermal": c.thermal, "rgb": c.rgb, "route": c.route,
-      "limit": c.limit} for c in CORPORA], indent=2))
+      "limit": c.limit, "border": c.border, "exclude": c.exclude,
+      "crop": c.crop} for c in CORPORA], indent=2))
 
 REPORT_JSON = WORK / "stage_a_report.json"
 !python tools/pretrain_stage_a.py {ARGS} \
     --corpora {CORPORA_JSON} --base {BASE_CKPT} --out {OUT} \
-    --size {SIZE} --batch {BATCH} --steps {STEPS} --epochs {EPOCHS} \
+    --student {STUDENT} --size {SIZE} --batch {BATCH} --steps {STEPS} \
+    --epochs {EPOCHS} \
     --trunk-lr {TRUNK_LR} --neck-lr {NECK_LR} --seed {SEED} \
     --device {DEVICE} --json {REPORT_JSON}
 

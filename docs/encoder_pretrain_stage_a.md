@@ -305,7 +305,7 @@ Yani mentorun haklı: aşama B'nin verisini de ver. Tek istisna not veren set.
 
 ---
 
-## 7. Ne zaman bitmiş sayılır
+## 7. Ne zaman bitmiş sayılır (§8 iki-model planı için aşağıda)
 
 Aşama A'nın ürettiği kayıp bir **vekil**, ve iki kolun vekilleri aynı ölçeği
 bile paylaşmıyor. Karar veren sayı şu üç koşunun tablosu:
@@ -320,3 +320,247 @@ bile paylaşmıyor. Karar veren sayı şu üç koşunun tablosu:
 Diğer her şey — veri setleri, program, seed, prompt karışımı — sabit tutulmak
 zorunda; yoksa sayılar karşılaştırılabilir değil ve karşılaştırma bu aşamayı
 koşmanın tek sebebiydi.
+
+---
+
+## 8. İki model: RGB ve termal, ayrı ayrı beslenmesi
+
+Dağıtımda göreve göre bir RGB bir termal encoder arasında geçiliyorsa, bu
+**iki ayrı ön-eğitim** demek — ve aralarındaki tek fark öğrencinin hangi yarıyı
+gördüğü. `STUDENT` ayarı bunu tek satıra indiriyor:
+
+```python
+STUDENT = "thermal"   # veya "rgb"
+```
+
+`for_student` külliyat listesini o öğrenciye göre yeniden yönlendiriyor:
+
+| külliyat | `STUDENT="thermal"` | `STUDENT="rgb"` |
+|---|---|---|
+| `paired` | öğretmen RGB, öğrenci hizalı termal | ikisi de RGB yarısı (`rgb->rgb`) |
+| `rgb` | öğretmen renk, öğrenci luminans | ikisi de renk (`rgb->rgb`) |
+| `thermal` | ikisi de termal kare | **düşürülüyor** ve hangileri düşürüldüğü basılıyor |
+
+RGB öğrenci için her yol `rgb->rgb` oluyor: öğretmen ve öğrenci **aynı**
+augmentasyonlu görüntüyü görüyor ve öğrenci öğretmenin haritasını yeniden
+üretmeyi öğreniyor. Bu, arXiv 2205.14141 ve Proteus'un kanonik tarifi — yani
+RGB tarafı, termal taraftan **daha iyi doğrulanmış** bir problem üzerinde
+çalışıyor.
+
+Termal-only külliyatlar RGB öğrenci için düşürülüyor, yönlendirilmiyor: maske
+koluna verilebilirlerdi (öğretmen istemiyor) ama görüntüler termal olurdu, ve
+renkte dağıtılan bir encoder'ın hiç görmeyeceği bir radyometri üzerinde
+çözülmüş bir pretext görevinden faydası yok.
+
+### 8.1 Termal encoder — külliyat bütçesi
+
+Bugün `tools/fetch_datasets.py`'nin indirebildikleriyle:
+
+| külliyat | modalite | kare/çift | çözünürlük | disk | not |
+|---|---|---|---|---|---|
+| VTUAV `train_001` | `paired` | **26 059 çift** | 1920×1080 | 9,1 GB | tek başına aşama A'yı doyuruyor; **hiç yaya yok** — `train_003` yanına gelmeli |
+| DroneVehicle `train` | `paired` | **17 990 çift** | 640×512 (100 px bant kesildikten sonra) | 8,9 GB | gündüz **ve gece**; projenin native çözünürlüğü, hiç yeniden örnekleme yok |
+| SegFly | `paired` | **15 007 çift** | termal 640×512 | 22 GB | ICP ile hizalanmış, yayıncının kendi kaydı %87 diyor |
+| Kust4K | `paired` | **2 864** (4 024 − dataset'in bozuk dediği 1 160) | 640×512 | 2,5 GB | listedeki en temiz kayıt — **modalite probunun evi** |
+| Caltech `pairs` | `paired` | **2 282 çift** | 960×600 | 4,3 GB | **listedeki en iyi hizalı**, ölçülen artık kayma 1–4 px; doğal arazi/su/gece |
+| RGBT234 | `paired` | 233,8 K çift | — | 7,7 GB | yer seviyesi — havadan değil, ama çeşitliliğin kaynağı |
+| LasHeR | `paired` | 730 K+ çift | — | ~224 GB | akışlı, dizi-seçmeli (`--sequences`); varsayılan değil |
+| VisDrone | `rgb` → luminans | 6 471 | — | 1,8 GB | vekil yol; **AeroVIS kontaminasyonu, §8.3** |
+| SegFly RGB | `rgb` → luminans | 3 000 (20 606'nın dilimi) | 4000×3000 | 23 GB | |
+| HIT-UAV | `thermal` | 2 898 | 640×512 | 0,4 GB | havadan, 80–130 m |
+| Caltech `singles` | `thermal` | 3 076 | 640×512 | 4,1 GB | içindeki `color/` **kayıtlı eş değil**, `rgb=None` |
+| Anti-UAV410 | `thermal` | 410 dizi / 438 K kutu | 640×512 | 8,7 GB | ayrı fetcher (`fetch_antiuav410.py`) |
+
+Makul bir ilk bütçe — **~64 000 hizalı çift + ~6 000 termal-only + ~9 500 RGB
+vekil**, toplam ~50 GB disk:
+
+```python
+CORPORA = [
+    Corpus("vtuav",        DATA_ROOT / "VTUAV_VIS",   "paired", spec="vtuav_vis", limit=20000),
+    Corpus("dronevehicle", DATA_ROOT / "DroneVehicle","paired", spec="dronevehicle"),
+    Corpus("segfly",       DATA_ROOT / "SegFly",      "paired", spec="segfly",    limit=12000),
+    Corpus("kust4k",       DATA_ROOT / "Kust4K",      "paired", spec="kust4k"),
+    Corpus("caltech",      DATA_ROOT / "Caltech",     "paired", spec="caltech_rgbt"),
+    Corpus("visdrone",     DATA_ROOT / "VisDrone",    "rgb",    rgb="**/images/*.jpg"),
+    Corpus("segfly_rgb",   DATA_ROOT / "SegFly_RGB",  "rgb",    rgb="**/*.jpg"),
+    Corpus("hituav",       DATA_ROOT / "HIT_UAV",     "thermal",thermal="**/normal_json/**/*.jpg"),
+]
+```
+
+**Ve dört set daha var, ama bu dalda değil.**
+`claude/aerial-rgb-thermal-data-qhjpxd` dalının `fetch_datasets.py`'si 14 tarif
+taşıyor, bu dalınki 10. Fark, hepsi **havadan** ve üçü **termal** olan dört
+set:
+
+| tarif | ne | kare | lisans |
+|---|---|---|---|
+| `rgbtdroneperson` | WHU-DroneDual, hizalı RGB-T, 640×512 | **6 125 çift**, 70 880 kutu | CC BY 4.0 |
+| `vtuavdet` | VTUAV'ın aynı ekipçe yeniden kutulanmış hâli, 1920×1080 | **11 392 + 5 378** kare | CC BY 4.0 |
+| `birdsai` | havadan gece termal, LWIR | **48 dizi / ~62 K kare**, ~166 K kutu + iz | **CDLA-Permissive-1.0** — listedeki tek ticari-serbest set |
+| `airesq` | havadan termal, 640×512 | **1 988 kare** | CC BY 4.0 |
+
+Dördü birlikte **~87 K yeni kutu-etiketli kare, ~79 K'sı termal tarafta**.
+Aşama A etiket okumadığı için buradaki değer kutular değil **kareler**, ve
+`birdsai`'nin 62 K havadan gece termal karesi bu listedeki en büyük tek
+termal-only kaynak.
+
+İki uyarı, o dalın kendi ölçümlerinden: **RGBTDronePerson "piksel hizalı" diye
+duyuruluyor ama iki modalitenin kutuları medyan 11,7 px ayrı** ve medyan hedef
+boyu zaten √alan 11–12 px — kayma bir hedef çapına eşit, yani hizalı çift
+kaynağı olarak *kullanılmamalı*. **VTUAV-det'in kutuları tek modalitede
+çizilip diğerine aynen taşınmış**, yani VTUAV'ın bilinen hizasızlığını sessizce
+miras alıyor.
+
+Bu dört tarifi buraya almak iki commit'lik bir cherry-pick
+(`6a350f4`, `5ac1575`) ve `fetch_datasets.py` + `boxes.py` + testlerden ibaret.
+
+### 8.2 RGB encoder — külliyat bütçesi
+
+Aynı liste, `STUDENT = "rgb"`. Termal-only satırlar düşüyor, kalan her şey
+`rgb->rgb` oluyor ve **paired setlerin RGB yarıları** devreye giriyor.
+
+**Ama RGB tarafında bir seçim ölçütü var ve termal tarafta yok.**
+`docs/rgb_aerial_kaynaklar.md` (dal `claude/rgb-aerial-data-sources-e73aml`)
+adayları paperlardan değil **arşivleri açıp kutuları ölçerek** sıralıyor, ve
+ölçüt irtifa değil piksel:
+
+> **medyan √alan ≥ 45 px** ve **< 32 px oranı ≤ %30**
+
+Bu ölçüte göre listenin yarısı eleniyor — **VisDrone dahil**:
+
+| külliyat | medyan √alan | < 32 px | karar |
+|---|---|---|---|
+| AU-AIR | **81 px** | %11,8 | ✓ listedeki en iri nesneler |
+| AeroVIS `sd_` dilimi | 84 px | %21,1 | ✓ ama 2 sınıf, hep su |
+| **CODrone 60 m** | **60 px** | %20,4 | ✓ |
+| **CODrone 30 m** | 47 px | %28,9 | ✓ |
+| CODrone 100 m | 44 px | %30,2 | sınırda, opsiyonel |
+| DroneVehicle RGB | 40 px | %19,0 | ✓ sınırda ama geçiyor |
+| AeroScapes | 35 px | %40,0 | ✗ 720p bandı yiyor |
+| **VisDrone2019-DET** | **32 px** | **%51,0** | **✗ bant dışı** |
+| AeroVIS (bütün) | 31 px | %52,1 | ✗ maskelerinin yarısı 32 px altı |
+| UAVid | 28 px | %58,7 | ✗ eğik bakış uzağı küçültüyor |
+| AeroVIS `ud_` (UAVDT) | 24 px | %75,1 | ✗✗ |
+
+Uydu setleri (DOTA, DIOR, iSAID, SODA-A, AI-TOD-v2, xView) kapsam dışı: havadan
+ama İHA değil.
+
+Bunun sonucu, RGB ön-eğitim bütçesinin **bugün fetcher'da olan setlerle
+kurulamayacağı**. Sıralama:
+
+| külliyat | bant-içi kare | çözünürlük | fetcher'da mı |
+|---|---|---|---|
+| **CODrone** (30 + 60 m dilimi) | **7 457** (60 m: 4 316 · 30 m: 3 141) | 3840×2160 | **hayır** — tarif yazıldı, koda girmedi |
+| **AU-AIR** | 32 823 ham → **~1 100** (uçuş başına ~1 fps) | 1920×1080 | **hayır** — tarif yazıldı |
+| **UAVScenes** | **120 000** (23 uçuş, her kare elle etiketli) | 2448×2048 | **hayır** — aday |
+| VTUAV RGB yarısı | 26 059 (`train_001`) | 1920×1080 | evet |
+| SegFly RGB | 20 606 (fetcher 3 000'lik dilim) | 4000×3000 | evet |
+| DroneVehicle RGB yarısı | 17 990 (`train`) | 640×512 | evet |
+| MVUAV | 53 828 | — | **hayır** |
+| Kust4K RGB yarısı | 2 864 | 640×512 | evet |
+| Caltech RGB yarısı | 2 282 | 960×600 | evet |
+| MESSI | 2 525 | 5472×3648 | hayır — irtifa ekseni (30/50/70/100 m + iniş) |
+| CARPK | 1 448 | — | hayır |
+| VDD | 400 | 4000×3000 | hayır |
+| SkyScapes | 16 | 5616×3744 | hayır — stres testi, eğitim seti değil |
+| ~~VisDrone-DET~~ | ~~6 471~~ | — | evet, **ama ölçüt elemesi** |
+
+Sentetiklere dikkat: Multi-View UAV'ın 357 690 karesi **400×300** (girdinin
+altında) ve tamamı CARLA; FlyAwareV2'nin 288 K'sı yine CARLA, gerçek kısmı
+~2 K. Hacim büyük, sinyal değil.
+
+**Bugün fetcher'la kurulabilecek en iyi RGB bütçesi** ≈ **69 000 kare**:
+VTUAV RGB (26 059) + SegFly RGB (20 606, fetcher 3 000 çekiyor) +
+DroneVehicle RGB (17 990) + Kust4K RGB (2 864) + Caltech RGB (2 282). CODrone
+ve AU-AIR tarifleri yazılırsa +8 500 bant-içi kare, UAVScenes eklenirse
++120 000.
+
+### 8.3 Kontaminasyon — ve burada bir düzeltme var
+
+`docs/datasets.md`'nin bu daldaki hâli şunu diyordu: *"13'ün havuzu
+VisDrone'dan üretildiği için, bu havuzla eğitilen bir model AeroVIS'te
+ölçülemez — kare kare aynı veri."* **Bu fazla sıkıymış ve ölçülerek
+düzeltilmiş.** VisDrone'un resmî tanımı "288 video klip → 261 908 kare **ve**
+10 209 statik görüntü"; ikisi **ayrı koleksiyon**. Defter 13 VisDrone-**DET**'i
+(statik), AeroVIS ise VisDrone-**MOT**'u (video) kullanıyor → örtüşme kare
+düzeyinde değil, sahne/kampanya düzeyinde.
+
+Asıl tehlike başkaymış, ve listede yoktu:
+
+| havuza girerse | AeroVIS'ten yanan |
+|---|---|
+| **VisDrone-MOT** | 52 dizi / 21 758 kare (**%44,2**) |
+| **UAVDT-M** | 39 dizi / 19 276 kare (**%39,2**) |
+| **SeaDronesSee** | 26 dizi / 8 170 kare (**%16,6**) |
+
+Üçü birden girerse AeroVIS'ten ölçülecek bir şey kalmaz. Yani: **AeroVIS ölçüm
+seti olarak kalacaksa, aşama C'nin masklet kaynağı bu üçü olamaz.** Ve bu üçü
+listedeki en kolay video-kutu setleri, yani kısıt gerçek.
+
+Diğer kurallar değişmedi:
+
+- **UAVid → FlyAwareV2 (test) + VDD/IDD.**
+- **VTUAV → VTUAV-det.** Aynı çekim; VTUAV'da eğitiliyorsa VTUAV-det bir
+  değerlendirme seti olamaz, prompt kaynağı olabilir.
+- **CARLA → FlyAwareV2 + Multi-View UAV** — kare değil, render imzası ortak.
+- **OccuFly → SegFly** — bugün çakışma yok; OccuFly değerlendirmeye alınırsa
+  SegFly tarafsız olmaktan çıkar.
+- **MARS-LVIG → UAVScenes** — listede başka kullanan yok, temiz.
+
+Ve **DroneVehicle VisDrone değildir** — AeroVIS'in üç kaynağından hiçbiri de
+değil. RGB tarafında kontaminasyonsuz, bant-içi ve fetcher'da olan tek büyük
+set o.
+
+**Not:** `claude/aerotrack-dataset-review-5jcxzy` dalında AeroVIS'i yeniden
+ölçen daha yeni bir `rgb_aerial_kaynaklar.md` var (1 378 603 hazır
+`(görüntü, kutu, maske)` üçlüsü, medyan kenar 39,5 px, %34,1 COCO-small) ve
+AeroVIS'in rolü konusunda iki dal **aynı fikirde değil**. Karar vermeden önce
+o dosya okunmalı.
+
+### 8.4 Termal modeli RGB ile beslemek mantıklı mı?
+
+**Evet, ve bu bir taviz değil — ölçülmüş bir kazanç.**
+
+| ölçüm | sonuç |
+|---|---|
+| FLIR termal detection, ViT-L: rastgele başlatma vs DINOv2 **RGB** ağırlıkları | 39,8 → **70,5 mAP50** |
+| Caltech havadan termal segmentasyon, **4,8 M** encoder: sıfırdan / **ImageNet RGB** / 40 k termalde öz-denetim | 0,687 / **0,725** / 0,714 |
+| SODA-IR + MFNet-IR, ViT-B: termal-only MIM vs RGB IN1K ön-eğitimi | 61,5 / 43,0 → **69,6 / 50,3** |
+
+Üçü de aynı yöne bakıyor: **termal görevde bile RGB ön-eğitimi, termal
+öz-denetimden iyi.** Sebep basit — termal görüntülerin taşıdığı bilgi kare
+başına daha az (InfMAE'nin kendi ölçümü: Inf30 entropi 6,44 vs ImageNet 7,19),
+ve dünyada RGB verisi kat kat fazla.
+
+Ama **nasıl** beslendiği önemli, ve burada iki yanlış yol var:
+
+1. **Öğrenciye tam renk verme.** Dağıtılan encoder hayatı boyunca renk
+   görmeyecek. `rgb->gray` yolu öğrenciye luminansı veriyor, öğretmene rengi —
+   görevin şeklini koruyor.
+2. **Öğretmenin *tahminini* distile etme.** Termal→RGB-öğretmen yanıt seviyesi
+   distilasyonu ölçülmüş: **hiç distile etmemekten 2,9 mAP50 kötü**. Öznitelik
+   kopyala, tahmin değil — bu aşama zaten öyle yapıyor.
+
+Ve bir de üçüncü, daha ince tehlike: **dar külliyat.** AnyThermal, *yalnızca*
+havadan veriyle distile edilen varyantın kentsel sahnelerde distile edilmemiş
+RGB modelden **daha kötü** çıktığını bildiriyor. Yani RGB'yi karıştırmanın
+faydası çeşitlilikten geliyor; RGB'yi karıştırıp külliyatı yine tek sahneye
+sıkıştırmak faydayı yok eder.
+
+### 8.5 Sıra: RGB modeli önce eğit, sonra termalin öğretmeni yap
+
+İki model eğitiliyorsa doğal sıra şu:
+
+1. **RGB encoder'ı önce ön-eğit** (`STUDENT="rgb"`, defter 16). Aynı modalite,
+   en çok veri, en iyi doğrulanmış tarif. Aşama B'yi de RGB tarafında koş.
+2. **Termal encoder'ı ön-eğitirken öğretmen olarak DINOv3 yerine kendi RGB
+   encoder'ını dene.** EdgeCrafter'ın ölçtüğü şey tam bu: öğretmeni göreve
+   adapte etmek **+1,0 AP**, ve COCO'ya adapte etmek +0,8 AP. Havadan
+   görüntüye adapte edilmiş bir RGB encoder, havadan termal için genel bir
+   DINOv3'ten daha yakın bir öğretmen — ve kapasite oranı da doğru (6 M → 6 M,
+   yani 1×; bu bandın *altında*, o yüzden DINOv3-ViT-B ile yan yana koşulmalı,
+   yerine değil).
+
+Bu ikinci adım bugün bir satır değil — `distill.build_teacher` transformers
+checkpoint'i bekliyor, EdgeTAM checkpoint'ini değil. Ama ölçülmeye değer ve
+kodda küçük bir ekleme.

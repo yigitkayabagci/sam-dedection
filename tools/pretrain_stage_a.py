@@ -40,7 +40,8 @@ if str(ROOT) not in sys.path:
 
 from src.training.aerial import SPECS  # noqa: E402
 from src.training.automask import MODES, TARGETS  # noqa: E402
-from src.training.pretrain import ARMS, LOSSES, MODALITIES, Corpus  # noqa: E402
+from src.training.pretrain import (ARMS, LOSSES, MODALITIES,  # noqa: E402
+                                   STUDENTS, Corpus)
 
 
 def read_corpora(args) -> list[Corpus]:
@@ -101,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default=None, help="Where the checkpoint goes.")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
     p.add_argument("--size", type=int, default=512)
+    p.add_argument("--student", choices=STUDENTS, default="thermal",
+                   help="Which encoder is being pretrained. `thermal` uses "
+                        "each corpus's default route; `rgb` reroutes every "
+                        "corpus to same-modality distillation and drops the "
+                        "thermal-only ones, which an RGB encoder cannot use.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
 
     teacher = p.add_argument_group("the distillation arm")
@@ -164,10 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     import torch
 
     from src.training import pretrain
+    from src.training.pretrain import for_student as pretrain_module_for_student
     from src.training.distill import DINO_ID, build_teacher
     from src.training.finetune import Rates, apply_freeze, save_checkpoint
 
-    corpora = read_corpora(args)
+    corpora = pretrain_module_for_student(read_corpora(args), args.student)
     if args.arm != "none" or args.probe:
         if not corpora:
             raise SystemExit(
@@ -222,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model = build_model(args.size, args.base, args.device)
     meta = {"stage": "pretrain", "arm": args.arm, "method": args.method,
-            "image_size": args.size, "seed": args.seed,
+            "student": args.student, "image_size": args.size, "seed": args.seed,
             "corpora": [{"name": c.name, "modality": c.modality,
                          "route": c.routing, "root": str(c.root)}
                         for c in corpora]}
