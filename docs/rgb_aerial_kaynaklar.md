@@ -19,7 +19,7 @@ Doğrulama yöntemi ve ne bulunamadığı §8'de.
 | Öncelik | Set | Neden |
 |---|---|---|
 | **1** | [CODrone](#2-codrone--yeni-birincil-aday) | 10 004 İHA karesi, 3840×2160, 12 sınıf yönlü kutu, **30/60/100 m irtifa × 30°/90° kamera**, ~%37 gece. AeroVIS soyağacına **değmiyor** → havuza girse de AeroVIS değerlendirme olarak sağ kalıyor. Tek 6,7 GiB Drive zip'i, `gdown` ile |
-| **2** | [AeroVIS](#3-aerovis--açıldı-ve-sayıldı) | Sürüm gerçek ve indirilebilir (12,63 GiB, doğrulandı). Maskeler **YTVIS RLE + `track_id`** — EdgeTAM'ın çıktı tipinin birebir kendisi. **Eğitime değil, ölçüme** |
+| **2** | [AeroVIS](#3-aerovis--açıldı-sayıldı-ve-maskeleri-çözüldü) | Sürüm gerçek ve indirilebilir (12,63 GiB, doğrulandı). Maskeler **YTVIS RLE + `track_id`** — EdgeTAM'ın çıktı tipinin birebir kendisi. Annotation açıldı: **1 378 603 hazır `(görüntü, kutu-prompt, maske)` üçlüsü**, kutular maskeden türetilmemiş (§3.4). Varsayılan hâlâ **ölçüm**; eğitime alınırsa held-out biter, takas §3.5 |
 | **3** | [iSAID](#5-gerçek-örnek-maskesi--kalibrasyon-ve-held-out) | Listedeki **tek elle çizilmiş havadan örnek maskesi** seti: 655 451 örnek / 2 806 görüntü. RGB dalının kalibrasyonunda Kust4K'nın *decompose* edilmiş semantiğinin yerini alır — gerçek örnek sınırı |
 | 4 | [SODA-A](#4-kutu-etiketli-havadan-rgb--görüntü) | Görüntü başına ~350 örnek; öğretmen kapılarının yoğunluk stres testi |
 | 5 | [AU-AIR](#41-au-air--en-alçak-irtifa-ama-tek-kavşak) | Listedeki **en alçak irtifa** (2,8–30,6 m, medyan 20,4 m) ve en büyük nesneler (medyan √alan 81 px). Kare başına irtifa okuması var → kalibrasyona bedava bir irtifa sütunu. Ama 32 823 karenin tamamı **tek bir kavşak** |
@@ -67,7 +67,7 @@ Kust4K'da olduğu gibi **histogramla problanmalı**, ezberden yazılmamalı.
 
 ---
 
-## 3. AeroVIS — açıldı ve sayıldı
+## 3. AeroVIS — açıldı, sayıldı ve maskeleri çözüldü
 
 [AeroTrack repo](https://github.com/Dmygithub/AeroTrack) ·
 [arXiv 2607.08075](https://arxiv.org/abs/2607.08075) (UAV-OVVIS) · kod MIT,
@@ -135,6 +135,71 @@ veri."* İkinci yarısı düzeltilmeli:
 kaynağı **VisDrone-MOT / UAVDT / SeaDronesSee olamaz**. Bu üçü zaten
 listedeki en kolay video-kutu setleri — bu yüzden §6'da ayrı duruyorlar,
 "indirilebilir ama bedeli şu" etiketiyle.
+
+### 3.4 Annotation açıldı — aşama B'nin sorduğu üçlü var mı?
+
+§3.2'ye kadar sayılan şey arşivin **girdileriydi**: kaç dizi, kaç kare. Bu
+"sürüm gerçek mi" sorusunu cevaplar, aşama B'nin sorduğunu değil — *bu set
+`(görüntü, prompt, maske)` üçlüsünü veriyor mu, yoksa yalnız maskeyi mi?*
+`aero_vis.json` (332,6 MB) indirilip **RLE'ler gerçek karelere karşı
+açıldı**. Yeniden üretim: `tools/inspect_aerovis.py --stats --render out/`
+(12,6 GiB'ı indirmez; ranged GET'le arşivi uzaktan okur, maliyet ~400 MB).
+
+| ölçüm | değer |
+|---|---:|
+| **kutu VE maske, aynı kare aynı instance** | **1 378 603** |
+| kutusuz maske | 0 |
+| masksiz kutu | 149 |
+| etiketli kare | 49 048 / 49 204 |
+
+Yani **üçü de var, hizalı**: `sequences/{video}/{kare}.jpg` görüntüyü,
+`bboxes[i]` XYWH kutu-promptunu, `segmentations[i]` aynı karenin COCO RLE
+instance maskesini verir; `categories` 9 sınıfın metin promptunu ekler.
+`iscrowd=1` olan 80 girdi ignore bölgesi — bunların `bboxes`'ı **tümüyle
+null**, üçlü sayısına girmezler, okuyucu bunları düşmeli.
+
+**Kaynak payı üçlü düzeyinde** (kare payından farklı — VisDrone kare başına
+çok daha kalabalık): VisDrone 999 144 (%72,5) · UAVDT 359 826 (%26,1) ·
+SeaDronesSee 19 633 (%1,4).
+
+**Kutu, maskenin zarfı değil.** 400 örnekte kutu ile maskenin sıkı zarfı
+karşılaştırıldı: dört kenarda da birebir tutan **%3,8**, ≤2 px tutan %19,8,
+ortalama sapma (x,y,w,h) = (2,5 · 2,4 · 4,5 · 4,4) px. Yani AeroVIS kaynak
+setlerin **elle çizilmiş kutularını taşıyor**, kendi ürettiği maskeden geri
+hesaplanmış kutuyu değil. Bu, kutu-promptlu eğitim için tam istenen şey:
+prompt hedeften bağımsız bir sinyal, cevabın sızmış hâli değil. (`areas`
+alanı ise maskenin piksel sayısı — %99,8 — kutu alanı değil.)
+
+**Ölçek — havadan demek küçük demek.** `sqrt(w*h)`: p25 28,5 px · medyan
+39,5 px · p75 59,4 px. **%34,1'i COCO-small (<32 px)**, %57,3'ü orta, yalnız
+%8,6'sı >96 px. Gözle bakıldığında 13×33 px insan ve 14×24 px araçta bile
+maske sınırı temiz — SAM3 + elle inceleme bu ölçekte tutmuş.
+
+Kare başına medyan **18** instance (ortalama 28,1, maks 180); iz uzunluğu
+medyan **117** kare, 8 279 izin **8 074'ü ≥8 kare** — yani set aşama B'ye
+statik üçlü olarak da, aşama C'ye masklet olarak da yeter.
+
+### 3.5 Ama: eğitime alınırsa ölçüm seti biter
+
+§1 "AeroVIS'e dokunma — onu ölçüm seti olarak sakla" diyor, §3.3 bedeli
+kaynak kaynak sayıyor. §3.4'ün bulduğu şey bu kuralı **değiştirmiyor**,
+sadece cazibesini artırıyor: 1,38 M hazır üçlü, öğretmen koşturmadan.
+Karar hâlâ bir takas ve açıkça verilmeli:
+
+- **AeroVIS eğitime girerse** — 13'ün havuzunun SAM3 koşturma maliyeti
+  sıfırlanır ve elle incelenmiş maske kalitesi bedava gelir; karşılığında
+  **held-out ölçüm seti kalmaz** (kendi kareleriyle ölçmek olur).
+- **Ölçüm seti kalacaksa** — havuz VisDrone-**DET** ile üretilmeye devam
+  eder (§3.3: DET statik, AeroVIS MOT videosu; kare düzeyinde örtüşmez).
+
+İki tarafı birden isteyen tek düzen: AeroVIS **dizi düzeyinde** ikiye
+bölünür (117 dizinin bir bölümü eğitime, geri kalanı held-out'a) — pay
+kaynağa göre tutulur, çünkü sınıf dağılımı kaynağa bağlı (`vehicle` yalnız
+UAVDT'de, `boat` yalnız SeaDronesSee'de). Bölme yapılırsa `videos[].name`
+öneki (`vd_`/`ud_`/`sd_`) tabakalamanın anahtarı.
+
+Temiz alternatif held-out adayları §1'de zaten duruyor: **CODrone**
+(soyağacına değmiyor), UAVScenes, MVUAV.
 
 ---
 
