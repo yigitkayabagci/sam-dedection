@@ -34,6 +34,15 @@ rather than in the notebook:
 Drive is a mounted read with no download at all, which is why `DRIVE_DIR` is
 the only data setting and it ships as a placeholder.
 
+**A clone that is already there is updated, not trusted.** The cell used to
+clone only when `REPO_DIR` was missing, which means a session that had ever
+run an older revision kept it: the code the notebook imports and the code the
+notebook was generated from silently drift apart, and the stamp line reports
+STALE against a repo nobody asked to move. It now fetches the branch and
+resets to it when the directory exists, with `check=False` on both -- an
+offline runtime should run against what is on disk rather than refuse to
+start, and the stamp line is what says which of those happened.
+
 **Nothing is upgraded over a package the kernel already imported.** Cell 1's
 pip line used to carry `pillow`, and `--upgrade pillow` inside a live Colab
 session is a trap: Colab imports matplotlib, and through it `PIL`, before the
@@ -143,6 +152,11 @@ from pathlib import Path
 if not Path(REPO_DIR).exists():
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
                     REPO_URL, REPO_DIR], check=True)
+else:
+    subprocess.run(["git", "-C", REPO_DIR, "fetch", "-q", "--depth", "1",
+                    "origin", BRANCH], check=False)
+    subprocess.run(["git", "-C", REPO_DIR, "checkout", "-q", "-B", BRANCH,
+                    "FETCH_HEAD"], check=False)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
 
