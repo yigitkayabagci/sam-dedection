@@ -22,6 +22,7 @@ Doğrulama yöntemi ve ne bulunamadığı §8'de.
 | **2** | [AeroVIS](#3-aerovis--açıldı-ve-sayıldı) | Sürüm gerçek ve indirilebilir (12,63 GiB, doğrulandı). Maskeler **YTVIS RLE + `track_id`** — EdgeTAM'ın çıktı tipinin birebir kendisi. **Eğitime değil, ölçüme** |
 | **3** | [iSAID](#5-gerçek-örnek-maskesi--kalibrasyon-ve-held-out) | Listedeki **tek elle çizilmiş havadan örnek maskesi** seti: 655 451 örnek / 2 806 görüntü. RGB dalının kalibrasyonunda Kust4K'nın *decompose* edilmiş semantiğinin yerini alır — gerçek örnek sınırı |
 | 4 | [SODA-A](#4-kutu-etiketli-havadan-rgb--görüntü) | Görüntü başına ~350 örnek; öğretmen kapılarının yoğunluk stres testi |
+| 5 | [AU-AIR](#41-au-air--en-alçak-irtifa-ama-tek-kavşak) | Listedeki **en alçak irtifa** (2,8–30,6 m, medyan 20,4 m) ve en büyük nesneler (medyan √alan 81 px). Kare başına irtifa okuması var → kalibrasyona bedava bir irtifa sütunu. Ama 32 823 karenin tamamı **tek bir kavşak** |
 | — | UAVDT, VisDrone-MOT, SeaDronesSee | İndirilebilir ama **AeroVIS'i yakar**, §3.3 |
 
 **Tek cümlelik tavsiye:** havuza **CODrone**'u ekle, kalibrasyona **iSAID**'i
@@ -151,6 +152,7 @@ ucu **ranged GET 206** döndürüyor (kaldığı yerden devam eden indirme
 | **DIOR** | 23 463 görüntü 800×800, 192 472 kutu, 20 sınıf | HF `torchgeo/dior`: `Images_trainval.zip` 3 883 MB + `Images_test.zip` 3 528 MB + `Annotations_trainval.zip` 12,1 MB | VOC XML |
 | **DOTA v1.0 / v1.5 / v2.0** | v2.0: 11 268 görüntü, 1,79 M örnek, 18 sınıf | HF `isaaccorley/dota` (ungated, toplam 22,5 GB): `dotav1.0_images_train.tar.gz` 10 183 MB, `dotav2.0_images_train.tar.gz` 7 720 MB, etiketler ≤ 5 MB | DOTA poligon |
 | **SeaDronesSee** | denizde arama-kurtarma, 5 sınıf (`swimmer`, `boat`, `jetski`, `life_saving_appliances`, `buoy`) | Resmî dağıtım **kayıt istiyor**; HF aynası `dronefreak/SeaDronesSee` ungated, **7 416 MB**, 20 964 dosya, hazır `data.yaml` (train 3 shard + val 1 shard; test GT'siz) | YOLO txt |
+| **AU-AIR** | 32 823 kare 1920×1080, **132 031 kutu**, 8 sınıf, 2,8–30,6 m irtifa, kare başına GPS/IMU/hız | Drive `1pJ3xfKtHi...` **2,16 GiB** (`auair2019data.zip`) + `1boGF0L6ol...` **4,0 MB** (etiket zip'i, `annotations.json`) — ikisi de 206 | özel JSON (`top/left/width/height` + `class`) |
 | **AI-TOD-v2** | 28 036 görüntü, **752 745 örnek**, 8 sınıf, ortalama nesne **12,7 px** | [GitHub](https://github.com/Chasel-Tsui/AI-TOD-v2) — link sayfası, aynası yok | COCO |
 | **VEDAI** | 1 246 görüntü, 3 640 nesne, 8 araç sınıfı, **RGB + IR eş kayıtlı** | HF `ckyrkou/vedai`: `vedai.zip` **52,3 MB** (512² alt küme) | yönlü kutu |
 
@@ -159,6 +161,83 @@ ucu **ranged GET 206** döndürüyor (kaldığı yerden devam eden indirme
 > bunlar **alan çeşitliliği** ve **öğretmen stres testi** olarak değerli,
 > alan-içi eğitim verisi olarak değil. İHA irtifasında olanlar: VisDrone,
 > CODrone, SeaDronesSee, UAVDT.
+
+### 4.1 AU-AIR — en alçak irtifa, ama tek kavşak
+
+[arXiv 2001.11737](https://arxiv.org/abs/2001.11737) (ICRA 2020) ·
+[veri indeksi](https://fmi-data-index.github.io/au_air.html) ·
+[python kütüphanesi](https://github.com/bozcani/auairdataset)
+
+Her iki Drive dosyası da indirildi/açıldı; aşağıdaki her sayı **etiket
+dosyasının kendisinden** (`annotations.json`, 32 823 kayıt), makaleden değil.
+
+| | |
+|---|---|
+| arşivler | `auair2019data.zip` **2 318 071 652 B (2,16 GiB)**, 32 823 JPG; etiket zip'i **4 039 375 B**. İkisi de ranged GET **206** |
+| çözünürlük | 1920×1080 — JPEG SOF başlığından teyit edildi, etiketteki değerle uyuşuyor |
+| örnek | **132 031 kutu** / 32 823 kare, **boş kare yok** |
+| sınıf dağılımı | Car **102 619 (%77,7)** · Van 9 995 · Truck 9 545 · Human 5 158 · Trailer 2 538 · Bicycle 1 128 · Bus 729 · **Motorbike 319** |
+| yoğunluk | kare başına kutu: min 1, **medyan 3**, ortalama 4,0, maks 56 |
+| nesne boyutu | √alan: p05 **24 px**, medyan **81 px**, p95 249 px. 32×32'nin altı yalnızca **%11,8**, 16×16'nın altı **%1,3** |
+| irtifa | **2,8 – 30,6 m**, p05 10,2 · medyan **20,4** · p95 29,7 (kare başına, mm cinsinden kayıtlı) |
+| süreklilik | 8 uçuş; kare indeksleri **ardışık** (baskın fark = 1), dizi içi doluluk %51–99 |
+| coğrafya | 56,2061–56,2071 K, 10,1878–10,1910 D → **≈ 111 m × 198 m'lik tek bir alan** (Aarhus) |
+| zaman | 29 Ağu + 5–6 Eyl 2019, saat 09–15 — **gece yok** |
+| platform | Parrot Bebop 2 |
+| lisans | `annotations.json`'ın `licenses` bloğu: **CC BY-NC-SA 2.0** / CC BY-NC 2.0. Veri indeksi sayfasının "CC BY 4.0" demesi **yanlış** |
+
+**Değerli olduğu iki yer.** Birincisi irtifa: listedeki her şey 30 m ve
+üstü (CODrone 30/60/100, SegFly 30/40/50, HIT-UAV 80–130, DroneVehicle
+~80–100). AU-AIR medyanı **20,4 m** ve nesne medyanı **81 px** — öğretmenin
+en kolay rejimi. VisDrone/SODA-A'da kutu-IoU kapısının küçük hedefte
+zayıfladığı ölçülmüştü; AU-AIR bunun karşı ucu, yani kapı eşiklerinin
+tavanını gösteren set. İkincisi **kare başına irtifa okuması**: kalibrasyon
+tablosu bugün sınıf × boyut; AU-AIR aynı tabloya bedava bir **irtifa sütunu**
+ekler, çünkü ölçüyü etiketin kendisi taşıyor. Listedeki başka hiçbir set
+bunu vermiyor.
+
+**Neden birincil havuz kaynağı değil.** 32 823 kare kulağa VisDrone'un beş
+katı gibi geliyor; değil. Hepsi **tek bir kavşağın** 8 uçuşu, ardışık video
+kareleri. Aşama B için bu 32 823 örnek değil, **8 sahne** — havuza olduğu
+gibi girerse aynı kavşak on binlerce kez tekrarlanır ve `split_frames`'in
+tuttuğu ayrımlar anlamsızlaşır. Üstelik kare başına medyan 3 kutu var
+(CODrone'da 21): öğretmen kodlayıcısını 32 823 kez çalıştırıp yalnızca
+132 K maske alırsın — CODrone aynı bütçeyle ~5 kat daha fazla kutu
+işler. Ek olarak JPEG'ler ağır sıkıştırılmış (1920×1080 için medyan
+**72 KB** ≈ 0,28 bit/piksel), yani maske sınırı `box_iou` kapısının
+varsaydığından yumuşak olabilir — ölçülmeli, varsayılmamalı.
+
+**Kullanım tarifi.**
+
+1. **Aşama C masklet kaynağı olarak — evet, doğrudan.** Ardışık kare +
+   kare-başına kutu, `masklets.py`'nin tam istediği şey. Eksik olan tek şey
+   **kimlik**: `bbox` yalnızca `class` taşıyor, iz numarası yok. Çözüm
+   zaten yazılmış — ilk karede kutuyla promptla, sonraki her karede
+   `gate_boxes` ile o karenin kutusuna karşı kapıla; RGBT234 rotasının
+   aynısı, tek farkı kapı kutusunun ikinci modaliteden değil aynı
+   görüntüden gelmesi.
+2. **Aşama B havuzuna — seyrelterek.** Uçuş başına her N'inci kare
+   (saniyede ~1 kare ⇒ ~1 100 kare) yeter; komşu kareler zaten
+   birbirinin kopyası.
+3. **Kalibrasyon probu olarak — evet.** Gerçek maskesi yok, o yüzden IoU
+   veremez; ama kabul oranını irtifaya göre kırar.
+4. **Kontaminasyon: yok.** AeroVIS'in üç kaynağının hiçbiri değil, mevcut
+   setlerin hiçbiriyle ortak kare taşımıyor. Ölçüm tarafında da serbest —
+   ama maskesi olmadığı için J&F değil, yalnızca kutu metriği verir.
+
+```python
+AUAIR = Recipe(
+    name="auair",
+    note="AU-AIR: 32 823 kare 1920x1080, 132 031 kutu, 8 sınıf, 2,8-30,6 m "
+         "irtifa; ardışık video kareleri, tek kavşak (Aarhus)",
+    parts=(
+        Part("images", drive="1pJ3xfKtHiTdysX5G3dxqKTdGESOBYCxJ",
+             size=2_318_071_652),
+        Part("annotations", drive="1boGF0L6olGe_Nu7rd1R8N7YmQErCb0xA",
+             size=4_039_375),
+    ),
+)
+```
 
 ---
 
@@ -196,10 +275,13 @@ kimlik → masklet). **Üçü de AeroVIS'in kaynağı** — §3.3'teki bedel ge�
 | **SeaDronesSee-MOT** | 22 klip, 3840×2160 | Resmî, **kayıt gerekli** | 26 dizi / **8 170 kare** yanar |
 | **Okutama-Action** | 43 dizi / **77 365 kare** 4K, kutu + kimlik + 12 eylem sınıfı, tepeden insan | [GitHub](https://github.com/miquelmarti/Okutama-Action) — form ile | **yok** |
 | **Stanford Drone** | 8 sahne / 60+ video, ~20 000 hedef (yaya, bisiklet, araba, golf arabası), tepeden sabit İHA | [Kaggle](https://www.kaggle.com/datasets/aryashah2k/stanford-drone-dataset), academictorrents | **yok** |
+| **AU-AIR** | 8 uçuş / **32 823 ardışık kare** 1920×1080, 132 031 kutu, ama **kimlik yok** (§4.1) | Drive, **2,16 GiB**, doğrulandı | **yok** |
 
-Okutama-Action ve Stanford Drone, **AeroVIS'e dokunmadan** aşama C'ye
-kimlikli kutu getiren tek iki set — bedeli erişimin betikle değil formla
-olması (Okutama) ve üçüncü şahıs ayna (Stanford/Kaggle).
+Okutama-Action, Stanford Drone ve AU-AIR, **AeroVIS'e dokunmadan** aşama C'ye
+kare-başına kutu getiren üç set. Bedelleri farklı: Okutama form arkasında,
+Stanford yalnızca üçüncü şahıs aynada, AU-AIR ise betikle iniyor ama kimlik
+taşımıyor — izi ilk kareden propagasyonla kurup her karede kutuyla kapılamak
+gerekiyor (§4.1).
 
 ---
 
