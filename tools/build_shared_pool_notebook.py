@@ -12,7 +12,7 @@ builder would mean a variant flag on every cell.
 What the notebook does, in six cells:
 
   1. clone, install, mount Drive, size the batch to the card
-  2. unzip DroneVehicle out of the user's own Drive, build the shared index
+  2. copy DroneVehicle off Drive, unpack it entry by entry, build the index
   3. load the teacher, draw two frames so the mirror is visible before it runs
   4. harvest the shared boxes: prompt on RGB, file the mask under both pools
   5. harvest the two *-only sets, each prompted on the half that can see them
@@ -26,13 +26,35 @@ thermal half misses. A thermal training run reads the second and third; merging
 them into one directory would make a mirrored mask indistinguishable from a
 thermal-prompted one.
 
-Three decisions inside it are not arbitrary and are argued where they live
+Five decisions inside it are not arbitrary and are argued where they live
 rather than in the notebook:
 
 **Drive, not the Hub.** `fetch_datasets.py` pulls DroneVehicle from
 `McCheng/DroneVehicle` at 8.88 GB over HTTPS. A copy already in the user's own
 Drive is a mounted read with no download at all, which is why `DRIVE_DIR` is
 the only data setting and it ships as a placeholder.
+
+**The archive is copied to local disk before it is opened.** `extractall`
+straight off the mount is what the notebook used to do, and on an 8.3 GiB zip
+it reliably ends in `BadZipFile: Bad CRC-32`. Extraction is a seek-heavy read
+-- central directory, then a jump per entry -- and the Drive FUSE mount answers
+some of those jumps with bytes that are not the file's, without ever raising:
+the CRC in the zip is the first thing to notice. One sequential copy is the
+read pattern the mount is good at, and it is retried per chunk when it does
+fail outright. Extraction then runs against local disk, where a CRC mismatch
+means what it says -- the archive itself is damaged -- so the notebook can tell
+the two apart and say which one happened. The copy is deleted once it is
+unpacked, and skipped entirely if the disk cannot hold it.
+
+**A bad entry drops one frame, not the whole run.** Entries are extracted one
+at a time and a failed CRC removes that half-written file and moves on, because
+a damaged image left on disk is worse than a missing one: `dronevehicle_shared_frames`
+walks pairs and simply does not yield a frame whose twin or XML is absent,
+while a truncated PNG surfaces as a `None` from `cv2.imread` in cell 3. Past
+1 % of entries the archive is not worth working around and the cell says so.
+The done-marker moved with it: the old one was the extracted `train/` directory,
+which a run that died halfway through creates, so the next run reported
+"already staged" over a half-unpacked dataset.
 
 **SAM 3 by default.** `docs/mask_pool_plan.md` section 1 measured this: SAM 3
 is ahead of SAM 2.1 on image PVS and is the pools' default teacher. It is a
@@ -81,6 +103,7 @@ TIR_POOL    = "dronevehicle_thermal"
 TIR_ONLY    = "dronevehicle_thermal_only"
 RGB_ONLY    = "dronevehicle_rgb_only"
 MIRROR_DIR  = "/content/drive/MyDrive/edgetam-pool/dronevehicle"
+STAGE_DIR   = "/content/stage"
 ARCHIVES    = ["train.zip"]
 ONLY_DISTANCE = 40.0
 TEACHER     = "facebook/sam3"
@@ -94,12 +117,12 @@ MAX_BOXES   = None
 LIMIT       = None
 BOX_IOU     = 0.5
 REPO_URL    = "https://github.com/yigitkayabagci/sam-dedection.git"
-BRANCH      = "claude/aerial-rgb-thermal-data-qhjpxd"
+BRANCH      = "claude/colab-notebook-15-zipfile-p5czwt"
 REPO_DIR    = "/content/sam-dedection"
 NOTEBOOK = "15_dronevehicle_shared_pool.ipynb"
 STAMP    = "{{STAMP}}"
 
-import json, os, shutil, subprocess, sys, zipfile
+import json, os, shutil, subprocess, sys, time, zipfile
 from pathlib import Path
 
 if not Path(REPO_DIR).exists():
@@ -161,17 +184,83 @@ print(_device.name if _device else "no GPU", VRAM, "GiB",
 
 code('''
 Path(DATA_ROOT).mkdir(parents=True, exist_ok=True)
+STAGED = Path(DATA_ROOT) / ".staged"
+STAGED.mkdir(parents=True, exist_ok=True)
+
+def copy_off_drive(source, target):
+    from tqdm.auto import tqdm
+    _size = source.stat().st_size
+    if target.is_file() and target.stat().st_size == _size:
+        print("local copy already there:", target)
+        return target
+    Path(target).parent.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(target.parent).free < _size + (2 << 30):
+        print("not enough local disk to copy, reading Drive directly")
+        return None
+    _partial = target.with_name(target.name + ".part")
+    _at = 0
+    with open(source, "rb") as _in, open(_partial, "wb") as _out, tqdm(
+            total=_size, unit="B", unit_scale=True,
+            desc="copy " + source.name) as _bar:
+        while _at < _size:
+            _chunk = b""
+            for _attempt in range(5):
+                try:
+                    _in.seek(_at)
+                    _chunk = _in.read(1 << 24)
+                    break
+                except OSError as _read_error:
+                    print("drive read failed at", _at, "--", _read_error)
+                    time.sleep(2 ** _attempt)
+            if not _chunk:
+                raise SystemExit(
+                    f"{source}: Drive stopped at {_at} of {_size} bytes -- "
+                    f"remount Drive and run this cell again")
+            _out.write(_chunk)
+            _at += len(_chunk)
+            _bar.update(len(_chunk))
+    _partial.replace(target)
+    return target
+
+def unzip(source, dest):
+    _bad = []
+    with zipfile.ZipFile(source) as _zip:
+        _members = _zip.infolist()
+        for _member in progress(_members, len(_members), "unzip " + source.name):
+            try:
+                _zip.extract(_member, dest)
+            except (zipfile.BadZipFile, EOFError):
+                _bad.append(_member.filename)
+                _dropped = Path(dest) / _member.filename
+                if _dropped.is_file():
+                    _dropped.unlink()
+    return len(_members), _bad
+
 for _archive in ARCHIVES:
     _source = Path(DRIVE_DIR) / _archive
-    _marker = Path(DATA_ROOT) / _archive[:-4]
-    if _marker.exists():
-        print("already staged:", _marker)
+    _marker = STAGED / (_archive + ".done")
+    if _marker.is_file():
+        print("already staged:", _marker.read_text().strip())
         continue
     if not _source.is_file():
         raise SystemExit(f"{_source} is not there -- set DRIVE_DIR in cell 1")
-    print("unzipping", _source, round(_source.stat().st_size / 2 ** 30, 2), "GiB")
-    with zipfile.ZipFile(_source) as _zip:
-        _zip.extractall(DATA_ROOT)
+    print("staging", _source, round(_source.stat().st_size / 2 ** 30, 2), "GiB")
+    _local = copy_off_drive(_source, Path(STAGE_DIR) / _archive)
+    try:
+        _entries, _bad = unzip(_local or _source, DATA_ROOT)
+    except zipfile.BadZipFile as _archive_error:
+        raise SystemExit(f"{_source}: {_archive_error} -- the copy in Drive is "
+                         f"not a readable zip, upload it again")
+    if _local is not None and _local.is_file():
+        _local.unlink()
+    if len(_bad) > max(16, _entries // 100):
+        raise SystemExit(
+            f"{_source}: {len(_bad)} of {_entries} entries failed their CRC "
+            f"even from a local copy -- the archive in Drive is damaged, "
+            f"upload it again and re-run this cell")
+    if _bad:
+        print(len(_bad), "damaged entries dropped:", ", ".join(_bad[:4]))
+    _marker.write_text(f"{_archive}: {_entries - len(_bad)} of {_entries} entries")
 
 from src.training import boxes as B
 

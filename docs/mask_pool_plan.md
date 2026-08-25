@@ -147,12 +147,32 @@ havuzun bedeli bir dosya kopyası. Eş karenin boyutu tutmazsa aynalama
 yapılmıyor ve `mirror_mismatch` olarak sayılıyor — bunun sessizce yanlış
 olabileceği tek yol oydu.
 
-İki operasyonel karar:
+Üç operasyonel karar:
 
 - **Veri Drive'dan.** `fetch_datasets.py` DroneVehicle'ı Hub'dan 8,88 GB
   indiriyor; kullanıcının kendi Drive'ındaki kopya mount edilmiş bir okuma,
   indirme yok. Defterin tek veri ayarı `DRIVE_DIR` ve yer tutucu olarak
   geliyor.
+- **Arşiv önce yerel diske kopyalanıyor.** Mount'tan doğrudan `extractall`
+  defterin eski hâliydi ve 8,3 GiB'lık `train.zip`'te düzenli olarak
+  `BadZipFile: Bad CRC-32` ile bitiyor: açma, merkezî dizinden sonra girdi
+  başına bir atlama yapan **seek yoğun** bir okuma ve Drive FUSE mount'u o
+  atlamaların bir kısmına hata vermeden yanlış baytlarla cevap veriyor —
+  fark eden ilk şey zip'in kendi CRC'si oluyor. Tek sıralı bir kopya mount'un
+  iyi olduğu okuma biçimi (ve çıkan bir okuma hatası aynı ofsetten yeniden
+  deneniyor); açma sonra yerel diskten yapılıyor, orada CRC uyuşmazlığı
+  gerçekten arşivin bozuk olduğu anlamına geliyor, yani defter ikisini ayırıp
+  hangisi olduğunu söyleyebiliyor. Kopya açıldıktan sonra siliniyor, disk
+  almıyorsa hiç yapılmıyor.
+- **Bozuk girdi tek kareye mal oluyor, koşuya değil.** Girdiler tek tek
+  açılıyor; CRC'si tutmayan girdi yarım yazılmış dosyasıyla birlikte atılıyor,
+  çünkü diske kalan bozuk bir PNG eksik olandan kötü:
+  `dronevehicle_shared_frames` eşi ya da XML'i olmayan kareyi zaten
+  üretmiyor, yarım PNG ise üçüncü hücrede `cv2.imread`'in `None`'ı olarak
+  çıkıyor. Girdilerin %1'i aşılırsa hücre duruyor. Bitti işareti de artık
+  açılmış `train/` klasörü değil `.staged/train.zip.done`: eskisini yarıda
+  ölen bir açma da yaratıyordu, sonraki koşu yarım veri setine "already
+  staged" diyordu.
 - **`frame_group`, `batch_size` tek başına yetmiyor.** Paylaşılan alt küme
   kare başına **medyan 4 kutu** taşıyor; 80 GB'lık bir kartta kare-içi
   batch'leme adı var kendi yok. `pool.label_many` kırpmaları kareler arasında
