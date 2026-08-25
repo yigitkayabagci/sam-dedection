@@ -32,6 +32,7 @@ altındaki artıklar atıldı).
 | **CODrone 60 m** | 60 m | 3840×2160 | **60 px** | %20,4 | %2,3 | 39 | **✓** |
 | **CODrone 30 m** | 30 m | 3840×2160 | 47 px | %28,9 | %2,4 | 21 | **✓** |
 | CODrone 100 m | 100 m | 3840×2160 | 44 px | %30,2 | %4,4 | 26 | sınırda |
+| **DroneVehicle — RGB** *(zaten repoda)* | 80–120 m · dik + 15/30/45° | 840×712 (→640×512) | **40 px** | **%19,0** | — | 12 | **✓ sınırda ama geçer** — §4.3 |
 | AeroScapes | 5–50 m | 1280×720 | 35 px | %40,0 | %22,9 | 1–2 | zayıf: seyrek + düşük çözünürlük |
 | VisDrone2019-DET *(bugün havuzda)* | yüksek | ≤1920×1080 | 32 px | **%51,0** | %17,5 | 56 | **✗ bant dışı** |
 | **AeroVIS bütünü** | — | çoğu ≤1080p | **31 px** | **%52,1** | %10,6 | — | **✗ bant dışı** |
@@ -51,8 +52,12 @@ başına odak) ve bakış açısı.
 
 Pratik sonuç: **"şu irtifadaki setleri al" diye filtreleme.** Ölçüt
 doğrudan medyan √alan olmalı; bu doküman her aday için o sayıyı veriyor.
-Öneri eşiği: **medyan ≥ 45 px ve < 32 px oranı ≤ %30**. Bunu geçen üç
-kaynak var: AU-AIR, CODrone (30 ve 60 m), ve AeroVIS'in `sd_` dilimi.
+Öneri eşiği: **medyan ≥ 45 px ve < 32 px oranı ≤ %30**. Bunu geçen
+kaynaklar: AU-AIR, CODrone (30 ve 60 m), AeroVIS'in `sd_` dilimi — ve
+**DroneVehicle'ın RGB yarısı**, medyanda kıl payı kalsa da (40 px) tiny
+oranında rahat geçerek (%19,0). DroneVehicle 80–120 m'de uçuyor, yani
+"irtifa filtresi" onu elerdi; ölçüm elemiyor, çünkü karesi 640×512 dar
+alan görüyor. Tablodaki en net "irtifaya bakma" kanıtı bu satır.
 
 ## 1.2 Özet — ne eklenmeli
 
@@ -62,11 +67,13 @@ kaynak var: AU-AIR, CODrone (30 ve 60 m), ve AeroVIS'in `sd_` dilimi.
 | **2** | [AU-AIR](#41-au-air--en-alçak-irtifa-ama-tek-kavşak) | Bandın **en iri** nesnesi (medyan 81 px, <32 px yalnızca %11,8) ve kare başına irtifa okuması. Ama tek kavşak → seyrelterek, hacim için değil kalibrasyon/aşama C için |
 | **3** | [SegFly](https://github.com/markus-42/SegFly) — **zaten repoda** | 30/40/50 m, tam hedef bant, 20 606 RGB, **gerçek maske**. Kalibrasyonun yeni doğal yeri; kısıtı `things`in sadece `vehicle` + `truck` olması |
 | 4 | [Okutama-Action](#42-bant-içi-diğer-adaylar) · [CARPK](#42-bant-içi-diğer-adaylar) · [Semantic Drone](#42-bant-içi-diğer-adaylar) | 10–45 m 4K insan · ~40 m 90 K araba · 5–30 m 6000×4000. Üçü de bant içi, üçünün de erişimi betikle değil |
+| **kalıyor** | [DroneVehicle](#43-dronevehicle--visdrone-değil-ve-iki-modalitede-tek-geçiş-fikri) — **zaten repoda** | RGB medyan 40 px / %19 tiny → bandı geçiyor. Asıl değeri tek geçişte **iki maske**: hizalı RGB-IR, ama akış **IR etiketinden** sürülmeli, RGB'den değil (§4.3) |
 | **düştü** | VisDrone-DET, UAVDT, SODA-A, DIOR, DOTA, **iSAID**, AI-TOD-v2 | Ölçüldü, hepsi tiny/uydu rejiminde. iSAID'in 655 K elle çizilmiş örneği cazipti ama **uydu görüntüsü** — kalibrasyonu bant dışına taşırdı |
 
 **Tek cümle:** havuzu **CODrone 30+60 m** üzerine kur, **AU-AIR**'ı
 seyrelterek ve aşama C için ekle, kalibrasyonu **SegFly**'a taşı,
-**VisDrone'u RGB havuzundan çıkar**.
+**DroneVehicle'ı tut ama IR etiketinden sür**, **VisDrone'u RGB
+havuzundan çıkar**.
 
 ## 2. CODrone — yeni birincil aday
 
@@ -338,6 +345,87 @@ sırası resmî sıra **değil**: `data.yaml`'a göre `3 = Static Car`,
 paletlerinin dersi burada üçüncü kez geçerli: **paleti setin kendi
 dosyasından oku.**
 
+### 4.3 DroneVehicle — VisDrone değil, ve iki modalitede tek geçiş fikri
+
+[GitHub](https://github.com/VisDrone/DroneVehicle) · RA-L / T-CSVT 2022 ·
+`fetch_datasets.py`'de **zaten var** (`dronevehicle`)
+
+Önce karışıklığı temizleyelim: **DroneVehicle, VisDrone değildir.** Aynı
+laboratuvarın (Tianjin Üniversitesi AISKYEYE) deposu olduğu ve GitHub yolu
+`VisDrone/DroneVehicle` diye geçtiği için karışıyor; ama başka bir çekim,
+başka bir sensör (RGB **+ termal**), başka bir etiket (5 araç sınıfı,
+yönlü kutu). Bu dokümanda ikisi hep ayrı satırlar. **AeroVIS'in üç
+kaynağından da biri değil** → kontaminasyon yok.
+
+| | |
+|---|---|
+| ölçek | **28 439 hizalı RGB-IR çifti** (56 878 görüntü), **953 087 yönlü kutu** |
+| sınıflar | car · truck · bus · van · freight car |
+| kutu, modalite başına | **RGB 452 570** · **IR 500 517** — sayılar *farklı*, sebebi §aşağıda |
+| kare | 840×712, çevresinde 100 px beyaz bant → içerik **640×512** (XML `<size>`'dan doğrulandı) |
+| irtifa · açı | **80–120 m**, dik + 15°/30°/45° eğik |
+| ışık | gündüz · gece · **karanlık gece** |
+| indirme | HF `McCheng/DroneVehicle` — `val.zip` **723 321 423 B**, ranged GET **206**; train 8,88 GB, test 4,43 GB |
+
+**Ölçüm** (val'den 70 çift, 840 RGB + 1 149 IR kutu):
+
+| | medyan √alan | < 32 px | > 64 px |
+|---|---:|---:|---:|
+| RGB | **40 px** | %19,0 | %12,7 |
+| IR | 40 px | %19,9 | — |
+
+RGB p05 24 · p25 34 · p75 52 · p95 77 px; kare başına medyan 12 kutu.
+Yani hedef bandı **geçiyor** — VisDrone-DET'ten (32 px / %51) belirgin
+şekilde daha iyi, CODrone 30 m'nin (47 px / %28,9) biraz altında.
+
+#### "RGB'de etiketlerken termali de kaydedeyim" — fikir doğru, yönü ters
+
+Bu zaten boru hattının **(a) rotası** (`docs/mask_pool_plan.md` §2) ve
+defter 14'ün ilk çıktısı tam olarak "(a) mı (b) mi" ölçümü. DroneVehicle
+bu ölçüm için Kust4K'nın yanına konabilecek **ikinci ve çok daha büyük**
+yüzey. Ama iki düzeltmesi var, ikisi de ölçüldü.
+
+**1. Maskeyi taşıma, promptu taşı.** Aynı kareye ait RGB ve IR kutuları
+merkezden eşleştirildiğinde eşleşmelerin **%72,1'i tam 0,0 px** kayıyor —
+ama bu sensör hizasının kanıtı *değil*, etiketçinin çoğu kutuyu
+modaliteler arası **kopyaladığının** kanıtı. Bilgi taşıyan kısım yeniden
+çizilen %27,9: orada kayma **medyan 5,2 px, p90 12,6 px, maks 36,1 px**.
+40 px'lik bir araçta p90 kayma nesnenin **~%32'si** demek — RGB'de üretilip
+termale olduğu gibi yapıştırılan bir maske o kuyrukta aracın kenarını
+kesiyor. Repoda çaresi zaten yazılı: **prompt RGB kutusundan, kapı termal
+kutusundan** (`masklets.VideoSequence.gate_boxes`, RGBT234 rotası). Kayan
+çift orada düşer.
+
+**2. RGB'den sürme — IR'den sür.** Asıl mesele hiza değil, **kapsam**.
+Örneklemde **1 149 IR kutusunun 319'unun (%27,8) RGB karşılığı yok**;
+tersi neredeyse hiç (10/840). Yayınlanan tam sayılar da aynısını söylüyor:
+IR 500 517'ye karşı RGB 452 570 — car 389 779 → 428 086, freight car
+13 400 → 17 173 (**+%28,2**), truck 22 123 → 25 960 (+%17,4). Bunlar
+gece ve karanlık gece araçları: RGB karesinde **görünmüyorlar**, o yüzden
+etiketleri de yok.
+
+Sonuç: "RGB'de etiketle, termali de kaydet" dediğinde **termal hedeflerin
+yaklaşık dörtte birini baştan kaybediyorsun** — üstelik tam olarak termal
+dalın var olma sebebi olanları. Doğru yön tersi:
+
+```
+IR etiketi üzerinde döngü kur (üst küme, 500 517 kutu)
+  ├─ RGB'de tolerans içinde eşi VAR  → kalibrasyonun kazanan rotasıyla
+  │                                    maskeyi üret, ikisine birden yaz
+  └─ RGB'de eşi YOK (gece nesnesi)   → öğretmeni doğrudan termalde
+                                       promptla (rota b)
+```
+
+Bu, önerilen akışın kaybettiği ~48 000 örneği geri alıyor ve RGB maskesini
+mümkün olan her yerde yine üretiyor. Sıfır ek indirme: iki etiket klasörü
+(`*label/` ve `*labelr/`) aynı arşivde.
+
+**Bir de sınıf adı tuzağı:** freight car sınıfı dosyalarda **iki farklı
+yazımla** geçiyor — `feright_car` *ve* `feright car` (ikisi de "freight"
+yazım hatasıyla). Örneklemde RGB'de 13 + 7, IR'de 41 + 8. Tek yazıma
+normalize edilmezse sınıf haritası bu nesnelerin bir kısmını sessizce
+düşürür — Kust4K/SegFly/UAVid palet derslerinin dördüncüsü.
+
 ---
 
 ## 5. Gerçek örnek maskesi — kalibrasyon ve held-out
@@ -455,6 +543,13 @@ için etiket dosyasının **tamamı** (132 031 kutu), AeroVIS için
 VisDrone'un YOLO etiketi normalize olduğu için piksel boyutu 1920×1080
 varsayımıyla hesaplandı — yani **iyimser taraf**; setin bir kısmı
 1360×765 ve orada nesneler daha da küçük.
+
+DroneVehicle için `McCheng/DroneVehicle`'ın `val.zip`'i uzaktan zip olarak
+açıldı ve 70 karenin **her iki** etiket klasörü (`vallabel/` = RGB,
+`vallabelr/` = IR) okundu: 840 RGB + 1 149 IR yönlü kutu. Modaliteler arası
+kayma, kutu merkezleri 40 px eşiğiyle açgözlü eşleştirilerek ölçüldü;
+eşleşmeyenler "yalnız şu modalitede" sayıldı. XML'lerin bir kısmında
+kaçırılmamış `&` var, ayrıştırıcı bunu onarıyor.
 
 **Yapılamayan — üçü de bu sandbox'ın kısıtı, setin kusuru değil:**
 

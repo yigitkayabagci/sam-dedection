@@ -226,7 +226,11 @@ söylüyor; notebook'ların bunun için bir hücresi var.
 > 30+60 m dilimi** (7 457 kare, medyan 47/60 px) ile **AU-AIR** (medyan
 > 81 px) gelmeli. AeroVIS de aynı ölçütte bütünüyle bant dışı (medyan
 > 31 px) — yalnızca `sd_` dilimi ya da boyut kovalı J&F ile kullanılır.
-> Sayıların hepsi `docs/rgb_aerial_kaynaklar.md` §1 ve §3.0'da.
+> **DroneVehicle bandı geçiyor** (RGB medyan 40 px, %19'u < 32 px) ve
+> kalıyor; ama hizalı çiftten iki maske çıkarma akışı **IR etiketinden**
+> sürülmeli — IR'de 500 517, RGB'de 452 570 kutu var ve fark gece
+> araçları. Sayıların hepsi `docs/rgb_aerial_kaynaklar.md` §1, §3.0
+> ve §4.3'te.
 
 Yukarıdaki eleme ölçütü (2) — piksel maskesi — bu setlerde **bilerek**
 aranmıyor: maske havuzu boru hattı (`docs/mask_pool_plan.md`,
