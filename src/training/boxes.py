@@ -45,6 +45,17 @@ IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 VISDRONE_NAMES = ("pedestrian", "people", "bicycle", "car", "van", "truck",
                   "tricycle", "awning-tricycle", "bus", "motor")
 
+# DroneVehicle's class names are not clean, and a census of all 35 980 train
+# XMLs (both modalities, 2026-08) says exactly how dirty: `feright_car` 7 419
+# and `feright car` 3 773 in the thermal half alone -- the same class under two
+# spellings, so a histogram keyed on either loses a third of the freight cars.
+# Plus one `feright` and one `truvk`. The five real classes are car, truck,
+# bus, van, freight car; `*` (one box) is left alone on purpose so the probe
+# still shows it rather than the reader quietly deciding what it meant.
+DRONEVEHICLE_ALIASES = {"feright car": "feright_car",
+                        "feright": "feright_car",
+                        "truvk": "truck"}
+
 # BIRDSAI's MOT csv carries two class columns, and the legend is the LILA
 # dataset page's own ("Annotation format"), read there rather than inferred:
 # `class` is 0 for animals and 1 for humans, `species` refines it. 3 and 4
@@ -242,7 +253,23 @@ def dronevehicle_frames(root: str | Path, modality: str = "thermal",
     gate in the pool loop is what catches the residual.
 
     `border` is the 100 px white band every frame ships on all four sides --
-    carried on the frame as `inset`, applied when the image is decoded.
+    carried on the frame as `inset`, applied when the image is decoded. It is
+    real, not nominal: decoding four frames off the mirror and measuring gives
+    840x712 with 99.3-99.9 % of the band at exactly 255 (the rest is JPEG
+    ringing) and 640x512 left inside.
+
+    Class names go through `DRONEVEHICLE_ALIASES` on the way out, because the
+    archive spells freight car two ways. Everything else is the file's own.
+
+    Two more things the census of all 35 980 train XMLs turned up, in case a
+    caller is deciding how to read them. 7.2 % of objects are a plain
+    `<bndbox>` rather than a `<polygon>`, so both branches of `_envelope`
+    carry real traffic. And the two halves are annotated separately but not
+    independently: 53 % of thermal boxes are byte-identical to an RGB one and
+    another 36 % sit within 40 px of one, while 10.6 % have no RGB counterpart
+    at all -- vehicles the thermal half can see and the visible half cannot.
+    That last number is the dataset's reason to exist, and it is also why the
+    thermal labels are the ones to harvest.
     """
     if modality not in ("thermal", "rgb"):
         raise ValueError(f"modality must be thermal or rgb, got {modality!r}")
@@ -275,7 +302,8 @@ def dronevehicle_frames(root: str | Path, modality: str = "thermal",
                 envelope = _envelope(obj)
                 if envelope is not None:
                     boxes.append(envelope)
-                    classes.append((obj.findtext("name") or "object").strip())
+                    name = (obj.findtext("name") or "object").strip()
+                    classes.append(DRONEVEHICLE_ALIASES.get(name, name))
             if not boxes:
                 continue
             pair = pair_dir / image.name

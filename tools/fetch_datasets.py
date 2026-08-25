@@ -219,6 +219,17 @@ VTUAV_VIS = Recipe(
 #
 # Every image is 840x712 with a 100 px band of pure white on all four sides;
 # `SPECS["dronevehicle"].border` discards it at read time. See that spec.
+# Counted 2026-08 off `train.zip`'s ZIP64 central directory rather than the
+# paper: 17 990 pairs in the train split, and **four** folders of 17 990 --
+# `trainimg` / `trainimgr` for the two modalities and `trainlabel` /
+# `trainlabelr` for their two separate annotation sets. 316 412 thermal boxes
+# and 286 794 RGB ones; the paper's 953 087 is all three splits together.
+#
+# Reading all 35 980 XMLs says the two label sets are separate but not
+# independent: 53.2 % of thermal boxes are byte-identical to an RGB one, the
+# matched ones sit a median 0.00 px apart, and 10.6 % have no RGB counterpart
+# at all -- vehicles only the thermal half can see. That last figure is why
+# the pool harvests the thermal side. Full census: `docs/datasets.md`.
 DRONEVEHICLE = Recipe(
     name="dronevehicle",
     note="28 442 registered RGB-TIR UAV pairs, day and night (RA-L 2022)",

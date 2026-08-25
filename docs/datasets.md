@@ -364,6 +364,114 @@ bunun için var.
   410'un termal dizileri RGB-T sürümündekilerle örtüşebilir. İkisi birden
   kullanılacaksa dizi adları karşılaştırılmalı.
 
+## DroneVehicle — tam sayım (evet, kullanıyoruz; evet, kutu)
+
+Kısa cevabı: **evet, üç yerde kullanılıyor** — aşama A'da hizalı çift kaynağı
+(`SPECS["dronevehicle"]`), defter 14'te termal havuzun varsayılan kutu
+kaynağı, defter 13'te RGB yarısı `INCLUDE_DRONEVEHICLE` ile isteğe bağlı. Ve
+etiketi **kutu**, üstelik **yönlü kutu** (oriented box), semantik maske değil.
+
+Aşağısı tahmin değil: `train.zip`'in ZIP64 merkezi dizini `Range` isteğiyle
+okundu, **35 980 XML'in tamamı** (iki modalite × 17 990 kare) indirilip
+ayrıştırıldı, dört kare de gerçekten kod çözülüp piksel kontrol edildi.
+2026-08.
+
+### Ne var
+
+| | |
+|---|---|
+| kaynak | HF aynası `McCheng/DroneVehicle`, `train.zip` = **8 880 004 598 B**, 206 (resume var), ZIP64 |
+| içerik | `train/{trainimg, trainimgr, trainlabel, trainlabelr}` — dördü de **17 990** dosya → 17 990 hizalı RGB-TIR çift, **iki modalite de ayrı ayrı etiketli** |
+| kare | 840×712, dört yanda 100 px bant → **içeride 640×512** (projenin native çözünürlüğü) |
+| etiket tipi | VOC-vari XML, `<polygon>` `x1..y4` = **yönlü kutu**. 293 495 poligon + **22 917 düz `<bndbox>` (%7,2)** — iki biçim de gerçek trafik taşıyor |
+| hacim | termal **316 412** kutu, RGB **286 794** kutu (yalnız train; makalenin 953 087'si üç bölmenin toplamı) |
+| sınıflar | car 270 350 · truck 15 833 · bus 11 334 · **freight car 11 192** · van 7 701 |
+
+### Ölçek — sorduğun kısım
+
+Kutu büyüklüğü, √alan olarak (100 px bant çıktıktan sonraki 640×512 karede):
+
+```
+p05 27,2   p10 30,9   medyan 44,2   p90 68,6   p95 83,9   maks 300  px
+<16 px: %0,03      16–32 px: %11,8      >=32 px: %88,1
+```
+
+Sınıf bazında medyan / p90: car 42,4 / 59,0 · van 47,0 / 80,0 ·
+freight car 66,8 / 119,5 · truck 67,3 / 122,3 · bus 85,2 / 125,1.
+
+Bu, listedeki **en iyi prompt ölçeği**. Karşılaştırma: RGBTDronePerson'da
+medyan 11 px (%93'ü 16 px altında), VTUAV-det'te 48–69 px. DroneVehicle'da
+hedeflerin **%88'i 32 px'in üstünde** — kutu-prompt'lu bir öğretmenin
+zoom-crop'a en az muhtaç olduğu set bu.
+
+Bir uyarı, yönlülükten geliyor: kutuların **%92,8'i döndürülmüş**, ve SAM'ın
+prompt kodlayıcısı açıyı ifade edemediği için eksen-hizalı zarf
+promptlanıyor. Zarf, gerçek döndürülmüş dikdörtgenin **medyan 1,46 katı**
+alanını kaplıyor (p75 2,12×, p90 2,37×) — yani prompt sıkılığında ödenen
+sabit bir bedel var. Kapılar maskeyi kendi genişliğine göre ölçtüğü için bu
+doğruluğu değil, sıkılığı etkiliyor; `box_iou` eşiği ayarlanırken akılda
+tutulmalı.
+
+### İrtifa — kısmen filtrelenebilir
+
+Uçuş klasörü adlarının bir kısmı irtifayı ve gimbal açısını **adında
+taşıyor**: `310_80m45night1`, `39_120m45_2`, `319_120m_30_3`,
+`321_100_15_3`. Tam sayım:
+
+| | |
+|---|---|
+| irtifa/açı kodlayan kare | **2 243 / 17 990 (%12,5)** |
+| irtifa | 120 m: 955 · 80 m: 673 · 100 m: 615 |
+| gimbal | 45°: 1 087 · 30°: 866 · 15°: 290 |
+| gece etiketli | 328 |
+| kalan %87,5 | jenerik adlar: `image` (3 556), `A` (2 199), `modalB` (1 114), `B` (834), `5-20`, `6-5`… |
+
+Yani makalenin "80–120 m, 15/30/45°, gündüz+gece" ifadesi doğru, ama
+**kare bazında irtifaya göre bölmek yalnız sekizde bir için mümkün.** İrtifa
+ekseninde kontrollü bir deney isteniyorsa bu 2 243 kare o deneyin veri
+kümesi; geri kalanı irtifası bilinmeyen havuz.
+
+### Hizalama — gerçekten kayıtlı
+
+İki yarı ayrı ayrı etiketlenmiş ama bağımsız değil. Termal kutuyu aynı
+sınıftan en yakın RGB kutusuyla eşleştirdim (40 px kapı, 17 990 karenin
+tamamı):
+
+| | |
+|---|---|
+| byte-birebir aynı dikdörtgen | **%53,2** (168 253 kutu) |
+| 40 px içinde eşleşen | %89,4 toplam |
+| eşleşenlerin merkez farkı | medyan **0,00 px** · p75 3,9 · p90 8,1 · p95 11,6 |
+| 10 px içinde | %93,2 |
+| **RGB karşılığı hiç olmayan termal kutu** | **%10,6 — 33 383 kutu** |
+
+Son satır setin var olma sebebi: termalin gördüğü, görünürün göremediği
+araçlar. Ayrıca 512 RGB karesi tamamen boşken yalnız 33 termal kare boş.
+**Sonuç: hasat termal yarıdan yapılmalı**, ve `--prompt pair` (maskeyi RGB'de
+üretip termalde kapılamak) burada RGBTDronePerson'ın aksine gerçekten
+savunulabilir — orada iki modalitenin kutuları medyan 11,7 px ayrıydı,
+burada 0.
+
+### Beyaz bant ve kanal sayısı — ikisi de ölçüldü
+
+Dört kare (iki modalite × iki uçuş) indirilip kod çözüldü: hepsi 840×712,
+100 px bandın **%99,3–99,9'u tam 255** (kalanı JPEG çınlaması), içeride
+640×512. `DatasetSpec.border = 100` ve `inset()` doğru.
+
+Termal jpg'lerin bir kısmı **üç kanallı** geliyor (17 990 termal XML'in
+1 346'sı `<depth>3</depth>` diyor) — okuyucular `IMREAD_UNCHANGED` + gri
+dönüşüm kullandığı için bu zaten karşılanıyor, ama kendi loader'ını yazan
+biri buna takılır.
+
+### Bulunan tek gerçek kusur: sınıf adı iki yazımda
+
+`feright_car` **7 419** kutu, `feright car` **3 773** kutu — aynı sınıf, iki
+yazım. Ayrıca bir `feright`, bir `truvk` (RGB tarafında) ve bir `*`. Elle
+dokunulmasa `class_histogram` aynı aracı iki satırda raporluyor ve ada göre
+süzen herhangi bir kod **freight car'ların üçte birini** sessizce kaybediyor.
+`boxes.DRONEVEHICLE_ALIASES` bunları tek ada indiriyor; `*` bilerek
+dokunulmadan bırakıldı, ki probe onu göstersin.
+
 ## Mevcut referans
 
 [Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) (2023 · TPAMI) —

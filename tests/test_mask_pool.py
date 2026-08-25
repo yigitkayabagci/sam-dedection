@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from src.training.boxes import (  # noqa: E402
     BIRDSAI_SPECIES,
+    DRONEVEHICLE_ALIASES,
     VISDRONE_NAMES,
     BoxFrame,
     birdsai_frames,
@@ -231,6 +232,35 @@ class TestDroneVehicleFrames(unittest.TestCase):
                          classes=("car",), inset=100)
         _, keep = frame.resolved((712, 840))
         self.assertFalse(keep[0])
+
+    def test_the_two_spellings_of_freight_car_become_one_class(self):
+        # Measured over all 35 980 train XMLs: `feright_car` 7 419 boxes and
+        # `feright car` 3 773. Left alone, a class histogram reports the same
+        # vehicle twice and any name filter loses a third of them.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp))
+            (root / "train" / "trainlabelr" / "00002.xml").write_text(
+                "<annotation>"
+                "<object><name>feright car</name><bndbox>"
+                "<xmin>10</xmin><ymin>10</ymin><xmax>60</xmax><ymax>50</ymax>"
+                "</bndbox></object>"
+                "<object><name>feright_car</name><bndbox>"
+                "<xmin>70</xmin><ymin>10</ymin><xmax>120</xmax><ymax>50</ymax>"
+                "</bndbox></object>"
+                "<object><name>truvk</name><bndbox>"
+                "<xmin>10</xmin><ymin>70</ymin><xmax>60</xmax><ymax>110</ymax>"
+                "</bndbox></object></annotation>")
+            (root / "train" / "trainimgr" / "00002.jpg").write_bytes(b"jpg")
+            counts = class_histogram(dronevehicle_frames(root))
+            self.assertEqual(counts.get("feright_car"), 2)
+            self.assertNotIn("feright car", counts)
+            self.assertEqual(counts.get("truck"), 2)   # one real, one typo
+
+    def test_an_unrecognised_name_is_left_for_the_probe_to_show(self):
+        # `*` appears once in the archive. The reader must not guess at it.
+        self.assertNotIn("*", DRONEVEHICLE_ALIASES)
+        self.assertEqual(set(DRONEVEHICLE_ALIASES.values()),
+                         {"feright_car", "truck"})
 
     def test_a_class_count_mismatch_is_refused_at_construction(self):
         with self.assertRaises(ValueError):
