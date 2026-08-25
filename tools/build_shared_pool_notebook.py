@@ -26,13 +26,28 @@ thermal half misses. A thermal training run reads the second and third; merging
 them into one directory would make a mirrored mask indistinguishable from a
 thermal-prompted one.
 
-Five decisions inside it are not arbitrary and are argued where they live
+Six decisions inside it are not arbitrary and are argued where they live
 rather than in the notebook:
 
 **Drive, not the Hub.** `fetch_datasets.py` pulls DroneVehicle from
 `McCheng/DroneVehicle` at 8.88 GB over HTTPS. A copy already in the user's own
 Drive is a mounted read with no download at all, which is why `DRIVE_DIR` is
 the only data setting and it ships as a placeholder.
+
+**Nothing is upgraded over a package the kernel already imported.** Cell 1's
+pip line used to carry `pillow`, and `--upgrade pillow` inside a live Colab
+session is a trap: Colab imports matplotlib, and through it `PIL`, before the
+first cell runs, so pip writes Pillow 12 to disk under a kernel still holding
+Pillow 11's `PIL._typing`. Nothing fails at that point. It fails two cells
+later, when transformers is the first thing to want `PIL.ImageText` -- a
+12-only module, so it loads from disk -- and that module asks the live 11 for
+`_Ink`. `pillow` is off the install list, since `requirements.txt` needs only
+>= 10 and Colab ships 11. What stays is the general check, because the next
+dependency to move will not be Pillow: any watched package whose live
+`__version__` differs from the one now on disk means pip moved house under
+this kernel, and the cell restarts the runtime once -- marked in `/content`,
+so it cannot loop -- instead of letting the mismatch surface three cells later
+as somebody else's import error.
 
 **The archive is copied to local disk before it is opened.** `extractall`
 straight off the mount is what the notebook used to do, and on an 8.3 GiB zip
@@ -133,7 +148,41 @@ if REPO_DIR not in sys.path:
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
-                "pillow", "tqdm"], check=False)
+                "tqdm"], check=False)
+
+import importlib.metadata as _metadata
+
+LIVE = {"PIL": "pillow", "numpy": "numpy", "torch": "torch",
+        "matplotlib": "matplotlib", "transformers": "transformers",
+        "huggingface_hub": "huggingface_hub"}
+_moved = []
+for _module, _dist in LIVE.items():
+    if _module not in sys.modules:
+        continue
+    try:
+        _disk = _metadata.version(_dist).split("+")[0]
+    except Exception:
+        continue
+    _live = getattr(sys.modules[_module], "__version__", _disk).split("+")[0]
+    if _live != _disk:
+        _moved.append(f"{_dist} {_live} in this kernel, {_disk} on disk")
+
+_restarted = Path("/content/.pip_restarted")
+if _moved and not _restarted.is_file():
+    _restarted.write_text("; ".join(_moved))
+    print("pip replaced a package this kernel had already imported:")
+    for _line in _moved:
+        print("   ", _line)
+    print("restarting the runtime -- run this cell again when it comes back")
+    try:
+        get_ipython().kernel.do_shutdown(True)
+    except Exception:
+        os.kill(os.getpid(), 9)
+    raise SystemExit("restarting the runtime")
+if _moved:
+    print("!! still mixed after one restart:", "; ".join(_moved))
+elif _restarted.is_file():
+    _restarted.unlink()
 
 try:
     from google.colab import drive as _drive

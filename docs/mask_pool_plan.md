@@ -147,12 +147,29 @@ havuzun bedeli bir dosya kopyası. Eş karenin boyutu tutmazsa aynalama
 yapılmıyor ve `mirror_mismatch` olarak sayılıyor — bunun sessizce yanlış
 olabileceği tek yol oydu.
 
-Üç operasyonel karar:
+Dört operasyonel karar:
 
 - **Veri Drive'dan.** `fetch_datasets.py` DroneVehicle'ı Hub'dan 8,88 GB
   indiriyor; kullanıcının kendi Drive'ındaki kopya mount edilmiş bir okuma,
   indirme yok. Defterin tek veri ayarı `DRIVE_DIR` ve yer tutucu olarak
   geliyor.
+- **Çalışan kernel'in çoktan import ettiği bir paket yükseltilmiyor.** Birinci
+  hücrenin pip satırında `pillow` vardı; canlı bir Colab oturumunda
+  `--upgrade pillow` bir tuzak: Colab ilk hücreden önce matplotlib'i, onun
+  üzerinden de `PIL`'i import ediyor, dolayısıyla pip diske Pillow 12 yazarken
+  kernel hâlâ Pillow 11'in `PIL._typing`'ini tutuyor. O anda hiçbir şey
+  patlamıyor. İki hücre sonra, `PIL.ImageText`'i (yalnız 12'de var, o yüzden
+  diskten yükleniyor) ilk isteyen transformers olduğunda patlıyor: modül canlı
+  11'den `_Ink` istiyor. `pillow` kurulum listesinden çıkarıldı —
+  `requirements.txt` >= 10 istiyor, Colab 11 getiriyor. Kalan şey genel
+  kontrol, çünkü bir dahaki sefere yerinden oynayacak bağımlılık Pillow
+  olmayacak: izlenen bir paketin canlı `__version__`'ı diskteki sürümden
+  farklıysa pip bu kernel'in altından taşınmış demektir ve hücre çalışma
+  zamanını bir kez yeniden başlatıyor (`/content`'te işaretlenerek, döngüye
+  giremesin diye). Teşhis tarafı da düzeltildi: `labels.teacher_import_error`
+  artık "transformers çok eski" ile "import başka bir pakette öldü"yü
+  ayırıyor; eski mesaj `_Ink` hatasını sürümü zaten yeterli olan
+  transformers'a yıkıyordu.
 - **Arşiv önce yerel diske kopyalanıyor.** Mount'tan doğrudan `extractall`
   defterin eski hâliydi ve 8,3 GiB'lık `train.zip`'te düzenli olarak
   `BadZipFile: Bad CRC-32` ile bitiyor: açma, merkezî dizinden sonra girdi

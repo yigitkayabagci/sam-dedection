@@ -15,7 +15,9 @@ import sys
 import tarfile
 import tempfile
 import threading
+import types
 import unittest
+import unittest.mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import replace
 from pathlib import Path
@@ -50,6 +52,7 @@ from src.training.labels import (  # noqa: E402
     Sam3Teacher,
     open_masks,
     teacher_class_for,
+    teacher_import_error,
 )
 from src.training.masklets import find_rgbt_sequences, masklet_sequence  # noqa: E402
 from src.training.pool import (  # noqa: E402
@@ -895,6 +898,80 @@ class TestTeacherDispatch(unittest.TestCase):
         self.assertIs(teacher_class_for("facebook/sam3"), Sam3Teacher)
         self.assertIs(teacher_class_for("facebook/sam2.1-hiera-large"),
                       Sam2Teacher)
+
+
+def broken_transformers() -> types.ModuleType:
+    """A `transformers` whose import dies inside Pillow, as Colab's does.
+
+    The real chain is longer -- transformers' lazy module imports an image
+    utility, which imports `PIL.ImageDraw`, which in Pillow 12 imports
+    `PIL.ImageText` -- but every step of it raises the same ImportError, with
+    `name` pointing at the module that actually broke.
+    """
+    module = types.ModuleType("transformers")
+
+    def _raise(name):
+        raise ImportError(
+            "cannot import name '_Ink' from 'PIL._typing' "
+            "(/usr/local/lib/python3.13/dist-packages/PIL/_typing.py)",
+            name="PIL._typing")
+
+    module.__getattr__ = _raise
+    return module
+
+
+class TestTeacherImportErrors(unittest.TestCase):
+    """A broken dependency is not a version, and no longer says it is.
+
+    What shipped: `transformers has no Sam3Tracker classes (cannot import name
+    '_Ink' from 'PIL._typing')`, printed by a Colab kernel holding Pillow 11
+    while pip had just written 12 to disk. The transformers wheel was 5.x and
+    fine; upgrading it again is the one move that cannot help. The notebook
+    then fell back to SAM 2.1, hit the identical wall, and reported it as a raw
+    ImportError with the useful sentence nowhere in sight.
+    """
+
+    def test_a_missing_class_still_gets_the_version_advice(self):
+        exc = ImportError("cannot import name 'Sam3TrackerModel' from "
+                          "'transformers' (unknown location)",
+                          name="transformers")
+        self.assertEqual(str(teacher_import_error(exc, "the version advice")),
+                         "the version advice")
+
+    def test_a_broken_dependency_names_it_and_asks_for_a_restart(self):
+        exc = ImportError("cannot import name '_Ink' from 'PIL._typing'",
+                          name="PIL._typing")
+        message = str(teacher_import_error(exc, "the version advice"))
+        self.assertNotIn("the version advice", message)
+        self.assertIn("PIL", message)
+        self.assertIn("Restart the runtime", message)
+
+    def test_an_importerror_with_no_name_falls_back_to_the_advice(self):
+        self.assertEqual(str(teacher_import_error(ImportError("bare"), "advice")),
+                         "advice")
+
+    def test_both_teachers_route_their_import_through_it(self):
+        # Including SAM 2.1: it is what the notebook falls back *to*, so its
+        # import was the one that surfaced as a bare traceback.
+        for teacher in (Sam2Teacher, Sam3Teacher):
+            with self.subTest(teacher=teacher.__name__):
+                modules = {"torch": types.ModuleType("torch"),
+                           "transformers": broken_transformers()}
+                with unittest.mock.patch.dict(sys.modules, modules):
+                    with self.assertRaises(SystemExit) as caught:
+                        teacher("facebook/whatever")
+                self.assertIn("Restart the runtime", str(caught.exception))
+
+    def test_a_transformers_without_the_classes_says_which_floor(self):
+        for teacher, floor in ((Sam2Teacher, "4.56"), (Sam3Teacher, "5.0.0")):
+            with self.subTest(teacher=teacher.__name__):
+                modules = {"torch": types.ModuleType("torch"),
+                           "transformers": types.ModuleType("transformers")}
+                with unittest.mock.patch.dict(sys.modules, modules):
+                    with self.assertRaises(SystemExit) as caught:
+                        teacher("facebook/whatever")
+                self.assertIn(floor, str(caught.exception))
+                self.assertNotIn("Restart the runtime", str(caught.exception))
 
 
 class TestNewRecipes(unittest.TestCase):

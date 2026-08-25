@@ -356,6 +356,37 @@ class _ImageTeacher:
         return out
 
 
+def teacher_import_error(exc: ImportError, advice: str) -> SystemExit:
+    """The right message for a failed teacher import, which is two failures.
+
+    `from transformers import Sam3TrackerModel` raises ImportError with `name`
+    set to `transformers` when the installed wheel is too old to carry the
+    classes. That is the case `advice` is written for, and the only one where
+    a version number is the answer.
+
+    It raises the same ImportError with `name` set to something else entirely
+    when importing transformers pulled in a dependency that is itself broken --
+    and on Colab that is the common one, because a `pip install --upgrade` in
+    cell 1 rewrites packages the kernel imported at startup. Pillow 12 lands on
+    disk while `PIL._typing` from 11 is still live in `sys.modules`, the first
+    module to want `PIL.ImageText` gets `cannot import name '_Ink'`, and the
+    old message blamed a transformers version that was fine. Upgrading
+    transformers again is exactly the wrong move there, so the two do not share
+    a message: the fix is to restart the runtime, which is what this one says.
+    """
+    culprit = (getattr(exc, "name", "") or "").split(".")[0]
+    if culprit in ("", "transformers"):
+        return SystemExit(advice)
+    return SystemExit(
+        f"the teacher's import died inside {culprit}, not in transformers "
+        f"({exc}).\n"
+        f"This is not a transformers version and upgrading it will not help. "
+        f"It is what a half-replaced package looks like: pip wrote a new "
+        f"{culprit} to disk under a kernel that had already imported the old "
+        f"one. Restart the runtime -- in Colab, Runtime > Restart session -- "
+        f"and run the cells again.")
+
+
 class Sam2Teacher(_ImageTeacher):
     """SAM 2.1's image predictor through `transformers`. The default.
 
@@ -370,7 +401,15 @@ class Sam2Teacher(_ImageTeacher):
         dtype: str = "bfloat16",
     ) -> None:
         import torch
-        from transformers import Sam2Model, Sam2Processor
+
+        try:
+            from transformers import Sam2Model, Sam2Processor
+        except ImportError as exc:
+            raise teacher_import_error(exc, (
+                f"transformers has no Sam2 classes ({exc}).\n"
+                f"They landed in transformers 4.56, which is the floor "
+                f"requirements.txt documents -- `pip install -U "
+                f"'transformers>=4.56'`.")) from exc
 
         self.model_id = model_id
         self.device = device
@@ -414,11 +453,11 @@ class Sam3Teacher(_ImageTeacher):
         try:
             from transformers import Sam3TrackerModel, Sam3TrackerProcessor
         except ImportError as exc:
-            raise SystemExit(
+            raise teacher_import_error(exc, (
                 f"transformers has no Sam3Tracker classes ({exc}).\n"
                 f"SAM 3 landed in transformers 5.0.0 -- `pip install -U "
                 f"'transformers>=5'` -- or use the default SAM 2.1 teacher, "
-                f"which needs nothing.") from exc
+                f"which needs nothing.")) from exc
 
         self.model_id = model_id
         self.device = device
