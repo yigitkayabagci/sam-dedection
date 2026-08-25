@@ -25,6 +25,13 @@ matched on CRC32 and compressed size: the "RGB version" is the RGB-T archive
 with `ir/` and `ir.txt` deleted. Both notebooks read the same RGB-T zips and
 each unzips only its own half.
 
+**Each arm extracts into its own `DATA_ROOT`.** `tracked_members` keeps both
+`.txt` files but only one modality's frames, so two arms sharing an extraction
+tree is a trap: the second one finds the first one's staging markers, skips
+extracting, then finds `<sequence>/rgb.txt` present and `<sequence>/rgb/` empty
+and quietly indexes nothing. The modality is in the path so that cannot happen,
+whether the arms run on two runtimes or one after another on the same disk.
+
 **Only a tenth of each archive is used.** Frame ids run 0..n-1 with no gaps and
 each box file holds `ceil(n / 10)` lines, so line k is frame 10k and nine
 frames in ten carry no label. `fetch_datasets.tracked_members` (reached through
@@ -90,7 +97,7 @@ def resolve(text: str) -> str:
 
 code('''
 DRIVE_DIR   = "/content/drive/MyDrive/VTUAV"
-DATA_ROOT   = "/content/data/VTUAV"
+DATA_ROOT   = "/content/data/VTUAV_{{modality}}"
 POOL_ROOT   = "/content/pool"
 POOL        = "{{pool}}"
 MODALITY    = "{{modality}}"

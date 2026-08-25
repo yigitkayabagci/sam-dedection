@@ -571,11 +571,14 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
     root = Path(root)
 
     frames: list[BoxFrame] = []
+    seen = empty = 0
     for boxes_file in sorted(root.rglob(f"*/{modality}.txt")):
         sequence = boxes_file.parent
         images = _images_by_stem(sequence / modality)
         twins = _images_by_stem(sequence / other)
+        seen += 1
         if not images:
+            empty += 1
             continue
         for index, line in enumerate(boxes_file.read_text().splitlines()):
             cells = line.replace(",", " ").split()
@@ -597,6 +600,15 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
                 classes=(sequence.name.rsplit("_", 1)[0],),
                 pair=twins.get(stem)))
     if not frames:
+        if seen and empty == seen:
+            # `tracked_members` keeps both `.txt` files but only one modality's
+            # frames, so this is what a shared extraction tree looks like: the
+            # box files are all there and the image folders are all empty.
+            raise FileNotFoundError(
+                f"{root}: found {seen} {modality}.txt file(s) and not one "
+                f"{modality}/ frame. This tree was extracted for the other "
+                f"modality -- give each one its own root (e.g. "
+                f"{root}_{modality}) and extract again.")
         raise FileNotFoundError(
             f"{root}: no VTUAV sequence underneath -- expected "
             f"`<sequence>/{modality}.txt` beside `<sequence>/{modality}/`.")

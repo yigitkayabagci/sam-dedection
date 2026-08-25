@@ -763,6 +763,24 @@ class TestVtuavFrames(unittest.TestCase):
             frame, = vtuav_frames(root, modality="rgb")
             self.assertIsNone(frame.pair)
 
+    def test_a_tree_extracted_for_the_other_modality_says_exactly_that(self):
+        """The failure that cost a whole RGB run.
+
+        `tracked_members` keeps both box files but only one modality's frames.
+        Two arms sharing an extraction tree means the second one skips staging
+        (the markers are there), then finds every `rgb.txt` present and every
+        `rgb/` empty. Silently indexing nothing is the worst way to say that.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), "10 20 30 40\n", "10 20 30 40\n")
+            for stale in (root / "bus_017" / "rgb").iterdir():
+                stale.unlink()
+            with self.assertRaises(FileNotFoundError) as caught:
+                vtuav_frames(root, modality="rgb")
+            message = str(caught.exception)
+            self.assertIn("not one rgb/ frame", message)
+            self.assertIn("own root", message)
+
     def test_an_unknown_modality_is_refused(self):
         with self.assertRaises(ValueError):
             vtuav_frames("/nowhere", modality="thermal")

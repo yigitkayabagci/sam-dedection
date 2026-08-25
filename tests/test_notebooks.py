@@ -189,7 +189,9 @@ class TestEveryNotebook(unittest.TestCase):
         """16 and 17 are one job with one variable, run on two runtimes.
 
         They must write to different pools and different Drive folders or a
-        parallel run has each arm's zip land on the other's.
+        parallel run has each arm's zip land on the other's -- and to
+        different DATA_ROOTs, because a shared extraction tree makes the
+        second arm skip staging and then index nothing.
         """
         rgb = settings_of(ROOT / "notebooks" / "16_vtuav_rgb_pool.ipynb")
         ir = settings_of(ROOT / "notebooks" / "17_vtuav_thermal_pool.ipynb")
@@ -197,10 +199,11 @@ class TestEveryNotebook(unittest.TestCase):
         differ = {k for k in rgb if rgb[k] != ir[k]}
         self.assertEqual(
             differ, {"MODALITY", "POOL", "EXTRACT_MODE", "MIRROR_DIR",
-                     "NOTEBOOK", "STAMP"},
+                     "DATA_ROOT", "NOTEBOOK", "STAMP"},
             f"unexpected differences: {sorted(differ)}")
         self.assertNotEqual(rgb["MIRROR_DIR"], ir["MIRROR_DIR"])
         self.assertNotEqual(rgb["POOL"], ir["POOL"])
+        self.assertNotEqual(rgb["DATA_ROOT"], ir["DATA_ROOT"])
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*
