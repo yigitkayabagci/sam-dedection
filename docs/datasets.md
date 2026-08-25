@@ -463,6 +463,44 @@ Termal jpg'lerin bir kısmı **üç kanallı** geliyor (17 990 termal XML'in
 dönüşüm kullandığı için bu zaten karşılanıyor, ama kendi loader'ını yazan
 biri buna takılır.
 
+### Paylaşılan kutular — defter 15'in beslendiği alt küme
+
+Yukarıdaki "%53,2 byte-birebir aynı" satırı bir gözlem değil, bir alt küme.
+Ölçütü sıkılaştırıp (zarf değil, **sekiz poligon koordinatının tamamı** artı
+sınıf) tam sayım yapıldığında:
+
+| | |
+|---|---|
+| iki etiket dosyasının aynı poligonu yazdığı kutu | **167 644 / 316 412 (%53,0)** |
+| bu kutuları taşıyan kare | **13 129 / 17 990 (%73,0)** |
+| kare başına | medyan 4, ortalama 9,3, p90 25 |
+| büyüklük | medyan √alan **43,8 px** (tüm termal kutularda 44,2) — boyutça yanlı bir örnek değil |
+| sınıflar | car 141 220 · truck 9 010 · bus 7 409 · freight car 5 842 · van 4 163 |
+
+Bu kutularda iki modalitenin anlaşmazlığı **ölçümle değil, inşa gereği
+sıfır** — etiketçi aynı koordinatları iki kez yazmış. İki yarı da kayıtlı
+olduğu için RGB piksellerinden üretilen maske, aynı koordinatlarda termal kare
+için de doğru maske. `boxes.dronevehicle_shared_frames` bu alt kümeyi
+`image = RGB`, `pair = termal` olarak veriyor (`dronevehicle_frames`'in
+tersi, bilerek) ve `pool.label_pool(..., mirror=...)` tek öğretmen
+geçişinin çıktısını iki havuza birden yazıyor: termal havuzun bedeli bir
+dosya kopyası.
+
+Bunun **bilerek dışarıda bıraktığı** şey, setin var olma sebebi olan
+%10,6'lık termal-only hedefler. Onlar ayrı bir termal-promptlu geçiş ister
+(`--dataset dronevehicle --modality thermal --prompt self`). Defter 15 ucuz
+yarıyı hasat eder, tamamını değil.
+
+**Kaggle'daki YOLOv11-OBB sürümü bu iş için kullanılamaz.** (Kaggle API'sinden
+okundu: `redzapdos123/dronevehicle-dataset-yolov11-obb`, 1,04 GB,
+CC BY-NC-SA 4.0.) Üç sebeple: bölme başına **tek düz `images/` klasörü** var —
+RGB ile termal ayrılmıyor, dolayısıyla eşleştirilemiyor; **etiket görüntü
+başına tek** dosya, yani "iki modalite aynı poligonu yazmış mı" sorusu
+sorulamıyor; ve beş sınıf **ikiye indirilmiş** (`small-vehicle`,
+`large-vehicle`). YOLO-OBB eğitimi için düzgün bir paket, havuz kaynağı için
+değil. Bu boru hattının ihtiyacı `trainimg`/`trainimgr` + `trainlabel`/
+`trainlabelr` dördünü birden taşıyan orijinal arşiv.
+
 ### Bulunan tek gerçek kusur: sınıf adı iki yazımda
 
 `feright_car` **7 419** kutu, `feright car` **3 773** kutu — aynı sınıf, iki

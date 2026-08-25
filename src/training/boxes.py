@@ -240,6 +240,129 @@ def _envelope(obj: ElementTree.Element) -> list[float] | None:
     return None
 
 
+def _geometry_key(obj: ElementTree.Element) -> tuple | None:
+    """The object's geometry exactly as the file wrote it, hashable.
+
+    `_envelope` is lossy on purpose -- it is what a box prompt can express --
+    which makes it the wrong thing to compare two annotation files with: two
+    differently rotated polygons can share an envelope. This keeps all eight
+    polygon coordinates (or the four `bndbox` ones) so "the same rectangle" in
+    `dronevehicle_shared_frames` means the same rectangle.
+    """
+    polygon = obj.find("polygon")
+    if polygon is not None:
+        try:
+            points = tuple(float(polygon.findtext(f"{axis}{i}"))
+                           for i in range(1, 5) for axis in ("x", "y"))
+        except (TypeError, ValueError):
+            return None
+        return ("polygon",) + points
+    bndbox = obj.find("bndbox")
+    if bndbox is not None:
+        try:
+            return ("bndbox",) + tuple(
+                float(bndbox.findtext(k))
+                for k in ("xmin", "ymin", "xmax", "ymax"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _dronevehicle_objects(path: Path) -> list[tuple[str, tuple, list[float]]]:
+    """`[(class, geometry key, envelope)]` for one DroneVehicle XML."""
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (ElementTree.ParseError, OSError):
+        return []
+    found = []
+    for obj in root.iter("object"):
+        key, envelope = _geometry_key(obj), _envelope(obj)
+        if key is None or envelope is None:
+            continue
+        name = (obj.findtext("name") or "object").strip()
+        found.append((DRONEVEHICLE_ALIASES.get(name, name), key, envelope))
+    return found
+
+
+def dronevehicle_shared_frames(root: str | Path,
+                               border: int = 100) -> list[BoxFrame]:
+    """Only the boxes both modalities annotate identically, prompted on RGB.
+
+    DroneVehicle labels its two halves separately, and a census of all 35 980
+    train XMLs says how separately: 53.0 % of thermal boxes (167 644 of
+    316 412, over 13 129 of 17 990 frames) appear in the RGB file as the *same
+    polygon under the same class*, another 36 % sit within 40 px of one, and
+    10.6 % have no RGB counterpart at all.
+
+    That first slice is the one worth a single teacher pass. The two halves are
+    registered -- for these boxes the annotators wrote the same coordinates
+    twice, so the disagreement is zero by construction rather than by
+    measurement -- which means one mask made from the RGB pixels is a correct
+    mask for the thermal frame at the same coordinates. `label_pool(...,
+    mirror=...)` writes it into both pools without a second forward pass.
+
+    So `image` is the **RGB** frame (the pixels the teacher reads, and where it
+    is strongest) and `pair` is its thermal twin (where the mask is mirrored).
+    That is the opposite assignment from `dronevehicle_frames(modality=...)`,
+    and deliberately so.
+
+    What this deliberately gives up: the 10.6 % of targets only the thermal
+    half sees -- night vehicles, the reason the dataset exists. Those need a
+    thermal-prompted pass, which is `dronevehicle_frames(modality="thermal")`
+    with `prompt="self"`. This reader is the cheap half, not the whole set.
+
+    Shared boxes are not a biased sample by size: median sqrt(area) 43.8 px
+    against 44.2 px over all thermal boxes, 85.9 % at or above 32 px.
+    """
+    root = Path(root)
+    frames: list[BoxFrame] = []
+    for rgb_dir in sorted(root.rglob("*img")):
+        if not rgb_dir.is_dir() or not rgb_dir.name.endswith("img"):
+            continue
+        prefix = rgb_dir.name[:-len("img")]
+        thermal_dir = rgb_dir.parent / f"{prefix}imgr"
+        rgb_labels = rgb_dir.parent / f"{prefix}label"
+        thermal_labels = rgb_dir.parent / f"{prefix}labelr"
+        if not (thermal_dir.is_dir() and rgb_labels.is_dir()
+                and thermal_labels.is_dir()):
+            continue
+        twins = _images_by_stem(thermal_dir)
+
+        for image in sorted(rgb_dir.iterdir()):
+            if image.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            twin = twins.get(image.stem)
+            if twin is None:
+                continue
+            rgb_objects = _dronevehicle_objects(rgb_labels / f"{image.stem}.xml")
+            if not rgb_objects:
+                continue
+            available: dict[tuple[str, tuple], int] = {}
+            for name, key, _ in rgb_objects:
+                available[(name, key)] = available.get((name, key), 0) + 1
+
+            boxes, classes = [], []
+            for name, key, envelope in _dronevehicle_objects(
+                    thermal_labels / f"{image.stem}.xml"):
+                if available.get((name, key), 0) <= 0:
+                    continue
+                available[(name, key)] -= 1     # one thermal box per RGB box
+                boxes.append(envelope)
+                classes.append(name)
+            if not boxes:
+                continue
+            frames.append(BoxFrame(
+                key=f"{rgb_dir.parent.name}/{image.stem}", image=image,
+                boxes=np.asarray(boxes, dtype=np.float64),
+                classes=tuple(classes), pair=twin, inset=border))
+    if not frames:
+        raise FileNotFoundError(
+            f"{root}: no frame had a box both halves annotate identically -- "
+            f"is this the extracted DroneVehicle archive (`*img/`, `*imgr/`, "
+            f"`*label/`, `*labelr/` side by side)?")
+    return frames
+
+
 def dronevehicle_frames(root: str | Path, modality: str = "thermal",
                         border: int = 100) -> list[BoxFrame]:
     """DroneVehicle's boxes, for whichever half the pool is being built on.

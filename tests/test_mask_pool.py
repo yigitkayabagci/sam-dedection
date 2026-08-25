@@ -17,6 +17,7 @@ import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ if str(ROOT) not in sys.path:
 from src.training.boxes import (  # noqa: E402
     BIRDSAI_SPECIES,
     DRONEVEHICLE_ALIASES,
+    dronevehicle_shared_frames,
     VISDRONE_NAMES,
     BoxFrame,
     birdsai_frames,
@@ -51,6 +53,8 @@ from src.training.labels import (  # noqa: E402
 from src.training.masklets import find_rgbt_sequences, masklet_sequence  # noqa: E402
 from src.training.pool import (  # noqa: E402
     RECORD_FILE,
+    label_boxes,
+    label_many,
     calibration_table,
     label_pool,
     pool_report,
@@ -99,8 +103,10 @@ class FakeImageTeacher:
         self.shrink = shrink
         self.score = score
         self.calls = 0
+        self.batches = 0          # forward passes, as opposed to crops
 
     def masks_for(self, crops, boxes):
+        self.batches += 1
         out = []
         for crop, box in zip(crops, boxes):
             self.calls += 1
@@ -528,6 +534,191 @@ class TestLabelPool(unittest.TestCase):
             self.assertIn("| toy |", summary)
 
 
+class TestSharedFrames(unittest.TestCase):
+    """The boxes both halves annotate identically, prompted on RGB."""
+
+    SAME = ("<object><name>car</name><polygon>"
+            "<x1>150</x1><y1>150</y1><x2>200</x2><y2>160</y2>"
+            "<x3>190</x3><y3>210</y3><x4>140</x4><y4>200</y4>"
+            "</polygon></object>")
+    # Same envelope as SAME, different corners: a rotated box the two files
+    # drew differently. The strict key has to reject it.
+    ROTATED = ("<object><name>car</name><polygon>"
+               "<x1>140</x1><y1>150</y1><x2>200</x2><y2>150</y2>"
+               "<x3>200</x3><y3>210</y3><x4>140</x4><y4>210</y4>"
+               "</polygon></object>")
+    OTHER = ("<object><name>bus</name><bndbox>"
+             "<xmin>300</xmin><ymin>300</ymin><xmax>380</xmax><ymax>360</ymax>"
+             "</bndbox></object>")
+
+    def fixture(self, tmp: Path, thermal_xml: str, rgb_xml: str) -> Path:
+        root = tmp / "dv"
+        for folder in ("trainimg", "trainimgr", "trainlabel", "trainlabelr"):
+            (root / "train" / folder).mkdir(parents=True)
+        for folder in ("trainimg", "trainimgr"):
+            (root / "train" / folder / "00001.jpg").write_bytes(b"jpg")
+        (root / "train" / "trainlabelr" / "00001.xml").write_text(
+            f"<annotation>{thermal_xml}</annotation>")
+        (root / "train" / "trainlabel" / "00001.xml").write_text(
+            f"<annotation>{rgb_xml}</annotation>")
+        return root
+
+    def test_only_the_identical_geometry_survives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                self.SAME + self.OTHER,
+                                self.SAME)
+            frame, = dronevehicle_shared_frames(root)
+            self.assertEqual(frame.classes, ("car",))
+            np.testing.assert_allclose(frame.boxes[0], [140, 150, 200, 210])
+
+    def test_the_same_envelope_drawn_differently_is_not_shared(self):
+        # This is why the key is all eight coordinates and not `_envelope`.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), self.SAME, self.ROTATED)
+            with self.assertRaises(FileNotFoundError):
+                dronevehicle_shared_frames(root)
+
+    def test_the_rgb_half_is_the_image_and_the_thermal_half_the_pair(self):
+        # The opposite of `dronevehicle_frames`, because the teacher reads the
+        # RGB pixels here and the mask is mirrored onto the thermal frame.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), self.SAME, self.SAME)
+            frame, = dronevehicle_shared_frames(root)
+            self.assertEqual(frame.image.parent.name, "trainimg")
+            self.assertEqual(frame.pair.parent.name, "trainimgr")
+            self.assertEqual(frame.inset, 100)
+
+    def test_the_two_spellings_still_match_each_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(
+                Path(tmp),
+                self.OTHER.replace("bus", "feright car"),
+                self.OTHER.replace("bus", "feright_car"))
+            frame, = dronevehicle_shared_frames(root)
+            self.assertEqual(frame.classes, ("feright_car",))
+
+    def test_a_box_only_one_half_draws_is_left_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), self.SAME + self.OTHER, self.OTHER)
+            frame, = dronevehicle_shared_frames(root)
+            self.assertEqual(frame.classes, ("bus",))
+
+
+class TestLabelMany(unittest.TestCase):
+    """Crops pool across frames, or `batch_size` does nothing on sparse data."""
+
+    def items(self, count: int, boxes_each: int = 2):
+        pixels = np.zeros((100, 200, 3), np.uint8)
+        boxes = np.array([[10.0, 10.0, 40.0, 40.0]] * boxes_each)
+        return [(pixels, boxes) for _ in range(count)]
+
+    def test_one_batch_can_span_several_frames(self):
+        teacher = FakeImageTeacher()
+        out = label_many(self.items(4), teacher, batch_size=8)
+        self.assertEqual(teacher.batches, 1, "8 crops from 4 frames, one pass")
+        self.assertEqual(teacher.calls, 8)
+        self.assertEqual(len(out), 4)
+
+    def test_results_come_back_split_by_frame_in_order(self):
+        out = label_many(self.items(3), FakeImageTeacher(), batch_size=4)
+        for masks, rows in out:
+            self.assertEqual([r["i"] for r in rows], [0, 1])
+            self.assertEqual(sorted(masks), [0, 1])
+
+    def test_one_frame_gives_exactly_what_label_boxes_gave(self):
+        pixels, boxes = self.items(1)[0]
+        a_masks, a_rows = label_boxes(pixels, boxes, FakeImageTeacher())
+        (b_masks, b_rows), = label_many([(pixels, boxes)], FakeImageTeacher())
+        self.assertEqual(a_rows, b_rows)
+        self.assertEqual(sorted(a_masks), sorted(b_masks))
+
+
+class TestMirroredPool(unittest.TestCase):
+    """One teacher pass, two pools -- the point of the shared-box subset."""
+
+    def frames(self, tmp: Path, twin_shape=(100, 200)) -> list:
+        write_yolo(tmp / "y", stems=("img0",))
+        twin_dir = tmp / "t"
+        twin_dir.mkdir()
+        twin = twin_dir / "img0.jpg"
+        if HAVE_CV2:
+            cv2.imwrite(str(twin), np.full((*twin_shape, 3), 90, np.uint8))
+        else:
+            twin.write_bytes(b"jpg")
+        base = yolo_frames(tmp / "y")[0]
+        return [replace(base, pair=twin)]
+
+    @unittest.skipUnless(HAVE_CV2, "needs OpenCV to decode the frames")
+    def test_the_same_masks_are_filed_under_both_pools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            teacher = FakeImageTeacher()
+            report = label_pool(self.frames(tmp), teacher, tmp / "pool",
+                                dataset="rgb", mirror="tir")
+            self.assertEqual(report["mirrored"], 1)
+            self.assertEqual(teacher.calls, 2, "one pass, not two")
+            rgb = tmp / "pool" / "rgb" / "img0"
+            tir = tmp / "pool" / "tir" / "img0"
+            self.assertEqual((rgb / MASK_STORE).read_bytes(),
+                             (tir / MASK_STORE).read_bytes())
+            record = json.loads((tir / RECORD_FILE).read_text())
+            self.assertEqual(record["prompt"], "mirror")
+            self.assertEqual(record["dataset"], "tir")
+            self.assertTrue(record["image"].endswith("t/img0.jpg"))
+            self.assertIn("y/images/img0.jpg", record["mirror_of"])
+
+    @unittest.skipUnless(HAVE_CV2, "needs OpenCV to decode the frames")
+    def test_a_twin_of_another_shape_is_refused_not_stamped(self):
+        # The one way this could be silently wrong.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            report = label_pool(self.frames(tmp, twin_shape=(64, 64)),
+                                FakeImageTeacher(), tmp / "pool",
+                                dataset="rgb", mirror="tir")
+            self.assertEqual(report["mirror_mismatch"], 1)
+            self.assertEqual(report["mirrored"], 0)
+            self.assertFalse((tmp / "pool" / "tir").exists())
+
+    @unittest.skipUnless(HAVE_CV2, "needs OpenCV to decode the frames")
+    def test_a_mirror_asked_for_later_is_copied_not_re_labelled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            frames = self.frames(tmp)
+            label_pool(frames, FakeImageTeacher(), tmp / "pool", dataset="rgb")
+            teacher = FakeImageTeacher()
+            report = label_pool(frames, teacher, tmp / "pool", dataset="rgb",
+                                mirror="tir")
+            self.assertEqual(teacher.calls, 0, "resume must not re-prompt")
+            self.assertEqual(report["mirrored"], 1)
+            self.assertTrue((tmp / "pool" / "tir" / "img0" / MASK_STORE).is_file())
+
+    @unittest.skipUnless(HAVE_CV2, "needs OpenCV to decode the frames")
+    def test_both_pools_show_up_in_the_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            label_pool(self.frames(tmp), FakeImageTeacher(), tmp / "pool",
+                       dataset="rgb", mirror="tir")
+            summary = summarise_pool(pool_report(tmp / "pool"))
+            self.assertIn("| rgb |", summary)
+            self.assertIn("| tir |", summary)
+
+    @unittest.skipUnless(HAVE_CV2, "needs OpenCV to decode the frames")
+    def test_grouping_frames_shrinks_the_number_of_forward_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            write_yolo(Path(tmp) / "y", stems=("a", "b", "c", "d"))
+            frames = yolo_frames(Path(tmp) / "y")
+            one = FakeImageTeacher()
+            label_pool(frames, one, tmp / "p1", dataset="toy", batch_size=32)
+            grouped = FakeImageTeacher()
+            label_pool(frames, grouped, tmp / "p2", dataset="toy",
+                       batch_size=32, frame_group=4)
+            self.assertEqual(one.batches, 4)
+            self.assertEqual(grouped.batches, 1)
+            self.assertEqual(one.calls, grouped.calls)
+
+
 class TestCalibrationTable(unittest.TestCase):
     def test_routes_sit_side_by_side_per_class_and_size(self):
         table = calibration_table({
@@ -639,14 +830,25 @@ class TestNewRecipes(unittest.TestCase):
         # `--dataset` on `make_mask_pool.py` and the recipe list on
         # `fetch_datasets.py` are two hand-written lists that have to agree:
         # a dataset the CLI offers but cannot fetch is a dead end at 3 a.m.
-        from tools.make_mask_pool import DATASETS, frames_for  # noqa: F401
+        from tools.make_mask_pool import DATASETS, RECIPE_FOR, frames_for  # noqa: F401
         from src.training import boxes
 
         for dataset in DATASETS:
-            self.assertIn(dataset, RECIPES, f"{dataset} has no fetch recipe")
-        for dataset in ("rgbtdroneperson", "vtuavdet", "birdsai"):
+            recipe = RECIPE_FOR.get(dataset, dataset)
+            self.assertIn(recipe, RECIPES,
+                          f"{dataset} has no fetch recipe ({recipe!r})")
+        for dataset in ("rgbtdroneperson", "vtuavdet", "birdsai",
+                        "dronevehicle_shared"):
             self.assertIn(dataset, DATASETS)
             self.assertTrue(hasattr(boxes, f"{dataset}_frames"), dataset)
+
+    def test_a_shared_dataset_names_the_archive_it_actually_comes_from(self):
+        # dronevehicle_shared is a view of the dronevehicle archive, not its
+        # own download; the mapping is what stops the CLI offering a dataset
+        # nothing can fetch.
+        from tools.make_mask_pool import RECIPE_FOR
+
+        self.assertEqual(RECIPE_FOR["dronevehicle_shared"], "dronevehicle")
 
     def test_a_staged_tarball_is_found_like_a_staged_zip(self):
         with tempfile.TemporaryDirectory() as tmp:

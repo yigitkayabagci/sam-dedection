@@ -36,6 +36,7 @@ double-counts.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterable, Mapping, Sequence as SequenceABC
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,64 @@ def iou(a: np.ndarray, b: np.ndarray) -> float:
 # --------------------------------------------------------------------------
 
 
+def label_many(
+    items: SequenceABC[tuple[np.ndarray, np.ndarray]],
+    teacher,
+    gates: Gates = Gates(),
+    zoom: float = 4.0,
+    min_size: int = 128,
+    batch_size: int = 8,
+) -> list[tuple[dict[int, np.ndarray], list[dict]]]:
+    """Many frames' boxes through the teacher in *shared* batches.
+
+    The reason this exists rather than a loop over `label_boxes`: batching only
+    within a frame is barely batching at all on the data these pools are made
+    from. DroneVehicle's shared-box subset carries a **median of 4 boxes per
+    frame**, so a `batch_size` of 128 on an 80 GB card would still run 13 129
+    forward passes of average size 9 -- the card idles between launches and the
+    setting meant to make it fast does nothing. Pooling crops across frames
+    turns the same work into a tenth as many full batches.
+
+    Crops of different sizes batch fine (the processor pads), so frames of
+    different densities pool without bucketing. Returns one `(masks, records)`
+    pair per item, in the order given, each exactly what `label_boxes` would
+    have returned for that frame alone.
+    """
+    plans: list[tuple[int, int, tuple[int, int, int, int]]] = []
+    crops: list[np.ndarray] = []
+    local_boxes: list[np.ndarray] = []
+    for item_index, (pixels, boxes) in enumerate(items):
+        height, width = pixels.shape[:2]
+        for box_index, box in enumerate(boxes):
+            x0, y0, w, h = zoom_window(box, (width, height), zoom, min_size)
+            crops.append(pixels[y0:y0 + h, x0:x0 + w])
+            local_boxes.append(np.array(
+                [box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0]))
+            plans.append((item_index, box_index, (x0, y0, w, h)))
+
+    masks: list[dict[int, np.ndarray]] = [{} for _ in items]
+    records: list[list[dict]] = [[] for _ in items]
+    step = max(batch_size, 1)
+    for start in range(0, len(crops), step):
+        stop = start + step
+        for (item_index, box_index, (x0, y0, w, h)), local_box, (
+                crop_mask, teacher_iou) in zip(
+            plans[start:stop], local_boxes[start:stop],
+            teacher.masks_for(crops[start:stop], local_boxes[start:stop]),
+        ):
+            verdict = reject_reason(measure(crop_mask, local_box, teacher_iou),
+                                    gates)
+            records[item_index].append({
+                "i": int(box_index),
+                "teacher_iou": round(float(teacher_iou), 4),
+                "verdict": verdict})
+            if verdict is None:
+                full = np.zeros(items[item_index][0].shape[:2], dtype=bool)
+                full[y0:y0 + h, x0:x0 + w] = crop_mask[:h, :w]
+                masks[item_index][int(box_index)] = full
+    return list(zip(masks, records))
+
+
 def label_boxes(
     pixels: np.ndarray,
     boxes: np.ndarray,
@@ -83,36 +142,12 @@ def label_boxes(
     attempted -- index, teacher confidence, and either `None` or the name of
     the gate that stopped it. The caller decides what the indices mean; this
     function only promises they are the row numbers of `boxes`.
+
+    One frame's case of `label_many`, kept because most callers have one frame
+    and this pair reads better than a list of length one at every call site.
     """
-    height, width = pixels.shape[:2]
-    masks: dict[int, np.ndarray] = {}
-    records: list[dict] = []
-
-    order = list(range(len(boxes)))
-    for start in range(0, len(order), max(batch_size, 1)):
-        chunk = order[start:start + max(batch_size, 1)]
-        crops, local_boxes, windows = [], [], []
-        for index in chunk:
-            box = boxes[index]
-            x0, y0, w, h = zoom_window(box, (width, height), zoom, min_size)
-            crops.append(pixels[y0:y0 + h, x0:x0 + w])
-            local_boxes.append(np.array(
-                [box[0] - x0, box[1] - y0, box[2] - x0, box[3] - y0]))
-            windows.append((x0, y0, w, h))
-
-        for index, (crop_mask, teacher_iou), local_box, (x0, y0, w, h) in zip(
-            chunk, teacher.masks_for(crops, local_boxes), local_boxes, windows
-        ):
-            verdict = reject_reason(measure(crop_mask, local_box, teacher_iou),
-                                    gates)
-            records.append({"i": int(index),
-                            "teacher_iou": round(float(teacher_iou), 4),
-                            "verdict": verdict})
-            if verdict is None:
-                full = np.zeros((height, width), dtype=bool)
-                full[y0:y0 + h, x0:x0 + w] = crop_mask[:h, :w]
-                masks[int(index)] = full
-    return masks, records
+    return label_many([(pixels, boxes)], teacher, gates=gates, zoom=zoom,
+                      min_size=min_size, batch_size=batch_size)[0]
 
 
 # --------------------------------------------------------------------------
@@ -123,6 +158,57 @@ def label_boxes(
 def _frame_dir(out_root: Path, key: str) -> Path:
     parts = [p for p in Path(key).parts if p not in ("..", "/", "")]
     return out_root.joinpath(*parts) if parts else out_root / "frame"
+
+
+def _image_size(path: Path) -> tuple[int, int] | None:
+    """`(height, width)` of an image file, or None if nothing could read it.
+
+    Only the mirror path needs this, and it needs it to be cheap -- it runs
+    once per frame purely to refuse to stamp a mask onto a twin of a different
+    shape. Pillow reads the header and stops, which is the cheap answer; the
+    repo's own contract is numpy + OpenCV with Pillow optional, so a full
+    decode is the fallback rather than the requirement.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as handle:
+            width, height = handle.size
+        return int(height), int(width)
+    except ImportError:
+        pass
+    except Exception:                       # noqa: BLE001 - unreadable file
+        return None
+    try:
+        import cv2
+
+        raw = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        return None if raw is None else (int(raw.shape[0]), int(raw.shape[1]))
+    except Exception:                       # noqa: BLE001 - unreadable file
+        return None
+
+
+def _mirror(target: Path, record: dict, store: Path, dataset: str,
+            image: Path) -> None:
+    """The same masks, filed against the twin frame in the other pool.
+
+    A copy, not a second forward pass: the boxes these frames carry are the
+    ones both label files write identically, so the mask the teacher made from
+    the RGB pixels *is* the thermal frame's mask at the same coordinates. The
+    record says so -- `prompt` becomes `mirror` and `mirror_of` names the frame
+    it was made on -- so nothing downstream has to infer it.
+
+    Record first, store last, exactly as the primary write does: the store's
+    existence is what `resume` reads as done.
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    twin = dict(record)
+    twin["dataset"] = dataset
+    twin["prompt"] = "mirror"
+    twin["mirror_of"] = record.get("image")
+    twin["image"] = str(image)
+    (target / RECORD_FILE).write_text(json.dumps(twin, indent=1) + "\n")
+    shutil.copyfile(store, target / MASK_STORE)
 
 
 def label_pool(
@@ -138,6 +224,8 @@ def label_pool(
     limit: int | None = None,
     max_boxes: int | None = None,
     resume: bool = True,
+    mirror: str | None = None,
+    frame_group: int = 1,
     progress=None,
 ) -> dict:
     """Run the teacher over a box dataset; write one store per image.
@@ -154,6 +242,21 @@ def label_pool(
     boxes first, because a 6-pixel box's mask is the least trustworthy thing
     the teacher makes and the gates reject most of them anyway.
 
+    `mirror` is a second dataset name to file the *same* masks under, against
+    `BoxFrame.pair`. It exists for `boxes.dronevehicle_shared_frames`, whose
+    boxes are the ones both halves of an aligned RGB-T set annotate
+    identically: one teacher pass over the RGB pixels then supervises both
+    modalities, and the thermal pool costs a file copy instead of a second
+    forward pass. A twin that is missing or a different size is counted
+    (`mirror_missing`, `mirror_mismatch`) and not written -- stamping a mask
+    onto pixels of another shape is the one way this could be silently wrong.
+
+    `frame_group` is how many frames pool their crops into one set of teacher
+    batches. It defaults to 1, which is the old behaviour exactly; raise it on
+    a card big enough that `batch_size` outruns a single frame's box count.
+    Frames are still written one at a time, after their group's inference, so
+    the crash contract is unchanged.
+
     The report is the honest statement of what this produced: images and
     boxes attempted, accepted, skipped, and every gate's reject count.
     """
@@ -161,6 +264,7 @@ def label_pool(
         raise ValueError(f"prompt must be self or pair, got {prompt!r}")
     out_root = Path(out_dir) / dataset
     out_root.mkdir(parents=True, exist_ok=True)
+    mirror_root = Path(out_dir) / mirror if mirror else None
 
     chosen = list(frames)[:limit] if limit is not None else list(frames)
     iterator = (progress(chosen, total=len(chosen), desc=dataset)
@@ -168,41 +272,56 @@ def label_pool(
 
     counts = {"images": 0, "resumed": 0, "no_pair": 0, "unreadable": 0,
               "attempted": 0, "accepted": 0}
+    if mirror_root is not None:
+        counts.update(mirrored=0, mirror_missing=0, mirror_mismatch=0)
     rejected: dict[str, int] = {}
     by_class: dict[str, int] = {}
 
-    for frame in iterator:
-        target = _frame_dir(out_root, frame.key)
-        store = target / MASK_STORE
-        if resume and store.is_file():
-            counts["resumed"] += 1
-            counts["accepted"] += len(open_masks(store))
-            continue
-        source = frame.image if prompt == "self" else frame.pair
-        if source is None:
-            counts["no_pair"] += 1
-            continue
-        try:
-            pixels = _read_rgb(source)
-        except FileNotFoundError:
-            counts["unreadable"] += 1
-            continue
+    def prepared():
+        """The frames that still need the teacher, decoded and box-filtered."""
+        for frame in iterator:
+            target = _frame_dir(out_root, frame.key)
+            store = target / MASK_STORE
+            if resume and store.is_file():
+                counts["resumed"] += 1
+                counts["accepted"] += len(open_masks(store))
+                if mirror_root is not None:
+                    # A run that died between the two writes, or a mirror asked
+                    # for on a pool built without one: copy, do not re-label.
+                    twin_dir = _frame_dir(mirror_root, frame.key)
+                    if not (twin_dir / MASK_STORE).is_file() and frame.pair:
+                        _mirror(twin_dir,
+                                json.loads((target / RECORD_FILE).read_text()),
+                                store, mirror, frame.pair)
+                        counts["mirrored"] += 1
+                continue
+            source = frame.image if prompt == "self" else frame.pair
+            if source is None:
+                counts["no_pair"] += 1
+                continue
+            try:
+                pixels = _read_rgb(source)
+            except FileNotFoundError:
+                counts["unreadable"] += 1
+                continue
 
-        boxes, keep = frame.resolved(pixels.shape[:2])
-        if frame.inset:
-            b = frame.inset
-            pixels = pixels[b:-b, b:-b]
-        indices = [i for i in range(len(boxes)) if keep[i]]
-        if max_boxes is not None and len(indices) > max_boxes:
-            areas = ((boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]))
-            indices = sorted(sorted(indices, key=lambda i: -areas[i])[:max_boxes])
-        if not indices:
-            continue
+            boxes, keep = frame.resolved(pixels.shape[:2])
+            full_shape = pixels.shape[:2]
+            if frame.inset:
+                b = frame.inset
+                pixels = pixels[b:-b, b:-b]
+            indices = [i for i in range(len(boxes)) if keep[i]]
+            if max_boxes is not None and len(indices) > max_boxes:
+                areas = ((boxes[:, 2] - boxes[:, 0])
+                         * (boxes[:, 3] - boxes[:, 1]))
+                indices = sorted(
+                    sorted(indices, key=lambda i: -areas[i])[:max_boxes])
+            if not indices:
+                continue
+            yield frame, target, store, pixels, boxes, indices, full_shape
 
-        masks, rows = label_boxes(
-            pixels, boxes[indices], teacher, gates=gates, zoom=zoom,
-            min_size=min_size, batch_size=batch_size)
-
+    def write(item, masks, rows) -> None:
+        frame, target, store, pixels, boxes, indices, full_shape = item
         counts["images"] += 1
         counts["attempted"] += len(rows)
         record = {"key": frame.key, "dataset": dataset, "prompt": prompt,
@@ -211,11 +330,9 @@ def label_pool(
                   "teacher": getattr(teacher, "model_id", type(teacher).__name__),
                   "instances": []}
         for row in rows:
-            local = int(row["i"])                  # row in the *sent* subset
-            index = indices[local]                 # row in the frame's boxes
+            index = indices[int(row["i"])]         # row in the frame's boxes
             cls = frame.classes[index]
-            accepted = row["verdict"] is None
-            if accepted:
+            if row["verdict"] is None:
                 counts["accepted"] += 1
                 by_class[cls] = by_class.get(cls, 0) + 1
             else:
@@ -233,7 +350,35 @@ def label_pool(
         save_masks(store, pixels.shape[:2],
                    {indices[i]: m for i, m in masks.items()})
 
-    report = {"dataset": dataset, "prompt": prompt, **counts,
+        if mirror_root is not None:
+            if frame.pair is None:
+                counts["mirror_missing"] += 1
+            elif _image_size(frame.pair) != full_shape:
+                counts["mirror_mismatch"] += 1
+            else:
+                _mirror(_frame_dir(mirror_root, frame.key), record, store,
+                        mirror, frame.pair)
+                counts["mirrored"] += 1
+
+    group: list = []
+
+    def flush() -> None:
+        if not group:
+            return
+        outputs = label_many(
+            [(item[3], item[4][item[5]]) for item in group], teacher,
+            gates=gates, zoom=zoom, min_size=min_size, batch_size=batch_size)
+        for item, (masks, rows) in zip(group, outputs):
+            write(item, masks, rows)
+        group.clear()
+
+    for item in prepared():
+        group.append(item)
+        if len(group) >= max(frame_group, 1):
+            flush()
+    flush()
+
+    report = {"dataset": dataset, "prompt": prompt, "mirror": mirror, **counts,
               "acceptance_rate": (counts["accepted"] / counts["attempted"]
                                   if counts["attempted"] else 0.0),
               "rejected": rejected, "accepted_by_class": by_class,

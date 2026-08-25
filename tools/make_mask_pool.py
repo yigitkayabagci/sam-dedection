@@ -52,8 +52,13 @@ from src.training.pool import (  # noqa: E402
     write_index,
 )
 
-DATASETS = ("visdrone", "hituav", "dronevehicle", "rgbtdroneperson",
-            "vtuavdet", "birdsai")
+DATASETS = ("visdrone", "hituav", "dronevehicle", "dronevehicle_shared",
+            "rgbtdroneperson", "vtuavdet", "birdsai")
+
+# Which `fetch_datasets.py` recipe puts a dataset on disk. Only the readers
+# that share an archive with another dataset need an entry; everything else
+# fetches under its own name.
+RECIPE_FOR = {"dronevehicle_shared": "dronevehicle"}
 
 
 def frames_for(dataset: str, data: Path, split: str, modality: str,
@@ -72,6 +77,10 @@ def frames_for(dataset: str, data: Path, split: str, modality: str,
         return boxes.hituav_frames(data, split=split)
     if dataset == "dronevehicle":
         return boxes.dronevehicle_frames(data, modality=modality)
+    if dataset == "dronevehicle_shared":
+        # Boxes both halves annotate identically; `image` is the RGB frame, so
+        # `--prompt self --mirror <name>` is one pass for two pools.
+        return boxes.dronevehicle_shared_frames(data)
     if dataset == "rgbtdroneperson":
         return boxes.rgbtdroneperson_frames(data, split=split, modality=modality)
     if dataset == "vtuavdet":
@@ -119,12 +128,22 @@ def main(argv: list[str] | None = None) -> int:
                        default="thermal",
                        help="dronevehicle/rgbtdroneperson/vtuavdet: which half "
                             "the pool supervises. birdsai is thermal-only.")
+    label.add_argument("--mirror", default=None,
+                       help="Second pool name to file the same masks under, "
+                            "against each frame's registered twin. For "
+                            "dronevehicle_shared: one teacher pass over the "
+                            "RGB half supervises both modalities.")
     label.add_argument("--prompt", choices=("self", "pair"), default="self",
                        help="Which pixels the teacher looks at: the frame "
                             "itself, or its registered twin (the mask is "
                             "stored against the frame either way).")
     label.add_argument("--limit", type=int, default=None,
                        help="At most this many images.")
+    label.add_argument("--frame-group", type=int, default=1,
+                       help="How many frames pool their crops into one set of "
+                            "teacher batches. 1 is per-frame batching; raise "
+                            "it when --batch outruns a frame's box count (the "
+                            "shared DroneVehicle subset has a median of 4).")
     label.add_argument("--max-boxes", type=int, default=64,
                        help="Boxes attempted per image, largest first. "
                             "VisDrone frames can carry hundreds.")
@@ -166,7 +185,8 @@ def main(argv: list[str] | None = None) -> int:
             frames, teacher, args.out, dataset=dataset, prompt=args.prompt,
             gates=gates, zoom=args.zoom, min_size=args.min_size,
             batch_size=args.batch, limit=args.limit, max_boxes=args.max_boxes,
-            resume=not args.no_resume, progress=_tqdm())
+            resume=not args.no_resume, mirror=args.mirror,
+            frame_group=args.frame_group, progress=_tqdm())
         write_index(args.out)
         print(f"\n{report['accepted']}/{report['attempted']} boxes accepted "
               f"({report['acceptance_rate']:.1%}); "

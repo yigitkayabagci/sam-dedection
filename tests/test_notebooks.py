@@ -24,6 +24,17 @@ from tools.check_notebook import check, strip_magics  # noqa: E402
 
 NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
 
+# Which generator owns which notebook, by its number prefix. Anything not
+# listed comes from `build_notebooks.py`; a wrong answer here sends someone to
+# a generator that rebuilds a different file and leaves theirs as stale as it
+# was, which is a confusing few minutes.
+BUILDERS = {
+    "12_": "build_probe_notebook",
+    "13_": "build_pool_notebooks",
+    "14_": "build_pool_notebooks",
+    "15_": "build_shared_pool_notebook",
+}
+
 
 def reload_calls(path: Path) -> list[str]:
     """Every real call to `reload(...)` in a notebook's code cells.
@@ -119,11 +130,10 @@ class TestEveryNotebook(unittest.TestCase):
 
         for name, stamp in sorted(stamps.items()):
             with self.subTest(notebook=name):
-                # Two generators now, and sending someone to the wrong one is
+                # Four generators now, and sending someone to the wrong one is
                 # a confusing few minutes: rebuilding with `build_notebooks.py`
                 # leaves 12 exactly as stale as it was.
-                builder = ("build_probe_notebook" if name.startswith("12_")
-                           else "build_notebooks")
+                builder = BUILDERS.get(name[:3], "build_notebooks")
                 self.assertEqual(
                     embedded.get(name), stamp,
                     f"{name} is out of step with .stamps.json -- run: "
@@ -137,6 +147,37 @@ class TestEveryNotebook(unittest.TestCase):
         stamps = json.loads((ROOT / "notebooks" / ".stamps.json").read_text())
         generated = [stamps[p.name] for p in NOTEBOOKS if p.name in stamps]
         self.assertEqual(len(generated), len(set(generated)))
+
+    def test_every_generated_notebook_names_a_generator_that_exists(self):
+        # The mapping is only useful if the file it points at is real, and a
+        # renamed generator would otherwise fail silently on the day someone
+        # needs it.
+        import json
+
+        stamps = json.loads((ROOT / "notebooks" / ".stamps.json").read_text())
+        for name in stamps:
+            with self.subTest(notebook=name):
+                builder = BUILDERS.get(name[:3], "build_notebooks")
+                self.assertTrue((ROOT / "tools" / f"{builder}.py").is_file(),
+                                f"{name} points at tools/{builder}.py")
+
+    def test_the_comment_free_notebook_stays_comment_free(self):
+        """15 was asked for as cells only -- no markdown, no comments.
+
+        It is generated, so the way that erodes is a helpful line added to the
+        generator's cell text months later, not an edit to the notebook.
+        """
+        import json
+
+        path = ROOT / "notebooks" / "15_dronevehicle_shared_pool.ipynb"
+        self.assertTrue(path.is_file())
+        cells = json.loads(path.read_text())["cells"]
+        self.assertTrue(all(c["cell_type"] == "code" for c in cells),
+                        "no markdown cells in 15")
+        self.assertLessEqual(len(cells), 6, "15 is meant to stay short")
+        commented = [line for cell in cells for line in cell["source"]
+                     if line.lstrip().startswith("#")]
+        self.assertEqual(commented, [])
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*

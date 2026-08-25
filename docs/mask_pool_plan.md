@@ -132,6 +132,37 @@ açılabiliyor (CLI'da bayrağı yok; defterden çağrılırken verilir).
 `occlusion=1` ise **atılmıyor**:
 örtülü hedef zaten hafıza yolunun var olma sebebi.
 
+### Defter 15: paylaşılan kutular, tek geçiş, iki havuz
+
+`15_dronevehicle_shared_pool.ipynb` (üreteci
+`tools/build_shared_pool_notebook.py`) 13/14'ten farklı bir belge: **hiç
+markdown, hiç yorum, beş hücre**. Okunacak bir karar değil, koşulacak bir iş.
+
+Beslendiği alt küme `docs/datasets.md` → *"Paylaşılan kutular"*: DroneVehicle'ın
+iki etiket dosyasının aynı poligonu yazdığı 167 644 kutu / 13 129 kare.
+Öğretmen **RGB'de** promptlanıyor (en güçlü olduğu yer), çıkan maske
+`label_pool(..., mirror=...)` ile hem `dronevehicle_rgb` hem
+`dronevehicle_thermal` havuzuna yazılıyor. İkinci ileri geçiş yok; termal
+havuzun bedeli bir dosya kopyası. Eş karenin boyutu tutmazsa aynalama
+yapılmıyor ve `mirror_mismatch` olarak sayılıyor — bunun sessizce yanlış
+olabileceği tek yol oydu.
+
+İki operasyonel karar:
+
+- **Veri Drive'dan.** `fetch_datasets.py` DroneVehicle'ı Hub'dan 8,88 GB
+  indiriyor; kullanıcının kendi Drive'ındaki kopya mount edilmiş bir okuma,
+  indirme yok. Defterin tek veri ayarı `DRIVE_DIR` ve yer tutucu olarak
+  geliyor.
+- **`frame_group`, `batch_size` tek başına yetmiyor.** Paylaşılan alt küme
+  kare başına **medyan 4 kutu** taşıyor; 80 GB'lık bir kartta kare-içi
+  batch'leme adı var kendi yok. `pool.label_many` kırpmaları kareler arasında
+  havuzluyor, defter de `FRAME_GROUP`'u `BATCH`'i dolduracak şekilde VRAM'den
+  hesaplıyor. OOM'da ikisi de yarılanıyor — resume tekrarı bedava kılıyor.
+
+Öğretmen `facebook/sam3`, gated olduğu için `facebook/sam2.1-hiera-large`'a
+düşüyor ve hangisinin kullanıldığını hem ekrana hem her `record.json`'a
+yazıyor; yedekle üretilmiş bir havuz SAM 3'le üretilmiş sanılamaz.
+
 Defter 13/14'ün `DATASETS` listesine bağlamak bilerek ayrı bırakıldı —
 önce havuzun kendisi incelensin, sonra defter üretici (
 `tools/build_pool_notebooks.py`) bir turda güncellensin.
