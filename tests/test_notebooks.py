@@ -33,6 +33,8 @@ BUILDERS = {
     "13_": "build_pool_notebooks",
     "14_": "build_pool_notebooks",
     "15_": "build_shared_pool_notebook",
+    "16_": "build_vtuav_pool_notebooks",
+    "17_": "build_vtuav_pool_notebooks",
 }
 
 
@@ -169,15 +171,36 @@ class TestEveryNotebook(unittest.TestCase):
         """
         import json
 
-        path = ROOT / "notebooks" / "15_dronevehicle_shared_pool.ipynb"
-        self.assertTrue(path.is_file())
-        cells = json.loads(path.read_text())["cells"]
-        self.assertTrue(all(c["cell_type"] == "code" for c in cells),
-                        "no markdown cells in 15")
-        self.assertLessEqual(len(cells), 6, "15 is meant to stay short")
-        commented = [line for cell in cells for line in cell["source"]
-                     if line.lstrip().startswith("#")]
-        self.assertEqual(commented, [])
+        for name in ("15_dronevehicle_shared_pool.ipynb",
+                     "16_vtuav_rgb_pool.ipynb",
+                     "17_vtuav_thermal_pool.ipynb"):
+            with self.subTest(notebook=name):
+                path = ROOT / "notebooks" / name
+                self.assertTrue(path.is_file())
+                cells = json.loads(path.read_text())["cells"]
+                self.assertTrue(all(c["cell_type"] == "code" for c in cells),
+                                f"no markdown cells in {name}")
+                self.assertLessEqual(len(cells), 6, f"{name} stays short")
+                commented = [line for cell in cells for line in cell["source"]
+                             if line.lstrip().startswith("#")]
+                self.assertEqual(commented, [])
+
+    def test_the_two_vtuav_arms_differ_only_in_their_modality(self):
+        """16 and 17 are one job with one variable, run on two runtimes.
+
+        They must write to different pools and different Drive folders or a
+        parallel run has each arm's zip land on the other's.
+        """
+        rgb = settings_of(ROOT / "notebooks" / "16_vtuav_rgb_pool.ipynb")
+        ir = settings_of(ROOT / "notebooks" / "17_vtuav_thermal_pool.ipynb")
+        self.assertEqual(sorted(rgb), sorted(ir))
+        differ = {k for k in rgb if rgb[k] != ir[k]}
+        self.assertEqual(
+            differ, {"MODALITY", "POOL", "EXTRACT_MODE", "MIRROR_DIR",
+                     "NOTEBOOK", "STAMP"},
+            f"unexpected differences: {sorted(differ)}")
+        self.assertNotEqual(rgb["MIRROR_DIR"], ir["MIRROR_DIR"])
+        self.assertNotEqual(rgb["POOL"], ir["POOL"])
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*

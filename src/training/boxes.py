@@ -534,6 +534,75 @@ def dronevehicle_frames(root: str | Path, modality: str = "thermal",
     return frames
 
 
+VTUAV_STRIDE = 10        # verified on all 20 sequences of train_ST_001
+
+
+def vtuav_frames(root: str | Path, modality: str = "rgb",
+                 stride: int = VTUAV_STRIDE) -> list[BoxFrame]:
+    """VTUAV's tracking archives: one target per sequence, one box per row.
+
+    Layout, read off `train_ST_001.zip`'s central directory rather than the
+    paper: `<sequence>/rgb/000000.jpg`, `<sequence>/ir/000000.jpg`,
+    `<sequence>/rgb.txt`, `<sequence>/ir.txt`. Frame ids are contiguous from
+    zero and each box file holds `ceil(frames / 10)` lines on all 20
+    sequences, so **line k is frame `k * stride`** and nine frames in ten are
+    unlabelled. `fetch_datasets.tracked_members` is the extractor that knows
+    the same thing.
+
+    Rows are `x y w h`; a row whose width or height is not positive marks the
+    target as absent and is dropped. The class is the sequence name's prefix
+    (`bus_017` -> `bus`), which is where VTUAV's object categories live.
+
+    **Both modalities get their own boxes, and they disagree.** Over the 3 750
+    annotated rows of `train_ST_001`, only 12.2 % of `rgb.txt` and `ir.txt`
+    rows are identical; the median centre offset is 8.4 px (p90 29.4) against
+    a median target of 77 px. So unlike DroneVehicle's shared subset there is
+    no mask here that serves both halves -- each modality is prompted on its
+    own frame with its own box, which is exactly why the RGB and thermal pools
+    are two notebooks that can run at the same time.
+
+    There is also nothing to harvest as *-only: the target is one physical
+    object, so it is annotated in both files or in neither. Across the same
+    3 750 rows, rgb-only and ir-only are both zero.
+    """
+    if modality not in ("rgb", "ir"):
+        raise ValueError(f"modality must be rgb or ir, got {modality!r}")
+    other = "ir" if modality == "rgb" else "rgb"
+    root = Path(root)
+
+    frames: list[BoxFrame] = []
+    for boxes_file in sorted(root.rglob(f"*/{modality}.txt")):
+        sequence = boxes_file.parent
+        images = _images_by_stem(sequence / modality)
+        twins = _images_by_stem(sequence / other)
+        if not images:
+            continue
+        for index, line in enumerate(boxes_file.read_text().splitlines()):
+            cells = line.replace(",", " ").split()
+            if len(cells) < 4:
+                continue
+            try:
+                x, y, w, h = (float(v) for v in cells[:4])
+            except ValueError:
+                continue
+            if w <= 0 or h <= 0:
+                continue                     # the target is out of view
+            stem = f"{index * stride:06d}"
+            image = images.get(stem)
+            if image is None:
+                continue
+            frames.append(BoxFrame(
+                key=f"{sequence.name}/{stem}", image=image,
+                boxes=np.asarray([[x, y, x + w, y + h]], dtype=np.float64),
+                classes=(sequence.name.rsplit("_", 1)[0],),
+                pair=twins.get(stem)))
+    if not frames:
+        raise FileNotFoundError(
+            f"{root}: no VTUAV sequence underneath -- expected "
+            f"`<sequence>/{modality}.txt` beside `<sequence>/{modality}/`.")
+    return frames
+
+
 def hituav_frames(root: str | Path, split: str = "train",
                   drop: tuple[str, ...] = ("dontcare", "ignore")) -> list[BoxFrame]:
     """HIT-UAV's standard-box annotations, wherever the archive unpacked.

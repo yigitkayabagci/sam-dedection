@@ -364,6 +364,71 @@ bunun için var.
   410'un termal dizileri RGB-T sürümündekilerle örtüşebilir. İkisi birden
   kullanılacaksa dizi adları karşılaştırılmalı.
 
+## VTUAV takip bölümü — DroneVehicle'in tarifi buraya taşınmıyor
+
+Maske bölümü (100 video, `vtuav_vis`) zaten kullanılıyor. Bu bölüm **takip**
+arşivleri hakkında: 500 dizi, 1920×1080 RGB-T, dizi başına tek hedef.
+2026-08'de proje sayfasının Drive linkleri üzerinden ölçüldü — merkezi
+dizinler `Range` isteğiyle okundu, kutu dosyaları tek tek indirildi.
+
+### Üç şey, ölçülerek
+
+**1. "RGB sürümü" ayrı bir veri değil, aynı baytlar.** `train_ST_001.zip`'i
+iki Drive klasöründen de aldım: örneklenen her RGB üyesi **CRC32 ve
+sıkıştırılmış boyutta birebir eşleşti**. RGB arşivi = RGB-T arşivinden `ir/`
+ve `ir.txt` silinmiş hâli. İkisini birden indirmek parça başına ~9 GiB saf
+tekrar. **Yalnız RGB-T sürümü indirilmeli**; RGB hasadı aynı çıkarımın
+`rgb/` yarısını okur.
+
+**2. Kareler 1/10 etiketli.** Dizi düzeni `<dizi>/rgb/000000.jpg`,
+`<dizi>/ir/…`, `<dizi>/rgb.txt`, `<dizi>/ir.txt`. Kare kimlikleri 0..n-1
+boşluksuz ve kutu dosyaları 20 dizinin **yirmisinde de** `ceil(n/10)` satır
+taşıyor → **satır k = kare 10k**. `train_ST_001`: 20 dizi, 37 419 kare
+çifti, **3 750 etiketli satır**, 15,4 GiB. Yani arşivin %90'ı bu boru hattı
+için ölü ağırlık; `fetch_datasets.tracked_members` yalnız etiketli kareleri
+ve tek modaliteyi açıyor (~0,8 GiB).
+
+**3. DroneVehicle'ın paylaşılan-kutu numarası burada işlemiyor.** Aynı 3 750
+satırda:
+
+| | |
+|---|---|
+| `rgb.txt` ile `ir.txt` **birebir aynı** satır | **%12,2** (DroneVehicle'da %53,0) |
+| merkez farkı | medyan **8,38 px**, p75 15,8, p90 29,4, maks 94,2 |
+| 5 px içinde | %30,5 |
+| hedef büyüklüğü | medyan √alan **76,7 px**, %98,5'i ≥32 px |
+| yalnız-bir-modalitede satır | **0** (rgb-only 0, ir-only 0) |
+
+Son satır yapısal: hedef tek bir fiziksel nesne, iki dosyada da etiketli ya
+da hiçbirinde. Yani VTUAV'da ne **aynalanacak** maske var (%88 satırda
+kutular farklı) ne de **only** hasadı. Doğru kurgu: her modalite kendi
+karesinde, kendi kutusuyla, ayrı bir öğretmen geçişi — ve tam da bu yüzden
+iki defter (16, 17) **aynı anda iki runtime'da** koşabiliyor.
+
+Not: 8,38 px'lik fark 77 px'lik bir hedefte ~%11; RGBTDronePerson'daki
+11,7 px'in 12 px'lik hedefte olması ile karıştırılmamalı. VTUAV'ın kayması
+görecelı olarak çok daha küçük — ama yine de "tek maske iki modaliteye"
+demek için yeterli değil.
+
+### Parçalar dizi adına göre alfabetik — bu bir tuzak
+
+| parça | boyut | dizi | ~etiketli satır | nesne türleri |
+|---|---:|---:|---:|---|
+| `train_ST_001` | 15,42 GiB | 20 | 3 750 | animal, bike, bus |
+| `train_ST_005` | **7,32 GiB** | 20 | 1 931 | car, elebike |
+| `train_ST_008` | 13,07 GiB | 28 | 4 054 | pedestrian (28'in 24'ü), car |
+| `train_ST_011` | 11,57 GiB | 10 | 3 034 | car, pedestrian, truck |
+| `train_LT_001` | 16,49 GiB | 12 | 5 617 | bus, car |
+| `train_LT_004` | 13,91 GiB | 9 | 4 051 | pedestrian, truck |
+
+Ardışık parça almak iki kategorilik bir havuz demek. Defterlerin `ARCHIVES`
+varsayılanı bu yüzden bir **serpme**: `ST_001 + ST_005 + ST_008 + ST_011` =
+47,4 GiB → ~12 800 etiketli kare, animal/bike/bus/car/elebike/pedestrian/truck.
+
+Train yarısının tamamı **214,5 GiB** (11 ST + 4 LT parça). `fetch_datasets.py`
+tarifinde (`vtuav_track`) her parça **varsayılan olarak kapalı**; id'ler ve
+gerçek boyutlar orada, ama hiçbiri kazara inmiyor.
+
 ## DroneVehicle — tam sayım (evet, kullanıyoruz; evet, kutu)
 
 Kısa cevabı: **evet, üç yerde kullanılıyor** — aşama A'da hizalı çift kaynağı

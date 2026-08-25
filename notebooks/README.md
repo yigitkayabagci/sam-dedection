@@ -21,6 +21,8 @@ recipe, not the implementation.
 | 13 | `13_rgb_mask_pool.ipynb` | an aerial-RGB mask pool: VisDrone boxes → gated teacher masks, on your Drive | **nothing** — it downloads VisDrone and Kust4K's RGB half itself; SAM 3 wants an HF token |
 | 14 | `14_thermal_mask_pool.ipynb` | the **thermal** mask pool: HIT-UAV + DroneVehicle boxes and RGBT234 masklets, with the thermal-vs-RGB-prompt route *measured* first | **nothing** — it downloads all four sets itself; SAM 3 wants an HF token |
 | 15 | `15_dronevehicle_shared_pool.ipynb` | all of DroneVehicle in four pools: the 53 % of boxes both halves annotate identically (one RGB pass, mirrored onto thermal), plus the 33 383 thermal-only and 3 797 rgb-only targets, each prompted on the half that can see them | a copy of DroneVehicle's `train.zip` in your own Drive (set `DRIVE_DIR` in cell 1); SAM 3 wants an HF token |
+| 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17 |
+| 17 | `17_vtuav_thermal_pool.ipynb` | VTUAV's **thermal** half, on `ir.txt`'s own boxes — the two halves agree on only 12 % of rows, so neither mask serves the other | the same archives; runs beside 16 on a second runtime |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of

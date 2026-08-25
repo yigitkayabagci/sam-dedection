@@ -53,13 +53,15 @@ from src.training.pool import (  # noqa: E402
 )
 
 DATASETS = ("visdrone", "hituav", "dronevehicle", "dronevehicle_shared",
-            "dronevehicle_only", "rgbtdroneperson", "vtuavdet", "birdsai")
+            "dronevehicle_only", "rgbtdroneperson", "vtuavdet", "birdsai",
+            "vtuav")
 
 # Which `fetch_datasets.py` recipe puts a dataset on disk. Only the readers
 # that share an archive with another dataset need an entry; everything else
 # fetches under its own name.
 RECIPE_FOR = {"dronevehicle_shared": "dronevehicle",
-              "dronevehicle_only": "dronevehicle"}
+              "dronevehicle_only": "dronevehicle",
+              "vtuav": "vtuav_track"}
 
 
 def frames_for(dataset: str, data: Path, split: str, modality: str,
@@ -86,6 +88,11 @@ def frames_for(dataset: str, data: Path, split: str, modality: str,
         # The targets `--modality` sees and the other half never annotates.
         # `--prompt self` only: the other modality does not show them.
         return boxes.dronevehicle_only_frames(data, modality=modality)
+    if dataset == "vtuav":
+        # Its two halves carry their own boxes and disagree by a median 8.4 px,
+        # so each is prompted on its own frame -- never `--prompt pair`.
+        return boxes.vtuav_frames(
+            data, modality="ir" if modality == "thermal" else "rgb")
     if dataset == "rgbtdroneperson":
         return boxes.rgbtdroneperson_frames(data, split=split, modality=modality)
     if dataset == "vtuavdet":

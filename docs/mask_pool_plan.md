@@ -172,6 +172,31 @@ tek nesneye iki maske koymamak için. Havuz böylece dört klasör:
 `dronevehicle_{rgb,thermal,thermal_only,rgb_only}`; ayrı durmaları
 aynalanmış maskeyi termalde promptlanmış olandan ayırt edilebilir tutuyor.
 
+### Defter 16 ve 17: VTUAV'ın iki yarısı, iki runtime
+
+`tools/build_vtuav_pool_notebooks.py` tek dosyadan iki varyant üretiyor
+(07/10 kalıbı), ikisi de 15 gibi yorumsuz ve beş hücre. Ayrı olmalarının
+sebebi ölçüm: VTUAV'da `rgb.txt` ile `ir.txt` satırlarının yalnız **%12,2'si
+birebir aynı**, merkez farkı medyan **8,38 px**, ve yalnız-bir-modalitede
+satır **sıfır** (hedef tek fiziksel nesne). Yani ne aynalanacak maske var ne
+de only hasadı — her modalite kendi karesinde, kendi kutusuyla, ayrı
+geçişte. Bu da iki defteri gerçekten bağımsız kılıyor: farklı havuz adı,
+farklı Drive klasörü, aynı anda koşabilir.
+
+Üç operasyonel not, üçü de ölçülmüş:
+
+- **Yalnız RGB-T arşivleri Drive'a konmalı.** "RGB sürümü" aynı baytlar
+  (CRC32 + sıkıştırılmış boyut örneklemede birebir eşleşti), yalnızca `ir/`
+  ve `ir.txt` çıkarılmış. Parça başına ~9 GiB tekrar.
+- **Kareler 1/10 etiketli** (satır k = kare 10k, 20 dizide de doğrulandı).
+  `fetch_datasets.tracked_members` yalnız etiketli kareleri ve tek modaliteyi
+  açıyor: 15,4 GiB arşiv → diskte ~0,8 GiB.
+- **Parçalar dizi adına göre alfabetik**, yani her biri iki-dört nesne türü
+  taşıyor. `ARCHIVES` varsayılanı serpme: `ST_001 + ST_005 + ST_008 + ST_011`.
+
+Kare başına tek kutu olduğu için `FRAME_GROUP = BATCH` (DroneVehicle'da
+`BATCH // 4`): batch'i dolduran şey kareler, kutular değil.
+
 Defter 13/14'ün `DATASETS` listesine bağlamak bilerek ayrı bırakıldı —
 önce havuzun kendisi incelensin, sonra defter üretici (
 `tools/build_pool_notebooks.py`) bir turda güncellensin.

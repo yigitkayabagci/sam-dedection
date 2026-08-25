@@ -14,6 +14,7 @@ import json
 import sys
 import tarfile
 import tempfile
+import zipfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -30,6 +31,7 @@ from src.training.boxes import (  # noqa: E402
     BIRDSAI_SPECIES,
     DRONEVEHICLE_ALIASES,
     dronevehicle_only_frames,
+    vtuav_frames,
     dronevehicle_shared_frames,
     VISDRONE_NAMES,
     BoxFrame,
@@ -62,7 +64,12 @@ from src.training.pool import (  # noqa: E402
     summarise_pool,
     write_index,
 )
-from tools.fetch_datasets import RECIPES, staged, stream_extract  # noqa: E402
+from tools.fetch_datasets import (  # noqa: E402
+    RECIPES,
+    staged,
+    stream_extract,
+    tracked_members,
+)
 
 try:
     import cv2  # noqa: F401 -- decoding the synthetic frames needs it
@@ -692,6 +699,110 @@ class TestOnlyFrames(unittest.TestCase):
     def test_an_unknown_modality_is_refused(self):
         with self.assertRaises(ValueError):
             dronevehicle_only_frames("/nowhere", modality="infrared")
+
+
+class TestVtuavFrames(unittest.TestCase):
+    """One target per sequence, one box every tenth frame, per modality."""
+
+    def fixture(self, tmp: Path, rgb_lines: str, ir_lines: str,
+                frames: int = 31, both: bool = True) -> Path:
+        root = tmp / "VTUAV" / "bus_017"
+        (root / "rgb").mkdir(parents=True)
+        if both:
+            (root / "ir").mkdir()
+        for index in range(frames):
+            (root / "rgb" / f"{index:06d}.jpg").write_bytes(b"jpg")
+            if both:
+                (root / "ir" / f"{index:06d}.jpg").write_bytes(b"jpg")
+        (root / "rgb.txt").write_text(rgb_lines)
+        (root / "ir.txt").write_text(ir_lines)
+        return tmp / "VTUAV"
+
+    def test_line_k_is_frame_ten_k(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n")
+            frames = vtuav_frames(root)
+            self.assertEqual([f.key for f in frames],
+                             ["bus_017/000000", "bus_017/000010",
+                              "bus_017/000020"])
+            np.testing.assert_allclose(frames[0].boxes[0], [10, 20, 40, 60])
+
+    def test_an_absent_target_is_dropped_not_boxed_at_zero(self):
+        # Long-term sequences mark the target out of view with a null box; a
+        # zero-area prompt is the least useful thing to hand a teacher.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\n0 0 0 0\n12 22 32 42\n",
+                                "10 20 30 40\n0 0 0 0\n12 22 32 42\n")
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000", "bus_017/000020"])
+
+    def test_the_class_is_the_sequence_name_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), "10 20 30 40\n", "10 20 30 40\n")
+            self.assertEqual(vtuav_frames(root)[0].classes, ("bus",))
+
+    def test_each_modality_reads_its_own_box_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), "10 20 30 40\n", "15 25 30 40\n")
+            rgb, = vtuav_frames(root, modality="rgb")
+            ir, = vtuav_frames(root, modality="ir")
+            np.testing.assert_allclose(rgb.boxes[0], [10, 20, 40, 60])
+            np.testing.assert_allclose(ir.boxes[0], [15, 25, 45, 65])
+            self.assertEqual(rgb.image.parent.name, "rgb")
+            self.assertEqual(ir.image.parent.name, "ir")
+            self.assertEqual(rgb.pair.parent.name, "ir")
+
+    def test_a_half_extracted_tree_still_reads(self):
+        # 16 unzips only `rgb/`, so the twin is simply not there.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), "10 20 30 40\n", "10 20 30 40\n",
+                                both=False)
+            frame, = vtuav_frames(root, modality="rgb")
+            self.assertIsNone(frame.pair)
+
+    def test_an_unknown_modality_is_refused(self):
+        with self.assertRaises(ValueError):
+            vtuav_frames("/nowhere", modality="thermal")
+
+
+class TestTrackedMembers(unittest.TestCase):
+    """Nine frames in ten carry no label; unzipping them is disk for nothing."""
+
+    def archive(self, tmp: Path) -> zipfile.ZipFile:
+        path = tmp / "part.zip"
+        with zipfile.ZipFile(path, "w") as handle:
+            for index in range(25):
+                handle.writestr(f"bus_017/rgb/{index:06d}.jpg", b"x")
+                handle.writestr(f"bus_017/ir/{index:06d}.jpg", b"x")
+            handle.writestr("bus_017/rgb.txt", "1 2 3 4\n5 6 7 8\n9 1 2 3\n")
+            handle.writestr("bus_017/ir.txt", "1 2 3 4\n5 6 7 8\n9 1 2 3\n")
+        return zipfile.ZipFile(path)
+
+    def test_only_the_annotated_frames_of_one_modality_are_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = set(tracked_members(self.archive(Path(tmp)), "rgb"))
+            self.assertEqual(
+                {n for n in keep if n.endswith(".jpg")},
+                {"bus_017/rgb/000000.jpg", "bus_017/rgb/000010.jpg",
+                 "bus_017/rgb/000020.jpg"})
+
+    def test_both_box_files_survive_either_way(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = set(tracked_members(self.archive(Path(tmp)), "ir"))
+            self.assertIn("bus_017/rgb.txt", keep)
+            self.assertIn("bus_017/ir.txt", keep)
+            self.assertEqual({n for n in keep if n.endswith(".jpg")},
+                             {"bus_017/ir/000000.jpg", "bus_017/ir/000010.jpg",
+                              "bus_017/ir/000020.jpg"})
+
+    def test_it_saves_most_of_the_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.archive(Path(tmp))
+            self.assertLess(len(tracked_members(archive, "rgb")),
+                            len(archive.namelist()) // 5)
 
 
 class TestLabelMany(unittest.TestCase):

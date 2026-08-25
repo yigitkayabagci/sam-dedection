@@ -535,10 +535,70 @@ AIRESQ = Recipe(
     ),
 )
 
+# VTUAV's *tracking* archives, which are a different download from the mask
+# split above: 500 sequences of 1920x1080 RGB-T with one target per sequence
+# and a box every tenth frame. Ids and sizes read off the project page's Drive
+# links in 2026-08, then each one range-probed for its true length.
+#
+# **Only the RGB-T version is listed, because the RGB version is the same
+# bytes.** Sampling `train_ST_001` from both folders, every RGB member matched
+# on CRC32 *and* compressed size: the RGB archive is the RGB-T archive with
+# `ir/` and `ir.txt` removed. Downloading both is 9 GiB per part of pure
+# duplication, and `boxes.vtuav_frames(modality="rgb")` reads the RGB half of
+# the RGB-T extraction directly.
+#
+# Every part defaults to off: the train half alone is **214.5 GiB** and no
+# default should reach for that. What one part buys, measured on ST_001:
+# 15.4 GiB, 20 sequences, 37 419 frame pairs, 3 750 annotated rows.
+#
+# The parts are ordered by sequence name, so each carries only two to four
+# object kinds -- ST_001 is animal/bike/bus, ST_005 is car/elebike, ST_008 is
+# pedestrian (24 of its 28 sequences), ST_011 is car/pedestrian/truck. A pool
+# built from consecutive parts is a pool of two categories; spread them.
+VTUAV_TRACK = Recipe(
+    name="vtuav_track",
+    note="VTUAV tracking split: 1920x1080 RGB-T sequences, one box per target "
+         "every 10th frame, per-modality (rgb.txt + ir.txt). 214.5 GiB train; "
+         "nothing is fetched by default",
+    parts=(
+        Part("train_ST_001", default=False, drive="1GQgLZ8kJo6ljR3k0tLUyvokp33ecwmM4",
+             size=16553040666),
+        Part("train_ST_002", default=False, drive="1hOsPq6umKb0FtV4royO2nuiwBmOZR5zf",
+             size=18059604978),
+        Part("train_ST_003", default=False, drive="1Mlj73qj4JZgcUVhlir4oqDSkeFFUZk__",
+             size=17986937566),
+        Part("train_ST_004", default=False, drive="1UdbUJlJaTB7loptBlBY2Jb47YVDIxrbj",
+             size=18850569348),
+        Part("train_ST_005", default=False, drive="1RqSkP_qZ_3hjLhxd5Hm7uL6nLj6PufdL",
+             size=7856011518),
+        Part("train_ST_006", default=False, drive="1cp5mQjxTy3GChEYW_zmZ_HwsvApGygKK",
+             size=15388627743),
+        Part("train_ST_007", default=False, drive="1i6U7Ld1oHKsm9XyquE2WakB3poHdLkg9",
+             size=12371156732),
+        Part("train_ST_008", default=False, drive="1cMM7TJ2yIUttKKyBLkZTDohB1t1acrrA",
+             size=14032522966),
+        Part("train_ST_009", default=False, drive="1MKcrP-LhGSXiNghWGk-h9i7FX3u0vGLd",
+             size=13380718697),
+        Part("train_ST_010", default=False, drive="1-h66icS6IYOo8F0thDYkZJ9LFUzvHAZ-",
+             size=18926310599),
+        Part("train_ST_011", default=False, drive="1YEOCsni7RxnOI3c7sOG32qFwgB7xSY-O",
+             size=12422921973),
+        Part("train_LT_001", default=False, drive="1JAQfW2ZnRyAJ2llfiayGHjv6x1A2iRbR",
+             size=17705121999),
+        Part("train_LT_002", default=False, drive="1HD0StT_aGROmrluEVr86hH9Akee5qA3K",
+             size=17287125186),
+        Part("train_LT_003", default=False, drive="1X8_OUstaGyoJclihwBAiTXJLPFZ1LbJN",
+             size=14607972970),
+        Part("train_LT_004", default=False, drive="1RilAMqJLKIAlmW44o5K_v3RD2mlywmCk",
+             size=14937685115),
+    ),
+)
+
 RECIPES: dict[str, Recipe] = {
     r.name: r for r in (KUST4K, VTUAV_VIS, DRONEVEHICLE, CALTECH, SEGFLY,
                         SEGFLY_RGB, HITUAV, RGBT234, LASHER, VISDRONE,
-                        RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ)}
+                        RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ,
+                        VTUAV_TRACK)}
 
 
 # --------------------------------------------------------------------------
@@ -780,6 +840,44 @@ def masked_members(archive: zipfile.ZipFile) -> list[str]:
     return keep
 
 
+def tracked_members(archive: zipfile.ZipFile, modality: str = "rgb",
+                    stride: int = 10) -> list[str]:
+    """Only the frames a VTUAV *tracking* archive actually annotates.
+
+    Verified against `train_ST_001.zip`'s central directory: a sequence is
+    `<name>/rgb/000000.jpg`, `<name>/ir/000000.jpg`, `<name>/rgb.txt`,
+    `<name>/ir.txt`, the frame ids run 0..n-1 with no gaps, and the box files
+    hold `ceil(n / 10)` lines on all 20 sequences -- so **line k is frame
+    10k** and nine frames in ten carry no label at all. Extracting everything
+    spends 15.4 GB of disk to make 3 750 usable pairs.
+
+    Keeping one modality on top of that halves it again, which is what makes
+    the RGB and thermal pools runnable side by side on two ordinary runtimes:
+    each unzips only the half it prompts on. Both `.txt` files are always
+    kept -- they are a few kilobytes and the other modality's boxes are what
+    any later agreement check reads.
+    """
+    counts: dict[str, int] = {}
+    for name in archive.namelist():
+        parts = name.split("/")
+        if len(parts) == 2 and parts[1] == f"{modality}.txt":
+            with archive.open(name) as handle:
+                counts[parts[0]] = sum(1 for line in handle if line.strip())
+
+    wanted = {(sequence, index * stride)
+              for sequence, lines in counts.items() for index in range(lines)}
+    keep = []
+    for name in archive.namelist():
+        parts = name.split("/")
+        if len(parts) == 2 and parts[1].endswith(".txt"):
+            keep.append(name)
+        elif len(parts) == 3 and parts[1] == modality:
+            stem = Path(parts[-1]).stem
+            if stem.isdigit() and (parts[0], int(stem)) in wanted:
+                keep.append(name)
+    return keep
+
+
 def extract(archive_path: Path, dest: Path, into: str = "",
             frames: str = "all", quiet: bool = False) -> int:
     """Unpack into `dest/into`, returning how many files were written.
@@ -794,8 +892,12 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     target.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(archive_path):
         with zipfile.ZipFile(archive_path) as archive:
-            members = (masked_members(archive) if frames == "masked"
-                       else archive.namelist())
+            if frames == "masked":
+                members = masked_members(archive)
+            elif frames.startswith("tracked_"):
+                members = tracked_members(archive, frames.split("_", 1)[1])
+            else:
+                members = archive.namelist()
             if not quiet:
                 print(f"   extracting {len(members)} entries -> {target}")
             archive.extractall(target, members=members)
@@ -1031,6 +1133,13 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
     for name, where in ready.items():
         if where is not None:
             print(f"   {name}: staged at {where}, no download needed")
+    if not chosen:
+        print(f"nothing fetched: every part of this set defaults to OFF "
+              f"because the whole of it is "
+              f"~{human(sum(p.size for p in recipe.parts))}. Ask for the ones "
+              f"you want:\n    python tools/fetch_datasets.py {recipe.name} "
+              f"--dest <dest> --parts {recipe.parts[0].name} [...]")
+        return dest
     wanted = [p for p in chosen if ready[p.name] is None]
     if wanted:
         print(f"{len(wanted)} archive(s), about {human(sum(p.size for p in wanted))} "
@@ -1094,10 +1203,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--parts", nargs="*", default=None,
                    help="Which archives to fetch. Without it, the defaults: "
                         "Kust4K thermal+labels, VTUAV train_001.")
-    p.add_argument("--frames", choices=("all", "masked"), default="all",
+    p.add_argument("--frames",
+                   choices=("all", "masked", "tracked_rgb", "tracked_ir"),
+                   default="all",
                    help="`masked` keeps only annotated frames and their twins "
                         "-- a twentieth of the disk, and too few pairs for "
-                        "stage-A distillation.")
+                        "stage-A distillation. `tracked_rgb` / `tracked_ir` "
+                        "are the same idea for VTUAV's tracking archives: one "
+                        "modality, and only the frames its box file names.")
     p.add_argument("--limit", type=int, default=None,
                    help="Hub datasets only: stop after N rows.")
     p.add_argument("--keep", action="store_true",
@@ -1119,7 +1232,8 @@ def main(argv: list[str] | None = None) -> int:
                "hituav": "HIT_UAV", "rgbt234": "RGBT234",
                "lasher": "LasHeR", "visdrone": "VisDrone",
                "rgbtdroneperson": "RGBTDronePerson", "vtuavdet": "VTUAV_det",
-               "birdsai": "BIRDSAI", "airesq": "AIResQ"}
+               "birdsai": "BIRDSAI", "airesq": "AIResQ",
+               "vtuav_track": "VTUAV_track"}
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
         fetch(name, dest, tuple(args.parts) if args.parts else None,

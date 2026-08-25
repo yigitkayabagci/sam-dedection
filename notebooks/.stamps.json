@@ -7,5 +7,7 @@
  "12_encoder_probe.ipynb": "52383ab83c",
  "13_rgb_mask_pool.ipynb": "d6e99551d0",
  "14_thermal_mask_pool.ipynb": "e5293f2b3a",
- "15_dronevehicle_shared_pool.ipynb": "20813102df"
+ "15_dronevehicle_shared_pool.ipynb": "20813102df",
+ "16_vtuav_rgb_pool.ipynb": "9ecc804c73",
+ "17_vtuav_thermal_pool.ipynb": "47fd67b8f9"
 }
