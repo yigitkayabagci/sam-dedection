@@ -244,6 +244,24 @@ python tools/fetch_datasets.py hituav   --dest /content/data/HIT_UAV
 python tools/fetch_datasets.py rgbt234  --dest /content/data/RGBT234
 ```
 
+## Örnek maskesi ekseni — `docs/prompt_mask_datasets.md`
+
+Yukarıdaki eleme "yoğun maske GT'si var mı" diye soruyor. Aşama B'nin
+gerçek sorusu bir eksen daha derinde: **maske nesne başına ayrılmış mı.**
+Semantik bir harita "burası araç" der; bir prompt "bu aracı" sorar, ve bir
+otoparkta o ikisi aynı şey değildir — SegFly'de ölçülen bir-araç-bir-blok
+isabeti %78,5.
+
+`docs/prompt_mask_datasets.md` bu eksende ölçülmüş bir tarama: iSAID'in
+116 649 çizilmiş val maskesi (havadan RGB'de tek gerçek örnek kaynağı, ama
+medyan uzun kenar **18 px** — bu projenin rejimi değil), SAMRS (defter
+13/14'ün işini 2023'te uydu tarafında yapmış, OneDrive/Baidu), RRSIS-D
+(metin promptu, **EdgeTAM almıyor**, ve `bbox`'ı COCO değil), ve MONET
+(53 K termal drone karesi + 162 K kutu — havuza yeni girdi, SharePoint 403).
+
+Kısa cevabı: **havadan RGB'de elle çizilmiş örnek maskesi bol, havadan
+termalde yok.** Defter 14'ün var olma sebebi bu ve tarama onu doğruluyor.
+
 ## Mevcut referans
 
 [Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) (2023 · TPAMI) —
