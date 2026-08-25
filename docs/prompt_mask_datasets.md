@@ -267,6 +267,13 @@ havadan termalde yok, ve bu projenin ihtiyacı termal.**
 | metin promptu | RRSIS-D — **ama sadece SAM 3 ile** | EdgeTAM metin promptu almıyor |
 | aşama A (etiketsiz) | hepsi | distilasyon etiket okumuyor |
 
+Semantik setlerden örnek çıkarmanın kendisi ayrı bir dosyada:
+`docs/semantic_rescue_plan.md` (defter 15). Kısaca — `decompose`'un kaybettiği
+yer bitişik nesneler, ve bir **tık** kutunun ayıramadığını ayırabiliyor;
+çizilmiş harita da geri gelen maskenin sınıfını piksel piksel doğruluyor
+(`purity`, kutu havuzunun sahip olamayacağı kapı). Orada ayrıca Caltech'in
+ölçülmüş verdikti var.
+
 Bir şey **yapılmamalı**: iSAID'i "havadan araç" diye Kust4K/SegFly'ın yanına
 etiketsiz karıştırmak. 13 piksellik medyan uzun kenar, bu projenin 300×150
 piksellik hedefiyle aynı dağılım değil ve `datasets.md`'nin `role` alanı

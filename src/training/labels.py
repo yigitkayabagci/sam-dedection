@@ -305,6 +305,83 @@ class _ImageTeacher:
         best = int(scores.argmax())
         return masks.reshape(-1, *masks.shape[-2:])[best].numpy() > 0, float(scores[best])
 
+    def points_for(
+        self, crops: list[np.ndarray], points: list[np.ndarray]
+    ) -> list[tuple[np.ndarray, float]]:
+        """One positive click per crop, batched like `masks_for`.
+
+        A box says "the object is inside this rectangle"; a click says "the
+        object is under this pixel and you decide how far it goes". That
+        difference is the whole point of `semantic.py`: a box drawn around a
+        row of parked cars contains all of them and the teacher answers with
+        the row, while a click on one bonnet answers with one car. The
+        semantic map cannot make that distinction -- it never knew there were
+        several -- so the click is how the separation gets made at all.
+
+        `points` is one `(x, y)` per crop, in the crop's own coordinates.
+        Multi-point prompts are deliberately not exposed: this module's job is
+        one seed to one instance, and a second positive point on the same
+        object is a different, larger question (`input_labels` would then have
+        to carry negatives to be worth anything).
+
+        The three-mask head matters more here than for boxes. A click is
+        ambiguous by construction -- part, whole, group -- so SAM returns
+        several candidates and its own scores are how one is chosen. That
+        choice is exactly the over-confidence `Gates.teacher_iou` documents,
+        which is why the caller gates the winner on geometry anyway.
+        """
+        import torch
+
+        if len(crops) == 1 or not self._batched:
+            return [self._point_for(c, p) for c, p in zip(crops, points)]
+        try:
+            inputs = self.processor(
+                images=list(crops),
+                input_points=[[[[float(p[0]), float(p[1])]]] for p in points],
+                input_labels=[[[1]] for _ in points],
+                return_tensors="pt",
+            ).to(self.device)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            per_image = self.processor.post_process_masks(
+                outputs.pred_masks.float().cpu(), inputs["original_sizes"])
+            scores = outputs.iou_scores.float().cpu()
+        except Exception as exc:  # noqa: BLE001 -- any API mismatch, once
+            self._batched = False
+            warnings.warn(
+                f"Batched point call failed ({exc!r}); falling back to one crop "
+                "at a time for the rest of this run.",
+                RuntimeWarning, stacklevel=2)
+            return [self._point_for(c, p) for c, p in zip(crops, points)]
+
+        out = []
+        for i in range(len(crops)):
+            masks = per_image[i].reshape(-1, *per_image[i].shape[-2:])
+            row = scores[i].reshape(-1)
+            best = int(row.argmax())
+            out.append((masks[best].numpy() > 0, float(row[best])))
+        return out
+
+    def _point_for(self, crop_rgb: np.ndarray,
+                   point: np.ndarray) -> tuple[np.ndarray, float]:
+        """`points_for` for one crop."""
+        import torch
+
+        inputs = self.processor(
+            images=crop_rgb,
+            input_points=[[[float(point[0]), float(point[1])]]],
+            input_labels=[[1]],
+            return_tensors="pt",
+        ).to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        masks = self.processor.post_process_masks(
+            outputs.pred_masks.float().cpu(), inputs["original_sizes"])[0]
+        scores = outputs.iou_scores.float().cpu().reshape(-1)
+        best = int(scores.argmax())
+        return (masks.reshape(-1, *masks.shape[-2:])[best].numpy() > 0,
+                float(scores[best]))
+
     def masks_for(
         self, crops: list[np.ndarray], boxes: list[np.ndarray]
     ) -> list[tuple[np.ndarray, float]]:

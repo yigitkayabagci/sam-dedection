@@ -262,6 +262,15 @@ medyan uzun kenar **18 px** — bu projenin rejimi değil), SAMRS (defter
 Kısa cevabı: **havadan RGB'de elle çizilmiş örnek maskesi bol, havadan
 termalde yok.** Defter 14'ün var olma sebebi bu ve tarama onu doğruluyor.
 
+Aynı eksenin ikinci yarısı `docs/semantic_rescue_plan.md`'de: elimizdeki
+semantik setlerden (Kust4K, SegFly, Caltech) **örnek** çıkarmak. `decompose`
+bunu zaten deniyor ve bilinen bir yerde kaybediyor — yan yana park etmiş iki
+araba tek bileşen. Defter 15 bileşeni bir *bölge* sayıp içine tık atıyor,
+ayırmayı öğretmene, doğrulamayı çizilmiş haritaya bırakıyor. **Caltech'in
+verdikti orada, ölçülerek:** `pairs` arşivi bozuk değil ama örnek kaynağı
+olarak değmiyor — 289 karede 138 örnek, karelerin %14,9'u, sahne su ve doğal
+arazi (araç piksellerin %0,03'ü).
+
 ## Mevcut referans
 
 [Anti-UAV410](https://github.com/HwangBo94/Anti-UAV410) (2023 · TPAMI) —
