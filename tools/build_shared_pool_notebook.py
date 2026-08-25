@@ -92,9 +92,12 @@ so a shard on Drive is either whole or absent. `restore()` at the top of cell
 Re-running cells 1-5 in a fresh runtime is the recovery procedure, and it
 costs one Drive read.
 
-What ships is the *new* files only: the set of paths already on Drive is
-rebuilt at restore from what the shards put on disk, not carried in a ledger
-that could disagree with them. A shard write that fails after four tries
+What ships is the *new* files only, and what counts as already-shipped is
+read from the **shards' own name lists**, not from what happens to be on local
+disk. The difference is the case that matters: a pool half-built by an earlier
+run of the uncheckpointed cell has files on disk that Drive has never seen, and
+reading the set off the disk would mark them shipped and never send them. Off
+the shards, the first checkpoint carries them. A shard write that fails after four tries
 leaves `SHIPPED` untouched and prints why, so the next checkpoint carries
 those files instead of losing them. The four consolidated `<pool>.zip` files
 are still written at the end -- one zip per pool is what a training run wants
@@ -434,8 +437,10 @@ def restore():
     for _shard in progress(_shards, len(_shards), "restore"):
         with zipfile.ZipFile(_shard) as _zip:
             _zip.extractall(POOL_ROOT)
-    SHIPPED.update(str(p.relative_to(POOL_ROOT)) for p in pool_files())
-    print("restored", len(_shards), "shards /", len(SHIPPED), "files from Drive")
+            SHIPPED.update(n for n in _zip.namelist() if not n.endswith("/"))
+    _local = len(pool_files()) - len(SHIPPED)
+    print("restored", len(_shards), "shards /", len(SHIPPED), "files from Drive",
+          f"| {_local} local files not on Drive yet" if _local > 0 else "")
 
 def manifest(reports=None):
     (Path(MIRROR_DIR) / "manifest.json").write_text(json.dumps({
