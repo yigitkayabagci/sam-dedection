@@ -1,0 +1,201 @@
+Anladım — EdgeTAM'i RGB + termal (ağırlık termalde) geliştirmek için pseudo-label mask havuzu üretecek iki yeni notebook (RGB aerial branch + termal branch) kuracağım. Önce repoyu, mevcut notebookları ve Drive'daki veri yapısını inceleyip, SOTA SAM modelini ve dataset'leri araştırıp detaylı plan çıkaracağım, sonra kuruluma geçeceğim.
+
+İlk adım: repo yapısını ve araç şemalarını yüklüyorum.
+
+Ran 2 commands, used a tool
+
+Repo'da zaten kapsamlı bir pipeline var (stage A encoder pretraining, Kust4K, DroneVehicle, VTUAV, SAM 3 teacher commit'leri görünüyor). Şimdi notebooks, docs ve configs'i inceliyorum.
+
+Listed key project directories
+
+Önemli keşif: notebooklar tools/build_notebooks.py ile üretiliyor ve tests/test_notebooks.py ile doğrulanıyor. Şimdi README ve dokümanları okuyarak mevcut pipeline'ı anlıyorum.
+
+Read 2 files
+
+Şimdi eğitim planı dokümanını okuyup SAM 3 teacher'ın repodaki mevcut durumunu tarıyorum.
+
+Read encoder_training_todo.md, ran a command
+
+Bu büyük bir iş — görev takibi kurup keşfe devam ediyorum.
+
+Read 2 files, used 10 tools
+
+labels.py görüntü teacher'ı (SAM 2.1 + zoom crop + gates + RLE store) zaten var; SAM 3 image teacher eksik — onu ekleyeceğim. Şimdi fetcher ve CLI kalıplarına bakıyorum.
+
+Read 5 files, ran 2 commands
+
+Repo altyapısı net (task 1 tamam). Şimdi Drive içeriğini ve araştırmayı paralel yürütüyorum.
+
+Ran 3 commands, browsed the web, used 7 tools
+
+SegFly çıktı o arxiv linki — zaten repoda entegre. LasHeR sadece Baidu/TeraBox'ta; HF mirror arayacağım. Devam:
+
+Browsed the web
+
+İyi bir tablo oluşuyor. LasHeR/RGBT234 resmi kaynakları Baidu-only — HF mirror'larını API'den kontrol ediyorum, HIT-UAV'ın gerçek veri konumuna da bakıyorum.
+
+Ran 2 commands
+
+HF mirror'lar var: xche32/lasher, xche32/rgbt234, HIT-UAV ve VisDrone mirror'ları. Dosya yapılarını doğruluyorum:
+
+Ran 2 commands
+
+Mükemmel: RGBT234 tek 7.7 GB tar.gz olarak HF'de var (Colab-dostu). LasHeR ise ~224 GB — default olamaz. VisDrone ve HIT-UAV yapılarını + SAM3 image sınıflarını doğruluyorum:
+
+Ran 2 commands, browsed the web
+
+Araştırma tamam. Plan dokümanından önce, kalibrasyon kodunun dayanacağı aerial.py API'sini (SPECS, decompose, Instance) okuyorum:
+
+Read aerial.py, used a tool
+
+API tamam. Şimdi plan dokümanını yazıyorum (task 4):
+
+Created mask_pool_plan.md, used a tool
++205
+-0
+
+Plan hazır. Şimdi implementasyona geçiyorum — önce mevcut yardımcıların imzalarını kontrol edip boxes.py'yi yazacağım:
+
+Ran 2 commands, used 2 tools
+
+Şimdi builder'ın giriş hücrelerini (stamp/GPU/deps kalıbı) okuyup aynısını kullanacağım:
+
+Read
+build_notebooks.py
+
+Kalıp net — havuz defterleri eğitim yapmadığı için EdgeTAM kurulumu gerekmiyor, sadece transformers teacher + repo src/. Şimdi modülleri yazıyorum. Önce src/training/boxes.py:
+
+Created
+boxes.py
++320
+-0
+
+boxes.py hazır. Şimdi labels.py'ye SAM 3 image teacher'ı ekliyorum (ortak taban sınıfa küçük refactor ile):
+
+Edited labels.py, ran a command
++105
+-20
+
+Teacher dispatch çalışıyor. Şimdi masklets.py: gate_boxes alanı + LasHeR/RGBT234 dizi bulucu:
+
+Edited
+masklets.py
++84
+-1
+
+Şimdi ana modül src/training/pool.py:
+
+Created and edited pool.py, ran a command
++444
+-1
+
+Yerel ortam tam repo test sözleşmesine uyuyor (numpy+torch, cv2 yok — testler buna göre skip'li olacak). Şimdi fetch_datasets.py genişletmeleri:
+
+Edited
+fetch_datasets.py
++254
+-19
+
+hituav_frames yardımcısını boxes.py'ye ekleyip CLI'yi yazıyorum:
+
+Edited a file, created a file
++228
+-0
+Usage limit reached
+
+I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.
+
+Devam ediyorum — kaldığım yer: CLI ve fetcher düzenlemeleri yazıldı, şimdi derleme kontrolü + sentetik smoke test, sonra testler ve notebook builder.
+
+Ran 2 commands
+
+Smoke temiz. Test dosyasını yazmadan önce mevcut fetch testlerinin kalıbına bakıyorum:
+
+Ran 2 commands, edited a file, created a file
++495
+-0
+
+Testte bir saçma satır kaldı, düzeltip koşuyorum:
+
+Edited test_mask_pool.py, ran a command
++2
+-3
+
+26/26 geçti (7 cv2-gerektiren test bu makinede skip). cv2'li yolları da doğrulamak için scratchpad'de geçici bir venv kurup skip'lenen testleri orada koşuyorum:
+
+Ran 2 commands
+
+Tüm 60 test cv2'li ortamda da geçti — src/tools katmanı tamam. Builder'a geçmeden 07'nin Drive/mirror hücre kalıbını kopyalamak için okuyorum:
+
+Read build_notebooks.py, used 2 tools
+
+Kalıplar hazır — şimdi iki defteri üreten tools/build_pool_notebooks.py'yi yazıyorum (uzun dosya, 07-11 üreticisinin sözleşmesiyle: stamp, {{tag}} çözümleme, .stamps.json):
+
+Created
+build_pool_notebooks.py
++960
+-0
+
+Küçük temizlik (kullanılmayan import) + build + doğrulama:
+
+Edited build_pool_notebooks.py, ran a command
++2
+-3
+
+Tag çözümleme sırası: variant alanı içindeki {{probe}} tek geçişte çözülmüyor. Alan ikamelerini tag'lerden önce koyarak düzeltiyorum:
+
+Edited build_pool_notebooks.py, ran a command
++9
+-4
+
+İki defter de üretildi ve isim-sıra kontrolünden geçti. Tam test süitini koşuyorum (stamp uyumu dahil):
+
+Ran full CPU test suite in cv2 venv
+
+608 test, hepsi OK — stamp'ler ve iki yeni defter dahil. Şimdi dokümantasyon güncellemeleri:
+
+Edited README.md, used 3 tools
++29
+-4
+
+docs/datasets.md'ye havuz kaynakları bölümünü ekliyorum:
+
+Edited
+datasets.md
++33
+-0
+
+Son doğrulama turu: requirements notu, üretilen defterin birkaç hücresine göz atma ve hızlı test tekrarı:
+
+Ran 2 commands
+
+Her şey yerinde. Şimdi commit + push (Colab defterleri cell 1'de bu branch'ten git clone yaptığı için push, teslimatın çalışır olmasının parçası):
+
+Ran 2 commands
+
+Commit tamam (41ac1ab), push kimlik doğrulamasına takıldı. gh ile deniyorum:
+
+Ran 2 commands, used a tool
+
+Bitti — istediğin iki dal kuruldu, test edildi ve 41ac1ab olarak commit'lendi. Tek kalan adım push (bu oturumda GitHub kimlik doğrulaması yok):
+
+git push origin claude/encoder-architecture-colab-myo61y
+
+Push şart çünkü defterler 1. hücrede bu branch'i clone'luyor; push'tan sonra ikisi de Colab'da tek Run all ile çalışır.
+
+Ne kuruldu
+
+İki yeni defter (07–11 gibi tools/build_pool_notebooks.py'den üretiliyor, stamp'li, check_notebook temiz):
+
+13_rgb_mask_pool.ipynb — RGB dalı. VisDrone-DET kutuları → SAM 3 → kapılardan geçen maskeler. Kalibrasyonu Kust4K'nın RGB yarısında yapıyor (gerçek maskeye karşı IoU). İsteğe bağlı DroneVehicle-RGB.
+14_thermal_mask_pool.ipynb — asıl dal. Önce ölçüm: Kust4K'nın çizilmiş örneklerinde aynı kutu ile öğretmen bir termal karede, bir de hizalı RGB eşinde promptlanıp aynı GT'ye karşı skorlanıyor (sınıf × boyut tablosu) — "termalde direkt mi, RGB'den transfer mi" sorusunun cevabı tartışma değil tablo. Sonra hasat: HIT-UAV + DroneVehicle-termal (kutu havuzu) ve RGBT234 masklet'leri — prompt visible.txt'ten, kapı infrared.txt'ten (hizalama kayması burada yakalanıyor).
+
+Öğretmen kararı (araştırıldı, varsayılmadı): facebook/sam3 varsayılan — transformers ≥ 5'te Sam3TrackerModel ile kutu-prompt tam SAM 2 API'si; facebook/sam2.1-hiera-large tek string uzakta ungated yedek; SAM 3.1 elendi (checkpoint-only, transformers entegrasyonu yok, Object Multiplex kutu-başına-crop'a hiçbir şey kazandırmıyor). SAM 3'ün MOSEv2 kontaminasyonu ve AeroVIS kuralı (AeroVIS = VisDrone'un SAM3'le maskelenmiş hali → 13'ün havuzuyla eğitilen model AeroVIS'te ölçülemez) README ve docs/datasets.md'ye yazıldı.
+
+Veri araştırması sonuçları: LasHeR ve RGBT234 resmî olarak Baidu-only; HF'de çalışan mirror'lar buldum — RGBT234 tek 7,7 GB tar.gz (Colab-dostu, entegre edildi), LasHeR ~224 GB (5 parça; fetcher'a akışlı, dizi-seçmeli çıkarma yazdım — arşiv diske hiç inmeden --sequences ile açıyor, varsayılan kapalı). HIT-UAV'ın git reposu verinin kendisi (~0,4 GB, COCO). VisDrone düz-dosya snapshot ile geliyor. Drive'ında MyDrive/datasets/train_001.zip (VTUAV) hazır; havuzlar edgetam-pool/{rgb,thermal} altına set biter bitmez zip'leniyor.
+
+Kod tarafı: src/training/boxes.py (YOLO/COCO/DroneVehicle-OBB okuyucular), src/training/pool.py (zoom-crop + dört kapı + RLE depo + resume + kalibrasyon), labels.py'ye Sam3Teacher, masklets.py'ye gate_boxes + LasHeR/RGBT234 dizi bulucu, make_mask_pool.py CLI, dört yeni fetch tarifi. Depo formatı pseudo_masks.npz — aşama B/C okuyucuları değişmeden okur.
+
+Doğrulama: 26 yeni test (tests/test_mask_pool.py) dahil 608 test yeşil — hem cv2'siz minimal ortamda hem cv2'li venv'de; akışlı LasHeR yolu parça-sınırı-ortasında-üye senaryosuyla test edildi. Detaylı plan: docs/mask_pool_plan.md.
+
+Önerilen sıra: push → 14'ü aç → smoke için FRAME_LIMIT = 200 ile bir tur → kalibrasyon tablosuna bak, HARVEST_PROMPT'u seç → tam hasat. A+B+C karşılaştırma kolun için havuzları 07'nin DATASETS'ine bağlamak bilinçli olarak ayrı bırakıldı (havuz önce incelenip staged edilsin diye) — istersen bir sonraki adım olarak onu bağlayayım.
