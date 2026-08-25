@@ -21,7 +21,7 @@ Veri setleri: `docs/datasets.md` ve raporda Bölüm 5.
 
 | Aşama | Ne eğitilir | Hangi veri | Durum |
 |---|---|---|---|
-| **A. Pretraining** | image encoder, etiketsiz | hizalı RGB-T çiftleri | **kod yazıldı** (`src/training/distill.py`), ölçülmedi |
+| **A. Pretraining** | image encoder, etiketsiz | hizalı RGB-T çiftleri, ve artık RGB-only / termal-only da | **kod yazıldı** (`src/training/distill.py`, `pretrain.py`, `automask.py`), ölçülmedi — **dört kol**, §3 |
 | **B. Encoder + head** | image encoder + mask decoder | **statik** yoğun maskeli setler | **kod yazıldı** (`src/training/image_loop.py`), ölçülmedi |
 | **C. Video** | memory attention / encoder | video setleri | B ölçülmeden başlanmaz |
 
@@ -135,22 +135,59 @@ bitince atılıyor ve çıkan checkpoint sıradan bir EdgeTAM state dict'i.
 **Yapılacak:** koş ve A3 taban çizgisine karşı ölç. Kust4K'nın 4 024 çifti bu
 aşama için az olabilir — dürüst testi MVUAV'ın 53 828 çifti.
 
-### A2. MAE / maskeli görüntü modelleme — muhtemelen uygun değil
+### A2. MAE / maskeli görüntü modelleme — kapatılmadı, bir kola çevrildi
 
 SAM 2'nin Hiera gövdesi MAE ile ön-eğitilmiş, o yüzden akla ilk gelen bu.
 Ama **EdgeTAM'ın gövdesi RepViT, yani evrişimsel** (`finetune.py`'nin kendi
 ifadesiyle *"the domain shift here lives in a convolutional RepViT trunk"*).
-MAE token maskelemeye dayanıyor ve ViT için tasarlandı; evrişimsel gövdede
-doğrudan karşılığı yok.
+MAE token maskelemeye dayanıyor ve ViT için tasarlandı.
 
-**Yapılacak:** ConvNeXt/RepViT için maskeli ön-eğitim varyantı var mı diye
-bak; yoksa bu yolu kapat ve gerekçesini yaz.
+**Tarandı ve cevap ikiye ayrıldı.** MAE'nin ViT'e ihtiyaç duyduğu şey
+maskelenen token'ları *atmak* — hızlanmasının kaynağı o. ConvNeXt V2 (arXiv
+2301.00808) aynı numarayı seyrek evrişimle geri kazanmak zorunda kaldı ve
+yoğun evrişimin maskeli görüntüde **sızdırdığını** bildirdi. Ama ikisi de
+evrişimsel bir gövdenin maskeli girdiyle eğitilememesinin sebebi değil:
+*ucuza* eğitilememesinin ve hedefin sızıntının işe yaramayacağı şekilde
+seçilmesi gerektiğinin sebebi. Piksel yerine **öznitelik haritası** hedeflenip
+decoder hiç kullanılmadığında seyrek evrişim gerekmiyor.
+
+Yani bu yol kapatılmadı; `src/training/automask.py` olarak **aşama A'nın
+maske kolu** hâline geldi, ve maskeyi modelin kendisi üretiyor (AttMask'ın
+evrişimsel karşılığı). Gerekçesi, sızıntının adı konmuş kalan parçası (RepViT'in
+SE bloklarındaki global havuzlama) ve dürüst önseli
+`docs/encoder_pretrain_stage_a.md` §4'te.
+
+**Beklenti düşük ve yazılı:** ConvNeXt V2'nin kendi tablosunda FCMAE
+*değiştirilmemiş* mimaride −0.1 ile +0.1 arası; TinyMIM 5.7 M'lik bir ViT'te
+MAE'nin sıfırdan eğitmeden **kötü** olduğunu (−0.6) bildiriyor; ve 4.8 M'lik bir
+encoder'da havadan termal segmentasyonda sıradan ImageNet ön-eğitimi (0.725)
+40 k termal görüntülük öz-denetimi (0.714) yeniyor. Bu kol bir tahmin değil bir
+**ölçüm** olarak koşuluyor.
 
 ### A3. Ön-eğitim yok — yenilmesi gereken taban çizgisi
 
 Doğrudan EdgeTAM checkpoint'inden `apply_freeze(model, "encoder")` ile ince
 ayar. **Her ölçüm buna karşı raporlanmalı**, yoksa ön-eğitimin bir şey
 kattığı iddia edilemez.
+
+Artık bu da bir **kol** ve bir dosya yazıyor: `tools/pretrain_stage_a.py
+--arm none` stok ağırlıkları diğer kolların yazdığı yere, aynı manifestoyla
+kopyalıyor. Sebep: farklı bir kod yolundan geçen taban çizgisi kayan taban
+çizgisidir.
+
+### A4. Aşama A artık dört kollu bir seçim
+
+`docs/encoder_pretrain_stage_a.md` tamamını tartışıyor. Kısaca: `none`, `mask`,
+`distil`, `both` — dördü de **aynı çıktıyı** yazıyor (sıradan bir EdgeTAM state
+dict'i + `stage_a.json`), aşama B'ye geçiş tek bayrak (`--base`), ve külliyat
+kayıtları modalite başına yönlendiriliyor:
+
+* `paired` → öğretmen RGB, öğrenci termal (yayınlanmış yol)
+* `rgb` → öğretmen renk, öğrenci **aynı görüntünün luminansı** (vekil)
+* `thermal` → ikisi de termal — ama önce `pretrain.modality_gap` ölçülüyor
+
+Defterler: `notebooks/15_pretrain_automask.ipynb`,
+`notebooks/16_pretrain_convnext.ipynb`.
 
 ---
 

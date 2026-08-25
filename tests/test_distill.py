@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.training.distill import (  # noqa: E402
+    CONVNEXT_IDS,
     DINO_ID,
     Pair,
     collate_pairs,
@@ -36,7 +38,10 @@ from src.training.distill import (  # noqa: E402
     encoder_features,
     moment_loss,
     patch_aligned,
+    probe_geometry,
     shared_window,
+    teacher_input,
+    teacher_maps,
     subsample,
     tokens_to_map,
 )
@@ -269,11 +274,145 @@ class TestTeacherChoice(unittest.TestCase):
             params = list(inspect.signature(cls.__init__).parameters)
             self.assertEqual(params, ["self", "model_id", "device", "dtype", "size"],
                              cls.__name__)
-            source = inspect.getsource(cls.__init__)
+            # Matched on the assignment *target* rather than on the text
+            # `self.x =`: FeatureTeacher now unpacks its geometry from
+            # `probe_geometry` in one statement, which is still an assignment
+            # to self.patch and would fail a substring check.
+            import ast
+
+            tree = ast.parse(textwrap.dedent(inspect.getsource(cls.__init__)))
+            assigned = {
+                node.attr
+                for statement in ast.walk(tree)
+                if isinstance(statement, ast.Assign)
+                for target in statement.targets
+                for node in ast.walk(target)
+                if isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name) and node.value.id == "self"
+            }
             for attribute in ("model_id", "dim", "size", "patch"):
-                self.assertIn(f"self.{attribute} =", source,
+                self.assertIn(attribute, assigned,
                               f"{cls.__name__} never sets {attribute}")
             self.assertTrue(callable(cls.features), cls.__name__)
+
+
+class Tokens:
+    """A stand-in backbone that returns `prefix + (S/stride)^2` tokens.
+
+    Enough to exercise `probe_geometry`, which is the whole point: the thing
+    being tested is arithmetic over token counts, and downloading a foundation
+    model to check arithmetic would mean it never got checked.
+    """
+
+    def __init__(self, stride: int, prefix: int, channels: int = 64,
+                 four_d: bool = False) -> None:
+        self.stride, self.prefix, self.channels, self.four_d = (
+            stride, prefix, channels, four_d)
+        self.dtype = torch.float32
+
+    def __call__(self, pixel_values):
+        side = int(pixel_values.shape[-1]) // self.stride
+        if self.four_d:
+            return type("Out", (), {
+                "last_hidden_state": torch.zeros(1, self.channels, side, side)})
+        count = self.prefix + side * side
+        return type("Out", (), {
+            "last_hidden_state": torch.zeros(1, count, self.channels)})
+
+
+class TestProbeGeometry(unittest.TestCase):
+    """Read off the config this goes wrong quietly: DINOv3's ConvNeXt configs
+    carry no `patch_size` at all, so a `getattr(config, "patch_size", 14)`
+    answers 14 for a trunk whose real stride is 32."""
+
+    def test_it_recovers_the_stride_and_the_prefix_of_a_token_backbone(self):
+        for stride, prefix in ((16, 5), (16, 1), (32, 1), (8, 0), (14, 5)):
+            found = probe_geometry(Tokens(stride, prefix), device="cpu")
+            self.assertEqual(found[0], stride, f"stride {stride}")
+            self.assertEqual(found[1], prefix, f"prefix {prefix} at {stride}")
+
+    def test_dinov3s_convnext_shape_specifically(self):
+        # 4x stem then three 2x downsamples, and one pooled token in front.
+        stride, prefix, channels = probe_geometry(Tokens(32, 1, 768), device="cpu")
+        self.assertEqual((stride, prefix, channels), (32, 1, 768))
+
+    def test_a_backbone_that_returns_a_map_needs_no_arithmetic(self):
+        self.assertEqual(probe_geometry(Tokens(16, 0, 256, four_d=True),
+                                        device="cpu"), (16, 0, 256))
+
+    def test_a_backbone_that_does_not_scale_as_a_grid_says_so(self):
+        class Odd(Tokens):
+            def __call__(self, pixel_values):
+                return type("Out", (), {"last_hidden_state": torch.zeros(1, 7, 8)})
+
+        with self.assertRaises(RuntimeError) as caught:
+            probe_geometry(Odd(16, 0), device="cpu")
+        self.assertIn("stride", str(caught.exception))
+
+
+class TestTeacherInput(unittest.TestCase):
+    """One rule: never *upsample* the teacher to the student's grid."""
+
+    def test_a_stride_16_teacher_runs_at_the_students_own_resolution(self):
+        self.assertEqual(teacher_input(512, 16), 512)
+        self.assertEqual(teacher_input(512, 16) // 16, 512 // 16)
+
+    def test_a_stride_14_teacher_keeps_the_old_snap_up_rule(self):
+        # Finer than the student, so downsampling it loses nothing the student
+        # could have represented anyway.
+        self.assertEqual(teacher_input(512, 14), 518)
+
+    def test_a_stride_32_convnext_is_fed_twice_the_input(self):
+        """Fed 512 it would produce 16x16 against the student's 32x32, and the
+        loss would upsample it -- supervising four student cells with one
+        teacher cell, which is the resolution that matters when a target is
+        twenty pixels across."""
+        self.assertEqual(teacher_input(512, 32), 1024)
+        self.assertEqual(teacher_input(512, 32) // 32, 512 // 16)
+
+    def test_the_teachers_grid_is_never_coarser_than_the_students(self):
+        # The invariant, stated as an inequality rather than an equality: a
+        # teacher finer than the student is left alone and downsampled at the
+        # loss, which loses nothing the student could have represented. A
+        # teacher coarser than the student is what the rule exists to prevent.
+        for stride in (8, 14, 16, 32, 64):
+            self.assertGreaterEqual(teacher_input(512, stride) // stride, 32,
+                                    f"stride {stride}")
+
+
+class TestTeacherMaps(unittest.TestCase):
+    def test_one_layer_needs_nothing_but_features(self):
+        class Single:
+            def features(self, images):
+                return torch.zeros(1, 8, 4, 4)
+
+        maps = teacher_maps(Single(), torch.zeros(1, 3, 64, 64), layers=1)
+        self.assertEqual(len(maps), 1)
+
+    def test_asking_a_single_map_teacher_for_blocks_is_refused(self):
+        """`Sam2FeatureTeacher` reads an FPN level rather than a block, so
+        "the last two layers" has no meaning for it -- and answering with one
+        map twice would be a constraint that is not one."""
+        class Single:
+            def features(self, images):
+                return torch.zeros(1, 8, 4, 4)
+
+        with self.assertRaises(ValueError):
+            teacher_maps(Single(), torch.zeros(1, 3, 64, 64), layers=2)
+
+
+class TestConvNextTeachers(unittest.TestCase):
+    def test_the_four_convnext_students_are_named_not_spelled_out(self):
+        self.assertEqual(sorted(CONVNEXT_IDS), ["base", "large", "small", "tiny"])
+        for size, model_id in CONVNEXT_IDS.items():
+            self.assertTrue(model_id.startswith("facebook/dinov3-convnext-"), size)
+            self.assertIn(size, model_id)
+
+    def test_build_teacher_does_not_route_a_convnext_to_the_sam_class(self):
+        # Dispatch is on the id, and "sam2" is the only substring that means
+        # the SAM class; a dinov3 id must never reach it.
+        for model_id in CONVNEXT_IDS.values():
+            self.assertNotIn("sam2", model_id.lower())
 
 
 class TestPatchAligned(unittest.TestCase):

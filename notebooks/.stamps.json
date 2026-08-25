@@ -6,5 +6,7 @@
  "11_encoder_rgb_mixed.ipynb": "a38eccc002",
  "12_encoder_probe.ipynb": "52383ab83c",
  "13_rgb_mask_pool.ipynb": "d6e99551d0",
- "14_thermal_mask_pool.ipynb": "e5293f2b3a"
+ "14_thermal_mask_pool.ipynb": "e5293f2b3a",
+ "15_pretrain_automask.ipynb": "23bf5429b5",
+ "16_pretrain_convnext.ipynb": "8c69e0a368"
 }

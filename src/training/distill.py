@@ -58,6 +58,18 @@ from .finetune import EMA, Rates, apply_freeze, param_groups
 # to a non-ViT checkpoint.
 TEACHER_ID = "facebook/sam2.1-hiera-base-plus"
 DINO_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+
+# DINOv3's convolutional students, which are candidate *teachers* here: Meta
+# distilled them out of the 7B ViT, so they carry that model's representation
+# in a body whose geometry is the student's own -- a stage-wise convolutional
+# trunk rather than a token grid. Sizes are the card's own parameter counts.
+# All four are gated on the Hub, like every other `facebook/dinov3-*` id.
+CONVNEXT_IDS = {
+    "tiny":  "facebook/dinov3-convnext-tiny-pretrain-lvd1689m",    #  29 M
+    "small": "facebook/dinov3-convnext-small-pretrain-lvd1689m",   #  50 M
+    "base":  "facebook/dinov3-convnext-base-pretrain-lvd1689m",    #  89 M
+    "large": "facebook/dinov3-convnext-large-pretrain-lvd1689m",   # 198 M
+}
 STUDENT_SIZE = 512        # what the student is trained at, and the size to match
 SAM2_SIZE = 1024          # what SAM 2.1's position embeddings were trained at
 
@@ -109,6 +121,80 @@ def tokens_to_map(tokens: torch.Tensor, side: int) -> torch.Tensor:
     return tokens.reshape(tokens.shape[0], side, side, -1).permute(0, 3, 1, 2).float()
 
 
+@torch.no_grad()
+def probe_geometry(model, device: str = "cuda") -> tuple[int, int, int]:
+    """`(stride, prefix tokens, channels)` of a frozen backbone, **measured**.
+
+    Read off the config this goes wrong quietly. DINOv3's ConvNeXt checkpoints
+    have no `patch_size` field at all -- their config carries `hidden_sizes`
+    and `depths` and nothing about stride -- so a `getattr(config,
+    "patch_size", 14)` returns 14 for a trunk whose real stride is 32, and the
+    grid computed from it is off by more than a factor of two. That is exactly
+    the shape of bug this repo has been bitten by before: it does not raise
+    where it is wrong, it raises somewhere else, or worse, it does not raise.
+
+    So it is derived from two forward passes instead. A backbone that returns a
+    token sequence returns `k + (S/stride)^2` tokens for input side `S`, with
+    `k` prefix tokens (DINOv3's ViTs put one class token and four registers
+    there; its ConvNeXt puts one pooled token). Run it at 128 and at 256 and
+    the unknown `k` cancels:
+
+        n(256) - n(128) = (2g)^2 - g^2 = 3g^2      so   g = sqrt((n2 - n1) / 3)
+
+    from which the stride is `128 / g` and `k` is `n1 - g^2`. A backbone that
+    returns a map instead of tokens needs none of this -- the shape says it.
+
+    Two forwards at 128 and 256 cost milliseconds and are run once per stage.
+    """
+    counts, channels = [], 0
+    for side in (128, 256):
+        blank = torch.zeros(1, 3, side, side, device=device, dtype=model.dtype)
+        hidden = model(pixel_values=blank).last_hidden_state
+        if hidden.dim() == 4:
+            return side // int(hidden.shape[-1]), 0, int(hidden.shape[1])
+        counts.append(int(hidden.shape[1]))
+        channels = int(hidden.shape[-1])
+
+    small, large = counts
+    cells = (large - small) / 3.0
+    side = int(round(cells ** 0.5))
+    if side < 1 or abs(side * side - cells) > 0.51:
+        raise RuntimeError(
+            f"could not work out this backbone's stride from its token counts "
+            f"({small} at 128, {large} at 256). It does not scale as a square "
+            f"grid plus a fixed prefix, so `size` has to be given explicitly.")
+    return int(round(128 / side)), small - side * side, channels
+
+
+def teacher_input(student_size: int, stride: int, student_stride: int = 16) -> int:
+    """The teacher's input side, chosen so its map is never *coarser* than the
+    student's.
+
+    One rule, and it is the one that makes a convolutional teacher usable at
+    all. The student's map is stride 16, so at 512 it is 32x32 and each cell
+    covers 16 source pixels. A ViT/16 teacher at 512 produces the same 32x32
+    and the two correspond exactly. A ConvNeXt teacher has **stride 32**: fed
+    the same 512 it produces 16x16, and `distill_loss` would then upsample it
+    to the student's grid -- supervising four student cells with one teacher
+    cell, which throws away half the spatial resolution the student is being
+    trained to produce. On aerial imagery, where a target is twenty pixels
+    across, that is the resolution that matters.
+
+    Feeding that teacher 1024 instead gives it a 32x32 map over the *same*
+    field of view: exact correspondence, at the cost of a forward pass on an
+    upsampled image. Under `no_grad` and bfloat16 that cost is small next to
+    the student's backward, and it is paid once per batch.
+
+    Teachers at or below the student's stride keep the existing rule --
+    `patch_aligned` -- because there the teacher is the finer of the two and
+    downsampling it to the student's grid loses nothing the student could have
+    represented anyway.
+    """
+    if stride <= student_stride:
+        return patch_aligned(student_size, stride)
+    return (student_size // student_stride) * stride
+
+
 class FeatureTeacher:
     """A frozen ViT foundation model (DINOv3, DINOv2 and friends), dense.
 
@@ -145,16 +231,30 @@ class FeatureTeacher:
             model_id, dtype=getattr(torch, dtype)).to(device).eval()
         for param in self.model.parameters():
             param.requires_grad_(False)
+        # Measured rather than read: see `probe_geometry` for the checkpoint
+        # whose config says nothing about its stride and the failure that
+        # caused. `dim` still prefers the config where it has one, because a
+        # named field is clearer in a log than a number that fell out of a
+        # dummy forward -- but the probe is the fallback and the two are
+        # checked against each other.
+        self.patch, self.prefix, probed_dim = probe_geometry(self.model, device)
         config = self.model.config
-        # ViT configs carry `hidden_size`; convolutional ones (DINOv3's
-        # ConvNeXt students) carry `hidden_sizes` per stage, of which the last
-        # is the map `features` returns.
-        self.dim = int(getattr(config, "hidden_size", 0)
-                       or list(getattr(config, "hidden_sizes", []))[-1])
-        self.patch = int(getattr(config, "patch_size", 14))
-        # Resolved after the config is known, so the rule is one rule rather
+        stated = int(getattr(config, "hidden_size", 0)
+                     or (list(getattr(config, "hidden_sizes", None) or [0]))[-1])
+        self.dim = stated or probed_dim
+        if stated and probed_dim and stated != probed_dim:
+            raise RuntimeError(
+                f"{model_id}: config says {stated} channels, the model returns "
+                f"{probed_dim}. One of the two is not describing the tensor "
+                f"`features` will hand to the loss.")
+        # Resolved after the geometry is known, so the rule is one rule rather
         # than a constant per checkpoint.
-        self.size = patch_aligned(size or STUDENT_SIZE, self.patch)
+        self.size = teacher_input(size or STUDENT_SIZE, self.patch)
+
+    @property
+    def grid(self) -> int:
+        """The side of the feature map this teacher produces at `self.size`."""
+        return self.size // self.patch
 
     @torch.no_grad()
     def features(self, images: torch.Tensor) -> torch.Tensor:
@@ -163,14 +263,62 @@ class FeatureTeacher:
                                 mode="bilinear", align_corners=False)
         hidden = self.model(pixel_values=resized.to(self.model.dtype)).last_hidden_state
         if hidden.dim() == 4:
-            # A convolutional teacher -- DINOv3 ships ConvNeXt students
-            # distilled from its 7B ViT -- returns the map directly as
-            # [B, C, h, w]: no class token to strip, no grid to reshape, and
-            # conv-to-conv is the closer geometry for a RepViT student. Its
-            # stride need not be 16; `distill_loss` resamples the teacher to
-            # the student's grid either way.
+            # Some backbones hand back the map directly as [B, C, h, w]: no
+            # prefix token to strip and no grid to reshape.
             return hidden.float()
-        return tokens_to_map(hidden, self.size // self.patch)
+        # Everything else -- including DINOv3's **ConvNeXt** checkpoints, which
+        # flatten their final stage and prepend a pooled token before the final
+        # LayerNorm, so they arrive shaped exactly like a ViT's output --
+        # reshapes back to a grid. `tokens_to_map` drops the prefix by taking
+        # the last h*w tokens, which is why one path covers a class token, four
+        # registers and a single pooled token alike.
+        return tokens_to_map(hidden, self.grid)
+
+
+    @torch.no_grad()
+    def maps(self, images: torch.Tensor, layers: int = 1) -> list[torch.Tensor]:
+        """The last `layers` blocks as feature maps, deepest last.
+
+        One student map aligned against the teacher's **last two** blocks
+        rather than only its last is the one alignment ablation in EdgeCrafter
+        (arXiv 2603.18739) that moved its number without moving anything else:
+        +0.7 COCO AP for its compact student, and it reports that going to
+        three *regresses* for larger students. So `layers=2` is worth a run and
+        `layers=3` is worth nothing until someone measures it here.
+
+        The loss over several maps is a sum against the *same* projected
+        student, not a concatenation -- that is what makes it a constraint
+        rather than extra capacity, and it is how the paper writes it.
+
+        Only implemented where the intermediate states are the same shape as
+        the final one. DINOv3's ConvNeXt exposes its four *stages*, which sit
+        at strides 4, 8, 16 and 32 and are not adjacent blocks in the sense
+        this is asking for; rather than quietly average a stride-4 map into the
+        target, it says so.
+        """
+        if layers <= 1:
+            return [self.features(images)]
+        resized = F.interpolate(images, size=(self.size, self.size),
+                                mode="bilinear", align_corners=False)
+        out = self.model(pixel_values=resized.to(self.model.dtype),
+                         output_hidden_states=True)
+        states = out.hidden_states
+        if not states:
+            raise RuntimeError(
+                f"{self.model_id} returned no hidden_states, so layers>1 is not "
+                f"available for it. Use layers=1.")
+        final = out.last_hidden_state
+        usable = [h for h in states[-layers:]
+                  if h.dim() == final.dim() and h.shape[1] == final.shape[1]]
+        if len(usable) < layers:
+            raise RuntimeError(
+                f"{self.model_id}: only {len(usable)} of its last {layers} "
+                f"hidden states have the final layer's shape "
+                f"{tuple(final.shape)}. This backbone exposes stages at "
+                f"different strides rather than adjacent blocks -- use "
+                f"layers=1 for it.")
+        return [tokens_to_map(h, self.grid) if h.dim() == 3 else h.float()
+                for h in usable]
 
 
 class Sam2FeatureTeacher:
@@ -294,6 +442,23 @@ def build_teacher(model_id: str = TEACHER_ID, device: str = "cuda",
             f"An ungated alternative that needs no account: "
             f"--teacher facebook/dinov2-base\n\n"
             f"original error: {exc}") from exc
+
+
+def teacher_maps(teacher, images: torch.Tensor,
+                 layers: int = 1) -> list[torch.Tensor]:
+    """`layers` maps from any teacher, falling back to one where it has to.
+
+    `Sam2FeatureTeacher` reads an FPN level rather than a block, so "the last
+    two layers" has no meaning for it and asking is a mistake worth naming
+    rather than silently answering with one map twice.
+    """
+    if layers <= 1:
+        return [teacher.features(images)]
+    if not hasattr(teacher, "maps"):
+        raise ValueError(
+            f"{type(teacher).__name__} exposes one feature map, not blocks -- "
+            f"layers={layers} has no meaning for it. Use layers=1.")
+    return teacher.maps(images, layers)
 
 
 class Projector(nn.Module):

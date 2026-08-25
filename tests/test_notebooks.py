@@ -24,6 +24,14 @@ from tools.check_notebook import check, strip_magics  # noqa: E402
 
 NOTEBOOKS = sorted((ROOT / "notebooks").glob("*.ipynb"))
 
+# Which generator owns which notebook, for the message a stale stamp prints.
+# Order matters only in that the first match wins; the prefixes are disjoint.
+BUILDERS = (
+    (("12_",), "build_probe_notebook"),
+    (("13_", "14_"), "build_pool_notebooks"),
+    (("15_", "16_"), "build_pretrain_notebooks"),
+)
+
 
 def reload_calls(path: Path) -> list[str]:
     """Every real call to `reload(...)` in a notebook's code cells.
@@ -119,11 +127,12 @@ class TestEveryNotebook(unittest.TestCase):
 
         for name, stamp in sorted(stamps.items()):
             with self.subTest(notebook=name):
-                # Two generators now, and sending someone to the wrong one is
-                # a confusing few minutes: rebuilding with `build_notebooks.py`
-                # leaves 12 exactly as stale as it was.
-                builder = ("build_probe_notebook" if name.startswith("12_")
-                           else "build_notebooks")
+                # Four generators now, and sending someone to the wrong one
+                # is a confusing few minutes: rebuilding with
+                # `build_notebooks.py` leaves 12 exactly as stale as it was.
+                builder = next(
+                    (b for prefixes, b in BUILDERS
+                     if name.startswith(prefixes)), "build_notebooks")
                 self.assertEqual(
                     embedded.get(name), stamp,
                     f"{name} is out of step with .stamps.json -- run: "

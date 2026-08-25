@@ -7,9 +7,9 @@ loop can be reused for quantisation-aware training.
 Kept import-light on purpose: `antiuav` parses annotations and computes crop
 geometry with nothing but the standard library and numpy, so it is testable
 without OpenCV, without EdgeTAM and without a GPU. cv2, torch and transformers
-are imported inside the functions that actually need them. `image_loop` and
-`distill` need torch at module level and are therefore *not* re-exported here
--- import them by path.
+are imported inside the functions that actually need them. `image_loop`,
+`distill`, `pretrain` and `automask` need torch at module level and are
+therefore *not* re-exported here -- import them by path.
 
 Two data paths, deliberately parallel:
 
