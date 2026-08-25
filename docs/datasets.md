@@ -218,6 +218,15 @@ söylüyor; notebook'ların bunun için bir hücresi var.
 > canlı uca karşı doğrulanmış — `docs/rgb_aerial_kaynaklar.md`'de.** Orada
 > ayrıca kutuyu maskeye çevirmiş hazır veri setleri (SAMRS, AeroVIS, UAVDB)
 > ve boru hattı repoları var.
+>
+> **Hedef bant kararı (ölçüldü):** proje ~20–60 m irtifada ve **iri**
+> nesnede çalışıyor; ölçüt irtifa değil **medyan √alan ≥ 45 px ve
+> < 32 px oranı ≤ %30**. Bu ölçüte göre **VisDrone2019-DET RGB havuzundan
+> çıkmalı** (medyan 32 px, %51'i 32 px altında) ve yerine **CODrone'un
+> 30+60 m dilimi** (7 457 kare, medyan 47/60 px) ile **AU-AIR** (medyan
+> 81 px) gelmeli. AeroVIS de aynı ölçütte bütünüyle bant dışı (medyan
+> 31 px) — yalnızca `sd_` dilimi ya da boyut kovalı J&F ile kullanılır.
+> Sayıların hepsi `docs/rgb_aerial_kaynaklar.md` §1 ve §3.0'da.
 
 Yukarıdaki eleme ölçütü (2) — piksel maskesi — bu setlerde **bilerek**
 aranmıyor: maske havuzu boru hattı (`docs/mask_pool_plan.md`,

@@ -14,21 +14,59 @@ Doğrulama yöntemi ve ne bulunamadığı §8'de.
 
 ---
 
-## 1. Özet — ne eklenmeli
+## 1. Hedef bant: ~20–60 m, iri nesne — ve ölçülen sıralama
+
+Proje bilerek **yüksek irtifadan / uydudan** çalışmıyor ve **tiny nesne**
+hedeflemiyor. Bu, listeyi irtifaya göre değil **nesnenin kaç piksel
+göründüğüne** göre sıralamayı gerektiriyor — ve ikisi aynı şey değil.
+
+Aşağıdaki tablo tahmin değil: her satır o setin **kendi etiket
+dosyalarından** örneklenerek hesaplandı (kutu setlerinde kutu alanı,
+maske setlerinde bağlı bileşen alanı; `ignored` sınıfı ve 100 px²
+altındaki artıklar atıldı).
+
+| Set | irtifa | çözünürlük | **medyan √alan** | **< 32 px** | < 16 px | kare başına | karar |
+|---|---|---|---:|---:|---:|---:|---|
+| **AU-AIR** | 2,8–30,6 m | 1920×1080 | **81 px** | **%11,8** | %1,3 | 3 | **✓ en iri** |
+| AeroVIS `sd_` dilimi | yüksek, deniz | çeşitli | 84 px | %21,1 | %0,1 | — | ✓ ama 2 sınıf, su |
+| **CODrone 60 m** | 60 m | 3840×2160 | **60 px** | %20,4 | %2,3 | 39 | **✓** |
+| **CODrone 30 m** | 30 m | 3840×2160 | 47 px | %28,9 | %2,4 | 21 | **✓** |
+| CODrone 100 m | 100 m | 3840×2160 | 44 px | %30,2 | %4,4 | 26 | sınırda |
+| AeroScapes | 5–50 m | 1280×720 | 35 px | %40,0 | %22,9 | 1–2 | zayıf: seyrek + düşük çözünürlük |
+| VisDrone2019-DET *(bugün havuzda)* | yüksek | ≤1920×1080 | 32 px | **%51,0** | %17,5 | 56 | **✗ bant dışı** |
+| **AeroVIS bütünü** | — | çoğu ≤1080p | **31 px** | **%52,1** | %10,6 | — | **✗ bant dışı** |
+| UAVid | 50 m **eğik** | 3840×2160 | 28 px | %58,7 | — | 78 | ✗ eğik bakış uzağı küçültüyor |
+| AeroVIS `ud_` dilimi (UAVDT) | yüksek | 1024×540 | **24 px** | **%75,1** | %23,7 | — | **✗✗** |
+| DOTA · DIOR · SODA-A · iSAID · AI-TOD-v2 · xView | uydu / çok yüksek | — | — | — | — | — | **✗ kapsam dışı** |
+
+### 1.1 Dersi: irtifa yanıltıcı bir filtre
+
+Tablodaki üç satır bunu tek başına gösteriyor. **CODrone 100 m'de (44 px)
+nesneler, UAVid'in 50 m'sinden (28 px) daha iri** — çünkü CODrone 4K ve
+neredeyse dik bakıyor, UAVid ise 4K ama **eğik**, ve eğik bakışta karenin
+uzak yarısı otomatik olarak tiny oluyor. Aynı şekilde **AU-AIR 20 m'de
+1080p ile (81 px), CODrone'un 30 m'deki 4K'sını (47 px) geçiyor**, çünkü
+belirleyici olan irtifa değil **yer örnekleme aralığı** (irtifa ÷ piksel
+başına odak) ve bakış açısı.
+
+Pratik sonuç: **"şu irtifadaki setleri al" diye filtreleme.** Ölçüt
+doğrudan medyan √alan olmalı; bu doküman her aday için o sayıyı veriyor.
+Öneri eşiği: **medyan ≥ 45 px ve < 32 px oranı ≤ %30**. Bunu geçen üç
+kaynak var: AU-AIR, CODrone (30 ve 60 m), ve AeroVIS'in `sd_` dilimi.
+
+## 1.2 Özet — ne eklenmeli
 
 | Öncelik | Set | Neden |
 |---|---|---|
-| **1** | [CODrone](#2-codrone--yeni-birincil-aday) | 10 004 İHA karesi, 3840×2160, 12 sınıf yönlü kutu, **30/60/100 m irtifa × 30°/90° kamera**, ~%37 gece. AeroVIS soyağacına **değmiyor** → havuza girse de AeroVIS değerlendirme olarak sağ kalıyor. Tek 6,7 GiB Drive zip'i, `gdown` ile |
-| **2** | [AeroVIS](#3-aerovis--açıldı-ve-sayıldı) | Sürüm gerçek ve indirilebilir (12,63 GiB, doğrulandı). Maskeler **YTVIS RLE + `track_id`** — EdgeTAM'ın çıktı tipinin birebir kendisi. **Eğitime değil, ölçüme** |
-| **3** | [iSAID](#5-gerçek-örnek-maskesi--kalibrasyon-ve-held-out) | Listedeki **tek elle çizilmiş havadan örnek maskesi** seti: 655 451 örnek / 2 806 görüntü. RGB dalının kalibrasyonunda Kust4K'nın *decompose* edilmiş semantiğinin yerini alır — gerçek örnek sınırı |
-| 4 | [SODA-A](#4-kutu-etiketli-havadan-rgb--görüntü) | Görüntü başına ~350 örnek; öğretmen kapılarının yoğunluk stres testi |
-| 5 | [AU-AIR](#41-au-air--en-alçak-irtifa-ama-tek-kavşak) | Listedeki **en alçak irtifa** (2,8–30,6 m, medyan 20,4 m) ve en büyük nesneler (medyan √alan 81 px). Kare başına irtifa okuması var → kalibrasyona bedava bir irtifa sütunu. Ama 32 823 karenin tamamı **tek bir kavşak** |
-| — | UAVDT, VisDrone-MOT, SeaDronesSee | İndirilebilir ama **AeroVIS'i yakar**, §3.3 |
+| **1** | [CODrone](#2-codrone--yeni-birincil-aday), **30 m + 60 m dilimleri** | 7 457 kare 3840×2160, medyan 60/47 px, kare başına 39/21 kutu. Havuzun hacmi buradan gelir; 100 m dilimi (2 547 kare) isteğe bağlı bırakılır |
+| **2** | [AU-AIR](#41-au-air--en-alçak-irtifa-ama-tek-kavşak) | Bandın **en iri** nesnesi (medyan 81 px, <32 px yalnızca %11,8) ve kare başına irtifa okuması. Ama tek kavşak → seyrelterek, hacim için değil kalibrasyon/aşama C için |
+| **3** | [SegFly](https://github.com/markus-42/SegFly) — **zaten repoda** | 30/40/50 m, tam hedef bant, 20 606 RGB, **gerçek maske**. Kalibrasyonun yeni doğal yeri; kısıtı `things`in sadece `vehicle` + `truck` olması |
+| 4 | [Okutama-Action](#42-bant-içi-diğer-adaylar) · [CARPK](#42-bant-içi-diğer-adaylar) · [Semantic Drone](#42-bant-içi-diğer-adaylar) | 10–45 m 4K insan · ~40 m 90 K araba · 5–30 m 6000×4000. Üçü de bant içi, üçünün de erişimi betikle değil |
+| **düştü** | VisDrone-DET, UAVDT, SODA-A, DIOR, DOTA, **iSAID**, AI-TOD-v2 | Ölçüldü, hepsi tiny/uydu rejiminde. iSAID'in 655 K elle çizilmiş örneği cazipti ama **uydu görüntüsü** — kalibrasyonu bant dışına taşırdı |
 
-**Tek cümlelik tavsiye:** havuza **CODrone**'u ekle, kalibrasyona **iSAID**'i
-koy, **AeroVIS**'e dokunma — onu ölçüm seti olarak sakla.
-
----
+**Tek cümle:** havuzu **CODrone 30+60 m** üzerine kur, **AU-AIR**'ı
+seyrelterek ve aşama C için ekle, kalibrasyonu **SegFly**'a taşı,
+**VisDrone'u RGB havuzundan çıkar**.
 
 ## 2. CODrone — yeni birincil aday
 
@@ -90,6 +128,41 @@ listeliyordu; artık **arşivin içi okundu**:
 `vehicle` (UAVDT, kaba taneli) ayrı değerlendiriliyor** — yani tek bir
 "araç" sınıfı yok, iki kaynak iki sınıf olarak duruyor.
 
+### 3.0 Nesne boyutu — "kullanılabilir mi"nin cevabı
+
+Daha önce verilen cevap **"eğitime değil, ölçüme"** idi. Hedef bant
+netleşince o cevap yetmiyor: `aero_vis.json` indirilip **1 411 532 maske
+alanının tamamı** ölçüldü.
+
+| dilim | maske | medyan √alan | < 32 px | < 16 px | > 64 px |
+|---|---:|---:|---:|---:|---:|
+| `vd_` (VisDrone) | 1 015 836 | 34 px | %44,5 | %6,0 | %15,7 |
+| `ud_` (UAVDT) | 370 283 | **24 px** | **%75,1** | %23,7 | %5,2 |
+| `sd_` (SeaDronesSee) | 25 413 | **84 px** | %21,1 | %0,1 | **%56,0** |
+| **bütün** | **1 411 532** | **31 px** | **%52,1** | %10,6 | %13,7 |
+
+Çözünürlük de düşük: 117 videonun 35'i 1024×540, 4'ü 960×540, 10'u
+1344×756. Yalnızca 27'si tam 1080p.
+
+**Cevap:** AeroVIS **bütünüyle bant dışı**. Maskelerinin yarıdan fazlası
+32 px'in altında; onun üstünde ölçülen bir J&F skoru, esas olarak
+"tiny nesnede ne kadar iyisin" sorusunun cevabı olur — yani tam olarak
+odaklanmak istemediğin şey. Kullanılabilecek üç yolu var:
+
+1. **`sd_` dilimi (26 dizi / 8 170 kare / 25 413 maske, medyan 84 px).**
+   Bant içindeki tek parçası, ve listedeki **tek video örnek-maskesi +
+   kimlik** kaynağı olarak kalıyor. Kısıtı dar: yalnızca `boat` (41 iz) ve
+   `person` (34 iz), tamamı su üstü.
+2. **Boyut kovalı J&F.** Tüm sette ölç ama skoru √alan kovasına göre kır ve
+   raporda **≥ 45 px kovasını** öne al. Bu, kıyaslanabilirliği korurken
+   sayının hangi rejimden geldiğini gizlemez.
+3. **Hiç kullanma.** Bant içi video değerlendirmesi için AU-AIR (kimlik
+   yok ama kutu var) ya da UAVScenes/MVUAV daha dürüst.
+
+Kontaminasyon tarafında bir rahatlama var: VisDrone ve UAVDT artık havuza
+zaten girmeyecekleri için (§1, ölçüldü ve elendi), §3.3'teki "AeroVIS'i
+yakma" kısıtı pratikte kendiliğinden kalkıyor.
+
 ### 3.1 Nasıl üretilmiş
 
 `data.md`'nin kendi şeması: **VisDrone · SeaDronesSee · UAVDT → SAM3 +
@@ -146,17 +219,22 @@ ucu **ranged GET 206** döndürüyor (kaldığı yerden devam eden indirme
 
 | Set | Ne | İndirme (doğrulandı 2026-08-25) | Kutu biçimi |
 |---|---|---|---|
-| **VisDrone2019-DET** *(mevcut)* | 6 471 train / 548 val, 10 sınıf | HF `banu4prasad/VisDrone-Dataset`, `snapshot_download` | YOLO txt |
+| ~~**VisDrone2019-DET**~~ *(bugün havuzda — **çıkarılmalı**)* | 6 471 train / 548 val, 10 sınıf, **medyan 32 px / %51'i < 32 px** | HF `banu4prasad/VisDrone-Dataset`, `snapshot_download` | YOLO txt |
 | **CODrone** | 10 004 kare, 3840×2160, 12 sınıf, irtifa/açı ekseni | Drive `1FQ6mUaOr...`, **6,74 GiB** tek zip | DOTA poligon + VOC XML |
-| **SODA-A** | 2 513 kare, **872 069 yönlü kutu**, 9 sınıf, görüntü başına ~350 örnek | HF `torchgeo/soda-a`: `Images.zip` **10 960 MB** + `Annotations.zip` **55,4 MB** | yönlü kutu (JSON) |
-| **DIOR** | 23 463 görüntü 800×800, 192 472 kutu, 20 sınıf | HF `torchgeo/dior`: `Images_trainval.zip` 3 883 MB + `Images_test.zip` 3 528 MB + `Annotations_trainval.zip` 12,1 MB | VOC XML |
-| **DOTA v1.0 / v1.5 / v2.0** | v2.0: 11 268 görüntü, 1,79 M örnek, 18 sınıf | HF `isaaccorley/dota` (ungated, toplam 22,5 GB): `dotav1.0_images_train.tar.gz` 10 183 MB, `dotav2.0_images_train.tar.gz` 7 720 MB, etiketler ≤ 5 MB | DOTA poligon |
-| **SeaDronesSee** | denizde arama-kurtarma, 5 sınıf (`swimmer`, `boat`, `jetski`, `life_saving_appliances`, `buoy`) | Resmî dağıtım **kayıt istiyor**; HF aynası `dronefreak/SeaDronesSee` ungated, **7 416 MB**, 20 964 dosya, hazır `data.yaml` (train 3 shard + val 1 shard; test GT'siz) | YOLO txt |
+| ~~**SODA-A**~~ **(bant dışı)** | 2 513 kare, 872 069 yönlü kutu — ama görüntü başına ~350 örnek, tanımı gereği tiny | HF `torchgeo/soda-a`: `Images.zip` **10 960 MB** + `Annotations.zip` **55,4 MB** | yönlü kutu (JSON) |
+| ~~**DIOR**~~ **(uydu)** | 23 463 görüntü 800×800, 192 472 kutu, 20 sınıf | HF `torchgeo/dior`: `Images_trainval.zip` 3 883 MB + `Images_test.zip` 3 528 MB + `Annotations_trainval.zip` 12,1 MB | VOC XML |
+| ~~**DOTA v1.0 / v1.5 / v2.0**~~ **(uydu)** | v2.0: 11 268 görüntü, 1,79 M örnek, 18 sınıf | HF `isaaccorley/dota` (ungated, toplam 22,5 GB): `dotav1.0_images_train.tar.gz` 10 183 MB, `dotav2.0_images_train.tar.gz` 7 720 MB, etiketler ≤ 5 MB | DOTA poligon |
+| ~~**SeaDronesSee**~~ *(yüksek irtifa)* | denizde arama-kurtarma, 5 sınıf (`swimmer`, `boat`, `jetski`, `life_saving_appliances`, `buoy`) | Resmî dağıtım **kayıt istiyor**; HF aynası `dronefreak/SeaDronesSee` ungated, **7 416 MB**, 20 964 dosya, hazır `data.yaml` (train 3 shard + val 1 shard; test GT'siz) | YOLO txt |
 | **AU-AIR** | 32 823 kare 1920×1080, **132 031 kutu**, 8 sınıf, 2,8–30,6 m irtifa, kare başına GPS/IMU/hız | Drive `1pJ3xfKtHi...` **2,16 GiB** (`auair2019data.zip`) + `1boGF0L6ol...` **4,0 MB** (etiket zip'i, `annotations.json`) — ikisi de 206 | özel JSON (`top/left/width/height` + `class`) |
-| **AI-TOD-v2** | 28 036 görüntü, **752 745 örnek**, 8 sınıf, ortalama nesne **12,7 px** | [GitHub](https://github.com/Chasel-Tsui/AI-TOD-v2) — link sayfası, aynası yok | COCO |
+| ~~**AI-TOD-v2**~~ **(tanımı gereği tiny)** | 28 036 görüntü, 752 745 örnek, ortalama nesne **12,7 px** | [GitHub](https://github.com/Chasel-Tsui/AI-TOD-v2) — link sayfası, aynası yok | COCO |
 | **VEDAI** | 1 246 görüntü, 3 640 nesne, 8 araç sınıfı, **RGB + IR eş kayıtlı** | HF `ckyrkou/vedai`: `vedai.zip` **52,3 MB** (512² alt küme) | yönlü kutu |
 
-> **Uyarı — DOTA/DIOR/SODA-A "havadan" ama İHA değil.** Görüntüler Google
+> **Üstü çizili satırlar hedef bandın dışında** (§1). Listede kalmalarının
+> sebebi, öğretmenin *tavanını* değil **tabanını** ölçen stres testi
+> olabilmeleri: kutu-IoU kapısının 20 px'lik hedefte ne yaptığını görmek
+> isteyen bir koşu için hâlâ en hızlı yol. Eğitim havuzuna girmezler.
+>
+> **DOTA/DIOR/SODA-A "havadan" ama İHA değil.** Görüntüler Google
 > Earth / uydu / yüksek irtifa uçak. EdgeTAM'in hedef alanı 30–130 m İHA;
 > bunlar **alan çeşitliliği** ve **öğretmen stres testi** olarak değerli,
 > alan-içi eğitim verisi olarak değil. İHA irtifasında olanlar: VisDrone,
@@ -239,6 +317,27 @@ AUAIR = Recipe(
 )
 ```
 
+### 4.2 Bant içi diğer adaylar
+
+Hedef banda irtifasıyla giren ama her biri bir bedelle gelen dört set.
+İkisi ölçüldü, ikisinin erişimi betikle değil.
+
+| Set | irtifa · çözünürlük | ne | ölçüm / kısıt |
+|---|---|---|---|
+| **Okutama-Action** | **10–45 m**, 45°/90°, **4K** | 43 dizi / **77 365 kare**, kutu + **kimlik** + 12 eylem sınıfı, DJI Phantom 4 | Bandın ortası ve 4K → nesne iri olmalı. Ama **tek konu**: tek bir beysbol sahasında yürüyen/el sıkışan insanlar, araç yok. Erişim [GitHub](https://github.com/miquelmarti/Okutama-Action) üzerinden form |
+| **CARPK** | **~40 m**, DJI Phantom 3 | 4 otoparktan **89 777 araba kutusu** / 1 448 görüntü | Bant tam ortada, sınıf tek (`car`), sahne 4. HF aynası `ShantyCam/carpk`: **`carpk.zip` 2 081,6 MB**, ranged GET **206** — doğrulandı |
+| **Semantic Drone (TU Graz)** | **5–30 m**, **6000×4000** | 400 açık eğitim görüntüsü, 20 sınıf semantik + insan kutusu | Listedeki en yüksek çözünürlük ve en alçak irtifa → nesneler devasa. Ama **400 görüntü** ve dağıtımı [kurum sayfası](https://ivc.tugraz.at/research-project/semantic-drone-dataset/) / Kaggle |
+| **AeroScapes** | **5–50 m**, 1280×720 | 3 269 görüntü + maske, 12 sınıf (**Person, Bike, Car, Drone, Boat, Animal** = 6 "şey") | **Ölçüldü ve zayıf çıktı**: thing bileşenlerinin medyanı **35 px**, %40'ı 32 px altında, **kare başına medyan 1–2 nesne**. İrtifa bant içi ama 720p bunu yiyor. HF `dronefreak/Aeroscapes`, **757 MB**, hazır `data.yaml` |
+| **UAVid** | 50 m **eğik**, 3840×2160 | 420 görüntü (200/70/150) + maske, 8 sınıf | **Ölçüldü ve elendi**: medyan **28 px**, %58,7'si 32 px altında — 4K'ya rağmen, çünkü eğik bakışta karenin uzak yarısı tiny. HF `dronefreak/UAVid-2020`, 6,47 GB |
+
+**UAVid aynasında bir palet tuzağı daha.** `dronefreak/UAVid-2020` maskeleri
+resmî RGB paletiyle değil **sınıf indeksiyle** (0–7) dağıtıyor, ve indeks
+sırası resmî sıra **değil**: `data.yaml`'a göre `3 = Static Car`,
+`6 = Human`, `7 = Moving Car`. Resmî sıraya güvenip 5/6/7 okuyan bir probe
+**sıfır bileşen** buluyor — bu ölçümde bire bir yaşandı. Kust4K ve SegFly
+paletlerinin dersi burada üçüncü kez geçerli: **paleti setin kendi
+dosyasından oku.**
+
 ---
 
 ## 5. Gerçek örnek maskesi — kalibrasyon ve held-out
@@ -255,11 +354,28 @@ setler **az**:
 | **DRespNeT** | **poligon** | 2023 Türkiye–Suriye depremi 1080p İHA görüntüsü, **28 sınıf** (hasarlı bina, girişler, moloz, araç, sivil, kurtarma ekibi) | [figshare](https://figshare.com/s/66d3116a0de5b7d827fb) (YOLOv8-seg zip) · [arXiv 2508.16016](https://arxiv.org/pdf/2508.16016). **Bu sandbox'tan doğrulanamadı** (§8) |
 | **AeroVIS** | SAM3 + elle inceleme | §3 | Drive, doğrulandı |
 
-**Kalibrasyon için tavsiye: iSAID.** Sebep dürüstlük — AeroVIS'in maskesi
-SAM3 çıktısı, ve bizim öğretmenimiz de SAM 3. Bir SAM 3 öğretmenini SAM 3
-üretimi maskeye karşı skorlamak IoU'yu ölçmez, iki SAM 3 koşusunun
-tekrarlanabilirliğini ölçer. iSAID'in sınırları insan eli — döngü kapanmaz.
-Bedeli alan kayması (uydu ↔ İHA); rapor bunu yazmalı.
+**Kalibrasyon tavsiyesi hedef bant yüzünden değişti: iSAID değil, SegFly.**
+
+iSAID'in cazibesi hâlâ geçerliydi — 655 K sınır insan eli, ve öğretmeni
+kendi çıktısına karşı skorlama döngüsüne düşmüyor (AeroVIS'in maskesi
+SAM3 üretimi; SAM 3 öğretmenini ona karşı ölçmek IoU'yu değil iki SAM 3
+koşusunun tekrarlanabilirliğini ölçer). Ama iSAID **uydu görüntüsü**:
+kalibrasyonu tam da kaçınmak istediğimiz rejimde yapmak, ölçülen kabul
+oranını hedef bantta geçersiz kılar. Kalibrasyon **çalışılacak rejimde**
+olmalı.
+
+Bant içinde kalan seçenekler ve neden bu sıra:
+
+1. **SegFly — 30/40/50 m, zaten indiriliyor.** Hedef bandın birebir
+   kendisi, gerçek maske, 20 606 RGB kare. Kısıtı `things`in sadece
+   `vehicle` (13) + `truck` (36) olması — insan/motosiklet kalibre
+   edilemez. Bugünkü Kust4K rotasının yanına konması gereken ilk şey.
+2. **Semantic Drone (5–30 m, 6000×4000)** — AU-AIR'ın irtifasını maskeyle
+   eşleyen tek set; 400 görüntü az ama kalibrasyon zaten hacim işi değil.
+3. **AU-AIR'ın kendisi maske vermiyor**, ama **irtifa sütununu** o taşıyor
+   (§4.1): kabul oranını irtifaya göre kırmak için gereken ölçü onda.
+4. **iSAID → bant dışı stres testi.** Silinmiyor, ama rolü "kalibrasyon"
+   değil "öğretmen küçük nesnede nerede kırılıyor" sorusu.
 
 ---
 
@@ -331,6 +447,15 @@ oradan çıkarıldı. §2 ve §3'teki her sayı bu okumanın çıktısı — mak
 alınmadı. CODrone sınıf histogramı, arşivin içinden 30 rastgele `.txt`
 etiket dosyası okunarak üretildi.
 
+Boyut ölçümleri (§1) aynı disiplinle: CODrone irtifa kovası başına 34
+`annfile`, VisDrone-DET için aynanın 60 YOLO etiketi, AeroScapes için 18
+maske, UAVid için 6 maske (bağlı bileşen, `scipy.ndimage.label`), AU-AIR
+için etiket dosyasının **tamamı** (132 031 kutu), AeroVIS için
+`aero_vis.json`'ın **tamamı** (332,6 MB indirildi, 1 411 532 maske alanı).
+VisDrone'un YOLO etiketi normalize olduğu için piksel boyutu 1920×1080
+varsayımıyla hesaplandı — yani **iyimser taraf**; setin bir kısmı
+1360×765 ve orada nesneler daha da küçük.
+
 **Yapılamayan — üçü de bu sandbox'ın kısıtı, setin kusuru değil:**
 
 | Ne | Ne oldu |
@@ -348,51 +473,60 @@ etiket dosyası okunarak üretildi.
 (`Part.drive` ve `snapshot`/`url` yolları hazır):
 
 ```python
-CODRONE = Recipe(
+CODRONE = Recipe(                      # havuzun yeni gövdesi
     name="codrone",
     note="CODrone: 10 004 İHA karesi 3840x2160, 12 sınıf yönlü kutu, "
          "30/60/100 m irtifa x 30/90 derece kamera, ~%37 gece",
     parts=(Part("all", drive="1FQ6mUaOr_kATDaH7N2bObD5SRRkV7qJy",
                 size=7_233_513_058),),
 )
+# Tek zip, irtifaya göre bölünemiyor -- ayrım okuma anında, dosya adından:
+#   re.search(r"_(\d+)m_", stem).group(1) in {"30", "60"}
+# 30+60 m = 7 457 kare (medyan 47 / 60 px); 100 m dilimi (2 547) opsiyonel.
 
-AEROVIS = Recipe(                      # ölçüm seti -- havuza girmez
+AUAIR = Recipe(                        # bandın en iri nesnesi + irtifa sütunu
+    name="auair",
+    note="AU-AIR: 32 823 kare 1920x1080, 132 031 kutu, 2,8-30,6 m irtifa; "
+         "ardışık video kareleri, tek kavşak -- aşama B'ye seyrelterek",
+    parts=(
+        Part("images", drive="1pJ3xfKtHiTdysX5G3dxqKTdGESOBYCxJ",
+             size=2_318_071_652),
+        Part("annotations", drive="1boGF0L6olGe_Nu7rd1R8N7YmQErCb0xA",
+             size=4_039_375),
+    ),
+)
+
+AEROVIS = Recipe(                      # yalnızca ölçüm, ve yalnızca sd_ dilimi
     name="aerovis",
-    note="AeroVIS: 117 video / 49 204 kare / 8 279 iz, YTVIS RLE + track_id",
+    note="AeroVIS: 117 video / 49 204 kare / 8 279 iz, YTVIS RLE + track_id. "
+         "Bütünü bant dışı (medyan 31 px); sd_ dizileri bant içi",
     parts=(Part("all", drive="1DMLagGZMPntrvxk5W0PsaIoybsE7WX56",
                 size=13_563_857_996),),
 )
 
-ISAID = Recipe(                        # kalibrasyon: gerçek örnek sınırı
-    name="isaid",
-    note="iSAID: 655 451 elle çizilmiş örnek / 2 806 görüntü / 15 sınıf; "
-         "görüntüler DOTA v1.0",
-    parts=(
-        Part("ann-train", into="annotations",
-             url="https://huggingface.co/datasets/isaaccorley/isaid/"
-                 "resolve/main/isaid_annotations_train.tar.gz",
-             size=159_400_000),
-        Part("ann-val", into="annotations",
-             url="https://huggingface.co/datasets/isaaccorley/isaid/"
-                 "resolve/main/isaid_annotations_val.tar.gz",
-             size=52_700_000),
-        Part("img-train", into="images",
-             url="https://huggingface.co/datasets/isaaccorley/dota/"
-                 "resolve/main/dotav1.0_images_train.tar.gz",
-             size=10_183_000_000),
-        Part("img-val", into="images",
-             url="https://huggingface.co/datasets/isaaccorley/dota/"
-                 "resolve/main/dotav1.0_images_val.tar.gz",
-             size=3_331_300_000, default=False),
-    ),
+CARPK = Recipe(                        # ~40 m, tek sınıf, ucuz
+    name="carpk",
+    note="CARPK: 1 448 görüntü / 89 777 araba kutusu, ~40 m, 4 otopark",
+    parts=(Part("all",
+                url="https://huggingface.co/datasets/ShantyCam/carpk/"
+                    "resolve/main/carpk.zip",
+                size=2_081_600_000),),
 )
 ```
 
-Boyutlar canlı `content-length`/`content-range`'den; `Part.md5` bu üç
-kaynakta yayıncı tarafından verilmiyor, bu yüzden boş — Kust4K'daki gibi
-md5 doğrulaması yapılamaz, karşılığında defterin **probe hücresi** sayarak
-doğrular (CODrone: 10 004 görüntü ve `ignored` sınıfının varlığı;
-AeroVIS: 117 dizi / 49 204 kare; iSAID: 15 sınıf).
+iSAID/DOTA tarifi bilerek yazılmadı: §5'te kalibrasyon iSAID'den SegFly'a
+taşındı, ve SegFly `fetch_datasets.py`'de zaten var.
+
+Boyutlar canlı `content-length`/`content-range`'den; `Part.md5` bu
+kaynakların hiçbirinde yayıncı tarafından verilmiyor, bu yüzden boş —
+Kust4K'daki gibi md5 doğrulaması yapılamaz, karşılığında defterin **probe
+hücresi** sayarak doğrular (CODrone: 10 004 görüntü, `ignored` sınıfının
+varlığı ve irtifa histogramının 3 141/4 316/2 547 çıkması; AU-AIR: 32 823
+kare / 132 031 kutu; AeroVIS: 117 dizi / 49 204 kare; CARPK: 89 777 kutu).
+
+Probe hücresine bu dokümanın asıl ölçütü de girmeli: **medyan √alan ve
+< 32 px oranı**. Yeni bir kaynak eklendiğinde önce o iki sayı basılmalı;
+eşik (§1.1) medyan ≥ 45 px ve < 32 px ≤ %30.
 
 Sınıf id'leri **hiçbirinde ezberden yazılmamalı** — Kust4K ve SegFly
 paletlerinin ikisinin de yanlış tahmin edildiği dersi burada da geçerli.
