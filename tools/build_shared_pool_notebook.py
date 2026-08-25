@@ -9,13 +9,22 @@ prose and no comments, as few cells as possible**, because it is not a decision
 to be read, it is a job to be run. Folding that shape into the templated
 builder would mean a variant flag on every cell.
 
-What the notebook does, in five cells:
+What the notebook does, in six cells:
 
   1. clone, install, mount Drive, size the batch to the card
   2. unzip DroneVehicle out of the user's own Drive, build the shared index
   3. load the teacher, draw two frames so the mirror is visible before it runs
-  4. harvest: prompt on RGB, file the mask under both pools
-  5. zip both pools back to Drive
+  4. harvest the shared boxes: prompt on RGB, file the mask under both pools
+  5. harvest the two *-only sets, each prompted on the half that can see them
+  6. zip all four pools back to Drive
+
+Four pools, because provenance has to stay readable: `dronevehicle_rgb` and
+`dronevehicle_thermal` are the shared boxes (one mask, two files),
+`dronevehicle_thermal_only` is the 33 383 vehicles the visible half never
+annotates -- night, mostly -- and `dronevehicle_rgb_only` is the 3 797 the
+thermal half misses. A thermal training run reads the second and third; merging
+them into one directory would make a mirrored mask indistinguishable from a
+thermal-prompted one.
 
 Three decisions inside it are not arbitrary and are argued where they live
 rather than in the notebook:
@@ -30,6 +39,11 @@ is ahead of SAM 2.1 on image PVS and is the pools' default teacher. It is a
 gated repo, so the notebook falls back to `facebook/sam2.1-hiera-large` and
 says which one it used -- and the report records the model id either way, so a
 pool built on the fallback is not silently mistaken for one built on SAM 3.
+
+**The *-only sets are prompted on their own modality, never on the twin.**
+They are the boxes the other half does not annotate, usually because the target
+is not visible there; `--prompt pair` on them would ask the teacher to segment
+whatever happens to sit at those coordinates in a frame that shows nothing.
 
 **`frame_group`, not just `batch_size`.** The shared subset carries a median of
 4 boxes per frame. Batching within a frame on an 80 GB card is batching in
@@ -59,13 +73,16 @@ def code(text: str) -> None:
 # --------------------------------------------------------------------------
 
 code('''
-DRIVE_DIR   = "/content/drive/MyDrive/CHANGE_ME/DroneVehicle"
+DRIVE_DIR   = "/content/drive/MyDrive/DroneVehicle"
 DATA_ROOT   = "/content/data/DroneVehicle"
 POOL_ROOT   = "/content/pool"
 RGB_POOL    = "dronevehicle_rgb"
 TIR_POOL    = "dronevehicle_thermal"
-MIRROR_DIR  = "/content/drive/MyDrive/edgetam-pool/dronevehicle_shared"
+TIR_ONLY    = "dronevehicle_thermal_only"
+RGB_ONLY    = "dronevehicle_rgb_only"
+MIRROR_DIR  = "/content/drive/MyDrive/edgetam-pool/dronevehicle"
 ARCHIVES    = ["train.zip"]
+ONLY_DISTANCE = 40.0
 TEACHER     = "facebook/sam3"
 FALLBACK    = "facebook/sam2.1-hiera-large"
 DTYPE       = "bfloat16"
@@ -108,6 +125,13 @@ try:
         os.environ["HF_TOKEN"] = _token
 except Exception as _token_error:
     print("no HF_TOKEN secret:", _token_error)
+
+if os.environ.get("HF_TOKEN"):
+    try:
+        from huggingface_hub import login as _login
+        _login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
+    except Exception as _login_error:
+        print("hf login skipped:", _login_error)
 
 import torch
 
@@ -222,21 +246,23 @@ plt.show()
 code('''
 from src.training.pool import label_pool, pool_report, summarise_pool, write_index
 
-REPORT = None
-while REPORT is None:
-    try:
-        REPORT = label_pool(FRAMES, TEACHER_MODEL, POOL_ROOT, dataset=RGB_POOL,
-                            prompt="self", mirror=TIR_POOL, gates=GATES,
-                            zoom=ZOOM, min_size=MIN_SIZE, batch_size=BATCH,
-                            frame_group=FRAME_GROUP, limit=LIMIT,
-                            max_boxes=MAX_BOXES, progress=progress)
-    except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        BATCH = max(1, BATCH // 2)
-        FRAME_GROUP = max(1, FRAME_GROUP // 2)
-        print("out of memory, retrying at BATCH", BATCH,
-              "FRAME_GROUP", FRAME_GROUP)
+def harvest(frames, dataset, mirror=None):
+    global BATCH, FRAME_GROUP
+    while True:
+        try:
+            return label_pool(frames, TEACHER_MODEL, POOL_ROOT, dataset=dataset,
+                              prompt="self", mirror=mirror, gates=GATES,
+                              zoom=ZOOM, min_size=MIN_SIZE, batch_size=BATCH,
+                              frame_group=FRAME_GROUP, limit=LIMIT,
+                              max_boxes=MAX_BOXES, progress=progress)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            BATCH = max(1, BATCH // 2)
+            FRAME_GROUP = max(1, FRAME_GROUP // 2)
+            print("out of memory, retrying at BATCH", BATCH,
+                  "FRAME_GROUP", FRAME_GROUP)
 
+REPORT = harvest(FRAMES, RGB_POOL, mirror=TIR_POOL)
 print(json.dumps(REPORT, indent=1))
 write_index(POOL_ROOT)
 print(summarise_pool(pool_report(POOL_ROOT)))
@@ -244,12 +270,31 @@ print(summarise_pool(pool_report(POOL_ROOT)))
 
 
 # --------------------------------------------------------------------------
-# 5. Both pools back to Drive
+# 5. The other half: targets one modality annotates and the other never does
+# --------------------------------------------------------------------------
+
+code('''
+ONLY_REPORTS = {}
+for _modality, _pool in (("thermal", TIR_ONLY), ("rgb", RGB_ONLY)):
+    _only = B.dronevehicle_only_frames(DATA_ROOT, modality=_modality,
+                                       distance=ONLY_DISTANCE)
+    print(_modality, "only:", len(_only), "frames /",
+          sum(len(f.classes) for f in _only), "boxes")
+    ONLY_REPORTS[_modality] = harvest(_only, _pool)
+    print(json.dumps(ONLY_REPORTS[_modality], indent=1))
+
+write_index(POOL_ROOT)
+print(summarise_pool(pool_report(POOL_ROOT)))
+''')
+
+
+# --------------------------------------------------------------------------
+# 6. All four pools back to Drive
 # --------------------------------------------------------------------------
 
 code('''
 Path(MIRROR_DIR).mkdir(parents=True, exist_ok=True)
-for _pool in (RGB_POOL, TIR_POOL):
+for _pool in (RGB_POOL, TIR_POOL, TIR_ONLY, RGB_ONLY):
     _target = Path(MIRROR_DIR) / f"{_pool}.zip"
     _files = [p for p in sorted((Path(POOL_ROOT) / _pool).rglob("*")) if p.is_file()]
     with zipfile.ZipFile(_target, "w", zipfile.ZIP_STORED, allowZip64=True) as _zip:
@@ -261,8 +306,11 @@ for _pool in (RGB_POOL, TIR_POOL):
 _index = Path(POOL_ROOT) / "pool_index.jsonl"
 if _index.is_file():
     shutil.copy(_index, Path(MIRROR_DIR) / _index.name)
-print("teacher:", TEACHER_USED, "| accepted:", REPORT["accepted"],
-      "| mirrored frames:", REPORT["mirrored"])
+print("teacher:", TEACHER_USED,
+      "| shared accepted:", REPORT["accepted"],
+      "| mirrored frames:", REPORT["mirrored"],
+      "| thermal-only:", ONLY_REPORTS["thermal"]["accepted"],
+      "| rgb-only:", ONLY_REPORTS["rgb"]["accepted"])
 ''')
 
 

@@ -161,7 +161,16 @@ olabileceği tek yol oydu.
 
 Öğretmen `facebook/sam3`, gated olduğu için `facebook/sam2.1-hiera-large`'a
 düşüyor ve hangisinin kullanıldığını hem ekrana hem her `record.json`'a
-yazıyor; yedekle üretilmiş bir havuz SAM 3'le üretilmiş sanılamaz.
+yazıyor; yedekle üretilmiş bir havuz SAM 3'le üretilmiş sanılamaz. Colab'de
+`HF_TOKEN` secret'ı varsa defter onunla `huggingface_hub.login` çağırıyor.
+
+Beşinci hücre tamamlayıcıyı hasat ediyor: `dronevehicle_only_frames` ile
+termal-only (33 383 kutu / 4 420 kare) ve rgb-only (3 797 / 2 146), her biri
+**yalnız kendi modalitesinde** promptlanarak, `mirror` olmadan. Karşılığı 40 px
+içinde biraz farklı çizilmiş olan ~%36'lık orta bölge hiçbir hasada girmiyor —
+tek nesneye iki maske koymamak için. Havuz böylece dört klasör:
+`dronevehicle_{rgb,thermal,thermal_only,rgb_only}`; ayrı durmaları
+aynalanmış maskeyi termalde promptlanmış olandan ayırt edilebilir tutuyor.
 
 Defter 13/14'ün `DATASETS` listesine bağlamak bilerek ayrı bırakıldı —
 önce havuzun kendisi incelensin, sonra defter üretici (

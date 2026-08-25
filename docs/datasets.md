@@ -486,10 +486,45 @@ tersi, bilerek) ve `pool.label_pool(..., mirror=...)` tek öğretmen
 geçişinin çıktısını iki havuza birden yazıyor: termal havuzun bedeli bir
 dosya kopyası.
 
-Bunun **bilerek dışarıda bıraktığı** şey, setin var olma sebebi olan
-%10,6'lık termal-only hedefler. Onlar ayrı bir termal-promptlu geçiş ister
-(`--dataset dronevehicle --modality thermal --prompt self`). Defter 15 ucuz
-yarıyı hasat eder, tamamını değil.
+### Yalnız-bir-modalitede kutular — üçüncü ve dördüncü havuz
+
+Paylaşılan alt kümenin tamamlayıcısı tek parça değil, iki farklı parça.
+Termal kutuların **~%36'sının** RGB tarafında biraz farklı çizilmiş bir
+karşılığı var (aynı araç, başka dikdörtgen) — bunları ayrıca etiketlemek tek
+nesneye iki maske koymak olur, o yüzden **hiçbir hasada girmiyorlar.** Geri
+kalanın ise karşılığı **hiç yok**: diğer dosyada aynı sınıftan, merkezi 40 px
+içinde bir kutu bulunmuyor.
+
+| | termal-only | rgb-only |
+|---|---:|---:|
+| kutu | **33 383 (%10,6)** | **3 797 (%1,3)** |
+| taşıyan kare | 4 420 (%24,6) | 2 146 (%11,9) |
+| kare başına | medyan 0, ortalama 1,9, p90 5 | medyan 0, ortalama 0,2, p90 1 |
+| medyan √alan | 45,7 px | 36,7 px |
+| ≥32 px | %87,0 | %65,6 |
+| sınıflar | car 26 911 · freight 2 607 · truck 2 293 · bus 988 · van 584 | car 3 284 · van 160 · truck 148 · freight 129 · bus 76 |
+
+Asimetri **dokuz kat**: termal kameranın gördüğü ve görünürün kaçırdığı araç
+sayısı, tersinin dokuz katı. Gece. Setin var olma sebebi tam olarak bu sayı.
+
+`boxes.dronevehicle_only_frames(root, modality=...)` bu kutuları veriyor.
+**Prompt yalnız kendi modalitesinde** olabilir (`prompt="self"`, `mirror` yok):
+diğer yarı hedefi zaten göstermiyor, oraya promptlamak öğretmenden o
+koordinatlarda ne varsa onu segmentlemesini istemek olur. `pair` referans
+olarak taşınıyor, prompt kaynağı olarak değil.
+
+Böylece havuz dört klasör oluyor ve dördü de ayrı duruyor —
+`dronevehicle_rgb` + `dronevehicle_thermal` (paylaşılan, tek maske iki dosya),
+`dronevehicle_thermal_only`, `dronevehicle_rgb_only`. Tek klasöre karıştırmak
+aynalanmış bir maskeyi termalde promptlanmış birinden ayırt edilemez kılardı;
+kayıtların `prompt` alanı (`self` / `mirror`) bu ayrımı taşıyor.
+
+**Üç bölme de aynı düzeni kullanıyor.** `val.zip` (723 321 423 B, 1 469 çift)
+`val/{valimg,valimgr,vallabel,vallabelr}`, `test.zip` (4 430 343 899 B,
+8 980 çift) `test/{testimg,…}` — merkezi dizinlerden okundu. Toplam
+17 990 + 1 469 + 8 980 = **28 439**, yayının sayısı. Okuyucular `*img` /
+`*imgr` / `*label` / `*labelr` kalıbına baktığı için üçü de ek kod
+istemiyor; `ARCHIVES`'a eklemek yetiyor.
 
 **Kaggle'daki YOLOv11-OBB sürümü bu iş için kullanılamaz.** (Kaggle API'sinden
 okundu: `redzapdos123/dronevehicle-dataset-yolov11-obb`, 1,04 GB,

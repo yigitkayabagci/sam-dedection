@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 from src.training.boxes import (  # noqa: E402
     BIRDSAI_SPECIES,
     DRONEVEHICLE_ALIASES,
+    dronevehicle_only_frames,
     dronevehicle_shared_frames,
     VISDRONE_NAMES,
     BoxFrame,
@@ -603,6 +604,94 @@ class TestSharedFrames(unittest.TestCase):
             root = self.fixture(Path(tmp), self.SAME + self.OTHER, self.OTHER)
             frame, = dronevehicle_shared_frames(root)
             self.assertEqual(frame.classes, ("bus",))
+
+
+class TestOnlyFrames(unittest.TestCase):
+    """The other half of the split: targets one modality never annotates."""
+
+    def boxed(self, name: str, x: int, y: int) -> str:
+        return (f"<object><name>{name}</name><bndbox>"
+                f"<xmin>{x}</xmin><ymin>{y}</ymin>"
+                f"<xmax>{x + 50}</xmax><ymax>{y + 40}</ymax>"
+                f"</bndbox></object>")
+
+    def fixture(self, tmp: Path, thermal: str, rgb: str) -> Path:
+        root = tmp / "dv"
+        for folder in ("trainimg", "trainimgr", "trainlabel", "trainlabelr"):
+            (root / "train" / folder).mkdir(parents=True)
+        for folder in ("trainimg", "trainimgr"):
+            (root / "train" / folder / "00001.jpg").write_bytes(b"jpg")
+        (root / "train" / "trainlabelr" / "00001.xml").write_text(
+            f"<annotation>{thermal}</annotation>")
+        (root / "train" / "trainlabel" / "00001.xml").write_text(
+            f"<annotation>{rgb}</annotation>")
+        return root
+
+    def test_a_box_only_the_thermal_half_draws_is_thermal_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(
+                Path(tmp),
+                self.boxed("car", 200, 200) + self.boxed("bus", 500, 400),
+                self.boxed("car", 200, 200))
+            frame, = dronevehicle_only_frames(root, modality="thermal")
+            self.assertEqual(frame.classes, ("bus",))
+            self.assertEqual(frame.image.parent.name, "trainimgr")
+            self.assertEqual(frame.pair.parent.name, "trainimg")
+            self.assertEqual(frame.inset, 100)
+
+    def test_the_rgb_side_is_the_mirror_image_of_that(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(
+                Path(tmp),
+                self.boxed("car", 200, 200),
+                self.boxed("car", 200, 200) + self.boxed("van", 500, 400))
+            frame, = dronevehicle_only_frames(root, modality="rgb")
+            self.assertEqual(frame.classes, ("van",))
+            self.assertEqual(frame.image.parent.name, "trainimg")
+            self.assertEqual(frame.pair.parent.name, "trainimgr")
+
+    def test_a_counterpart_drawn_slightly_differently_is_not_only(self):
+        # ~36 % of thermal boxes are this case: same vehicle, different
+        # rectangle. Harvesting them here would put two masks on one object.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                self.boxed("car", 200, 200),
+                                self.boxed("car", 210, 208))
+            with self.assertRaises(FileNotFoundError):
+                dronevehicle_only_frames(root, modality="thermal")
+
+    def test_the_distance_gate_is_what_decides_that(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                self.boxed("car", 200, 200),
+                                self.boxed("car", 210, 208))
+            frame, = dronevehicle_only_frames(root, modality="thermal",
+                                              distance=5.0)
+            self.assertEqual(frame.classes, ("car",))
+
+    def test_a_counterpart_of_another_class_does_not_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                self.boxed("car", 200, 200),
+                                self.boxed("bus", 200, 200))
+            frame, = dronevehicle_only_frames(root, modality="thermal")
+            self.assertEqual(frame.classes, ("car",))
+
+    def test_the_shared_and_only_subsets_do_not_overlap(self):
+        # An identical box has distance 0, so it is matched at any gate.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(
+                Path(tmp),
+                self.boxed("car", 200, 200) + self.boxed("bus", 500, 400),
+                self.boxed("car", 200, 200))
+            shared, = dronevehicle_shared_frames(root)
+            only, = dronevehicle_only_frames(root, modality="thermal")
+            self.assertEqual(shared.classes, ("car",))
+            self.assertEqual(only.classes, ("bus",))
+
+    def test_an_unknown_modality_is_refused(self):
+        with self.assertRaises(ValueError):
+            dronevehicle_only_frames("/nowhere", modality="infrared")
 
 
 class TestLabelMany(unittest.TestCase):

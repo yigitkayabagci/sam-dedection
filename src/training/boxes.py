@@ -284,6 +284,43 @@ def _dronevehicle_objects(path: Path) -> list[tuple[str, tuple, list[float]]]:
     return found
 
 
+def _dronevehicle_halves(root: Path):
+    """Yield `(image, twin, own objects, other objects)` per registered pair.
+
+    The four folders DroneVehicle ships -- `*img` / `*imgr` for the two
+    modalities and `*label` / `*labelr` for their two separate annotation sets
+    -- under whichever split prefix the archive used. `train`, `val` and
+    `test` all follow it, so a reader written against this walks all three
+    without knowing their names.
+    """
+    for rgb_dir in sorted(root.rglob("*img")):
+        if not rgb_dir.is_dir() or not rgb_dir.name.endswith("img"):
+            continue
+        prefix = rgb_dir.name[:-len("img")]
+        folders = {
+            "rgb": rgb_dir,
+            "thermal": rgb_dir.parent / f"{prefix}imgr",
+            "rgb_labels": rgb_dir.parent / f"{prefix}label",
+            "thermal_labels": rgb_dir.parent / f"{prefix}labelr",
+        }
+        if not all(p.is_dir() for p in folders.values()):
+            continue
+        twins = _images_by_stem(folders["thermal"])
+        for image in sorted(rgb_dir.iterdir()):
+            if image.suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            twin = twins.get(image.stem)
+            if twin is None:
+                continue
+            yield (image, twin,
+                   _dronevehicle_objects(folders["rgb_labels"] / f"{image.stem}.xml"),
+                   _dronevehicle_objects(folders["thermal_labels"] / f"{image.stem}.xml"))
+
+
+def _centre(box: SequenceABC[float]) -> tuple[float, float]:
+    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+
 def dronevehicle_shared_frames(root: str | Path,
                                border: int = 100) -> list[BoxFrame]:
     """Only the boxes both modalities annotate identically, prompted on RGB.
@@ -316,50 +353,104 @@ def dronevehicle_shared_frames(root: str | Path,
     """
     root = Path(root)
     frames: list[BoxFrame] = []
-    for rgb_dir in sorted(root.rglob("*img")):
-        if not rgb_dir.is_dir() or not rgb_dir.name.endswith("img"):
-            continue
-        prefix = rgb_dir.name[:-len("img")]
-        thermal_dir = rgb_dir.parent / f"{prefix}imgr"
-        rgb_labels = rgb_dir.parent / f"{prefix}label"
-        thermal_labels = rgb_dir.parent / f"{prefix}labelr"
-        if not (thermal_dir.is_dir() and rgb_labels.is_dir()
-                and thermal_labels.is_dir()):
-            continue
-        twins = _images_by_stem(thermal_dir)
+    for image, twin, rgb_objects, thermal_objects in _dronevehicle_halves(root):
+        available: dict[tuple[str, tuple], int] = {}
+        for name, key, _ in rgb_objects:
+            available[(name, key)] = available.get((name, key), 0) + 1
 
-        for image in sorted(rgb_dir.iterdir()):
-            if image.suffix.lower() not in IMAGE_SUFFIXES:
+        boxes, classes = [], []
+        for name, key, envelope in thermal_objects:
+            if available.get((name, key), 0) <= 0:
                 continue
-            twin = twins.get(image.stem)
-            if twin is None:
-                continue
-            rgb_objects = _dronevehicle_objects(rgb_labels / f"{image.stem}.xml")
-            if not rgb_objects:
-                continue
-            available: dict[tuple[str, tuple], int] = {}
-            for name, key, _ in rgb_objects:
-                available[(name, key)] = available.get((name, key), 0) + 1
-
-            boxes, classes = [], []
-            for name, key, envelope in _dronevehicle_objects(
-                    thermal_labels / f"{image.stem}.xml"):
-                if available.get((name, key), 0) <= 0:
-                    continue
-                available[(name, key)] -= 1     # one thermal box per RGB box
-                boxes.append(envelope)
-                classes.append(name)
-            if not boxes:
-                continue
-            frames.append(BoxFrame(
-                key=f"{rgb_dir.parent.name}/{image.stem}", image=image,
-                boxes=np.asarray(boxes, dtype=np.float64),
-                classes=tuple(classes), pair=twin, inset=border))
+            available[(name, key)] -= 1      # one thermal box per RGB box
+            boxes.append(envelope)
+            classes.append(name)
+        if not boxes:
+            continue
+        frames.append(BoxFrame(
+            key=f"{image.parent.parent.name}/{image.stem}", image=image,
+            boxes=np.asarray(boxes, dtype=np.float64),
+            classes=tuple(classes), pair=twin, inset=border))
     if not frames:
         raise FileNotFoundError(
             f"{root}: no frame had a box both halves annotate identically -- "
             f"is this the extracted DroneVehicle archive (`*img/`, `*imgr/`, "
             f"`*label/`, `*labelr/` side by side)?")
+    return frames
+
+
+def dronevehicle_only_frames(root: str | Path, modality: str = "thermal",
+                             distance: float = 40.0,
+                             border: int = 100) -> list[BoxFrame]:
+    """The targets one modality annotates and the other does not, at all.
+
+    The complement `dronevehicle_shared_frames` leaves behind has two very
+    different halves, and only one of them is worth its own harvest. About
+    36 % of thermal boxes have an RGB counterpart the annotator drew slightly
+    differently -- same vehicle, different rectangle -- and labelling those
+    again would put two masks on one object. The rest have **no** counterpart:
+    a box is *only* in this modality when no same-class box in the other file
+    has its centre within `distance` pixels of it.
+
+    Counted over all 17 990 train pairs, that split is wildly asymmetric, and
+    the asymmetry is the dataset's reason to exist:
+
+    | | thermal-only | rgb-only |
+    |---|---:|---:|
+    | boxes | 33 383 (10.6 %) | 3 797 (1.3 %) |
+    | frames carrying any | 4 420 (24.6 %) | 2 146 (11.9 %) |
+    | median sqrt(area) | 45.7 px | 36.7 px |
+    | at or above 32 px | 87.0 % | 65.6 % |
+
+    Nine times as many vehicles are visible to the thermal camera and missing
+    from the visible one as the other way round -- night, mostly.
+
+    `image` is the frame these boxes were drawn on, and it is the only frame
+    they may be prompted on: the whole point is that the other modality does
+    not show the target. `pair` is carried for reference, never as a prompt
+    source, so pass `prompt="self"` and no `mirror`.
+
+    `distance` at 0 reduces this to "no same-class box at the identical
+    centre", which is nearly the strict complement of the shared subset; the
+    40 px default is the gate the published counts above were measured with.
+    """
+    if modality not in ("thermal", "rgb"):
+        raise ValueError(f"modality must be thermal or rgb, got {modality!r}")
+    root = Path(root)
+    frames: list[BoxFrame] = []
+    for image, twin, rgb_objects, thermal_objects in _dronevehicle_halves(root):
+        own, other = ((thermal_objects, rgb_objects) if modality == "thermal"
+                      else (rgb_objects, thermal_objects))
+        available = list(other)
+        boxes, classes = [], []
+        for name, _key, envelope in own:
+            here = _centre(envelope)
+            best, best_distance = -1, float("inf")
+            for index, (other_name, _, other_box) in enumerate(available):
+                if other_name != name:
+                    continue
+                there = _centre(other_box)
+                gap = float(np.hypot(here[0] - there[0], here[1] - there[1]))
+                if gap < best_distance:
+                    best, best_distance = index, gap
+            if best >= 0 and best_distance <= distance:
+                available.pop(best)          # one counterpart per box
+                continue
+            boxes.append(envelope)
+            classes.append(name)
+        if not boxes:
+            continue
+        source, mate = ((twin, image) if modality == "thermal"
+                        else (image, twin))
+        frames.append(BoxFrame(
+            key=f"{image.parent.parent.name}/{image.stem}", image=source,
+            boxes=np.asarray(boxes, dtype=np.float64),
+            classes=tuple(classes), pair=mate, inset=border))
+    if not frames:
+        raise FileNotFoundError(
+            f"{root}: no {modality}-only box found -- is this the extracted "
+            f"DroneVehicle archive (`*img/`, `*imgr/`, `*label/`, `*labelr/` "
+            f"side by side)?")
     return frames
 
 
