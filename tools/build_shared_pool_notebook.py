@@ -14,9 +14,9 @@ What the notebook does, in six cells:
   1. clone, install, mount Drive, size the batch to the card
   2. copy DroneVehicle off Drive, unpack it entry by entry, build the index
   3. load the teacher, draw two frames so the mirror is visible before it runs
-  4. harvest the shared boxes: prompt on RGB, file the mask under both pools
-  5. harvest the two *-only sets, each prompted on the half that can see them
-  6. zip all four pools back to Drive
+  4. harvest the shared boxes in chunks, shipping each chunk to Drive
+  5. harvest the two *-only sets the same way
+  6. close the pool out: last shard, one zip per pool, index, manifest
 
 Four pools, because provenance has to stay readable: `dronevehicle_rgb` and
 `dronevehicle_thermal` are the shared boxes (one mask, two files),
@@ -26,7 +26,7 @@ thermal half misses. A thermal training run reads the second and third; merging
 them into one directory would make a mirrored mask indistinguishable from a
 thermal-prompted one.
 
-Six decisions inside it are not arbitrary and are argued where they live
+Seven decisions inside it are not arbitrary and are argued where they live
 rather than in the notebook:
 
 **Drive, not the Hub.** `fetch_datasets.py` pulls DroneVehicle from
@@ -80,6 +80,27 @@ The done-marker moved with it: the old one was the extracted `train/` directory,
 which a run that died halfway through creates, so the next run reported
 "already staged" over a half-unpacked dataset.
 
+**A runtime that dies is the expected case, not the failure case.** This is
+hours of A100 time against 33 000 frames, in a session whose owner has to
+close the laptop. The old cell 6 wrote everything to Drive once, at the end,
+which makes every hour before it worthless if the runtime goes away. The
+harvest now runs in `CHUNK`-frame slices and ships each slice to Drive as a
+numbered zip under `shards/` -- append-only, written to `.part` and renamed,
+so a shard on Drive is either whole or absent. `restore()` at the top of cell
+4 extracts every shard back into `POOL_ROOT` before anything runs, and
+`label_pool(resume=True)` then skips the frames whose store is already there.
+Re-running cells 1-5 in a fresh runtime is the recovery procedure, and it
+costs one Drive read.
+
+What ships is the *new* files only: the set of paths already on Drive is
+rebuilt at restore from what the shards put on disk, not carried in a ledger
+that could disagree with them. A shard write that fails after four tries
+leaves `SHIPPED` untouched and prints why, so the next checkpoint carries
+those files instead of losing them. The four consolidated `<pool>.zip` files
+are still written at the end -- one zip per pool is what a training run wants
+to unpack -- but they are now the convenience and the shards are the
+guarantee.
+
 **SAM 3 by default.** `docs/mask_pool_plan.md` section 1 measured this: SAM 3
 is ahead of SAM 2.1 on image PVS and is the pools' default teacher. It is a
 gated repo, so the notebook falls back to `facebook/sam2.1-hiera-large` and
@@ -129,6 +150,7 @@ RGB_ONLY    = "dronevehicle_rgb_only"
 MIRROR_DIR  = "/content/drive/MyDrive/edgetam-pool/dronevehicle"
 STAGE_DIR   = "/content/stage"
 ARCHIVES    = ["train.zip"]
+CHUNK       = 400
 ONLY_DISTANCE = 40.0
 TEACHER     = "facebook/sam3"
 FALLBACK    = "facebook/sam2.1-hiera-large"
@@ -398,25 +420,104 @@ plt.show()
 code('''
 from src.training.pool import label_pool, pool_report, summarise_pool, write_index
 
+POOLS = (RGB_POOL, TIR_POOL, TIR_ONLY, RGB_ONLY)
+SHARD_DIR = Path(MIRROR_DIR) / "shards"
+SHARD_DIR.mkdir(parents=True, exist_ok=True)
+SHIPPED = set()
+
+def pool_files():
+    return [p for p in sorted(Path(POOL_ROOT).rglob("*"))
+            if p.is_file() and p.suffix != ".jsonl"]
+
+def restore():
+    _shards = sorted(SHARD_DIR.glob("*.zip"))
+    for _shard in progress(_shards, len(_shards), "restore"):
+        with zipfile.ZipFile(_shard) as _zip:
+            _zip.extractall(POOL_ROOT)
+    SHIPPED.update(str(p.relative_to(POOL_ROOT)) for p in pool_files())
+    print("restored", len(_shards), "shards /", len(SHIPPED), "files from Drive")
+
+def manifest(reports=None):
+    (Path(MIRROR_DIR) / "manifest.json").write_text(json.dumps({
+        "notebook": NOTEBOOK, "stamp": STAMP, "teacher": TEACHER_USED,
+        "written": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "data_root": DATA_ROOT, "pool_root": POOL_ROOT, "datasets": list(POOLS),
+        "shards": [p.name for p in sorted(SHARD_DIR.glob("*.zip"))],
+        "files": len(SHIPPED), "gates": vars(GATES), "zoom": ZOOM,
+        "min_size": MIN_SIZE, "reports": reports}, indent=1))
+
+def checkpoint(note):
+    _new = [p for p in pool_files()
+            if str(p.relative_to(POOL_ROOT)) not in SHIPPED]
+    if not _new:
+        print("checkpoint", note, "| nothing new")
+        return
+    _shard = SHARD_DIR / f"{len(list(SHARD_DIR.glob('*.zip'))):04d}.zip"
+    _partial = _shard.with_name(_shard.name + ".part")
+    for _attempt in range(4):
+        try:
+            with zipfile.ZipFile(_partial, "w", zipfile.ZIP_DEFLATED,
+                                 allowZip64=True) as _zip:
+                for _file in _new:
+                    _zip.write(_file, _file.relative_to(POOL_ROOT))
+            _partial.replace(_shard)
+            SHIPPED.update(str(p.relative_to(POOL_ROOT)) for p in _new)
+            manifest()
+            print("checkpoint", note, "->", _shard.name, len(_new), "files",
+                  round(_shard.stat().st_size / 2 ** 20, 1), "MiB")
+            return
+        except OSError as _shard_error:
+            print("shard write failed, retrying:", _shard_error)
+            time.sleep(2 ** _attempt)
+    print("!!", note, "not written to Drive -- it stays local and the next "
+          "checkpoint ships it")
+
+def merge(reports):
+    _out = {}
+    for _report in reports:
+        for _key, _value in _report.items():
+            if _value is None or isinstance(_value, (str, bool)):
+                _out[_key] = _value
+            elif isinstance(_value, dict):
+                _into = _out.setdefault(_key, {})
+                for _name, _count in _value.items():
+                    _into[_name] = _into.get(_name, 0) + _count
+            elif _key != "acceptance_rate":
+                _out[_key] = _out.get(_key, 0) + _value
+    _out["acceptance_rate"] = (_out.get("accepted", 0) / _out["attempted"]
+                               if _out.get("attempted") else 0.0)
+    return _out
+
 def harvest(frames, dataset, mirror=None):
     global BATCH, FRAME_GROUP
-    while True:
-        try:
-            return label_pool(frames, TEACHER_MODEL, POOL_ROOT, dataset=dataset,
-                              prompt="self", mirror=mirror, gates=GATES,
-                              zoom=ZOOM, min_size=MIN_SIZE, batch_size=BATCH,
-                              frame_group=FRAME_GROUP, limit=LIMIT,
-                              max_boxes=MAX_BOXES, progress=progress)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            BATCH = max(1, BATCH // 2)
-            FRAME_GROUP = max(1, FRAME_GROUP // 2)
-            print("out of memory, retrying at BATCH", BATCH,
-                  "FRAME_GROUP", FRAME_GROUP)
+    _frames = list(frames)[:LIMIT] if LIMIT is not None else list(frames)
+    _reports = []
+    for _start in range(0, len(_frames), CHUNK):
+        _part = _frames[_start:_start + CHUNK]
+        while True:
+            try:
+                _reports.append(label_pool(
+                    _part, TEACHER_MODEL, POOL_ROOT, dataset=dataset,
+                    prompt="self", mirror=mirror, gates=GATES, zoom=ZOOM,
+                    min_size=MIN_SIZE, batch_size=BATCH,
+                    frame_group=FRAME_GROUP, max_boxes=MAX_BOXES,
+                    progress=progress))
+                break
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                BATCH = max(1, BATCH // 2)
+                FRAME_GROUP = max(1, FRAME_GROUP // 2)
+                print("out of memory, retrying at BATCH", BATCH,
+                      "FRAME_GROUP", FRAME_GROUP)
+        checkpoint(f"{dataset} {min(_start + CHUNK, len(_frames))}"
+                   f"/{len(_frames)}")
+    return merge(_reports)
 
+restore()
 REPORT = harvest(FRAMES, RGB_POOL, mirror=TIR_POOL)
 print(json.dumps(REPORT, indent=1))
-write_index(POOL_ROOT)
+INDEX = write_index(POOL_ROOT)
+shutil.copy(INDEX, Path(MIRROR_DIR) / INDEX.name)
 print(summarise_pool(pool_report(POOL_ROOT)))
 ''')
 
@@ -435,7 +536,8 @@ for _modality, _pool in (("thermal", TIR_ONLY), ("rgb", RGB_ONLY)):
     ONLY_REPORTS[_modality] = harvest(_only, _pool)
     print(json.dumps(ONLY_REPORTS[_modality], indent=1))
 
-write_index(POOL_ROOT)
+INDEX = write_index(POOL_ROOT)
+shutil.copy(INDEX, Path(MIRROR_DIR) / INDEX.name)
 print(summarise_pool(pool_report(POOL_ROOT)))
 ''')
 
@@ -445,19 +547,32 @@ print(summarise_pool(pool_report(POOL_ROOT)))
 # --------------------------------------------------------------------------
 
 code('''
-Path(MIRROR_DIR).mkdir(parents=True, exist_ok=True)
-for _pool in (RGB_POOL, TIR_POOL, TIR_ONLY, RGB_ONLY):
+checkpoint("final")
+REPORTS = {"shared": REPORT, "thermal_only": ONLY_REPORTS["thermal"],
+           "rgb_only": ONLY_REPORTS["rgb"]}
+manifest(REPORTS)
+
+_packed = 0
+for _pool in POOLS:
     _target = Path(MIRROR_DIR) / f"{_pool}.zip"
-    _files = [p for p in sorted((Path(POOL_ROOT) / _pool).rglob("*")) if p.is_file()]
-    with zipfile.ZipFile(_target, "w", zipfile.ZIP_STORED, allowZip64=True) as _zip:
-        for _file in _files:
+    _partial = _target.with_name(_target.name + ".part")
+    _files = [p for p in sorted((Path(POOL_ROOT) / _pool).rglob("*"))
+              if p.is_file()]
+    with zipfile.ZipFile(_partial, "w", zipfile.ZIP_DEFLATED,
+                         allowZip64=True) as _zip:
+        for _file in progress(_files, len(_files), _pool):
             _zip.write(_file, _file.relative_to(Path(POOL_ROOT)))
+    _partial.replace(_target)
+    _packed += len(_files)
     print(_target, len(_files), "files",
           round(_target.stat().st_size / 2 ** 20, 1), "MiB")
 
-_index = Path(POOL_ROOT) / "pool_index.jsonl"
-if _index.is_file():
-    shutil.copy(_index, Path(MIRROR_DIR) / _index.name)
+INDEX = write_index(POOL_ROOT)
+shutil.copy(INDEX, Path(MIRROR_DIR) / INDEX.name)
+print(summarise_pool(pool_report(POOL_ROOT)))
+print(len(pool_files()), "files in the pool /", _packed, "in the four zips /",
+      len(list(SHARD_DIR.glob("*.zip"))), "shards |",
+      "COMPLETE" if _packed == len(pool_files()) else "MISMATCH")
 print("teacher:", TEACHER_USED,
       "| shared accepted:", REPORT["accepted"],
       "| mirrored frames:", REPORT["mirrored"],

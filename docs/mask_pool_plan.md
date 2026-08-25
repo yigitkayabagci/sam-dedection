@@ -147,12 +147,29 @@ havuzun bedeli bir dosya kopyası. Eş karenin boyutu tutmazsa aynalama
 yapılmıyor ve `mirror_mismatch` olarak sayılıyor — bunun sessizce yanlış
 olabileceği tek yol oydu.
 
-Dört operasyonel karar:
+Beş operasyonel karar:
 
 - **Veri Drive'dan.** `fetch_datasets.py` DroneVehicle'ı Hub'dan 8,88 GB
   indiriyor; kullanıcının kendi Drive'ındaki kopya mount edilmiş bir okuma,
   indirme yok. Defterin tek veri ayarı `DRIVE_DIR` ve yer tutucu olarak
   geliyor.
+- **Ölen çalışma zamanı beklenen durum, arıza değil.** Hasat 33 000 kare
+  üzerinde saatlerce A100 demek ve oturumun sahibi bilgisayarı kapatmak
+  zorunda. Eski altıncı hücre her şeyi Drive'a *bir kez*, en sonda yazıyordu;
+  bu da çalışma zamanı giderse ondan önceki her saati çöpe atıyor. Hasat artık
+  `CHUNK` karelik dilimler hâlinde koşuyor ve her dilimi `shards/` altına
+  numaralı bir zip olarak Drive'a gönderiyor — yalnızca ekleyen, `.part`'a
+  yazılıp rename edilen, yani Drive'daki bir shard ya bütün ya da yok. Dördüncü
+  hücrenin başındaki `restore()` her shard'ı `POOL_ROOT`'a geri açıyor,
+  `label_pool(resume=True)` de deposu zaten duran kareleri atlıyor: taze bir
+  çalışma zamanında 1-5. hücreleri tekrar çalıştırmak kurtarma prosedürünün
+  kendisi ve maliyeti bir Drive okuması. Gönderilen şey yalnız *yeni*
+  dosyalar; "Drive'da zaten ne var" listesi shard'ların diske koyduğundan
+  yeniden türetiliyor, onlarla çelişebilecek bir deftere yazılmıyor. Dört
+  denemede de başarısız olan bir shard yazımı `SHIPPED`'i değiştirmiyor ve
+  sebebini yazıyor, dolayısıyla o dosyaları bir sonraki checkpoint taşıyor.
+  Havuz başına tek `<pool>.zip` yine en sonda yazılıyor — bir eğitim koşusunun
+  açmak isteyeceği şey o — ama artık kolaylık onlar, garanti shard'lar.
 - **Çalışan kernel'in çoktan import ettiği bir paket yükseltilmiyor.** Birinci
   hücrenin pip satırında `pillow` vardı; canlı bir Colab oturumunda
   `--upgrade pillow` bir tuzak: Colab ilk hücreden önce matplotlib'i, onun
