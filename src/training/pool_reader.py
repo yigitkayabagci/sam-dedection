@@ -240,6 +240,50 @@ def group_records(root: str | Path, workers: int = 8) -> dict[str, list[Path]]:
     return {name: sorted(paths) for name, paths in sorted(grouped.items())}
 
 
+def acceptance(records: SequenceABC[Path]) -> dict:
+    """What a harvest actually produced: boxes attempted, kept, and why not.
+
+    The number nobody was reading, and the one that decides whether a pool is
+    worth its download. A rejected box writes **nothing** to the store, so a
+    pool of forty thousand frames whose teacher refused nine tenths of them is
+    a pool of four thousand masks -- and from the outside it looks the same as
+    a pool of forty thousand, because the frame directories are all there.
+
+    `rejected` is keyed by the gate that stopped the box, and the order
+    matters: `reject_reason` returns at the **first** gate that fails, so a
+    box counted under `teacher_iou` was never measured against its own
+    annotation. A pool whose rejects pile up there has not been shown to carry
+    bad masks; it has been shown to carry masks the teacher was unsure of.
+    """
+    counts = {"frames": 0, "attempted": 0, "accepted": 0}
+    rejected: dict[str, int] = {}
+    classes: dict[str, int] = {}
+    teachers: set[str] = set()
+    for path in records:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        counts["frames"] += 1
+        teachers.add(str(record.get("teacher", "?")))
+        for instance in record.get("instances", ()):
+            counts["attempted"] += 1
+            verdict = instance.get("verdict")
+            if verdict is None:
+                counts["accepted"] += 1
+                name = str(instance.get("class", "?"))
+                classes[name] = classes.get(name, 0) + 1
+            else:
+                rejected[str(verdict)] = rejected.get(str(verdict), 0) + 1
+    return {**counts,
+            "rate": counts["accepted"] / counts["attempted"]
+                    if counts["attempted"] else 0.0,
+            "rejected": dict(sorted(rejected.items(), key=lambda kv: -kv[1])),
+            "accepted_by_class": dict(sorted(classes.items(),
+                                             key=lambda kv: -kv[1])),
+            "teachers": sorted(teachers)}
+
+
 def frame_keys(index: SequenceABC[FrameIndex]) -> set[str]:
     """The frames an index covers, as keys comparable across two readers.
 
@@ -623,7 +667,8 @@ def load_pool_index(path: str | Path, gates: InstanceGates | None = None,
 
 
 __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
-           "Relocator", "SKIP_REASONS", "describe_pools", "discover_pools",
+           "Relocator", "SKIP_REASONS", "acceptance", "describe_pools",
+           "discover_pools",
            "exclude_frames", "frame_keys", "group_records",
            "index_pool", "index_pools", "link_pool",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",

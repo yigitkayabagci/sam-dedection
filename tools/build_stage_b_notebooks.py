@@ -257,7 +257,8 @@ print("stage B only: no stage A, no distillation, base =", BASE_CKPT)
 # frames cannot be trained on while that set is the grade.
 
 code('''
-from src.training.pool_reader import discover_pools, group_records, link_pool
+from src.training.pool_reader import (acceptance, discover_pools,
+                                      group_records, link_pool)
 
 _done = Path(POOL_ROOT) / ".unpacked"
 _done.mkdir(parents=True, exist_ok=True)
@@ -297,11 +298,23 @@ for _name, _folder in discover_pools(DRIVE_POOLS).items():
 
 print()
 RAW = group_records(POOL_ROOT)
-POOLS, TEACHERS = {}, {}
+POOLS, TEACHERS, HARVEST = {}, {}, {}
+print(f"{'pool':<28}{'frames':>8}{'boxes':>9}{'masks':>9}{'kept':>7}   "
+      f"{'first gate that stopped the rest':<34}teacher")
 for _name, _records in RAW.items():
     POOLS[_name] = str(link_pool(_records, Path(POOL_ROOT) / "_by_name" / _name))
-    TEACHERS[_name] = json.loads(_records[0].read_text()).get("teacher", "?")
-    print(f"{_name:<28}{len(_records):>8} frames   {TEACHERS[_name]}")
+    HARVEST[_name] = acceptance(_records)
+    TEACHERS[_name] = "+".join(HARVEST[_name]["teachers"])
+    _top = ", ".join(f"{k} {v}" for k, v in
+                     list(HARVEST[_name]["rejected"].items())[:2]) or "nothing"
+    print(f"{_name:<28}{HARVEST[_name]['frames']:>8}"
+          f"{HARVEST[_name]['attempted']:>9}{HARVEST[_name]['accepted']:>9}"
+          f"{HARVEST[_name]['rate']:>7.1%}   {_top:<34}{TEACHERS[_name]}")
+print("\\na box the first gate stops is never measured against its own "
+      "annotation: `reject_reason` returns at the first failure, and "
+      "`teacher_iou` is the teacher's own confidence, which this repo "
+      "measured as the weak gate. A pool whose rejects pile up there has "
+      "not been shown to hold bad masks -- only unsure ones.")
 FOUND = sorted(POOLS)
 assert FOUND, f"no record.json under {POOL_ROOT} -- nothing was unpacked"
 
@@ -768,6 +781,7 @@ code('''
 VERDICT = {
     "run": RUN, "modalities": MODALITIES, "image_size": SIZE,
     "pools": POOL_FLAGS, "datasets": DATASET_FLAGS, "teachers": TEACHERS,
+    "harvest": HARVEST,
     "dropped": DROPPED, "unusable": FAILED,
     "frames": {k: len(v) for k, v in SPLITS.items()},
     "train_windows_by_source": TRAIN.sources,

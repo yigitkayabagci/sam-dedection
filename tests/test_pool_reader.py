@@ -321,6 +321,33 @@ class PoolIndexTest(unittest.TestCase):
                            workers=1)
         self.assertEqual(frame_keys(index), {"00042"})
 
+    def test_acceptance_counts_what_the_harvest_kept_and_what_stopped_it(self):
+        """The number that says whether a pool is worth its download.
+
+        A rejected box writes nothing to the store, so a pool whose teacher
+        refused nine boxes in ten looks, from the directory tree alone,
+        exactly like one that kept them all.
+        """
+        from src.training.pool_reader import acceptance
+
+        image = write_image(self.images / "counted.png", *self.shape)
+        write_frame(self.pool, "counted", image, self.shape, [
+            ("car", self.boxes[0][1], blob(self.shape, self.boxes[0][1])),
+            ("truck", self.boxes[1][1], None),
+            ("car", (10, 10, 40, 40), None)])
+        report = acceptance(sorted(self.pool.rglob(RECORD_FILE)))
+        self.assertEqual(report["frames"], 1)
+        self.assertEqual((report["attempted"], report["accepted"]), (3, 1))
+        self.assertAlmostEqual(report["rate"], 1 / 3)
+        self.assertEqual(report["rejected"], {"box_iou": 2})
+        self.assertEqual(report["accepted_by_class"], {"car": 1})
+        self.assertEqual(report["teachers"], ["test/teacher"])
+
+    def test_acceptance_of_nothing_is_zero_rather_than_a_division(self):
+        from src.training.pool_reader import acceptance
+
+        self.assertEqual(acceptance([])["rate"], 0.0)
+
     def test_a_pool_with_no_records_says_where_to_look(self):
         self.build()
         with self.assertRaises(FileNotFoundError) as caught:
