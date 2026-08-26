@@ -115,9 +115,15 @@ EVAL_DRAWN  = "kust4k"
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = []
 POOL_ROLE   = "all"
+POOL_ROLES  = {"kaggle_uav_thermal": "train"}
 POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
+
+IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal"}
+KAGGLE_DATASETS = {
+    "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
+}
 
 SOURCE_ZIPS = [
     ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
@@ -132,6 +138,7 @@ IMAGES = [
     ["segfly_rgb",   "",             "SegFly",       []],
     ["segfly",       "",             "SegFly",       []],
     ["vtuav",        "vtuav_track",  "VTUAV",        VTUAV_PARTS],
+    ["kaggle",       "",             "kaggle_uav_thermal", []],
 ]
 
 SIZE           = 512
@@ -363,7 +370,8 @@ def images_for(pool):
     lowered = pool.lower()
     for key, recipe, folder, parts in IMAGES:
         if key in lowered:
-            return key, recipe, str(Path(DATA_ROOT) / folder), list(parts)
+            root = IMAGE_ROOTS.get(pool) or str(Path(DATA_ROOT) / folder)
+            return key, recipe, root, list(parts)
     return None, "", "", []
 
 PLAN, DROPPED = [], []
@@ -379,11 +387,18 @@ for _pool in FOUND:
     else:
         PLAN.append({"pool": _pool, "dir": str(POOLS[_pool]), "key": _key,
                      "recipe": _recipe, "images": _root, "parts": _parts,
-                     "modality": _modality})
+                     "modality": _modality,
+                     "role": POOL_ROLES.get(_pool, POOL_ROLE)})
 
-print(f"\\n{'pool':<28}{'modality':<10}{'frames from':<28}")
+print(f"\\n{'pool':<28}{'modality':<10}{'role':<7}{'frames from':<40}")
 for _row in PLAN:
-    print(f"{_row['pool']:<28}{_row['modality']:<10}{_row['images']:<28}")
+    print(f"{_row['pool']:<28}{_row['modality']:<10}{_row['role']:<7}"
+          f"{_row['images']:<40}")
+for _pool, _role in POOL_ROLES.items():
+    if _role == "train" and any(r["pool"] == _pool for r in PLAN):
+        print(f"   {_pool} feeds training only -- it never reaches val or test, "
+              f"so it cannot inflate the score with a domain the deployment "
+              f"does not have.")
 for _pool, _why in DROPPED:
     print(f"{_pool:<28}dropped   {_why}")
 assert PLAN, "nothing left to train on -- read the dropped list above"
@@ -420,6 +435,25 @@ if FETCH:
                            DRIVE_MY, "/content/staging"))
         except Exception as _fetch_error:
             print("!!", _recipe, "->", _root, "failed:", _fetch_error)
+
+for _pool, _slug in KAGGLE_DATASETS.items():
+    if not any(_row["pool"] == _pool for _row in PLAN):
+        continue
+    _root = Path(IMAGE_ROOTS.get(_pool, ""))
+    if _root and _root.is_dir() and any(
+            any(_root.rglob(_glob)) for _glob in ("*.jpg", "*.png")):
+        print("already on disk:", _root)
+        continue
+    try:
+        import kagglehub
+        _got = kagglehub.dataset_download(_slug)
+        _root.parent.mkdir(parents=True, exist_ok=True)
+        if not _root.exists():
+            os.symlink(_got, _root)
+        print("kaggle:", _slug, "->", _got)
+    except Exception as _kaggle_error:
+        print("!! could not fetch", _slug, "--", _kaggle_error)
+        print("   put its frames under", _root, "or set IMAGE_ROOTS in cell 1")
 
 for _archive, _folder in SOURCE_ZIPS:
     _target = Path(DATA_ROOT) / _folder
@@ -486,15 +520,15 @@ if EVAL_DRAWN:
 print()
 POOL_FLAGS, FAILED = [], []
 for _row in PLAN:
-    _flag = f"{_row['dir']}:{_row['images']}:{_row['modality']}:{POOL_ROLE}"
+    _flag = f"{_row['dir']}:{_row['images']}:{_row['modality']}:{_row['role']}"
     _request = parse_pool(_flag, GATES)
     _cache = Path(INDEX_DIR) / f"{_request.cache_name}.json"
     try:
         if _cache.is_file():
-            _part = load_pool_index(_cache, GATES, POOL_ROLE)
+            _part = load_pool_index(_cache, GATES, _row["role"])
         else:
             _part = index_pool(_request.pool, _request.images, _request.modality,
-                               POOL_ROLE, GATES, _request.name,
+                               _row["role"], GATES, _request.name,
                                workers=WORKERS, progress=progress)
             save_pool_index(_cache, _part)
     except (ValueError, FileNotFoundError) as _index_error:
@@ -561,7 +595,8 @@ print("\\ntest windows by source:")
 for _source, _count in TEST.sources.items():
     print(f"  {_source:<34}{_count:>8}")
 assert not ({id(e) for e in SPLITS["train"]} & {id(e) for e in SPLITS["test"]})
-assert TEST.samples, "the test split is empty -- POOL_ROLE=train leaves nothing to grade"
+assert TEST.samples, ("the test split is empty -- every pool is role=train "
+                      "and there is no drawn grade, so nothing can be scored")
 
 _leaked = DRAWN_HELD & frame_keys(
     [e for e in SPLITS["train"] if e.source and e.source.mode == "pool"])
@@ -822,6 +857,7 @@ VERDICT = {
     "train_windows_by_source": TRAIN.sources,
     "test_windows_by_source": TEST.sources,
     "gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,
+    "roles": {_row["pool"]: _row["role"] for _row in PLAN},
     "prompt": PROMPT, "prompt_jitter": PROMPT_JITTER,
     "epochs": EPOCHS, "steps": STEPS, "seed": SEED,
     "run_log": RUN_LOG, "before": BEFORE, "after": AFTER,
