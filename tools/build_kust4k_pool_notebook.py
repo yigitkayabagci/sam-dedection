@@ -89,6 +89,7 @@ CAL_FRAMES  = 120                    # frames in the route measurement
 QUANTILE    = 0.02                   # clean-score floor the broken half must clear
 DROP_CORRUPT = True                  # False harvests both halves regardless
 EXPORT_PNG  = True                   # instance-id PNGs beside the run-length stores
+REQUIRE_DRIVE = True                 # False runs without Drive, no mirror
 REPO_URL    = "https://github.com/yigitkayabagci/sam-dedection.git"
 BRANCH      = "claude/aerial-rgb-thermal-data-qhjpxd"
 REPO_DIR    = "/content/sam-dedection"
@@ -98,21 +99,73 @@ STAMP    = "{{STAMP}}"
 import json, os, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
+# An existing clone is *updated*, not reused as-is. The old version cloned
+# only when the folder was absent, so a push landed while a runtime was alive
+# was invisible and the notebook went on running last week's code.
 if not Path(REPO_DIR).exists():
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
                     REPO_URL, REPO_DIR], check=True)
+else:
+    subprocess.run(["git", "-C", REPO_DIR, "fetch", "--depth", "1", "origin",
+                    BRANCH], check=False)
+    subprocess.run(["git", "-C", REPO_DIR, "reset", "--hard",
+                    f"origin/{BRANCH}"], check=False)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
+
+# And what the clone actually contains is checked here rather than discovered
+# as an ImportError four cells in. A branch that has not been pushed looks
+# exactly like a branch that has, right up to the traceback.
+REQUIRED = {
+    "tools/fetch_datasets.py": ("stage_rgbt_archives", "likely_dataset_dirs"),
+    "src/training/boxes.py": ("kust4k_frames", "semantic_frames"),
+    "src/training/pool.py": ("modality_agreement", "intact_modalities",
+                             "boundary_agreement"),
+}
+_stale = [f"{_file} -> {_name}"
+          for _file, _names in REQUIRED.items()
+          for _name in _names
+          if f"def {_name}(" not in (Path(REPO_DIR) / _file).read_text()]
+if _stale:
+    raise SystemExit(
+        "this clone of " + BRANCH + " is missing:\\n  " + "\\n  ".join(_stale)
+        + "\\n\\nThe branch on GitHub is behind the working copy. Push it:\\n"
+        "    git push origin " + BRANCH + "\\n"
+        "then re-run this cell -- it fetches and resets, so there is no need "
+        "to delete the runtime.")
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
                 "pillow", "tqdm"], check=False)
 
+# The mount is retried with `force_remount` before it is believed, because a
+# half-finished earlier mount fails the plain call and succeeds the forced
+# one. And a failure is fatal by default rather than printed: MIRROR_DIR is on
+# Drive, so a run that cannot mount is a run that harvests for hours and then
+# has nowhere to put the result.
+DRIVE_OK = False
 try:
     from google.colab import drive as _drive
-    _drive.mount("/content/drive")
-except Exception as _mount_error:
-    print("no Colab Drive mount:", _mount_error)
+except ImportError:
+    _drive = None
+    print("not a Colab runtime; Drive skipped")
+if _drive is not None:
+    for _forced in (False, True):
+        try:
+            _drive.mount("/content/drive", force_remount=_forced)
+            DRIVE_OK = True
+            break
+        except Exception as _mount_error:
+            print("drive mount failed:", _mount_error,
+                  "-- retrying with force_remount" if not _forced else "")
+if not DRIVE_OK and REQUIRE_DRIVE:
+    raise SystemExit(
+        "Drive is not mounted and MIRROR_DIR is on it.\\n"
+        "  - re-run this cell and accept the authorisation popup; a popup "
+        "blocker or blocked third-party cookies is the usual cause\\n"
+        "  - Runtime > Disconnect and delete runtime, then try again\\n"
+        "  - or set REQUIRE_DRIVE = False to run anyway and copy the pool out "
+        "by hand")
 
 try:
     from google.colab import userdata as _userdata
@@ -122,12 +175,12 @@ try:
 except Exception as _token_error:
     print("no HF_TOKEN secret:", _token_error)
 
-if os.environ.get("HF_TOKEN"):
-    try:
-        from huggingface_hub import login as _login
-        _login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
-    except Exception as _login_error:
-        print("hf login skipped:", _login_error)
+# No `login()` call. `huggingface_hub` reads HF_TOKEN from the environment on
+# its own, and calling login as well makes it print a warning that the env var
+# is the active token "independently from the token you've just configured" --
+# which reads like an access problem and is not one.
+print("HF_TOKEN:", "set" if os.environ.get("HF_TOKEN") else
+      "MISSING -- add it as a Colab secret (key icon, left bar) and re-run")
 
 import torch
 

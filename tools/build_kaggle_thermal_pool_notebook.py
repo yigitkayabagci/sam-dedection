@@ -132,6 +132,7 @@ LIMIT        = None
 BOX_IOU      = 0.5
 EXPORT_PNG   = True
 KEEP_ARCHIVE = False         # True keeps the 13 GB zip after extraction
+REQUIRE_DRIVE = True         # False runs without Drive, no mirror
 REPO_URL     = "https://github.com/yigitkayabagci/sam-dedection.git"
 BRANCH       = "claude/aerial-rgb-thermal-data-qhjpxd"
 REPO_DIR     = "/content/sam-dedection"
@@ -141,21 +142,71 @@ STAMP    = "{{STAMP}}"
 import json, os, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
+# An existing clone is *updated*, not reused as-is. The old version cloned
+# only when the folder was absent, so a push landed while a runtime was alive
+# was invisible and the notebook went on running last week's code.
 if not Path(REPO_DIR).exists():
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
                     REPO_URL, REPO_DIR], check=True)
+else:
+    subprocess.run(["git", "-C", REPO_DIR, "fetch", "--depth", "1", "origin",
+                    BRANCH], check=False)
+    subprocess.run(["git", "-C", REPO_DIR, "reset", "--hard",
+                    f"origin/{BRANCH}"], check=False)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
+
+# And what the clone actually contains is checked here rather than discovered
+# as an ImportError four cells in. A branch that has not been pushed looks
+# exactly like a branch that has, right up to the traceback.
+REQUIRED = {
+    "src/training/boxes.py": ("yolo_label_frames", "filter_by_scale",
+                              "scale_table", "box_scale"),
+}
+_stale = [f"{_file} -> {_name}"
+          for _file, _names in REQUIRED.items()
+          for _name in _names
+          if f"def {_name}(" not in (Path(REPO_DIR) / _file).read_text()]
+if _stale:
+    raise SystemExit(
+        "this clone of " + BRANCH + " is missing:\\n  " + "\\n  ".join(_stale)
+        + "\\n\\nThe branch on GitHub is behind the working copy. Push it:\\n"
+        "    git push origin " + BRANCH + "\\n"
+        "then re-run this cell -- it fetches and resets, so there is no need "
+        "to delete the runtime.")
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
                 "kaggle", "pandas", "pillow", "tqdm"], check=False)
 
+# The mount is retried with `force_remount` before it is believed, because a
+# half-finished earlier mount fails the plain call and succeeds the forced
+# one. And a failure is fatal by default rather than printed: MIRROR_DIR is on
+# Drive, so a run that cannot mount is a run that harvests for hours and then
+# has nowhere to put the result.
+DRIVE_OK = False
 try:
     from google.colab import drive as _drive
-    _drive.mount("/content/drive")
-except Exception as _mount_error:
-    print("no Colab Drive mount:", _mount_error)
+except ImportError:
+    _drive = None
+    print("not a Colab runtime; Drive skipped")
+if _drive is not None:
+    for _forced in (False, True):
+        try:
+            _drive.mount("/content/drive", force_remount=_forced)
+            DRIVE_OK = True
+            break
+        except Exception as _mount_error:
+            print("drive mount failed:", _mount_error,
+                  "-- retrying with force_remount" if not _forced else "")
+if not DRIVE_OK and REQUIRE_DRIVE:
+    raise SystemExit(
+        "Drive is not mounted and MIRROR_DIR is on it.\\n"
+        "  - re-run this cell and accept the authorisation popup; a popup "
+        "blocker or blocked third-party cookies is the usual cause\\n"
+        "  - Runtime > Disconnect and delete runtime, then try again\\n"
+        "  - or set REQUIRE_DRIVE = False to run anyway and copy the pool out "
+        "by hand")
 
 # Two secrets, both set by you in the Colab key panel and never printed here:
 # HF_TOKEN for the gated SAM 3 repo, KAGGLE_USERNAME + KAGGLE_KEY for the
@@ -172,12 +223,13 @@ try:
 except Exception as _secret_error:
     print("no Colab secrets:", _secret_error)
 
-if os.environ.get("HF_TOKEN"):
-    try:
-        from huggingface_hub import login as _login
-        _login(token=os.environ["HF_TOKEN"], add_to_git_credential=False)
-    except Exception as _login_error:
-        print("hf login skipped:", _login_error)
+# No `login()` call. `huggingface_hub` reads HF_TOKEN from the environment on
+# its own, and calling login as well makes it print a warning that the env var
+# is the active token "independently from the token you've just configured" --
+# which reads like an access problem and is not one.
+KAGGLE_OK = bool(os.environ.get("KAGGLE_USERNAME")
+                 and os.environ.get("KAGGLE_KEY")) \
+    or Path("~/.kaggle/kaggle.json").expanduser().is_file()
 
 import torch
 
@@ -197,9 +249,21 @@ _want = json.loads(_stamps.read_text()).get(NOTEBOOK) if _stamps.is_file() else 
 print(NOTEBOOK, STAMP, "| repo:", _want,
       "| OK" if _want == STAMP else "| STALE, re-open from the repo")
 print(_device.name if _device else "no GPU", VRAM, "GiB",
-      "| BATCH", BATCH, "| FRAME_GROUP", FRAME_GROUP)
-print("kaggle creds:", "yes" if os.environ.get("KAGGLE_KEY")
-      or Path("~/.kaggle/kaggle.json").expanduser().is_file() else "MISSING")
+      "| BATCH", BATCH, "| FRAME_GROUP", FRAME_GROUP,
+      "| HF_TOKEN", "set" if os.environ.get("HF_TOKEN") else "MISSING")
+if not KAGGLE_OK:
+    # Two names, both needed, and the toggle is the part people miss: a Colab
+    # secret exists but is unreadable until "Notebook access" is on for this
+    # notebook, and `userdata.get` then raises rather than returning None.
+    print("KAGGLE creds MISSING. kaggle.com > Settings > API > Create New "
+          "Token downloads kaggle.json; then either")
+    print("  a) Colab key icon (left bar): add KAGGLE_USERNAME and KAGGLE_KEY "
+          "from that file, turn ON 'Notebook access' for BOTH, re-run")
+    print("  b) upload kaggle.json and run in a scratch cell:")
+    print("     !mkdir -p ~/.kaggle && cp kaggle.json ~/.kaggle/ && "
+          "chmod 600 ~/.kaggle/kaggle.json")
+else:
+    print("KAGGLE creds: ok")
 ''')
 
 
@@ -214,6 +278,8 @@ code('''
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 ARCHIVE = next(iter(sorted(Path(DOWNLOAD_DIR).glob("*.zip"))), None)
 if ARCHIVE is None:
+    if not KAGGLE_OK:
+        raise SystemExit("no Kaggle credentials -- see what cell 1 printed")
     subprocess.run(["kaggle", "datasets", "download", "-d", KAGGLE_DATASET,
                     "-p", DOWNLOAD_DIR], check=True)
     ARCHIVE = next(iter(sorted(Path(DOWNLOAD_DIR).glob("*.zip"))))
