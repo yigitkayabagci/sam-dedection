@@ -856,7 +856,14 @@ def predict(model, samples, batch_size, want_masks=False):
     torch.cuda.empty_cache()
     return scored, drawn
 
-PANEL_POOL = TEST.samples[:PANEL_WINDOWS]
+_shuffled = np.random.default_rng(SEED).permutation(len(TEST.samples))
+PANEL_POOL = [TEST.samples[int(i)] for i in _shuffled[:PANEL_WINDOWS]]
+_panel_sources = {}
+for _sample in PANEL_POOL:
+    _name = _sample.source.spec.name if _sample.source else "?"
+    _panel_sources[_name] = _panel_sources.get(_name, 0) + 1
+print("panel pool:", len(PANEL_POOL), "windows from", len(_panel_sources),
+      "sources", dict(sorted(_panel_sources.items(), key=lambda kv: -kv[1])))
 _model = build_model(SIZE, BASE_CKPT, "cuda")
 _before, _ = predict(_model, PANEL_POOL, max(BATCH // 4, 1))
 del _model; torch.cuda.empty_cache()
@@ -874,6 +881,17 @@ print(f"{len(CASES)} held-out instances scored twice under `{PANEL_PROMPT}`: "
       f"{sum(1 for c in CASES if c['delta'] > 0.01)} better, "
       f"{sum(1 for c in CASES if c['delta'] < -0.01)} worse, "
       f"{sum(1 for c in CASES if abs(c['delta']) <= 0.01)} unchanged")
+_tally = {}
+for _case in CASES:
+    _name = (_case["sample"].source.spec.name if _case["sample"].source else "?")
+    _cell = _tally.setdefault(_name, [0, 0, 0.0])
+    _cell[0 if _case["delta"] > 0.01 else 1] += 1 if abs(_case["delta"]) > 0.01 else 0
+    _cell[2] += _case["delta"]
+print(f"{'source':<34}{'better':>8}{'worse':>8}{'mean delta':>12}")
+for _name, (_up, _down, _sum) in sorted(_tally.items(), key=lambda kv: -kv[1][2]):
+    _n = sum(1 for c in CASES
+             if (c["sample"].source.spec.name if c["sample"].source else "?") == _name)
+    print(f"{_name:<34}{_up:>8}{_down:>8}{_sum / max(_n, 1):>+12.4f}")
 assert SHOWN, "no instance was scored by both checkpoints"
 
 PICKED = sorted({id(c["sample"]): c["sample"] for c in SHOWN}.values(),
