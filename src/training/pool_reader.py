@@ -50,6 +50,13 @@ from .aerial import (ROLES, DatasetSpec, Frame, FrameIndex, Instance,
 from .labels import MASK_STORE
 from .pool import RECORD_FILE
 
+# Why a frame never reached the index. Kept apart from `InstanceGates`' names
+# so a caller can tell "these frames were not usable" from "these instances
+# were not worth training on" -- the first is usually a missing download and
+# the second is the gates doing their job.
+SKIP_REASONS = ("no_store", "no_image", "unreadable_image", "shape_mismatch",
+                "store_disagrees", "no_accepted")
+
 PALETTE_SOURCE = (
     "the pool's own record.json -- each instance carries the class name the "
     "box reader read out of the dataset's annotation file, so there is no "
@@ -231,6 +238,33 @@ def group_records(root: str | Path, workers: int = 8) -> dict[str, list[Path]]:
             if row is not None:
                 grouped.setdefault(row[0], []).append(row[1])
     return {name: sorted(paths) for name, paths in sorted(grouped.items())}
+
+
+def frame_keys(index: SequenceABC[FrameIndex]) -> set[str]:
+    """The frames an index covers, as keys comparable across two readers.
+
+    A pool names a frame by the key its harvest recorded and a semantic set
+    names it by `list_frames`' own key, and the two agree on the stem and
+    nothing else -- one may carry a split directory, the other a sequence. The
+    stem, lowercased, is what both always have.
+    """
+    return {Path(entry.frame.name).stem.lower() for entry in index}
+
+
+def exclude_frames(index: SequenceABC[FrameIndex],
+                   keys: SequenceABC[str] | set[str]) -> list[FrameIndex]:
+    """`index` without the frames in `keys` -- the anti-leak filter.
+
+    A pool harvested from a dataset that is *also* the run's held-out grade is
+    the same pixels twice: the pool trains on them and the grade scores on
+    them, and `split_index` cannot prevent it because the two are separate
+    sources with separate permutations. Dropping the graded frames from the
+    pool costs the pool its val/test share and keeps every training frame it
+    has, which is a far better trade than dropping the pool or the grade.
+    """
+    wanted = {str(k).lower() for k in keys}
+    return [entry for entry in index
+            if Path(entry.frame.name).stem.lower() not in wanted]
 
 
 def link_pool(records: SequenceABC[Path], target: str | Path) -> Path:
@@ -589,7 +623,8 @@ def load_pool_index(path: str | Path, gates: InstanceGates | None = None,
 
 
 __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
-           "Relocator", "describe_pools", "discover_pools", "group_records",
+           "Relocator", "SKIP_REASONS", "describe_pools", "discover_pools",
+           "exclude_frames", "frame_keys", "group_records",
            "index_pool", "index_pools", "link_pool",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",
            "save_pool_index", "store_areas"]

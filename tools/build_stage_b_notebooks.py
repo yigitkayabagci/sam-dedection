@@ -112,12 +112,17 @@ STAGE_DIR   = "/content/drive/MyDrive/datasets"
 DRIVE_MY    = "/content/drive/MyDrive"
 
 EVAL_DRAWN  = "kust4k"
-EVAL_SPEC   = "kust4k:{root}:thermal:components:eval"
-SKIP_POOLS  = ["broken", "rgbt234"]
+EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
+SKIP_POOLS  = []
 POOL_ROLE   = "all"
 POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
+
+SOURCE_ZIPS = [
+    ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
+    ["/content/drive/MyDrive/edgetam-pool/kust4k/29476610.zip", "Kust4K"],
+]
 
 IMAGES = [
     ["hituav",       "hituav",       "HIT_UAV",      []],
@@ -322,8 +327,6 @@ for _pool in FOUND:
         DROPPED.append((_pool, f"modality {_modality} not in MODALITIES"))
     elif _key is None:
         DROPPED.append((_pool, "no entry in IMAGES -- add one"))
-    elif EVAL_DRAWN and _key == EVAL_DRAWN:
-        DROPPED.append((_pool, f"its frames are {EVAL_DRAWN}'s, which is the grade"))
     else:
         PLAN.append({"pool": _pool, "dir": str(POOLS[_pool]), "key": _key,
                      "recipe": _recipe, "images": _root, "parts": _parts,
@@ -369,6 +372,20 @@ if FETCH:
         except Exception as _fetch_error:
             print("!!", _recipe, "->", _root, "failed:", _fetch_error)
 
+for _archive, _folder in SOURCE_ZIPS:
+    _target = Path(DATA_ROOT) / _folder
+    if not Path(_archive).is_file():
+        print("not there, skipping:", _archive)
+        continue
+    if _target.is_dir() and any(
+            any(_target.rglob(_glob)) for _glob in ("*.jpg", "*.png")):
+        print("already on disk:", _target)
+        continue
+    print("unzipping", _archive,
+          round(Path(_archive).stat().st_size / 2 ** 30, 2), "GiB ->", _target)
+    with zipfile.ZipFile(_archive) as _handle:
+        _handle.extractall(_target)
+
 subprocess.run(["df", "-h", "/content"], check=False)
 ''')
 
@@ -386,13 +403,39 @@ code('''
 from src.training.aerial import InstanceGates, sample_windows, split_index
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
-from src.training.pool_reader import index_pool, load_pool_index, parse_pool, save_pool_index
+from src.training.pool_reader import (SKIP_REASONS, exclude_frames, frame_keys,
+                                      index_pool, load_pool_index, parse_pool,
+                                      save_pool_index)
 from tools.train_encoder import build_indexes
 
 GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE, max_area=MAX_AREA,
                       fill=FILL)
 
-POOL_FLAGS, INDEX, FAILED = [], [], []
+INDEX, DATASET_FLAGS, DRAWN_HELD = [], [], set()
+if EVAL_DRAWN:
+    try:
+        _drawn_flag = EVAL_SPEC.format(root=EVAL_ROOT)
+        _drawn = build_indexes([parse(_drawn_flag, GATES)], Path(INDEX_DIR),
+                               WORKERS)
+        _parts = split_index(_drawn, seed=SEED)
+        DRAWN_HELD = frame_keys(_parts["val"]) | frame_keys(_parts["test"])
+        DATASET_FLAGS.append(_drawn_flag)
+        INDEX.extend(_drawn)
+        print(f"drawn grade: {EVAL_DRAWN}, {len(_drawn)} frames, "
+              f"{sum(len(e.instances) for e in _drawn)} instances, "
+              f"{len(DRAWN_HELD)} frames held out of it")
+        print("   these are drawn *semantic* maps decomposed into instances, "
+              "so where the decomposition fused two vehicles a model that "
+              "separates them is scored wrong. It is the best drawn "
+              "annotation here without VTUAV's archives; read it as a floor.")
+    except (ValueError, FileNotFoundError, AssertionError) as _drawn_error:
+        print(f"!! no drawn grade: {EVAL_DRAWN} -> "
+              f"{str(_drawn_error).splitlines()[0]}")
+        print("   the test split becomes the pools' own held-out slice, so "
+              "its truth is the teacher's. Read the number knowing that.")
+
+print()
+POOL_FLAGS, FAILED = [], []
 for _row in PLAN:
     _flag = f"{_row['dir']}:{_row['images']}:{_row['modality']}:{POOL_ROLE}"
     _request = parse_pool(_flag, GATES)
@@ -408,32 +451,30 @@ for _row in PLAN:
     except (ValueError, FileNotFoundError) as _index_error:
         FAILED.append((_row["pool"], str(_index_error).splitlines()[0]))
         continue
+    _skips = {k: v for k, v in _part[0].rejects.items() if k in SKIP_REASONS}
+    _leak = ""
+    if DRAWN_HELD and _row["key"] == EVAL_DRAWN:
+        _before = len(_part)
+        _part = exclude_frames(_part, DRAWN_HELD)
+        _cut = _before - len(_part)
+        assert _cut, (
+            f"{_row['pool']} is built from {EVAL_DRAWN}'s frames but shares "
+            f"none of the {len(DRAWN_HELD)} held-out keys, so the two readers "
+            f"name frames differently and the overlap cannot be removed. Set "
+            f"EVAL_DRAWN = None, or drop this pool.")
+        _leak = f"  (-{_cut} frames the drawn grade holds out)"
+    if not _part:
+        FAILED.append((_row["pool"], "nothing left after the overlap filter"))
+        continue
     POOL_FLAGS.append(_flag)
     INDEX.extend(_part)
     print(f"{_row['pool']:<28}{len(_part):>7} frames "
-          f"{sum(len(e.instances) for e in _part):>9} instances")
+          f"{sum(len(e.instances) for e in _part):>9} instances"
+          f"{('  skipped ' + str(_skips)) if _skips else ''}{_leak}")
 
 for _pool, _why in FAILED:
     print(f"{_pool:<28}unusable  {_why}")
 assert POOL_FLAGS, "no pool resolved its frames -- check the IMAGES roots above"
-
-DATASET_FLAGS = []
-if EVAL_DRAWN:
-    try:
-        _drawn_flag = EVAL_SPEC.format(root=EVAL_ROOT)
-        _drawn_index = build_indexes([parse(_drawn_flag, GATES)],
-                                     Path(INDEX_DIR), WORKERS)
-        DATASET_FLAGS.append(_drawn_flag)
-        INDEX.extend(_drawn_index)
-        print(f"\\ndrawn grade: {EVAL_DRAWN} at role=eval, "
-              f"{len(_drawn_index)} frames, "
-              f"{sum(len(e.instances) for e in _drawn_index)} instances")
-    except (ValueError, FileNotFoundError, AssertionError) as _drawn_error:
-        print(f"\\n!! no drawn grade: {EVAL_DRAWN} -> "
-              f"{str(_drawn_error).splitlines()[0]}")
-        print("   the test split is the pools' own held-out slice, so its "
-              "truth is the teacher's. Download it, or read the number "
-              "knowing that.")
 
 COMMON = []
 for _flag in POOL_FLAGS:
@@ -464,10 +505,17 @@ for _source, _count in TEST.sources.items():
     print(f"  {_source:<34}{_count:>8}")
 assert not ({id(e) for e in SPLITS["train"]} & {id(e) for e in SPLITS["test"]})
 assert TEST.samples, "the test split is empty -- POOL_ROLE=train leaves nothing to grade"
+
+_leaked = DRAWN_HELD & frame_keys(
+    [e for e in SPLITS["train"] if e.source and e.source.mode == "pool"])
+assert not _leaked, (
+    f"{len(_leaked)} frames the drawn grade holds out are still in a pool's "
+    f"training half, e.g. {sorted(_leaked)[:3]}")
+print(f"\\nno pool trains on any of the {len(DRAWN_HELD)} frames the drawn "
+      f"grade holds out" if DRAWN_HELD else "\\nno drawn grade to protect")
 ''')
 
 
-# --------------------------------------------------------------------------
 # 4. The batch this card takes, and the before picture
 # --------------------------------------------------------------------------
 #

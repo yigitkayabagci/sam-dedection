@@ -293,6 +293,34 @@ class PoolIndexTest(unittest.TestCase):
         link_pool(grouped["demo"], target)
         self.assertEqual(len(list(target.rglob(RECORD_FILE))), 1)
 
+    def test_the_graded_frames_are_removed_from_a_pool_of_the_same_set(self):
+        """The leak `split_index` cannot see, and the filter that closes it.
+
+        Kust4K's pool is teacher masks on Kust4K's own frames, and Kust4K's
+        drawn maps are the run's grade. They are separate sources with separate
+        permutations, so a frame can land in the pool's training half and the
+        grade's test half at once. Matching on the stem is what both readers
+        always share.
+        """
+        from src.training.pool_reader import exclude_frames, frame_keys
+
+        index = index_pool(self.build(
+            keys=("seq_a/000000", "seq_a/000010", "seq_b/000000")),
+            self.images, workers=1)
+        # What a semantic reader would call the same three frames.
+        held = {"000010"}
+        kept = exclude_frames(index, held)
+        self.assertEqual(len(kept), 2)
+        self.assertNotIn("000010", frame_keys(kept))
+        self.assertEqual(frame_keys(index) - frame_keys(kept), held)
+
+    def test_frame_keys_ignore_the_directory_each_reader_prefixes(self):
+        from src.training.pool_reader import frame_keys
+
+        index = index_pool(self.build(keys=("train/00042",)), self.images,
+                           workers=1)
+        self.assertEqual(frame_keys(index), {"00042"})
+
     def test_a_pool_with_no_records_says_where_to_look(self):
         self.build()
         with self.assertRaises(FileNotFoundError) as caught:
