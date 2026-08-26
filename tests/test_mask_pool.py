@@ -76,6 +76,7 @@ from src.training.pool import (  # noqa: E402
 )
 from tools.fetch_datasets import (  # noqa: E402
     RECIPES,
+    likely_dataset_dirs,
     route_by_pixels,
     stage_rgbt_archives,
     staged,
@@ -1513,6 +1514,43 @@ class TestStageRgbtArchives(unittest.TestCase):
             (folder / f"{i:05d}D.png").write_bytes(blob)
         counts = stage_rgbt_archives(self.source, self.dest, quiet=True)
         self.assertEqual(counts["tir"], 6)
+
+    def test_the_pool_it_writes_is_not_read_back_as_input(self):
+        # The natural place to keep the dataset and the natural place to write
+        # its pool are the same folder. `kust4k_rgb.zip` reads as the RGB half
+        # by name, and the instances.png inside it reads as a class map, so a
+        # second run would stage the first run's output.
+        self.write_zip(self.source / "TIR.zip", self.payloads["tir"])
+        pool = self.source / "kust4k_pool"
+        pool.mkdir()
+        with zipfile.ZipFile(pool / "kust4k_rgb.zip", "w") as archive:
+            for i, blob in enumerate(self.payloads["label"]):
+                archive.writestr(f"kust4k_rgb/{i:05d}D/instances.png", blob)
+        counts = stage_rgbt_archives(self.source, self.dest, quiet=True,
+                                     skip=[pool])
+        self.assertEqual(counts, {"tir": 6, "rgb": 0, "label": 0})
+
+    def test_a_dest_inside_the_source_is_skipped_without_being_asked(self):
+        self.write_zip(self.source / "TIR.zip", self.payloads["tir"])
+        nested = self.source / "staged"
+        stage_rgbt_archives(self.source, nested, quiet=True)
+        again = stage_rgbt_archives(self.source, nested, quiet=True)
+        self.assertEqual(again["tir"], 0)
+
+    def test_the_finder_names_where_the_data_actually_is(self):
+        (self.source / "MyDrive" / "edgetam-pool" / "kust4k").mkdir(parents=True)
+        (self.source / "MyDrive" / "edgetam-pool" / "kust4k"
+         / "29476610.zip").write_bytes(b"")
+        (self.source / "MyDrive" / "notes").mkdir(parents=True)
+        found = likely_dataset_dirs(self.source / "MyDrive", "kust4k")
+        self.assertEqual([p.name for p in found], ["kust4k"])
+
+    def test_the_finder_matches_on_an_archive_name_too(self):
+        folder = self.source / "MyDrive" / "arsiv"
+        folder.mkdir(parents=True)
+        (folder / "Kust4K_all.zip").write_bytes(b"")
+        found = likely_dataset_dirs(self.source / "MyDrive", "kust4k")
+        self.assertEqual([p.name for p in found], ["arsiv"])
 
     def test_running_it_twice_writes_nothing_the_second_time(self):
         self.write_zip(self.source / "TIR.zip", self.payloads["tir"])

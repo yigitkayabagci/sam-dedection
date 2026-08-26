@@ -1102,8 +1102,34 @@ def _decode(payload: bytes):
     return cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_UNCHANGED)
 
 
+def likely_dataset_dirs(root: str | Path, needle: str,
+                        depth: int = 3) -> list[Path]:
+    """Folders under `root` whose name or contents look like `needle`.
+
+    What turns "DRIVE_DIR is not there" into a message worth reading. The
+    setting is a path somebody typed, the data is wherever they actually put
+    it, and the gap between those two is the single most common way this cell
+    fails. Bounded to `depth` levels rather than an `rglob`, because MyDrive
+    can be very large and a diagnostic that takes four minutes is not one.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    for level in range(1, depth + 1):
+        for path in sorted(root.glob("/".join(["*"] * level))):
+            if not path.is_dir():
+                continue
+            if needle.lower() in path.name.lower() or any(
+                    needle.lower() in child.name.lower()
+                    for child in path.glob("*.zip")):
+                found.append(path)
+    return found
+
+
 def stage_rgbt_archives(source: str | Path, dest: str | Path, sample: int = 5,
-                        quiet: bool = False) -> dict[str, int]:
+                        quiet: bool = False,
+                        skip: SequenceABC[str | Path] = ()) -> dict[str, int]:
     """Unpack a hand-downloaded RGB-T set into the `tir/ rgb/ label/` layout.
 
     `fetch` knows where these archives live on the internet. This is for the
@@ -1124,6 +1150,14 @@ def stage_rgbt_archives(source: str | Path, dest: str | Path, sample: int = 5,
     **Names that say nothing.** When neither the archive nor its members carry
     a hint, `route_by_pixels` decodes a handful and decides from the values.
 
+    `skip` is folders under `source` that are not input, and it exists because
+    the natural place to keep a dataset and the natural place to write its
+    pool are the same folder. The pool's own archives are named after the pool
+    (`kust4k_rgb.zip`), which `route_hint` reads as the RGB half, and they hold
+    `instances.png` maps, which `route_by_pixels` reads as class maps -- so a
+    second run would quietly stage the *output* of the first as input. Pass the
+    mirror directory here and that cannot happen.
+
     `broken_in_*.txt` members are copied to the top of `dest`, because
     `aerial.excluded_keys` globs there and does not recurse.
 
@@ -1134,7 +1168,14 @@ def stage_rgbt_archives(source: str | Path, dest: str | Path, sample: int = 5,
     dest.mkdir(parents=True, exist_ok=True)
     counts = {route: 0 for route in RGBT_ROUTES}
     inner = dest / "_inner"
-    queue = sorted(source.rglob("*.zip"))
+    excluded = [Path(p).resolve() for p in (*skip, dest)]
+
+    def wanted(path: Path) -> bool:
+        resolved = path.resolve()
+        return not any(resolved == bad or bad in resolved.parents
+                       for bad in excluded)
+
+    queue = [p for p in sorted(source.rglob("*.zip")) if wanted(p)]
     if not queue and not quiet:
         print(f"{source}: no .zip anywhere underneath")
 
@@ -1219,7 +1260,7 @@ def stage_rgbt_archives(source: str | Path, dest: str | Path, sample: int = 5,
     # Folders somebody extracted before uploading, and the manifests beside them.
     for folder in sorted(p for p in source.rglob("*") if p.is_dir()):
         route = route_hint(folder.name)
-        if route is None or not any(folder.glob("*")):
+        if route is None or not wanted(folder) or not any(folder.glob("*")):
             continue
         images = [p for p in folder.iterdir()
                   if p.suffix.lower() in IMAGE_SUFFIXES]
@@ -1236,7 +1277,8 @@ def stage_rgbt_archives(source: str | Path, dest: str | Path, sample: int = 5,
         if written and not quiet:
             print(f"  {folder} -> {route}/ ({written} copied)")
     for manifest in sorted(source.rglob("broken_in_*.txt")):
-        shutil.copyfile(manifest, dest / manifest.name)
+        if wanted(manifest):
+            shutil.copyfile(manifest, dest / manifest.name)
 
     if inner.exists():
         shutil.rmtree(inner, ignore_errors=True)

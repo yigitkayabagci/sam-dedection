@@ -68,10 +68,10 @@ def code(text: str) -> None:
 # --------------------------------------------------------------------------
 
 code('''
-DRIVE_DIR   = "/content/drive/MyDrive/datasets/kust4k"
+DRIVE_DIR   = "/content/drive/MyDrive/edgetam-pool/kust4k"
 DATA_ROOT   = "/content/data/Kust4K"
 POOL_ROOT   = "/content/pool"
-MIRROR_DIR  = "/content/drive/MyDrive/edgetam-pool/kust4k"
+MIRROR_DIR  = "/content/drive/MyDrive/edgetam-pool/kust4k_pool"
 CLEAN_RGB   = "kust4k_rgb"
 CLEAN_TIR   = "kust4k_thermal"
 BROKEN_RGB  = "kust4k_broken_rgb"
@@ -164,11 +164,32 @@ code('''
 # two thirds of the data overwritten; and a file downloaded by hand is often
 # renamed to something that names no half at all, which is why
 # `route_by_pixels` decodes a few members and decides from the values.
-from tools.fetch_datasets import RECIPES, fetch_extra, stage_rgbt_archives
+from tools.fetch_datasets import (RECIPES, fetch_extra, likely_dataset_dirs,
+                                  stage_rgbt_archives)
 
 _drive_root = Path(DRIVE_DIR)
 if not _drive_root.is_dir():
-    raise SystemExit(f"{DRIVE_DIR} is not there -- set DRIVE_DIR in cell 1")
+    # A path somebody typed against data somebody else put somewhere: by far
+    # the most common way this cell fails, so it answers with candidates
+    # rather than with the setting read back at you.
+    _candidates = likely_dataset_dirs("/content/drive/MyDrive", "kust")
+    raise SystemExit(
+        f"{DRIVE_DIR} is not there. Set DRIVE_DIR in cell 1 to one of:\\n  "
+        + ("\\n  ".join(str(c) for c in _candidates) if _candidates else
+           "(nothing under MyDrive looks like Kust4K -- is Drive mounted?)"))
+
+# The pool is written *into* Drive too, and the obvious place to put it is
+# beside the data. It must not be beside the data: the pool's archives are
+# named after the pool (`kust4k_rgb.zip`, which reads as the RGB half) and
+# hold `instances.png` maps (which read as class maps), so a second run would
+# stage the first run's output as input. Separate folders, and `skip` as the
+# belt to that pair of braces.
+if Path(MIRROR_DIR).resolve() == _drive_root.resolve():
+    raise SystemExit(
+        f"MIRROR_DIR and DRIVE_DIR are the same folder ({MIRROR_DIR}). The "
+        f"pool would be re-read as input on the next run -- give the output "
+        f"its own folder, e.g. {DRIVE_DIR}_pool")
+
 print("what is in", DRIVE_DIR)
 for _entry in sorted(_drive_root.rglob("*"))[:40]:
     if _entry.is_file():
@@ -178,7 +199,7 @@ for _entry in sorted(_drive_root.rglob("*"))[:40]:
         print(f"  {_entry.relative_to(_drive_root)}/")
 print()
 
-STAGED = stage_rgbt_archives(_drive_root, DATA_ROOT)
+STAGED = stage_rgbt_archives(_drive_root, DATA_ROOT, skip=[MIRROR_DIR])
 ON_DISK = {_route: len(list((Path(DATA_ROOT) / _route).glob("*.png")))
            for _route in ("tir", "rgb", "label")}
 print(ON_DISK)
