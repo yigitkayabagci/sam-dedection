@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Sequence as SequenceABC
+from collections.abc import Mapping, Sequence as SequenceABC
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -747,6 +747,65 @@ def _allocate(total: int, fractions: SequenceABC[float]) -> list[int]:
                 counts[donor] -= 1
                 counts[index] += 1
     return counts
+
+
+def save_splits(path: str | Path,
+                splits: Mapping[str, SequenceABC[FrameIndex]]) -> Path:
+    """Which frames each split holds, as `source -> [frame key]`.
+
+    A notebook that indexes a run, caps a pool, drops the frames a drawn grade
+    holds out and then hands the *flags* to `train_encoder` has decided none of
+    that: the CLI re-indexes from the flags and splits again, so the caps and
+    the drops never reach the training. Writing the split it actually chose,
+    and reading it back there, is what makes the table a notebook prints the
+    same data the run trains on.
+
+    Keyed by `Source.name` and not by frame name alone, because frame names
+    collide across datasets -- `000123.png` is in most of them.
+    """
+    payload: dict[str, dict[str, list[str]]] = {}
+    for name, entries in splits.items():
+        by_source: dict[str, list[str]] = {}
+        for entry in entries:
+            key = entry.source.name if entry.source else "?"
+            by_source.setdefault(key, []).append(entry.frame.name)
+        payload[name] = by_source
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=1) + "\n")
+    return path
+
+
+def apply_splits(index: SequenceABC[FrameIndex],
+                 path: str | Path) -> dict[str, list[FrameIndex]]:
+    """`index` partitioned the way `save_splits` recorded it.
+
+    A filter rather than a reconstruction: every entry keeps the `Source` this
+    index built for it, and an entry no split names is dropped -- that is how a
+    cap and an overlap filter survive the trip. Refuses rather than trains on
+    the wrong set if the two sides disagree about what is there.
+    """
+    payload = json.loads(Path(path).read_text())
+    wanted = {name: {source: set(keys) for source, keys in by_source.items()}
+              for name, by_source in payload.items()}
+    out: dict[str, list[FrameIndex]] = {name: [] for name in payload}
+    seen = 0
+    for entry in index:
+        key = entry.source.name if entry.source else "?"
+        for name, by_source in wanted.items():
+            if entry.frame.name in by_source.get(key, ()):
+                out[name].append(entry)
+                seen += 1
+                break
+    asked = sum(len(keys) for by_source in wanted.values()
+                for keys in by_source.values())
+    if seen != asked:
+        raise ValueError(
+            f"{path} names {asked} frames and this index resolved {seen} of "
+            f"them. The two were built from different flags or different "
+            f"pools -- re-index, or drop --splits and let the split be made "
+            f"here.")
+    return out
 
 
 def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
@@ -1566,5 +1625,6 @@ __all__ = [
     "list_frames", "list_pairs", "split_bridges", "image_origin", "pool_masks",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",
+    "apply_splits", "save_splits",
     "split_frames", "split_index", "summarise", "windows_for",
 ]

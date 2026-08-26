@@ -49,6 +49,7 @@ if str(ROOT) not in sys.path:
 from src.training.aerial import (  # noqa: E402
     InstanceGates,
     sample_windows,
+    apply_splits,
     split_index,
 )
 from src.training.datasets import (  # noqa: E402
@@ -192,6 +193,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--index", default=None,
                    help="Directory holding the indexes train_encoder.py wrote.")
     p.add_argument("--split", default="test", choices=("train", "val", "test"))
+    p.add_argument("--splits", default="",
+                   help="A `save_splits` file naming the frames each "
+                        "split holds, so the scored set is the one the "
+                        "caller chose rather than one re-derived here.")
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--window", type=int, default=None,
                    help="Crop in SOURCE pixels, resized to --size. Defaults to "
@@ -246,7 +251,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # The same stratified split, from the same seed, as training used --
     # otherwise "held out" is a claim rather than a fact.
-    chosen = split_index(index, seed=args.seed)[args.split]
+    chosen = (apply_splits(index, args.splits) if args.splits
+              else split_index(index, seed=args.seed))[args.split]
     split = ImageSplit(sample_windows(
         chosen, size=args.size, per_image=args.per_image,
         max_instances=args.max_instances, jitter=0, seed=args.seed,

@@ -553,7 +553,8 @@ subprocess.run(["df", "-h", "/content"], check=False)
 code('''
 import numpy as np
 
-from src.training.aerial import InstanceGates, sample_windows, split_index
+from src.training.aerial import (InstanceGates, sample_windows, save_splits,
+                                 split_index)
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
 from src.training.pool_reader import (SKIP_REASONS, exclude_frames, frame_keys,
@@ -702,6 +703,9 @@ if _dropped:
           "and thermal halves, Kust4K's -- and each half is its own source "
           "with its own permutation, so a frame can train in one and be "
           "scored in the other. Same geometry, same objects, same mask.")
+
+SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS))
+COMMON += ["--splits", SPLIT_FILE]
 
 def windows(name, jitter):
     return ImageSplit(sample_windows(SPLITS[name], size=SIZE, per_image=PER_IMAGE,

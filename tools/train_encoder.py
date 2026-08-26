@@ -72,6 +72,7 @@ from src.training.aerial import (  # noqa: E402
     load_index,
     sample_windows,
     save_index,
+    apply_splits,
     split_index,
     summarise,
 )
@@ -260,6 +261,11 @@ def main(argv: list[str] | None = None) -> int:
                         "which is what every number recorded before this flag "
                         "was taken with.")
     p.add_argument("--accum", type=int, default=1)
+    p.add_argument("--splits", default="",
+                   help="A `save_splits` file naming the frames each "
+                        "split holds. Without it the split is made "
+                        "here, and any cap or overlap filter a caller "
+                        "applied to its own copy of the index is lost.")
     p.add_argument("--steps", type=int, default=400, help="Batches per epoch.")
     p.add_argument("--epochs", type=int, nargs=2, default=(1, 3),
                    metavar=("HEAD", "ENCODER"))
@@ -305,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     # sides of it and make the held-out number meaningless. Stratified per
     # dataset, and on index entries rather than names -- names collide across
     # datasets.
-    splits = split_index(index, seed=args.seed)
+    splits = (apply_splits(index, args.splits) if args.splits
+              else split_index(index, seed=args.seed))
 
     def windows(name, jitter):
         return ImageSplit(sample_windows(

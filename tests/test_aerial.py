@@ -52,6 +52,8 @@ from src.training.aerial import (  # noqa: E402
     sample_windows,
     save_index,
     split_frames,
+    apply_splits,
+    save_splits,
     split_index,
     summarise,
     windows_for,
@@ -755,6 +757,58 @@ class TestSplitsAreComparableAcrossRuns(unittest.TestCase):
             by_spec.setdefault(entry.source.spec.name, set()).add(
                 entry.frame.name.split("/")[0])
         self.assertNotEqual(by_spec.get("kust4k"), by_spec.get("segfly"))
+
+
+class TestASavedSplitIsTheSplitTheRunUses(unittest.TestCase):
+    """A caller that caps a pool and drops overlapping frames has decided the
+    run's data, and handing the CLI the same *flags* re-derives all of it. The
+    split file is how that decision travels."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "splits.json"
+        gates = InstanceGates()
+        self.kust = Source(SPECS["kust4k"], gates, role="train")
+        self.segfly = Source(SPECS["segfly"], gates, role="train")
+
+    def entries(self, source, count=10, offset=0):
+        return [FrameIndex(frame=Frame(name=f"{i + offset:06d}",
+                                       image=Path("i"), mask=Path("m")),
+                           instances=(), size=(64, 64), rejects={}, source=source)
+                for i in range(count)]
+
+    def test_a_capped_source_stays_capped_through_the_file(self):
+        full = self.entries(self.kust, 10) + self.entries(self.segfly, 10)
+        chosen = {"train": full[:3] + full[10:12], "val": [full[3]],
+                  "test": [full[4]]}
+        save_splits(self.path, chosen)
+        # The index the CLI builds is the *uncapped* one, as it would be.
+        back = apply_splits(full, self.path)
+        self.assertEqual(len(back["train"]), 5)
+        self.assertEqual([e.frame.name for e in back["val"]], ["000003"])
+        self.assertEqual(sum(len(v) for v in back.values()), 7,
+                         "the five frames no split names must be dropped")
+
+    def test_a_name_two_sources_share_does_not_cross_over(self):
+        both = self.entries(self.kust, 4) + self.entries(self.segfly, 4)
+        save_splits(self.path, {"train": both[:4], "val": [], "test": both[4:]})
+        back = apply_splits(both, self.path)
+        self.assertEqual({e.source.spec.name for e in back["train"]}, {"kust4k"})
+        self.assertEqual({e.source.spec.name for e in back["test"]}, {"segfly"})
+
+    def test_an_index_missing_a_named_frame_refuses(self):
+        full = self.entries(self.kust, 6)
+        save_splits(self.path, {"train": full[:4], "val": [], "test": full[4:]})
+        with self.assertRaises(ValueError) as caught:
+            apply_splits(full[:5], self.path)
+        self.assertIn("resolved 5", str(caught.exception))
+
+    def test_entries_keep_the_source_the_index_built(self):
+        full = self.entries(self.kust, 4)
+        save_splits(self.path, {"train": full, "val": [], "test": []})
+        back = apply_splits(full, self.path)
+        self.assertIs(back["train"][0].source, self.kust)
 
 
 class TestBothModalitiesOfAFlightTravelTogether(unittest.TestCase):
