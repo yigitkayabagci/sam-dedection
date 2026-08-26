@@ -224,6 +224,38 @@ class TestYoloLabelFrames(unittest.TestCase):
             self.assertEqual(len(frames[1].boxes), 0)
             self.assertEqual(len(yolo_frames(tmp)), 1)
 
+    def test_the_archive_listing_names_the_extension_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            for image in (Path(tmp) / "images").iterdir():
+                image.unlink()
+            frames = yolo_label_frames(tmp, members=[
+                "merged/images/a.png", "merged/images/b.tif",
+                "merged/labels/a.txt", "merged/data.yaml"])
+            self.assertEqual([f.image.suffix for f in frames],
+                             [".png", ".tif"])       # per frame, not a guess
+
+    def test_a_listing_from_another_tree_fails_before_the_gpu_is_rented(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            for image in (Path(tmp) / "images").iterdir():
+                image.unlink()
+            with self.assertRaises(FileNotFoundError) as caught:
+                yolo_label_frames(tmp, members=["other/images/z.jpg"])
+            self.assertIn("two different", str(caught.exception))
+            self.assertIn("other/images/z.jpg", str(caught.exception))
+
+    def test_a_split_folder_is_matched_and_a_sibling_split_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "labels/train").mkdir(parents=True)
+            (root / "labels/train/a.txt").write_text("0 0.5 0.5 0.1 0.1\n")
+            frames = yolo_label_frames(
+                root, images="images/train", labels="labels/train",
+                members=["m/images/val/a.png", "m/images/train/a.bmp"])
+            self.assertEqual(frames[0].image,
+                             root / "images/train" / "a.bmp")
+
     def test_a_classes_txt_beside_the_labels_is_not_read_as_a_frame(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_yolo(Path(tmp))

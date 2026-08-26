@@ -31,11 +31,12 @@ import xml.etree.ElementTree as ElementTree
 from collections.abc import (Callable, Iterable, Mapping,
                              Sequence as SequenceABC)
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp",
+                  ".webp")   # Roboflow-style merged exports ship webp
 
 # The ultralytics VisDrone2019-DET conversion, which is what the mirror this
 # repo fetches (`banu4prasad/VisDrone-Dataset`) ships: the devkit's categories
@@ -177,7 +178,8 @@ def yolo_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
 
 def yolo_label_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
                       images: str = "images", labels: str = "labels",
-                      suffix: str | None = None) -> list[BoxFrame]:
+                      suffix: str | None = None,
+                      members: Iterable[str] | None = None) -> list[BoxFrame]:
     """The same YOLO layout, indexed from the *label* side.
 
     `yolo_frames` lists the image folder and looks each label up beside it,
@@ -190,11 +192,17 @@ def yolo_label_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES
     not it has been extracted yet; the caller pulls the handful it actually
     decodes out of the zip.
 
-    That leaves the extension, which a label file does not carry. An image
-    already on disk answers it per frame; otherwise `suffix` does; with
-    neither, it is the extension the already-extracted images mostly use, and
-    failing that `.jpg` -- what every YOLO export this repo has fetched ships.
-    Pass `suffix` when the export is something else and nothing is unpacked.
+    That leaves the extension, which a label file does not carry. `members` --
+    the archive's own listing, `ZipFile.namelist()` -- answers it exactly, per
+    frame, and is the one form of this that cannot be wrong; pass it whenever
+    the caller has it. Otherwise: an image already on disk answers it per
+    frame, then `suffix`, then the extension the already-extracted images
+    mostly use, and failing all of that `.jpg` -- what every YOLO export this
+    repo has fetched ships. A guess that misses costs a whole labelling run,
+    because a path that no file answers to is not an error until the teacher
+    is loaded and the frame comes back `unreadable`; with `members` the same
+    mistake is a `FileNotFoundError` before the GPU is rented, naming the
+    member it expected and one the archive actually holds.
 
     Two deliberate differences from `yolo_frames`, both because this reader
     surveys an export rather than feeding the teacher: a label file with no
@@ -218,6 +226,13 @@ def yolo_label_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES
             f"{labels}/ side by side under {root}.")
 
     on_disk = _images_by_stem(image_dir)
+    archived: dict[str, str] = {}
+    listing = list(members) if members is not None else []
+    for member in listing:
+        name = PurePosixPath(member)
+        if (name.suffix.lower() in IMAGE_SUFFIXES
+                and f"/{images}/" in f"/{name.parent.as_posix()}/"):
+            archived[name.stem] = name.suffix
     if suffix is None:
         seen: dict[str, int] = {}
         for path in on_disk.values():
@@ -235,11 +250,23 @@ def yolo_label_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES
             boxes.append([float(v) for v in parts[1:5]])
             classes.append(names[index] if 0 <= index < len(names)
                            else f"class {index}")
+        chosen = archived.get(label.stem, suffix)
         frames.append(BoxFrame(
             key=label.stem,
-            image=on_disk.get(label.stem, image_dir / f"{label.stem}{suffix}"),
+            image=on_disk.get(label.stem, image_dir / f"{label.stem}{chosen}"),
             boxes=np.asarray(boxes, dtype=np.float64).reshape(-1, 4),
             classes=tuple(classes), normalized=True))
+
+    if listing and not any(f.key in archived for f in frames):
+        example = next((m for m in listing
+                        if PurePosixPath(m).suffix.lower() in IMAGE_SUFFIXES),
+                       listing[0])
+        raise FileNotFoundError(
+            f"{root}: not one of the {len(frames)} labels under {labels}/ has "
+            f"an image in the archive listing. Expected a member ending "
+            f"{images}/{frames[0].key}.<ext>; the archive holds {example!r}. "
+            f"The labels and the images are being read out of two different "
+            f"trees -- check the prefix `root` was built from.")
     return frames
 
 
