@@ -185,6 +185,13 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 if not Path(REPO_DIR).exists():
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
                     REPO_URL, REPO_DIR], check=True)
+else:
+    for _git in (["fetch", "--depth", "1", "origin", BRANCH],
+                 ["reset", "--hard", f"origin/{BRANCH}"]):
+        subprocess.run(["git", "-C", REPO_DIR, *_git], check=False)
+print("repo at", subprocess.run(["git", "-C", REPO_DIR, "log", "-1",
+                                 "--format=%h %s"], capture_output=True,
+                                text=True).stdout.strip())
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
 os.chdir(REPO_DIR)
