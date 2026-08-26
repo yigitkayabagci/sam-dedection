@@ -581,7 +581,7 @@ if EVAL_DRAWN:
               "its truth is the teacher's. Read the number knowing that.")
 
 print()
-POOL_FLAGS, FAILED = [], []
+POOL_FLAGS, FAILED, CUTS = [], [], {}
 for _row in PLAN:
     _flag = f"{_row['dir']}:{_row['images']}:{_row['modality']}:{_row['role']}"
     _request = parse_pool(_flag, GATES)
@@ -594,8 +594,9 @@ for _row in PLAN:
                                _row["role"], GATES, _request.name,
                                workers=WORKERS, progress=progress)
             save_pool_index(_cache, _part)
-    except (ValueError, FileNotFoundError) as _index_error:
-        FAILED.append((_row["pool"], str(_index_error).splitlines()[0]))
+    except Exception as _index_error:
+        FAILED.append((_row["pool"], f"{type(_index_error).__name__}: "
+                                     f"{str(_index_error).splitlines()[0]}"))
         continue
     _skips = {k: v for k, v in _part[0].rejects.items() if k in SKIP_REASONS}
     _capped = ""
@@ -612,12 +613,9 @@ for _row in PLAN:
         _before = len(_part)
         _part = exclude_frames(_part, DRAWN_HELD)
         _cut = _before - len(_part)
-        assert _cut, (
-            f"{_row['pool']} is built from {EVAL_DRAWN}'s frames but shares "
-            f"none of the {len(DRAWN_HELD)} held-out keys, so the two readers "
-            f"name frames differently and the overlap cannot be removed. Set "
-            f"EVAL_DRAWN = None, or drop this pool.")
-        _leak = f"  (-{_cut} frames the drawn grade holds out)"
+        CUTS[_row["pool"]] = _cut
+        _leak = (f"  (-{_cut} frames the drawn grade holds out)" if _cut
+                 else "  (shares no held-out key)")
     if not _part:
         FAILED.append((_row["pool"], "nothing left after the overlap filter"))
         continue
@@ -631,6 +629,20 @@ for _row in PLAN:
 for _pool, _why in FAILED:
     print(f"{_pool:<28}unusable  {_why}")
 assert POOL_FLAGS, "no pool resolved its frames -- check the IMAGES roots above"
+
+assert not CUTS or any(CUTS.values()), (
+    f"every pool built from {EVAL_DRAWN} ({sorted(CUTS)}) shares none of the "
+    f"{len(DRAWN_HELD)} held-out keys, so the two readers name frames "
+    f"differently and the overlap cannot be removed. Set EVAL_DRAWN = None, "
+    f"or drop these pools.")
+_blind = sorted(_p for _p, _c in CUTS.items() if not _c)
+if _blind and any(CUTS.values()):
+    print(f"\\n!! {', '.join(_blind)} shares no key with the held-out grade "
+          f"while its siblings do, so it is a different set of frames rather "
+          f"than a naming mismatch -- a broken-registration half, most "
+          f"likely. It trains only; what it can still carry is a scene whose "
+          f"other modality is graded, which is the registered-pair risk and "
+          f"not the same pixels.")
 
 _used = {TEACHERS[_row["pool"]] for _row in PLAN
          if any(_row["dir"] in _f for _f in POOL_FLAGS)}

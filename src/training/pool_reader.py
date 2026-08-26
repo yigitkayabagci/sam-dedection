@@ -55,7 +55,7 @@ from .pool import RECORD_FILE
 # were not worth training on" -- the first is usually a missing download and
 # the second is the gates doing their job.
 SKIP_REASONS = ("no_store", "no_image", "unreadable_image", "shape_mismatch",
-                "store_disagrees", "no_accepted")
+                "store_disagrees", "record_schema", "no_accepted")
 
 PALETTE_SOURCE = (
     "the pool's own record.json -- each instance carries the class name the "
@@ -465,13 +465,25 @@ def _read_frame(record_path: Path, relocate: Relocator,
     areas = areas_of(store)
     rows = []
     for instance in record["instances"]:
-        if instance["verdict"] is not None:
-            continue
-        key = int(instance["i"])
-        if key not in areas:
-            return "store_disagrees"
-        rows.append((key, str(instance["class"]),
-                     tuple(float(v) for v in instance["box"]), areas[key]))
+        try:
+            key = int(instance["i"])
+            if "verdict" in instance:
+                if instance["verdict"] is not None:
+                    continue
+                if key not in areas:
+                    return "store_disagrees"
+            elif key not in areas:
+                # A harvest that wrote no verdicts leaves the store as the only
+                # statement of which boxes the gates kept: every writer here
+                # stores the accepted masks and only those, so a box with no
+                # mask is a rejected box, not a store that disagrees.
+                continue
+            rows.append((key, str(instance["class"]),
+                         tuple(float(v) for v in instance["box"]), areas[key]))
+        except (KeyError, TypeError, ValueError):
+            # A record shaped by some other harvest. Naming it is worth more
+            # than a traceback that ends a half-hour of indexing.
+            return "record_schema"
     if not rows:
         return "no_accepted"
     return PoolFrame(key=str(record["key"]), image=image, store=store,

@@ -120,6 +120,52 @@ class PoolIndexTest(unittest.TestCase):
         index = index_pool(self.pool / "demo", self.images, workers=1)
         self.assertEqual([i.label for e in index for i in e.instances], [0])
 
+    def _strip_verdicts(self, target: Path) -> None:
+        """Rewrite one frame's record the way a harvest with no verdict field
+        would have written it, store untouched."""
+        record_file = target / RECORD_FILE
+        record = json.loads(record_file.read_text())
+        for instance in record["instances"]:
+            instance.pop("verdict", None)
+        record_file.write_text(json.dumps(record) + "\n")
+
+    def test_a_record_with_no_verdict_reads_acceptance_off_the_store(self):
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            ("car", self.boxes[0][1], blob(self.shape, self.boxes[0][1])),
+            ("truck", self.boxes[1][1], None)])
+        self._strip_verdicts(target)
+        index = index_pool(self.pool / "demo", self.images, workers=1)
+        # The rejected box has no mask in the store, so it stays out of the
+        # index even though the record no longer says it was rejected.
+        self.assertEqual([i.label for e in index for i in e.instances], [0])
+
+    def test_a_record_shaped_by_another_harvest_is_named_not_raised(self):
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            ("car", self.boxes[0][1], blob(self.shape, self.boxes[0][1]))])
+        record_file = target / RECORD_FILE
+        record = json.loads(record_file.read_text())
+        for instance in record["instances"]:
+            instance["index"] = instance.pop("i")
+        record_file.write_text(json.dumps(record) + "\n")
+        with self.assertRaises(ValueError) as caught:
+            index_pool(self.pool / "demo", self.images, workers=1)
+        self.assertIn("record_schema", str(caught.exception))
+
+    def test_a_missing_mask_still_disagrees_when_the_record_claims_it(self):
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            ("car", self.boxes[0][1], blob(self.shape, self.boxes[0][1])),
+            ("truck", self.boxes[1][1], None)])
+        record_file = target / RECORD_FILE
+        record = json.loads(record_file.read_text())
+        record["instances"][1]["verdict"] = None      # accepted, but not stored
+        record_file.write_text(json.dumps(record) + "\n")
+        with self.assertRaises(ValueError) as caught:
+            index_pool(self.pool / "demo", self.images, workers=1)
+        self.assertIn("store_disagrees", str(caught.exception))
+
     def test_class_names_survive_the_round_trip(self):
         index = index_pool(self.build(), self.images, workers=1)
         spec = index[0].source.spec
