@@ -32,6 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .aerial import MODES, ROLES, SPECS, InstanceGates, Source
+# Re-exported so one import gives an entry point both flags: `--dataset` reads
+# a dataset's own annotation, `--pool` reads a teacher's, and after parsing the
+# two produce the same `FrameIndex` list and mix in the same batches.
+from .pool_reader import (PoolRequest, describe_pools,  # noqa: F401
+                          index_pools, parse_pool)
 
 MODALITIES = ("thermal", "rgb")
 
@@ -80,6 +85,11 @@ def parse(argument: str, gates: InstanceGates | None = None) -> Request:
         raise ValueError(f"modality must be one of {MODALITIES}, got {modality!r}")
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    if mode == "pool":
+        raise ValueError(
+            "mode='pool' is not a way of reading a dataset's own annotation -- "
+            "it names a directory of teacher masks. Pass it as "
+            f"--pool <pool_dir>[:<images_root>[:{modality}[:{role}]]] instead.")
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}, got {role!r}")
 

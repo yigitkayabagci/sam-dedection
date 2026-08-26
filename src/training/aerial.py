@@ -810,7 +810,11 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
 # --------------------------------------------------------------------------
 
 
-MODES = ("components", "watershed", "labels")
+# `pool` is not a decomposition at all -- see `src/training/pool_reader.py`.
+# It names a source whose instances were already decided by a teacher and
+# written to a run-length store, so `decompose` is never called for it and
+# `sample_masks` reads the store instead.
+MODES = ("components", "watershed", "labels", "pool")
 
 # Which splits a dataset feeds. `all` is the ordinary 80/10/10.
 ROLES = ("all", "train", "eval")
@@ -1011,6 +1015,11 @@ def decompose(semantic: np.ndarray, spec: DatasetSpec,
 
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    if mode == "pool":
+        raise ValueError(
+            "mode='pool' has no annotation map to decompose -- its instances "
+            "were decided by a teacher and stored as run lengths. Build its "
+            "index with pool_reader.index_pool, not index_frames.")
 
     semantic = np.asarray(semantic)
     if semantic.ndim == 3:
@@ -1462,6 +1471,51 @@ def normalise(images: np.ndarray, device: str = "cpu"):
     return out.sub_(mean).div_(std)
 
 
+def image_origin(sample: Sample) -> tuple[int, int]:
+    """`sample.origin` translated into the coordinates of the file on disk.
+
+    They are the same number for every source that reads its own annotation
+    map, because the map and the image are the same size. A **pool** source is
+    the exception: `pool.label_pool` cut DroneVehicle's 100 px white band off
+    before the teacher ever looked, so its boxes, its stored masks and its
+    frame size are all the inset frame's -- while the JPEG on disk still has
+    the band. Carrying that offset here, rather than shifting the boxes when
+    the index is built, keeps the three of them agreeing with the store they
+    came out of and puts the one conversion at the one place that reads pixels.
+    """
+    source = sample.source
+    border = source.spec.border if source and source.mode == "pool" else 0
+    return sample.origin[0] + border, sample.origin[1] + border
+
+
+def pool_masks(sample: Sample) -> np.ndarray:
+    """`sample_masks` for a pool source: the teacher's masks, off the store.
+
+    `Instance.label` is the box's row number within its frame, which is exactly
+    the key `pool.label_pool` filed the mask under -- so recovering a mask is a
+    dictionary lookup and there is no matching step to get wrong. Instances the
+    gates rejected are absent from the store, and `pool_reader.index_pool` never
+    indexes them, so a `KeyError` here means the store and the index disagree
+    and is worth raising rather than papering over.
+    """
+    import cv2
+
+    from .labels import open_masks
+
+    store = open_masks(sample.frame.mask)
+    x0, y0 = sample.origin
+    width, height = sample.window
+
+    out = np.zeros((len(sample.instances), sample.size, sample.size), dtype=bool)
+    for k, instance in enumerate(sample.instances):
+        mask = store[instance.label][y0:y0 + height, x0:x0 + width].astype(np.uint8)
+        if mask.shape[:2] != (sample.size, sample.size):
+            mask = cv2.resize(mask, (sample.size, sample.size),
+                              interpolation=cv2.INTER_NEAREST)
+        out[k] = mask.astype(bool)
+    return out
+
+
 def sample_masks(sample: Sample) -> np.ndarray:
     """`[K, size, size]` boolean targets, one per instance, in input coordinates.
 
@@ -1485,6 +1539,8 @@ def sample_masks(sample: Sample) -> np.ndarray:
             "mask should be decoded. Build windows from an index made by "
             "index_frames(frames, source).")
     source = sample.source
+    if source.mode == "pool":
+        return pool_masks(sample)
     components, _, _ = decompose(read_mask(sample.frame.mask), source.spec,
                                  source.gates, source.mode)
     x0, y0 = sample.origin
@@ -1507,7 +1563,7 @@ def sample_masks(sample: Sample) -> np.ndarray:
 __all__ = [
     "DatasetSpec", "Frame", "FrameIndex", "Instance", "InstanceGates", "SPECS",
     "MODES", "ROLES", "Sample", "Source", "decompose", "describe_layout", "index_frames",
-    "list_frames", "list_pairs", "split_bridges",
+    "list_frames", "list_pairs", "split_bridges", "image_origin", "pool_masks",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",
     "split_frames", "split_index", "summarise", "windows_for",

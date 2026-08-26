@@ -36,6 +36,20 @@ BUILDERS = {
     "16_": "build_vtuav_pool_notebooks",
     "17_": "build_vtuav_pool_notebooks",
     "18_": "build_kust4k_pool_notebook",
+    "19_": "build_stage_b_notebooks",
+    "20_": "build_stage_b_notebooks",
+}
+
+# 15-20 were all asked for the same way -- cells only, no prose, no comments --
+# but they are not the same length of job. The cap is per notebook because a
+# single number would either let 15 grow or refuse 19 the four cells it needs
+# to train, score twice and draw the result.
+COMMENT_FREE = {
+    "15_dronevehicle_shared_pool.ipynb": 6,
+    "16_vtuav_rgb_pool.ipynb": 6,
+    "17_vtuav_thermal_pool.ipynb": 6,
+    "19_thermal_stage_b_pool.ipynb": 8,
+    "20_thermal_stage_b_pool_rgb.ipynb": 8,
 }
 
 
@@ -172,16 +186,14 @@ class TestEveryNotebook(unittest.TestCase):
         """
         import json
 
-        for name in ("15_dronevehicle_shared_pool.ipynb",
-                     "16_vtuav_rgb_pool.ipynb",
-                     "17_vtuav_thermal_pool.ipynb"):
+        for name, cap in COMMENT_FREE.items():
             with self.subTest(notebook=name):
                 path = ROOT / "notebooks" / name
                 self.assertTrue(path.is_file())
                 cells = json.loads(path.read_text())["cells"]
                 self.assertTrue(all(c["cell_type"] == "code" for c in cells),
                                 f"no markdown cells in {name}")
-                self.assertLessEqual(len(cells), 6, f"{name} stays short")
+                self.assertLessEqual(len(cells), cap, f"{name} stays short")
                 commented = [line for cell in cells for line in cell["source"]
                              if line.lstrip().startswith("#")]
                 self.assertEqual(commented, [])
@@ -205,6 +217,45 @@ class TestEveryNotebook(unittest.TestCase):
         self.assertNotEqual(rgb["MIRROR_DIR"], ir["MIRROR_DIR"])
         self.assertNotEqual(rgb["POOL"], ir["POOL"])
         self.assertNotEqual(rgb["DATA_ROOT"], ir["DATA_ROOT"])
+
+    def test_the_two_stage_b_arms_differ_only_in_the_data_they_mix(self):
+        """19 and 20 answer "does feeding RGB alongside thermal help?".
+
+        They answer it only if the RGB windows are the single difference: the
+        schedule, the seed, the split, the gates, the prompt and the two grades
+        have to be the same source, or the gap between their numbers is not
+        attributable to anything. The three names allowed to move are the
+        variable itself and the two places a parallel run would otherwise
+        collide -- the Drive folder and the checkpoint's `RUN` tag.
+        """
+        thermal = settings_of(ROOT / "notebooks" / "19_thermal_stage_b_pool.ipynb")
+        mixed = settings_of(ROOT / "notebooks" / "20_thermal_stage_b_pool_rgb.ipynb")
+        self.assertEqual(sorted(thermal), sorted(mixed))
+        differ = {k for k in thermal if thermal[k] != mixed[k]}
+        self.assertEqual(differ, {"MODALITIES", "RUN", "MIRROR_DIR",
+                                  "NOTEBOOK", "STAMP"},
+                         f"unexpected differences: {sorted(differ)}")
+        self.assertEqual(thermal["MODALITIES"], '["thermal"]')
+        self.assertEqual(mixed["MODALITIES"], '["thermal", "rgb"]')
+        self.assertNotEqual(thermal["MIRROR_DIR"], mixed["MIRROR_DIR"])
+
+    def test_the_stage_b_arms_start_from_stock_and_run_no_stage_a(self):
+        """The point of these two is stage B alone: `--base` is the stock
+        checkpoint and nothing distils into it first, so what the pools bought
+        is the only thing in the number."""
+        import json
+
+        for name in ("19_thermal_stage_b_pool.ipynb",
+                     "20_thermal_stage_b_pool_rgb.ipynb"):
+            with self.subTest(notebook=name):
+                source = "".join(
+                    line for cell in json.loads(
+                        (ROOT / "notebooks" / name).read_text())["cells"]
+                    for line in cell["source"])
+                self.assertIn('"--base", BASE_CKPT', source)
+                self.assertIn('"--anchor-weight", "0.0"', source)
+                self.assertNotIn("pretrain_encoder", source)
+                self.assertNotIn("DISTILL", source)
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*

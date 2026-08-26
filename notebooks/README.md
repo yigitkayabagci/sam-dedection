@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Fourteen notebooks, meant for Colab. Everything they orchestrate lives in
+Twenty notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -24,6 +24,8 @@ recipe, not the implementation.
 | 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17 |
 | 17 | `17_vtuav_thermal_pool.ipynb` | VTUAV's **thermal** half, on `ir.txt`'s own boxes — the two halves agree on only 12 % of rows, so neither mask serves the other | the same archives; runs beside 16 on a second runtime |
 | 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
+| 19 | `19_thermal_stage_b_pool.ipynb` | stage B trained on the **thermal** mask pools 13-18 produced, from stock EdgeTAM with no stage A — plus a stock-vs-trained score and a before/after panel | the pools staged under `MyDrive/edgetam-pool`, and the frames they were harvested from (a pool holds masks, not pixels) |
+| 20 | `20_thermal_stage_b_pool_rgb.ipynb` | the same run with the **RGB** pools mixed into the same batches — the one variable | the same, plus the RGB pools' frames |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -108,6 +110,32 @@ sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
 
+**19 and 20 are the pools' first training run, and one experiment.** They are
+generated from `tools/build_stage_b_notebooks.py`, are the comment-free shape
+15–18 are, and differ in exactly one setting: 19 trains on the thermal pools,
+20 adds the RGB ones to the same batches. Both start from **stock EdgeTAM with
+no stage A**, which is the point — 07's number carries a distillation pass and
+a fine-tune together, and these carry only what the pools bought.
+
+Both score stock and the trained checkpoint on the same held-out split under
+two prompts (`box` and `point` — 12 measured that the first cannot see an
+encoder change), print the deltas by class and by modality, and then draw the
+held-out instances whose IoU moved most **in both directions**: a mean can hide
+a model that got better at trucks and worse at people, and the panel cannot.
+
+Two grades, because they answer different questions. The pools' own held-out
+slice is the sensitive one and its "truth" is a teacher's guess gated four
+ways; Kust4K's drawn semantic maps, at `role=eval`, are the honest one. They
+cannot overlap, so cell 2 **drops any pool built from the drawn set's own
+frames** and says so — training on `kust4k_thermal` while grading on Kust4K
+would be scoring on frames the run had seen, and the stratified split cannot
+prevent that because the pool and the semantic set are separate sources with
+separate permutations.
+
+The reader that makes this possible is `src/training/pool_reader.py`, and
+`--pool` is now a flag on `tools/train_encoder.py` and `tools/eval_instances.py`
+beside `--dataset`. It was the follow-up `docs/mask_pool_plan.md` left open.
+
 **All of them are a different axis from 01–06.** Those specialise the *whole*
 tracker on thermal video; these train the **image encoder alone** on static
 aerial imagery, with the memory path frozen and never executed. They are stages
@@ -186,6 +214,10 @@ Each is argued where it is made; this is the index.
 | PTQ first, QAT only where it falls short | 03, `src/training/qat.py` | three of four modules already clear 0.999 in simulation |
 | SAMURAI, not SAM2Long | 04, `docs/samurai.md` | memory attention is 62 % of the frame; N pathways costs N× that |
 | adaptive ROI, not per-frame SAHI | 05, `src/trackers/adaptive.py` | SAHI is a detector technique; this pipeline has one prompted target |
+| a pool's mask is looked up, never matched | `src/training/pool_reader.py` | `Instance.label` is the box's row number, which is the key the store filed it under — so there is no matching step to get wrong |
+| a pool's inset is applied when the image is read, and nowhere else | `aerial.image_origin` | DroneVehicle's 100 px band was cut before the teacher looked, so the boxes, the masks and the frame size are all the inset frame's and only the JPEG is not |
+| a pool defaults to `role=train` | `pool_reader.parse_pool` | its masks are a teacher's guess gated four ways, so scoring on them measures the teacher — the same argument `split_index` makes for reconstructed semantic sets |
+| the batch is measured up to 512, and the rate scales with it | 19, 20, `tools/train_encoder.py` | image mode holds no clip length and no memory bank, so it fits far more than the video path; `--steps` is fixed, so a bigger batch puts more samples behind the same number of updates |
 
 ## Verifying without Colab
 
@@ -193,7 +225,7 @@ Everything these notebooks call is tested on CPU with **nothing installed but
 numpy and torch** — no EdgeTAM, no GPU:
 
 ```bash
-python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill tests.test_datasets tests.test_notebooks tests.test_masklets tests.test_fetch_datasets tests.test_mask_pool
+python -m unittest tests.test_antiuav_dataset tests.test_accuracy tests.test_pseudo_labels tests.test_training_losses tests.test_clip_loop tests.test_quantization tests.test_samurai tests.test_adaptive tests.test_loader tests.test_fetch_antiuav410 tests.test_lora tests.test_schedule tests.test_aerial tests.test_image_loop tests.test_distill tests.test_datasets tests.test_notebooks tests.test_masklets tests.test_fetch_datasets tests.test_mask_pool tests.test_pool_reader
 ```
 
 `tests.test_loader` and the end-to-end labelling case in

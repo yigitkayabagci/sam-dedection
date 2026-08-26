@@ -27,9 +27,23 @@ here than for the head: the encoder carries general visual features, and one
 dataset is one sensor, one city and one set of annotation habits. Kust4K's
 4 024 frames at 640x512 are a thin thing to move a trunk with on their own.
 
+**And it takes mask pools, on the same terms.** `--pool` points at a directory
+notebooks 13-18 harvested -- box annotations turned into teacher masks -- and
+its windows concatenate into the same batch as `--dataset`'s. The two differ
+only in where the mask came from, so a pool run, a semantic run and a mixed run
+go through one loop, one schedule and one evaluation. A pool holds masks and
+not pixels, so the second field of the flag is where its frames live now.
+
 Usage:
     python tools/train_encoder.py --dataset kust4k:/content/data/Kust4K \\
         --out checkpoints/edgetam_aerial_512.pt --method finetune
+
+    # stage B on the mask pools alone, no stage A, thermal only
+    python tools/train_encoder.py \\
+        --pool /content/pool/hituav_thermal:/content/data/HIT_UAV \\
+        --pool /content/pool/dronevehicle_thermal:/content/data/DroneVehicle \\
+        --pool /content/pool/kust4k_thermal:/content/data/Kust4K:thermal:all \\
+        --out checkpoints/edgetam_pool_512.pt --method finetune
 
     # higher resolution, and instance masks that need no decomposition at all
     python tools/train_encoder.py \\
@@ -61,7 +75,14 @@ from src.training.aerial import (  # noqa: E402
     split_index,
     summarise,
 )
-from src.training.datasets import Request, describe, parse  # noqa: E402
+from src.training.datasets import (  # noqa: E402
+    Request,
+    describe,
+    describe_pools,
+    index_pools,
+    parse,
+    parse_pool,
+)
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
 from src.training.image_loop import TRAIN_PROMPTS  # noqa: E402
 from src.training.schedule import Schedule, images, run_stages  # noqa: E402
@@ -161,11 +182,21 @@ def build_model(size: int, checkpoint: str, device: str):
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset", action="append", required=True, metavar="SPEC:PATH[:MODALITY[:MODE]]",
+    p.add_argument("--dataset", action="append", default=[],
+                   metavar="SPEC:PATH[:MODALITY[:MODE[:ROLE]]]",
                    help="Repeatable. e.g. kust4k:/data/Kust4K or "
                         "vtuav_vis:/data/VTUAV:thermal:labels. Every dataset "
                         "given is mixed into the same batches -- see "
                         "src/training/datasets.py.")
+    p.add_argument("--pool", action="append", default=[],
+                   metavar="POOL_DIR[:IMAGES_ROOT[:MODALITY[:ROLE]]]",
+                   help="Repeatable, and mixes into the same batches as "
+                        "--dataset. A mask pool built by notebooks 13-18: "
+                        "`(image, box, teacher mask)` triples in the same "
+                        "run-length store, read by src/training/pool_reader.py. "
+                        "IMAGES_ROOT is where that dataset's frames are now -- "
+                        "the pool holds masks only, a few KB per frame, and the "
+                        "path each record carries is the harvest runtime's.")
     p.add_argument("--out", required=True, help="Where the checkpoint goes.")
     p.add_argument("--method", choices=("finetune", "lora"), default="finetune")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt",
@@ -209,7 +240,25 @@ def main(argv: list[str] | None = None) -> int:
                         "undo that on a set two orders of magnitude smaller. "
                         "0.1-1.0 is the range to try; costs no extra forward.")
     p.add_argument("--batch", type=int, default=0, help="0 measures it on this GPU.")
-    p.add_argument("--batch-ceiling", type=int, default=64)
+    p.add_argument("--batch-ceiling", type=int, default=64,
+                   help="Upper bound on the measured batch. The default is a "
+                        "16 GB card's regime; on 80 GB raise it and let the "
+                        "probe find the wall -- image mode holds no clip "
+                        "length and no memory bank, so it fits far more than "
+                        "the video path does.")
+    p.add_argument("--batch-reserve", type=float, default=0.15,
+                   help="Fraction of the card the batch probe leaves free for "
+                        "fragmentation, the EMA copy and the validation pass. "
+                        "0.15 of an 80 GB card is 12 GB, which is generous; "
+                        "lower it to push the batch further.")
+    p.add_argument("--lr-scale", type=float, default=1.0,
+                   help="Multiplies every learning rate. Its reason is the "
+                        "batch: `--steps` is fixed, so doubling the batch "
+                        "doubles the samples behind each of the same number of "
+                        "updates, and the linear scaling rule says the step "
+                        "should grow with it. Left at 1.0 nothing changes, "
+                        "which is what every number recorded before this flag "
+                        "was taken with.")
     p.add_argument("--accum", type=int, default=1)
     p.add_argument("--steps", type=int, default=400, help="Batches per epoch.")
     p.add_argument("--epochs", type=int, nargs=2, default=(1, 3),
@@ -237,10 +286,17 @@ def main(argv: list[str] | None = None) -> int:
 
     gates = InstanceGates(min_area=args.min_area, min_side=args.min_side,
                           max_area=args.max_area, fill=args.fill)
+    if not args.dataset and not args.pool:
+        p.error("nothing to train on: pass --dataset, --pool, or both")
     requests = [parse(argument, gates) for argument in args.dataset]
-    print(describe(requests), "\n")
-    index = build_indexes(requests, Path(args.index) if args.index else None,
-                          args.workers)
+    pools = [parse_pool(argument, gates) for argument in args.pool]
+    cache = Path(args.index) if args.index else None
+    if requests:
+        print(describe(requests), "\n")
+    if pools:
+        print(describe_pools(pools), "\n")
+    index = build_indexes(requests, cache, args.workers)
+    index.extend(index_pools(pools, cache, args.workers, progress=_tqdm()))
     print()
     print(summarise(index))
 
@@ -279,7 +335,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"anchoring to {args.base} at weight {args.anchor_weight}")
 
     meta = {"method": args.method, "image_size": args.size,
-            "datasets": [r.label for r in requests], "base": args.base,
+            "datasets": [r.label for r in requests] + [r.label for r in pools],
+            "base": args.base,
             "stage": "instances", "train_frames": len(splits["train"]),
             "train_instances": instances, "sources": train.sources,
             "per_image": args.per_image, "max_instances": args.max_instances,
@@ -313,11 +370,24 @@ def main(argv: list[str] | None = None) -> int:
         # difference is a result, not something to normalise away.
         freeze(model, "encoder")
         batch = auto_batch_size(model, train, device=args.device,
-                                maximum=args.batch_ceiling)
+                                maximum=args.batch_ceiling,
+                                reserve=args.batch_reserve)
 
+    # Scaling the rates rather than editing RATES keeps the table above the one
+    # every recorded run used, and keeps `--lr-scale 1` byte-identical to it.
+    def scaled(rates: Rates) -> Rates:
+        if args.lr_scale == 1.0:
+            return rates
+        return Rates(head=rates.head * args.lr_scale,
+                     neck=rates.neck * args.lr_scale,
+                     trunk=rates.trunk * args.lr_scale,
+                     weight_decay=rates.weight_decay)
+
+    meta |= {"batch_reserve": args.batch_reserve, "lr_scale": args.lr_scale}
     schedule = Schedule(
-        stages=(("head", args.epochs[0], RATES[args.method]["head"]),
-                ("encoder", args.epochs[1], RATES[args.method]["encoder"])),
+        stages=(("head", args.epochs[0], scaled(RATES[args.method]["head"])),
+                ("encoder", args.epochs[1],
+                 scaled(RATES[args.method]["encoder"]))),
         batch=batch, accum=args.accum, steps_per_epoch=args.steps,
         val_batches=args.val_batches, workers=args.workers, depth=args.depth,
         seed=args.seed, meta=meta)

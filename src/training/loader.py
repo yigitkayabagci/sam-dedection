@@ -33,7 +33,13 @@ from .clip_loop import Batch, collate
 
 # Doubling to 16 and then widening the steps: the interesting range on a 90 GB
 # card is 16-64, and probing 5, 6, 7 there wastes minutes for nothing.
-CANDIDATES = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128)
+# The ladder `largest_that_fits` walks. It stops at the first refusal, so the
+# entries past a small card's reach cost that card nothing -- and an 80 GB one
+# needs them: image mode holds no clip length and no memory bank, so a 512
+# window batch that fills a 16 GB card at 24 leaves five sixths of an A100
+# idle. The gaps widen with the numbers because a wrong answer at 384 costs one
+# probe and a wrong answer at 12 costs a run.
+CANDIDATES = (1, 2, 4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512)
 
 
 # --------------------------------------------------------------------------

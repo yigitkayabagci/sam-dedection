@@ -42,7 +42,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .aerial import Sample, load_image, normalise, sample_masks
+from .aerial import (Sample, image_origin, load_image, normalise,
+                     sample_masks)
 from .clip_loop import (
     _capture_head,
     box_prompt,
@@ -114,7 +115,7 @@ def collate(samples: Sequence[Sample], device: str = "cpu",
     mapper = map if executor is None else executor.map
     size = samples[0].size
     pixels = list(mapper(
-        lambda s: load_image(s.frame.image, s.origin, s.window, s.size,
+        lambda s: load_image(s.frame.image, image_origin(s), s.window, s.size,
                              s.source.gray if s.source else True), samples))
     masks = list(mapper(sample_masks, samples))
 
@@ -418,7 +419,7 @@ class ImageSplit:
 
 def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
                     maximum: int | None = None, reserve: float = 0.15,
-                    verbose: bool = True) -> int:
+                    verbose: bool = True, candidates=None) -> int:
     """The largest window batch that trains on this GPU.
 
     Image mode fits far more than clip mode does -- there is no clip length
@@ -431,7 +432,7 @@ def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
     single-instance window would report a size that OOMs the moment a crowded
     scene comes round.
     """
-    from .loader import measure_batch_size
+    from .loader import CANDIDATES, measure_batch_size
 
     pool = sorted(split.samples, key=lambda s: -len(s.instances))
 
@@ -441,7 +442,8 @@ def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
 
     return measure_batch_size(model, step, device,
                               maximum=min(maximum or len(pool), len(pool)),
-                              reserve=reserve, verbose=verbose)
+                              reserve=reserve, verbose=verbose,
+                              candidates=candidates or CANDIDATES)
 
 
 def stream(split: ImageSplit, batch: int, seed: int | None, limit: int | None,

@@ -354,9 +354,21 @@ defterlerle şöyle hizalanır:
 - **A (ön-eğitim):** 07–11 zaten koşuyor (distilasyon; ConvNeXt V2'nin
   FCMAE'si `docs/encoder_arastirma.md`'de MAE-evrişimsel not olarak duruyor;
   distilasyon seçiminin gerekçesi orada). Havuz defterleri A'ya dokunmaz.
-- **B (tek kare):** bu havuzlar B'nin veri tarafını büyütür. `pool.py`'nin
-  okuyucusu `image_loop`'un beklediği örnek biçimini verir; B defterine
-  bağlamak ayrı, küçük bir değişiklik (DATASETS listesine havuz kaynağı).
+- **B (tek kare): bağlandı.** `src/training/pool_reader.py` bir havuz
+  klasörünü `sample_windows`/`split_index`/`image_loop`'un zaten tükettiği
+  `FrameIndex` listesine çeviriyor; `tools/train_encoder.py` ve
+  `tools/eval_instances.py` artık `--dataset`'in yanında **`--pool`** alıyor ve
+  ikisinin pencereleri aynı batch'te karışıyor. Üç karar okunmaya değer:
+  `Instance.label` kutunun kare içindeki satır numarası — yani maskeyi
+  bulmak bir sözlük araması, eşleştirme adımı yok; hasatta kesilen inset
+  (DroneVehicle'ın 100 px'i) yalnızca **görüntü okunurken** geri ekleniyor
+  (`aerial.image_origin`), çünkü kutular, maskeler ve kare boyutu zaten inset
+  çerçevesinde; ve bir havuzun varsayılan `role`'ü `train`, çünkü maskesi
+  öğretmenin dört kapıdan geçmiş tahmini — onun üstünde puan almak modeli
+  değil öğretmeni ölçer. Koşan hâli `notebooks/19_thermal_stage_b_pool.ipynb`
+  ve `20_thermal_stage_b_pool_rgb.ipynb`: aşama A yok, taban stok EdgeTAM,
+  ve aynı held-out bölünmesinde stok ile eğitilmiş checkpoint yan yana
+  puanlanıp IoU'su en çok oynayan örnekler **iki yönde birden** çiziliyor.
 - **C (video):** RGBT234/VTUAV masklet depoları `labels.py` deposunun
   kendisi — `clip_loop` hazır olduğunda aynı arayüzden okunur.
 

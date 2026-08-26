@@ -19,10 +19,19 @@ split will not be the same one and "held out" stops being true. Numbers are
 reported per `dataset/class`, because `car` is class 5 in Kust4K and something
 else elsewhere.
 
+`--pool` is the same flag `train_encoder.py` takes and carries the same
+warning: pass the run's own flags, in the same roles, or the stratified split
+is a different split and "held out" stops being true.
+
 Usage:
     python tools/eval_instances.py --dataset kust4k:/content/data/Kust4K \\
         --checkpoint checkpoints/edgetam_aerial_512.pt --split test \\
         --json /content/instances_finetune.json
+
+    python tools/eval_instances.py \\
+        --pool /content/pool/kust4k_thermal:/content/data/Kust4K:thermal:all \\
+        --checkpoint third_party/EdgeTAM/checkpoints/edgetam.pt \\
+        --split test --prompt point --json /content/pool_stock.json
 """
 from __future__ import annotations
 
@@ -42,7 +51,13 @@ from src.training.aerial import (  # noqa: E402
     sample_windows,
     split_index,
 )
-from src.training.datasets import describe, parse  # noqa: E402
+from src.training.datasets import (  # noqa: E402
+    describe,
+    describe_pools,
+    index_pools,
+    parse,
+    parse_pool,
+)
 
 # "Small" is the bucket the deployment lives in: a target this size is a few
 # hundred pixels of a 512 window, which is where a tracker starts losing things.
@@ -161,10 +176,18 @@ def report(result: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset", action="append", required=True,
-                   metavar="SPEC:PATH[:MODALITY[:MODE]]",
+    p.add_argument("--dataset", action="append", default=[],
+                   metavar="SPEC:PATH[:MODALITY[:MODE[:ROLE]]]",
                    help="Repeatable, and must match the training run's flags "
                         "for the split to be the same one.")
+    p.add_argument("--pool", action="append", default=[],
+                   metavar="POOL_DIR[:IMAGES_ROOT[:MODALITY[:ROLE]]]",
+                   help="Repeatable. Same rule as --dataset and for the same "
+                        "reason: the split is stratified per source and seeded "
+                        "by its name, so a pool the training run had and this "
+                        "one does not changes nothing about the others' "
+                        "splits -- but a pool scored under a different `role` "
+                        "than it trained under is not the same held-out set.")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--index", default=None,
                    help="Directory holding the indexes train_encoder.py wrote.")
@@ -209,9 +232,17 @@ def main(argv: list[str] | None = None) -> int:
     # baked into the instance list and these only matter on a cold rebuild.)
     gates = InstanceGates(min_area=args.min_area, min_side=args.min_side,
                           max_area=args.max_area, fill=args.fill)
+    if not args.dataset and not args.pool:
+        p.error("nothing to score on: pass --dataset, --pool, or both")
     requests = [parse(argument, gates) for argument in args.dataset]
-    print(describe(requests), "\n")
-    index = build_indexes(requests, Path(args.index) if args.index else None, 8)
+    pools = [parse_pool(argument, gates) for argument in args.pool]
+    cache = Path(args.index) if args.index else None
+    if requests:
+        print(describe(requests), "\n")
+    if pools:
+        print(describe_pools(pools), "\n")
+    index = build_indexes(requests, cache, 8)
+    index.extend(index_pools(pools, cache, 8))
 
     # The same stratified split, from the same seed, as training used --
     # otherwise "held out" is a claim rather than a fact.
