@@ -43,25 +43,45 @@ against 13 GB of PNGs, so the whole selection is decided before the disk is
 spent -- `boxes.yolo_label_frames` exists for exactly that, indexing from the
 label files with `image` naming where each frame *will* be.
 
-`SOURCES` therefore defaults to three of the six, and the two it leaves out
-are left out for different reasons. **gundataset and munitions** are
-photographs of objects at arm's length -- the scale filter would cut most of
-them anyway, and cutting them by name is both cheaper and honest about why.
-**hituav** is excluded despite being the only unambiguously aerial thermal part
-of the collection, because `tools/fetch_datasets.py hituav` already pulls those
-same 2 898 frames at 0.4 GB with their **original** COCO annotations rather
-than a re-encode through a seven-class remap. Harvesting both routes would put
-the same frames in the pool twice under two names, which is the one way a
-held-out split stops being held out.
+`SOURCES` therefore takes **one** of the six, and the five it leaves out are
+left out for three different kinds of reason, which is worth keeping straight.
+**gundataset and munitions** are photographs of objects at arm's length -- the
+scale filter would cut most of them anyway, and cutting them by name is both
+cheaper and honest about why. **hituav** is excluded despite being the only
+unambiguously aerial thermal part of the collection, because
+`tools/fetch_datasets.py hituav` already pulls those same 2 898 frames at
+0.4 GB with their **original** COCO annotations rather than a re-encode
+through a seven-class remap. Harvesting both routes would put the same frames
+in the pool twice under two names, which is the one way a held-out split stops
+being held out. **uav2uav (3 856) and mixdataset (2 975)** are out because the
+user decided to take only `llvip` -- not because anything here measured them
+and found them wanting, and this file will not invent a justification it does
+not have. The modality probe in cell 3 stays exactly where it is: it costs
+twelve images per source and it is the thing that would answer whether either
+is worth revisiting, which is an argument for keeping it, not for quietly
+dropping it along with the sources.
 
-What is left is what the download is actually for: LLVIP's 15 488 infrared
-frames, whose targets sit at a relative scale not far from an aerial one even
-though the camera is on a pole, and uav2uav's 3 856. Viewpoint transfers badly
-for a *detector*; this pool trains box-to-mask, which is a much more local
-skill. One caveat travels with LLVIP: its **car boxes are pseudo-labels** from
-a pretrained detector (5 484 boxes over 3 876 images), so a mask made from one
+So what is left is what the download is actually for. **LLVIP** is 15 488
+infrared frames, and it is the only reason 13.21 GB is worth pulling at all;
+without it this notebook would be a slow way to fetch a few thousand images.
+Its camera is on a pole rather than a drone, which is a real objection and not
+one to wave away -- it is in anyway on two grounds. First, this pool trains
+box-to-mask, and where a mask boundary lies inside a given box is a local
+skill that survives a change of viewpoint far better than detection does;
+a detector trained on street level and flown at 100 m is lost, a segmenter
+handed a box is mostly not. Second, LLVIP's targets sit at a relative scale of
+roughly 0.05-0.2, which overlaps the aerial band the filter is aiming at, so
+the scale objection that sinks the close-up sources does not apply here. One
+caveat travels with LLVIP: its **car boxes are pseudo-labels** from a
+pretrained detector (5 484 boxes over 3 876 images), so a mask made from one
 is a pseudo-label of a pseudo-label. The prompts file records the source, so
 they stay separable.
+
+One last thing not to "simplify": `MIRROR_DIR` points at a *per-pool subfolder*
+inside `edgetam-pool`, not at `edgetam-pool` itself. Cell 7 copies sidecars
+into it under fixed names, and `pool_index.jsonl` is one of them -- notebook 18
+writes a file of exactly that name into its own subfolder. Flatten either and
+the two notebooks overwrite each other's index.
 """
 from __future__ import annotations
 
@@ -94,7 +114,7 @@ MIRROR_DIR   = "/content/drive/MyDrive/edgetam-pool/kaggle_uav_thermal"
 SPLITS       = ("train", "val")
 CLASS_NAMES  = ("person", "car", "bicycle", "other_vehicle",
                 "drone", "mine", "gun")
-SOURCES      = ("llvip", "uav2uav", "mixdataset")   # see the note in cell 3
+SOURCES      = ("llvip",)           # llvip only, by decision -- see cell 3
 DROP_CLASSES = ("gun", "mine")                      # close-range by nature
 MIN_REL      = 0.01          # below this a box is a few pixels
 MAX_REL      = 0.35          # above this the frame is a close-up
@@ -266,6 +286,11 @@ print(B.scale_table(FLAT, max_rel=MAX_REL))
 # are. A thermal frame is single-channel written out as three, so the mean
 # spread between a pixel's channels is ~0 for thermal and tens of counts for
 # colour. Twelve images per source answers it for the price of twelve images.
+#
+# It probes every source, not only the ones in SOURCES. SOURCES is llvip alone
+# because that was decided, not because uav2uav or mixdataset were measured
+# and rejected -- and this table plus the one above it are what you would read
+# before deciding whether either is worth adding back.
 import numpy as np, cv2
 
 _by_source = {}
