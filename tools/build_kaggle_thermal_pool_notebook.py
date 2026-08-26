@@ -157,9 +157,33 @@ else:
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
 
+# Pillow is deliberately **not** in this list. Colab ships one, the kernel
+# has already imported it, and upgrading it underneath leaves a mixed
+# site-packages -- a new `ImageDraw.py` beside an old `_typing.py` -- whose
+# symptom is `cannot import name '_Ink' from 'PIL._typing'` raised from deep
+# inside transformers, where it reads as a SAM 3 problem. Nothing here needs
+# a newer Pillow: `pool._image_size` prefers it and falls back to OpenCV.
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
-                "kaggle", "pandas", "pillow", "tqdm"], check=False)
+                "kaggle", "pandas", "tqdm"], check=False)
+
+# transformers 5 is a large upgrade over the preinstalled one, so the kernel
+# that just installed it is usually still holding the old modules. Probing
+# the one class this notebook needs turns that into a restart instruction
+# here, instead of a 30-frame traceback three cells and one dataset later.
+try:
+    from transformers import Sam3TrackerModel as _probe
+    del _probe
+    TRANSFORMERS_OK = True
+except Exception as _transformers_error:
+    TRANSFORMERS_OK = False
+    print("transformers is not usable yet:", _transformers_error)
+    print("--> Runtime > Restart session, then run this cell again.")
+    print("If the message mentions PIL._typing or _Ink, Pillow is "
+          "half-upgraded; repair it first with:")
+    print("    !pip install -q --force-reinstall pillow")
+if not TRANSFORMERS_OK:
+    raise SystemExit("restart the runtime, then re-run this cell")
 
 # The mount is retried with `force_remount` before it is believed, because a
 # half-finished earlier mount fails the plain call and succeeds the forced
