@@ -31,7 +31,8 @@ The order the cells run in is the point:
 
   1. environment
   2. download the archive; extract **only** manifest.csv and the label files
-  3. index from those labels and print the scale table -- no image on disk yet
+  3. index from those labels; print the scale table and probe each source's
+     modality -- twelve images on disk, no more
   4. filter, then extract only the images that survived
   5. SAM 3 (no fallback), and the accepted masks drawn before the run
   6. harvest
@@ -42,10 +43,25 @@ against 13 GB of PNGs, so the whole selection is decided before the disk is
 spent -- `boxes.yolo_label_frames` exists for exactly that, indexing from the
 label files with `image` naming where each frame *will* be.
 
-The Kaggle route rather than the source datasets is deliberate for HIT-UAV's
-2 898 frames only under protest: `tools/fetch_datasets.py hituav` already pulls
-them at 0.4 GB with the original COCO annotations. What the merged set adds is
-LLVIP's 15 488 thermal frames and uav2uav's 3 856, at one download.
+`SOURCES` therefore defaults to three of the six, and the two it leaves out
+are left out for different reasons. **gundataset and munitions** are
+photographs of objects at arm's length -- the scale filter would cut most of
+them anyway, and cutting them by name is both cheaper and honest about why.
+**hituav** is excluded despite being the only unambiguously aerial thermal part
+of the collection, because `tools/fetch_datasets.py hituav` already pulls those
+same 2 898 frames at 0.4 GB with their **original** COCO annotations rather
+than a re-encode through a seven-class remap. Harvesting both routes would put
+the same frames in the pool twice under two names, which is the one way a
+held-out split stops being held out.
+
+What is left is what the download is actually for: LLVIP's 15 488 infrared
+frames, whose targets sit at a relative scale not far from an aerial one even
+though the camera is on a pole, and uav2uav's 3 856. Viewpoint transfers badly
+for a *detector*; this pool trains box-to-mask, which is a much more local
+skill. One caveat travels with LLVIP: its **car boxes are pseudo-labels** from
+a pretrained detector (5 484 boxes over 3 876 images), so a mask made from one
+is a pseudo-label of a pseudo-label. The prompts file records the source, so
+they stay separable.
 """
 from __future__ import annotations
 
@@ -78,8 +94,8 @@ MIRROR_DIR   = "/content/drive/MyDrive/edgetam-pool/kaggle_uav_thermal"
 SPLITS       = ("train", "val")
 CLASS_NAMES  = ("person", "car", "bicycle", "other_vehicle",
                 "drone", "mine", "gun")
-SOURCES      = None          # None = every source; or e.g. ("hituav", "uav2uav")
-DROP_CLASSES = ()            # e.g. ("gun", "mine") -- close-range by nature
+SOURCES      = ("llvip", "uav2uav", "mixdataset")   # see the note in cell 3
+DROP_CLASSES = ("gun", "mine")                      # close-range by nature
 MIN_REL      = 0.01          # below this a box is a few pixels
 MAX_REL      = 0.35          # above this the frame is a close-up
 LARGE_REL    = 0.15          # the "near target" band starts here
@@ -245,6 +261,44 @@ print("\\nby source dataset")
 print(B.scale_table(FLAT, groups=SOURCE_OF or None, max_rel=MAX_REL))
 print("\\nby class")
 print(B.scale_table(FLAT, max_rel=MAX_REL))
+
+# The collection is sold as thermal and its manifest never says which sources
+# are. A thermal frame is single-channel written out as three, so the mean
+# spread between a pixel's channels is ~0 for thermal and tens of counts for
+# colour. Twelve images per source answers it for the price of twelve images.
+import numpy as np, cv2
+
+_by_source = {}
+for _frame in FLAT:
+    _by_source.setdefault(SOURCE_OF.get(_frame.key, "?"), []).append(_frame)
+
+MODALITY = {}
+print("\\n| source | sampled | channel spread | mean | verdict |")
+print("|---|---:|---:|---:|---|")
+for _name, _frames in sorted(_by_source.items(), key=lambda kv: -len(kv[1])):
+    _sample = _frames[:: max(len(_frames) // 12, 1)][:12]
+    _spreads, _means = [], []
+    for _frame in _sample:
+        _member = str(Path(_frame.image).relative_to(EXTRACT_DIR))
+        if not (Path(EXTRACT_DIR) / _member).is_file():
+            if _member not in set(MEMBERS):
+                continue
+            ZIP.extract(_member, EXTRACT_DIR)
+        _raw = cv2.imread(str(_frame.image), cv2.IMREAD_UNCHANGED)
+        if _raw is None:
+            continue
+        if _raw.ndim == 2:
+            _spreads.append(0.0)
+        else:
+            _rgb = _raw[:, :, :3].astype(np.int16)
+            _spreads.append(float((_rgb.max(2) - _rgb.min(2)).mean()))
+        _means.append(float(_raw.mean()))
+    if not _spreads:
+        continue
+    _spread = float(np.mean(_spreads))
+    MODALITY[_name] = "thermal" if _spread < 3.0 else "colour"
+    print(f"| {_name} | {len(_spreads)} | {_spread:.1f} | "
+          f"{np.mean(_means):.0f} | {MODALITY[_name]} |")
 ''')
 
 
@@ -319,7 +373,6 @@ code('''
 # Deliberately no fallback. `facebook/sam3` is gated and wants
 # transformers>=5; both are a minute to fix, whereas a pool silently built on
 # a different teacher is not visibly wrong anywhere downstream.
-import numpy as np, cv2
 import matplotlib.pyplot as plt
 from src.training.labels import Gates, build_image_teacher
 from src.training.pool import label_boxes
