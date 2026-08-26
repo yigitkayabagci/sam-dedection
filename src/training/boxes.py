@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Iterable, Sequence as SequenceABC
+from collections.abc import (Callable, Iterable, Mapping,
+                             Sequence as SequenceABC)
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -171,6 +172,74 @@ def yolo_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
     if not frames:
         raise FileNotFoundError(
             f"{root}: images found but not one readable label under {labels}/.")
+    return frames
+
+
+def yolo_label_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
+                      images: str = "images", labels: str = "labels",
+                      suffix: str | None = None) -> list[BoxFrame]:
+    """The same YOLO layout, indexed from the *label* side.
+
+    `yolo_frames` lists the image folder and looks each label up beside it,
+    which is the right way round when the pixels are on disk and the wrong way
+    round while they are still in the archive. A detection export's labels are
+    a few megabytes and unzip in seconds; its images are tens of gigabytes, and
+    the census this reader feeds -- how many boxes, at what scale, from which
+    source -- needs no pixels at all. So the frames are built from
+    `labels/*.txt`, and `image` points at where each image *will* be whether or
+    not it has been extracted yet; the caller pulls the handful it actually
+    decodes out of the zip.
+
+    That leaves the extension, which a label file does not carry. An image
+    already on disk answers it per frame; otherwise `suffix` does; with
+    neither, it is the extension the already-extracted images mostly use, and
+    failing that `.jpg` -- what every YOLO export this repo has fetched ships.
+    Pass `suffix` when the export is something else and nothing is unpacked.
+
+    Two deliberate differences from `yolo_frames`, both because this reader
+    surveys an export rather than feeding the teacher: a label file with no
+    boxes is kept as a frame with none (a background image is part of what the
+    export claims, and dropping it counts the download smaller than it is;
+    `label_pool` skips it later, as it skips any frame with nothing to prompt),
+    and a `classes.txt` sitting in the label folder is not read as one.
+
+    `key` is the file stem, as in `yolo_frames`, so a per-file map -- the split
+    or source a name came from -- indexes the frames directly. Splits are read
+    one call at a time and an export that repeats a stem across two of them
+    would collide on that key; the fetchers this repo uses do not.
+    """
+    root = Path(root)
+    label_dir, image_dir = root / labels, root / images
+    found = sorted(label_dir.glob("*.txt")) if label_dir.is_dir() else []
+    files = [p for p in found if p.name != "classes.txt"]
+    if not files:
+        raise FileNotFoundError(
+            f"{label_dir}: no label files. YOLO layout wants {images}/ and "
+            f"{labels}/ side by side under {root}.")
+
+    on_disk = _images_by_stem(image_dir)
+    if suffix is None:
+        seen: dict[str, int] = {}
+        for path in on_disk.values():
+            seen[path.suffix] = seen.get(path.suffix, 0) + 1
+        suffix = max(seen, key=lambda s: seen[s]) if seen else ".jpg"
+
+    frames = []
+    for label in files:
+        boxes, classes = [], []
+        for line in label.read_text().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            index = int(float(parts[0]))
+            boxes.append([float(v) for v in parts[1:5]])
+            classes.append(names[index] if 0 <= index < len(names)
+                           else f"class {index}")
+        frames.append(BoxFrame(
+            key=label.stem,
+            image=on_disk.get(label.stem, image_dir / f"{label.stem}{suffix}"),
+            boxes=np.asarray(boxes, dtype=np.float64).reshape(-1, 4),
+            classes=tuple(classes), normalized=True))
     return frames
 
 
@@ -958,6 +1027,86 @@ def class_histogram(frames: Iterable[BoxFrame]) -> dict[str, int]:
         for name in frame.classes:
             counts[name] = counts.get(name, 0) + 1
     return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
+def scale_table(frames: SequenceABC[BoxFrame],
+                groups: Mapping[str, str] | Callable[[BoxFrame], str] | None = None,
+                max_rel: float = 0.5) -> str:
+    """How large the boxes are, relative to their own frame, per group.
+
+    `summarise_frames` reports a median long side in pixels and gives up on
+    normalised readers, because a YOLO fraction has no honest pixel number
+    until an image is decoded. This is the probe for the other half: a
+    fraction is already a scale, and it is the scale that decides whether a
+    box is worth a teacher pass. A merged export mixes sources that annotate
+    at wildly different distances -- one set's median box is 2 % of the frame
+    and another's is half of it -- and the pool's zoom crop, its gates and its
+    `max_boxes` cap all behave differently at the two ends.
+
+    `groups` splits the rows: a mapping from `BoxFrame.key` to a group name
+    (a key it does not carry lands in `?`), or a callable over the frame.
+    Without it there is a single row over everything.
+
+    `max_rel` is the "this is not an object, it is the picture" line: the
+    share of boxes at least that fraction of the frame, which is what a scale
+    gate would drop and what a mislabelled whole-image box looks like. `< 0.01`
+    is the other end -- boxes under 1 % of the frame, where the teacher's mask
+    is least trustworthy.
+
+    Each box's scale is its longer side as a fraction, each side measured
+    against its own axis. Frames from pixel-coordinate readers carry no such
+    fraction; their boxes are counted in a footer rather than guessed at.
+    """
+    def group_of(frame: BoxFrame) -> str:
+        if groups is None:
+            return "all"
+        if callable(groups):
+            return str(groups(frame))
+        return str(groups.get(frame.key, "?"))
+
+    scales: dict[str, list[float]] = {}
+    counts: dict[str, dict[str, int]] = {}
+    for frame in frames:
+        name = group_of(frame)
+        tally = counts.setdefault(name, {"images": 0, "boxes": 0, "unsized": 0})
+        tally["images"] += 1
+        tally["boxes"] += len(frame.classes)
+        if frame.normalized:
+            boxes = frame.boxes
+            scales.setdefault(name, []).extend(
+                np.maximum(np.abs(boxes[:, 2]), np.abs(boxes[:, 3])).tolist())
+        else:
+            tally["unsized"] += len(frame.classes)
+            scales.setdefault(name, [])
+
+    def row(name: str, rel: SequenceABC[float], tally: Mapping[str, int]) -> str:
+        cells = [name, str(tally["images"]), str(tally["boxes"])]
+        if len(rel):
+            values = np.asarray(rel, dtype=np.float64)
+            over = float((values >= max_rel).mean())
+            tiny = float((values < 0.01).mean())
+            cells += [f"{np.median(values):.3f}",
+                      f"{np.percentile(values, 90):.3f}",
+                      f"{values.max():.3f}",
+                      f"{over * 100:.1f} %", f"{tiny * 100:.1f} %"]
+        else:
+            cells += ["--"] * 5
+        return "| " + " | ".join(cells) + " |"
+
+    order = sorted(counts, key=lambda name: -counts[name]["boxes"])
+    lines = [f"| group | images | boxes | median | p90 | max | >= {max_rel:g} "
+             "| < 0.01 |",
+             "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    lines += [row(name, scales[name], counts[name]) for name in order]
+    if len(order) > 1:
+        lines.append(row("all", [v for name in order for v in scales[name]],
+                         {"images": sum(c["images"] for c in counts.values()),
+                          "boxes": sum(c["boxes"] for c in counts.values())}))
+    unsized = sum(c["unsized"] for c in counts.values())
+    if unsized:
+        lines += ["", f"{unsized} boxes came from a pixel-coordinate reader and "
+                      "carry no fraction; they are counted but not measured."]
+    return "\n".join(lines)
 
 
 def summarise_frames(frames: SequenceABC[BoxFrame], name: str = "") -> str:

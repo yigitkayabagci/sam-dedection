@@ -44,7 +44,9 @@ from src.training.boxes import (  # noqa: E402
     kust4k_frames,
     summarise_frames,
     vtuavdet_frames,
+    scale_table,
     yolo_frames,
+    yolo_label_frames,
 )
 from src.training.labels import (  # noqa: E402
     MASK_STORE,
@@ -177,6 +179,61 @@ class TestYoloFrames(unittest.TestCase):
             (Path(tmp) / "images" / "a.jpg").write_bytes(b"jpg")
             with self.assertRaises(FileNotFoundError):
                 yolo_frames(tmp)
+
+
+class TestYoloLabelFrames(unittest.TestCase):
+    """The label-side reader: the survey runs before the images are unpacked."""
+
+    def test_the_frames_are_built_with_not_one_image_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            for image in (Path(tmp) / "images").iterdir():
+                image.unlink()                      # still inside the archive
+            frames = yolo_label_frames(tmp)
+            self.assertEqual([f.key for f in frames], ["a", "b"])
+            self.assertEqual(frames[0].image,
+                             Path(tmp) / "images" / "a.jpg")
+            self.assertTrue(frames[0].normalized)
+            self.assertEqual(frames[0].classes, ("car", "pedestrian"))
+
+    def test_an_extracted_image_names_its_own_suffix_and_the_rest_follow_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp), stems=("a", "b"))
+            (Path(tmp) / "images" / "a.jpg").rename(Path(tmp) / "images" / "a.png")
+            (Path(tmp) / "images" / "b.jpg").unlink()
+            frames = {f.key: f.image for f in yolo_label_frames(tmp)}
+            self.assertEqual(frames["a"].suffix, ".png")
+            self.assertEqual(frames["b"].suffix, ".png")
+
+    def test_the_suffix_can_be_stated_when_nothing_is_unpacked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            for image in (Path(tmp) / "images").iterdir():
+                image.unlink()
+            frames = yolo_label_frames(tmp, suffix=".tif")
+            self.assertEqual(frames[0].image.suffix, ".tif")
+
+    def test_a_background_image_is_kept_where_the_teacher_side_drops_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            (Path(tmp) / "labels" / "b.txt").write_text("")
+            frames = yolo_label_frames(tmp)
+            self.assertEqual(len(frames), 2)        # the export said two
+            self.assertEqual(len(frames[1].boxes), 0)
+            self.assertEqual(len(yolo_frames(tmp)), 1)
+
+    def test_a_classes_txt_beside_the_labels_is_not_read_as_a_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            (Path(tmp) / "labels" / "classes.txt").write_text("car\nperson\n")
+            self.assertEqual([f.key for f in yolo_label_frames(tmp)], ["a", "b"])
+
+    def test_a_split_that_indexes_nothing_is_a_loud_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_yolo(Path(tmp))
+            with self.assertRaises(FileNotFoundError) as caught:
+                yolo_label_frames(tmp, labels="labels/train")
+            self.assertIn("labels/train", str(caught.exception))
 
 
 class TestCocoFrames(unittest.TestCase):
@@ -463,6 +520,35 @@ class TestProbes(unittest.TestCase):
                            classes=("person",))]
         self.assertEqual(class_histogram(frames), {"car": 2, "person": 1})
         self.assertIn("| car | 2 |", summarise_frames(frames, "x"))
+
+    def test_the_scale_table_measures_the_long_side_as_a_fraction(self):
+        frames = [BoxFrame(key="a", image=Path("a"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.02, 0.04],
+                                           [0.5, 0.5, 0.90, 0.10]]),
+                           classes=("car", "car"))]
+        table = scale_table(frames, max_rel=0.5)
+        self.assertIn("| all | 1 | 2 |", table)
+        self.assertIn("| 0.900 |", table)           # the long side, not the area
+        self.assertIn("| 50.0 % |", table)          # one of two boxes >= max_rel
+
+    def test_groups_come_from_the_key_and_an_unmapped_frame_says_so(self):
+        frames = [BoxFrame(key="a", image=Path("a"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.02, 0.02]]),
+                           classes=("car",)),
+                  BoxFrame(key="b", image=Path("b"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.60, 0.60]] * 2),
+                           classes=("car", "car"))]
+        table = scale_table(frames, groups={"a": "visdrone"}, max_rel=0.5)
+        self.assertIn("| ? | 1 | 2 |", table)       # densest group first
+        self.assertIn("| visdrone | 1 | 1 |", table)
+        self.assertIn("| all | 2 | 3 |", table)     # and a total under them
+
+    def test_pixel_boxes_are_counted_but_not_measured(self):
+        frames = [BoxFrame(key="a", image=Path("a"),
+                           boxes=np.array([[0, 0, 10, 10]]), classes=("car",))]
+        table = scale_table(frames)
+        self.assertIn("| all | 1 | 1 | -- |", table)
+        self.assertIn("carry no fraction", table)
 
 
 # --------------------------------------------------------------------------
