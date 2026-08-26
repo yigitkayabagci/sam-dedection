@@ -51,6 +51,7 @@ from src.training.boxes import (  # noqa: E402
 )
 from src.training.labels import (  # noqa: E402
     MASK_STORE,
+    transformers_import_message,
     Gates,
     Sam2Teacher,
     Sam3Teacher,
@@ -621,6 +622,32 @@ class TestProbes(unittest.TestCase):
         table = scale_table(frames)
         self.assertIn("| all | 1 | 1 | -- |", table)
         self.assertIn("carry no fraction", table)
+
+
+class TestTeacherImportMessage(unittest.TestCase):
+    """A broken neighbour package must not be reported as a missing class."""
+
+    def test_transformers_itself_is_the_version_message(self):
+        message = transformers_import_message(
+            ImportError("cannot import name 'Sam3TrackerModel'",
+                        name="transformers"), "Sam3Tracker")
+        self.assertIn("transformers>=5", message)
+
+    def test_a_dependency_is_named_with_its_pip_name_and_a_restart(self):
+        # What Colab actually raises: transformers imports torchvision, which
+        # imports a half-upgraded Pillow, and the ImportError names PIL.
+        message = transformers_import_message(
+            ImportError("cannot import name '_Ink' from 'PIL._typing'",
+                        name="PIL._typing"), "Sam3Tracker")
+        self.assertIn("pillow", message)
+        self.assertIn("--force-reinstall", message)
+        self.assertIn("restart the runtime", message)
+        self.assertNotIn("transformers>=5", message)   # the wrong fix
+
+    def test_an_exception_with_no_module_name_still_blames_transformers(self):
+        message = transformers_import_message(ImportError("boom"), "X")
+        self.assertIn("transformers has no X classes", message)
+
 
 
 # --------------------------------------------------------------------------

@@ -356,6 +356,45 @@ class _ImageTeacher:
         return out
 
 
+# `import transformers` pulls in torchvision, which pulls in Pillow, so an
+# unrelated broken package in the environment surfaces *here*, wearing this
+# import's clothes. The pip name is not always the import name, and the two a
+# Colab runtime breaks are these.
+_PIP_NAME = {"PIL": "pillow", "cv2": "opencv-python", "sklearn": "scikit-learn"}
+
+
+def transformers_import_message(exc: ImportError, classes: str) -> str:
+    """What actually failed, when importing a SAM 3 class does not work.
+
+    The obvious message -- "transformers has no `classes`, upgrade it" -- is
+    right only when transformers is the thing that is wrong. It is a lazy
+    module: importing one name from it imports torchvision, Pillow and a dozen
+    others, and any of those being half-upgraded raises `ImportError` from
+    inside *this* import. Reporting that as a missing SAM 3 class sends the
+    reader to reinstall the one package that was fine, which is a wasted run
+    on a rented GPU and, on Colab, a lost `/content`.
+
+    So the blame is read off the exception: `ImportError.name` is the module
+    that could not be imported, and when it is not transformers itself, the
+    message says which package broke and that a forced reinstall plus a
+    runtime restart -- not a transformers upgrade -- is the fix.
+    """
+    blame = (exc.name or "transformers").split(".")[0]
+    if blame == "transformers":
+        return (f"transformers has no {classes} classes ({exc}).\n"
+                f"SAM 3 landed in transformers 5.0.0 -- `pip install -U "
+                f"'transformers>=5'` -- or use the default SAM 2.1 teacher, "
+                f"which needs nothing.")
+    package = _PIP_NAME.get(blame, blame)
+    return (f"importing {classes} failed inside {blame}, not in transformers "
+            f"({exc}).\n"
+            f"This is not the SAM 3 classes and not the checkpoint: {package} "
+            f"is a broken or half-upgraded install in this environment -- a "
+            f"pip upgrade over a copy that was already imported leaves one. "
+            f"`pip install --force-reinstall --no-deps {package}`, restart the "
+            f"runtime, and run the import again before anything else.")
+
+
 class Sam2Teacher(_ImageTeacher):
     """SAM 2.1's image predictor through `transformers`. The default.
 
@@ -415,10 +454,7 @@ class Sam3Teacher(_ImageTeacher):
             from transformers import Sam3TrackerModel, Sam3TrackerProcessor
         except ImportError as exc:
             raise SystemExit(
-                f"transformers has no Sam3Tracker classes ({exc}).\n"
-                f"SAM 3 landed in transformers 5.0.0 -- `pip install -U "
-                f"'transformers>=5'` -- or use the default SAM 2.1 teacher, "
-                f"which needs nothing.") from exc
+                transformers_import_message(exc, "Sam3Tracker")) from exc
 
         self.model_id = model_id
         self.device = device

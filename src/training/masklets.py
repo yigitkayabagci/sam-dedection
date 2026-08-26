@@ -57,7 +57,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .labels import MASK_STORE, Gates, measure, reject_reason, save_masks
+from .labels import (MASK_STORE, Gates, measure, reject_reason, save_masks,
+                     transformers_import_message)
 
 REPORT_FILE = "masklets.json"
 
@@ -358,11 +359,8 @@ class Sam3VideoTeacher(_VideoTeacher):
             from transformers import (Sam3TrackerVideoModel,
                                       Sam3TrackerVideoProcessor)
         except ImportError as exc:
-            raise SystemExit(
-                f"transformers has no Sam3TrackerVideo classes ({exc}).\n"
-                f"SAM 3 landed in transformers 5.0.0 -- `pip install -U "
-                f"'transformers>=5'` -- or use the default SAM 2.1 teacher, "
-                f"which needs nothing.") from exc
+            raise SystemExit(transformers_import_message(
+                exc, "Sam3TrackerVideo")) from exc
 
         self.model_id = model_id
         self.device = device
