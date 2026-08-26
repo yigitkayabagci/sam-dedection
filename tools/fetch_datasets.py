@@ -1010,6 +1010,241 @@ STAGING = ("/content/drive/MyDrive/datasets",
            "/content/staging")
 
 
+# --------------------------------------------------------------------------
+# Staging an archive somebody already downloaded
+# --------------------------------------------------------------------------
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+RGBT_ROUTES = ("tir", "rgb", "label")
+
+# How many distinct pixel values still counts as a class map. Kust4K has nine
+# and the widest set here has twelve; sixty-four leaves room without reaching
+# the range a real image occupies.
+LABEL_VALUES = 64
+
+# Substrings that name a half, longest-first so `seg_annos` is not read as
+# `anno` after something else already matched. Only a hint: an archive
+# downloaded by hand and renamed, or figshare's "download all" (one zip named
+# after the article id), says nothing at all -- which is why `route_by_pixels`
+# exists below and has the last word.
+ROUTE_HINTS = (("thermal", "tir"), ("infrared", "tir"), ("tir", "tir"),
+               ("visible", "rgb"), ("rgb", "rgb"),
+               ("seg_anno", "label"), ("seg", "label"), ("anno", "label"),
+               ("label", "label"), ("mask", "label"))
+
+
+def route_hint(name: str) -> str | None:
+    """Which half a file or folder name claims to be, or None if it is silent."""
+    lowered = name.lower()
+    for key, folder in ROUTE_HINTS:
+        if key in lowered:
+            return folder
+    return None
+
+
+def route_by_pixels(payloads: SequenceABC[bytes]) -> str | None:
+    """`tir`, `rgb` or `label` decided by decoding a few of the files.
+
+    The name is a claim and the pixels are the fact. Collapsing to one value
+    per pixel is `aerial.read_mask`'s trick, reused so the two agree by
+    construction, and then the test differs by whether the file is grey:
+
+    **Grey** -- a class map is an *index* map, so it is not enough that it has
+    few distinct values, its values also have to be small: Kust4K's palette is
+    0-8. A thermal frame spans the sensor's range. Counting distinct values
+    alone is what an earlier version of this did, and it filed a
+    low-contrast thermal archive as `label/`, where it then blocked the real
+    label archive by name collision -- silently, because both writes
+    "succeeded".
+
+    **Colour** -- few distinct values is decisive on its own. OpenCV expands a
+    paletted PNG to colour, so a class map can arrive with three unequal
+    channels; no photograph has sixty-four distinct colours in it.
+
+    A vote over several files, because one corrupt member should not decide
+    where thirteen gigabytes go.
+    """
+    import numpy as np
+
+    votes: dict[str, int] = {}
+    for payload in payloads:
+        raw = _decode(payload)
+        if raw is None:
+            continue
+        if raw.ndim == 3 and raw.shape[2] >= 3:
+            channels = raw[..., :3].astype(np.int32)
+            grey = ((channels[..., 0] == channels[..., 1]).all()
+                    and (channels[..., 1] == channels[..., 2]).all())
+            flat = (channels[..., 0] if grey else
+                    (channels[..., 2] << 16) | (channels[..., 1] << 8)
+                    | channels[..., 0])
+        else:
+            grey = True
+            flat = raw if raw.ndim == 2 else raw[..., 0]
+        values = np.unique(flat)
+        few = int(values.size) <= LABEL_VALUES
+        if grey:
+            route = ("label" if few and int(values.max()) <= LABEL_VALUES
+                     else "tir")
+        else:
+            route = "label" if few else "rgb"
+        votes[route] = votes.get(route, 0) + 1
+    return max(votes, key=votes.get) if votes else None
+
+
+def _decode(payload: bytes):
+    import numpy as np
+
+    try:
+        import cv2
+    except ImportError:                     # pragma: no cover - environment
+        return None
+    return cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_UNCHANGED)
+
+
+def stage_rgbt_archives(source: str | Path, dest: str | Path, sample: int = 5,
+                        quiet: bool = False) -> dict[str, int]:
+    """Unpack a hand-downloaded RGB-T set into the `tir/ rgb/ label/` layout.
+
+    `fetch` knows where these archives live on the internet. This is for the
+    copy already sitting in somebody's Drive, which arrives in whatever shape
+    the download left it, and three of those shapes break the obvious loop:
+
+    **Nested zips.** figshare's *Download all* returns one archive named after
+    the article id, holding `TIR.zip`, `RGB.zip` and `Seg_annos.zip`. A loop
+    over `*.zip` in the folder finds one file whose name means nothing, and
+    routing on that name skips it silently. Inner archives are therefore
+    queued and unpacked in turn.
+
+    **Flat members.** All three Kust4K archives carry the same 4 024 names at
+    their top level -- `00001D.png` and no directories -- so extracting them
+    side by side would leave one third of the data behind three times over.
+    Each goes to its own folder and members are written by basename.
+
+    **Names that say nothing.** When neither the archive nor its members carry
+    a hint, `route_by_pixels` decodes a handful and decides from the values.
+
+    `broken_in_*.txt` members are copied to the top of `dest`, because
+    `aerial.excluded_keys` globs there and does not recurse.
+
+    Returns the file count per route, which is the number to check before
+    anything else runs: Kust4K is 4 024 in each of the three.
+    """
+    source, dest = Path(source), Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    counts = {route: 0 for route in RGBT_ROUTES}
+    inner = dest / "_inner"
+    queue = sorted(source.rglob("*.zip"))
+    if not queue and not quiet:
+        print(f"{source}: no .zip anywhere underneath")
+
+    seen: set[Path] = set()
+    claimed: dict[str, str] = {}          # route -> the archive that filled it
+    while queue:
+        archive = queue.pop(0)
+        if archive in seen:
+            continue
+        seen.add(archive)
+        try:
+            handle = zipfile.ZipFile(archive)
+        except zipfile.BadZipFile:
+            if not quiet:
+                print(f"  {archive.name}: not a zip, skipped")
+            continue
+        with handle as zf:
+            members = [n for n in zf.namelist() if not n.endswith("/")]
+            nested = [n for n in members if n.lower().endswith(".zip")]
+            if nested:
+                # An archive of archives: unpack one level and queue the rest.
+                inner.mkdir(parents=True, exist_ok=True)
+                for name in nested:
+                    target = inner / Path(name).name
+                    if not target.is_file():
+                        with zf.open(name) as src, target.open("wb") as out:
+                            shutil.copyfileobj(src, out)
+                    queue.append(target)
+                if not quiet:
+                    print(f"  {archive.name}: {len(nested)} archive(s) inside")
+
+            for name in members:
+                if Path(name).name.startswith("broken_in_"):
+                    with zf.open(name) as src:
+                        (dest / Path(name).name).write_bytes(src.read())
+
+            images = [n for n in members
+                      if Path(n).suffix.lower() in IMAGE_SUFFIXES]
+            if not images:
+                continue
+
+            route = route_hint(archive.stem)
+            if route is None:
+                hints = {route_hint(part) for n in images[:64]
+                         for part in Path(n).parts[:-1]}
+                hints.discard(None)
+                route = hints.pop() if len(hints) == 1 else None
+            if route is None:
+                step = max(len(images) // sample, 1)
+                route = route_by_pixels(
+                    [zf.read(n) for n in images[::step][:sample]])
+            if route is None:
+                if not quiet:
+                    print(f"  {archive.name}: could not tell which half this "
+                          f"is, skipped")
+                continue
+
+            folder = dest / route
+            folder.mkdir(parents=True, exist_ok=True)
+            written = 0
+            for name in images:
+                target = folder / Path(name).name
+                if target.is_file():
+                    continue
+                with zf.open(name) as src, target.open("wb") as out:
+                    shutil.copyfileobj(src, out)
+                written += 1
+            counts[route] += written
+            # Two archives claiming one half is a misroute, and because these
+            # archives share their filenames it is a *silent* one: the second
+            # write lands on names that already exist and skips every file
+            # while reporting no error at all. Say it out loud.
+            if route in claimed and written == 0 and images:
+                print(f"  !! {archive.name} and {claimed[route]} both routed "
+                      f"to {route}/ and every name collided -- one of them is "
+                      f"in the wrong folder")
+            claimed.setdefault(route, archive.name)
+            if not quiet:
+                print(f"  {archive.name} -> {route}/ ({written} new, "
+                      f"{len(images)} in archive)")
+
+    # Folders somebody extracted before uploading, and the manifests beside them.
+    for folder in sorted(p for p in source.rglob("*") if p.is_dir()):
+        route = route_hint(folder.name)
+        if route is None or not any(folder.glob("*")):
+            continue
+        images = [p for p in folder.iterdir()
+                  if p.suffix.lower() in IMAGE_SUFFIXES]
+        if not images:
+            continue
+        target = dest / route
+        target.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for image in images:
+            if not (target / image.name).is_file():
+                shutil.copyfile(image, target / image.name)
+                written += 1
+        counts[route] += written
+        if written and not quiet:
+            print(f"  {folder} -> {route}/ ({written} copied)")
+    for manifest in sorted(source.rglob("broken_in_*.txt")):
+        shutil.copyfile(manifest, dest / manifest.name)
+
+    if inner.exists():
+        shutil.rmtree(inner, ignore_errors=True)
+    if not quiet:
+        print("staged:", ", ".join(f"{k} {v}" for k, v in counts.items()))
+    return counts
+
+
 def fetch_extra(source: str, target: Path) -> Path:
     """One sidecar file -- a manifest or a COCO json -- next to the data.
 

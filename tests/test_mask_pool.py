@@ -76,6 +76,8 @@ from src.training.pool import (  # noqa: E402
 )
 from tools.fetch_datasets import (  # noqa: E402
     RECIPES,
+    route_by_pixels,
+    stage_rgbt_archives,
     staged,
     stream_extract,
     tracked_members,
@@ -1388,6 +1390,135 @@ class TestYoloLabelFrames(unittest.TestCase):
         from_labels = yolo_label_frames(self.root, names=("person",))
         self.assertEqual([f.key for f in from_images], [f.key for f in from_labels])
         np.testing.assert_allclose(from_images[0].boxes, from_labels[0].boxes)
+
+
+@unittest.skipUnless(HAVE_CV2, "OpenCV is not installed")
+class TestStageRgbtArchives(unittest.TestCase):
+    """A Drive copy arrives in whatever shape the download left it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.source = self.root / "drive"
+        self.dest = self.root / "data"
+        self.source.mkdir()
+        rng = np.random.default_rng(0)
+        self.payloads = {}
+        for route, maker in (
+                ("tir", lambda: rng.integers(0, 255, (32, 40), np.uint8)),
+                ("rgb", lambda: rng.integers(0, 255, (32, 40, 3), np.uint8)),
+                ("label", lambda: rng.integers(0, 9, (32, 40), np.uint8))):
+            self.payloads[route] = [
+                cv2.imencode(".png", maker())[1].tobytes() for _ in range(6)]
+
+    def write_zip(self, path, payloads, prefix=""):
+        with zipfile.ZipFile(path, "w") as archive:
+            for i, blob in enumerate(payloads):
+                archive.writestr(f"{prefix}{i:05d}D.png", blob)
+
+    def test_named_archives_route_on_their_names(self):
+        for name, route in (("TIR.zip", "tir"), ("RGB.zip", "rgb"),
+                            ("Seg_annos.zip", "label")):
+            self.write_zip(self.source / name, self.payloads[route])
+        counts = stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertEqual(counts, {"tir": 6, "rgb": 6, "label": 6})
+
+    def test_a_figshare_download_all_is_one_zip_of_three_zips(self):
+        # The shape that skipped everything silently: an outer archive named
+        # after the article id, holding the three real ones.
+        staging = self.root / "stage"
+        staging.mkdir()
+        for name, route in (("TIR.zip", "tir"), ("RGB.zip", "rgb"),
+                            ("Seg_annos.zip", "label")):
+            self.write_zip(staging / name, self.payloads[route])
+        with zipfile.ZipFile(self.source / "29476610.zip", "w") as outer:
+            for inner in sorted(staging.glob("*.zip")):
+                outer.write(inner, inner.name)
+        counts = stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertEqual(counts, {"tir": 6, "rgb": 6, "label": 6})
+        self.assertFalse((self.dest / "_inner").exists())
+
+    def test_names_that_say_nothing_are_decided_by_the_pixels(self):
+        for name, route in (("part_a.zip", "tir"), ("part_b.zip", "rgb"),
+                            ("part_c.zip", "label")):
+            self.write_zip(self.source / name, self.payloads[route])
+        counts = stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertEqual(counts, {"tir": 6, "rgb": 6, "label": 6})
+
+    def test_a_label_map_saved_as_colour_is_still_a_label_map(self):
+        # OpenCV expands a paletted PNG to colour, so a class map can arrive
+        # with three unequal channels. Distinct-value count, not channel
+        # equality, is what has to decide -- the other way round files it as
+        # RGB and the run finds no instances at all.
+        rng = np.random.default_rng(1)
+        palette = rng.integers(0, 255, (9, 3), np.uint8)
+        indices = rng.integers(0, 9, (32, 40))
+        coloured = palette[indices]
+        blobs = [cv2.imencode(".png", coloured)[1].tobytes() for _ in range(4)]
+        self.assertEqual(route_by_pixels(blobs), "label")
+
+    def test_a_low_contrast_thermal_frame_is_not_a_class_map(self):
+        # The bug this replaced: a thermal archive whose frames happened to
+        # hold ~40 distinct greys was filed as `label/`, where it then blocked
+        # the real label archive by name collision. Values, not just how many.
+        rng = np.random.default_rng(2)
+        frame = rng.integers(0, 40, (32, 40), np.uint8)
+        frame[8:16, 8:16] = 220
+        blobs = [cv2.imencode(".png", frame)[1].tobytes() for _ in range(4)]
+        self.assertEqual(route_by_pixels(blobs), "tir")
+
+    def test_an_index_map_is_small_values_as_well_as_few_of_them(self):
+        rng = np.random.default_rng(3)
+        blobs = [cv2.imencode(".png", rng.integers(0, 9, (32, 40), np.uint8))[1]
+                 .tobytes() for _ in range(4)]
+        self.assertEqual(route_by_pixels(blobs), "label")
+
+    def test_three_unnamed_archives_route_to_three_different_halves(self):
+        # The end-to-end version of the two cases above, in the shape that
+        # failed: a figshare download-all whose inner names say nothing.
+        staging = self.root / "stage"
+        staging.mkdir()
+        for name, route in (("file_1.zip", "tir"), ("file_2.zip", "rgb"),
+                            ("file_3.zip", "label")):
+            self.write_zip(staging / name, self.payloads[route])
+        with zipfile.ZipFile(self.source / "29476610.zip", "w") as outer:
+            for inner in sorted(staging.glob("*.zip")):
+                outer.write(inner, inner.name)
+        counts = stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertEqual(counts, {"tir": 6, "rgb": 6, "label": 6})
+
+    def test_the_three_flat_archives_do_not_overwrite_each_other(self):
+        # All three carry the same 4 024 names at their top level.
+        for name, route in (("TIR.zip", "tir"), ("RGB.zip", "rgb"),
+                            ("Seg_annos.zip", "label")):
+            self.write_zip(self.source / name, self.payloads[route])
+        stage_rgbt_archives(self.source, self.dest, quiet=True)
+        for route in ("tir", "rgb", "label"):
+            self.assertEqual(
+                sorted(p.name for p in (self.dest / route).glob("*.png")),
+                [f"{i:05d}D.png" for i in range(6)])
+
+    def test_manifests_land_at_the_top_where_the_glob_looks(self):
+        self.write_zip(self.source / "TIR.zip", self.payloads["tir"])
+        with zipfile.ZipFile(self.source / "extra.zip", "w") as archive:
+            archive.writestr("broken_in_train_day_528.txt", "00001D.png\n")
+        stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertTrue((self.dest / "broken_in_train_day_528.txt").is_file())
+
+    def test_a_folder_extracted_before_upload_is_copied_in(self):
+        folder = self.source / "Kust4K" / "tir"
+        folder.mkdir(parents=True)
+        for i, blob in enumerate(self.payloads["tir"]):
+            (folder / f"{i:05d}D.png").write_bytes(blob)
+        counts = stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertEqual(counts["tir"], 6)
+
+    def test_running_it_twice_writes_nothing_the_second_time(self):
+        self.write_zip(self.source / "TIR.zip", self.payloads["tir"])
+        stage_rgbt_archives(self.source, self.dest, quiet=True)
+        again = stage_rgbt_archives(self.source, self.dest, quiet=True)
+        self.assertEqual(again["tir"], 0)
 
 
 if __name__ == "__main__":

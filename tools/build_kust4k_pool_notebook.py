@@ -156,69 +156,43 @@ print(_device.name if _device else "no GPU", VRAM, "GiB",
 # --------------------------------------------------------------------------
 
 code('''
-# Kust4K's three archives are **flat** -- all three carry the same 4 024
-# filenames at their top level -- so each has to land in its own folder or the
-# last one extracted overwrites the other two. The folder is chosen from the
-# archive's name rather than a fixed list, because a file downloaded by hand
-# and re-uploaded is often renamed on the way.
-FOLDER_FOR = {"tir": "tir", "thermal": "tir", "infrared": "tir",
-              "rgb": "rgb", "visible": "rgb",
-              "seg": "label", "anno": "label", "label": "label"}
+# Whatever shape the download left it in. Three of them break the obvious
+# loop over `*.zip`: figshare's *Download all* returns **one archive named
+# after the article id** holding the three real ones, so routing on the outer
+# name skips everything silently; all three inner archives are **flat** and
+# carry the same 4 024 filenames, so extracting them side by side would leave
+# two thirds of the data overwritten; and a file downloaded by hand is often
+# renamed to something that names no half at all, which is why
+# `route_by_pixels` decodes a few members and decides from the values.
+from tools.fetch_datasets import RECIPES, fetch_extra, stage_rgbt_archives
 
-def folder_for(name):
-    lowered = name.lower()
-    for key, folder in FOLDER_FOR.items():
-        if key in lowered:
-            return folder
-    return None
-
-def flatten(folder):
-    """A repack that wrapped the flat archive in one directory, undone."""
-    entries = [p for p in folder.iterdir() if not p.name.startswith(".")]
-    if len(entries) == 1 and entries[0].is_dir():
-        for path in list(entries[0].iterdir()):
-            shutil.move(str(path), str(folder / path.name))
-        entries[0].rmdir()
-
-Path(DATA_ROOT).mkdir(parents=True, exist_ok=True)
 _drive_root = Path(DRIVE_DIR)
 if not _drive_root.is_dir():
     raise SystemExit(f"{DRIVE_DIR} is not there -- set DRIVE_DIR in cell 1")
+print("what is in", DRIVE_DIR)
+for _entry in sorted(_drive_root.rglob("*"))[:40]:
+    if _entry.is_file():
+        print(f"  {_entry.relative_to(_drive_root)} "
+              f"{round(_entry.stat().st_size / 2 ** 20, 1)} MiB")
+    else:
+        print(f"  {_entry.relative_to(_drive_root)}/")
+print()
 
-for _archive in sorted(_drive_root.rglob("*.zip")):
-    _folder = folder_for(_archive.name)
-    if _folder is None:
-        print("skipping (name says nothing about its half):", _archive.name)
-        continue
-    _target = Path(DATA_ROOT) / _folder
-    if _target.is_dir() and any(_target.iterdir()):
-        print("already staged:", _target)
-        continue
-    print("unzipping", _archive.name,
-          round(_archive.stat().st_size / 2 ** 30, 2), "GiB ->", _folder)
-    with zipfile.ZipFile(_archive) as _zip:
-        _zip.extractall(_target)
-    flatten(_target)
-
-# An upload that was extracted before it went to Drive: copy the folders in.
-for _folder in ("tir", "rgb", "label"):
-    _target = Path(DATA_ROOT) / _folder
-    if _target.is_dir() and any(_target.iterdir()):
-        continue
-    _sources = [p for p in _drive_root.rglob("*")
-                if p.is_dir() and folder_for(p.name) == _folder
-                and any(p.glob("*.png"))]
-    if _sources:
-        print("copying", _sources[0], "->", _folder)
-        shutil.copytree(_sources[0], _target, dirs_exist_ok=True)
+STAGED = stage_rgbt_archives(_drive_root, DATA_ROOT)
+ON_DISK = {_route: len(list((Path(DATA_ROOT) / _route).glob("*.png")))
+           for _route in ("tir", "rgb", "label")}
+print(ON_DISK)
+if not all(ON_DISK.values()):
+    # Failing here rather than three cells later, where the same problem
+    # arrives as "no image/mask pairs" and looks like a bad glob.
+    raise SystemExit(
+        f"{[k for k, v in ON_DISK.items() if not v]} came out empty. Kust4K "
+        f"needs all three -- TIR, RGB and Seg_annos, 4 024 PNGs each. The "
+        f"listing above is what {DRIVE_DIR} actually holds.")
 
 # The five broken-frame manifests. `aerial.excluded_keys` globs DATA_ROOT and
 # does **not** recurse, so they have to sit at the top; a manifest one folder
 # down reads as no manifest at all and all 4 024 frames look clean.
-from tools.fetch_datasets import RECIPES, fetch_extra
-
-for _found in sorted(_drive_root.rglob("broken_in_*.txt")):
-    shutil.copy(_found, Path(DATA_ROOT) / _found.name)
 for _name, _source in RECIPES["kust4k"].extras:
     _target = Path(DATA_ROOT) / _name
     if not _target.is_file():
