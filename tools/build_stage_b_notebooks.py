@@ -410,11 +410,14 @@ for _pool, _role in POOL_ROLES.items():
         print(f"   {_pool} feeds training only -- it never reaches val or test, "
               f"so it cannot inflate the score with a domain the deployment "
               f"does not have.")
-_guessed = sorted(GUESSED & {_row["pool"] for _row in PLAN})
+_guessed = sorted(_pool for _pool in GUESSED & {_r["pool"] for _r in PLAN}
+                  if "rgb" not in _pool.lower()
+                  and "thermal" not in _pool.lower()
+                  and "tir" not in _pool.lower())
 if _guessed:
-    print(f"   modality guessed from the name for {_guessed}. A pool whose "
-          f"name does not say `rgb` is read as thermal, which converts colour "
-          f"frames to grey and trains them as thermal. Put it in "
+    print(f"   !! modality guessed for {_guessed} -- their names say neither. "
+          f"A pool not naming `rgb` is read as thermal, which converts colour "
+          f"frames to grey and trains them as thermal. Put them in "
           f"POOL_MODALITIES if that is wrong.")
 if {"visdrone", "aerovis"} <= {_row["key"] for _row in PLAN}:
     print("   !! a VisDrone pool and an AeroVIS pool are both in this run. "
@@ -436,15 +439,57 @@ if EVAL_DRAWN:
 else:
     EVAL_ROOT = ""
 
+def unpack(archive, target, label=""):
+    """Every member the archive can still give, one at a time.
+
+    `extractall` stops at the first bad member and leaves the rest on the
+    floor. A Drive copy read by two runtimes at once returns a bad CRC often
+    enough that one corrupt JPEG out of seventy thousand must not cost the
+    other sixty-nine thousand. Already-extracted members are skipped, so this
+    is also the resume path.
+    """
+    bad, taken = [], 0
+    with zipfile.ZipFile(archive) as handle:
+        members = handle.namelist()
+        for member in members:
+            landing = Path(target) / member
+            if landing.exists() and (landing.is_dir() or landing.stat().st_size):
+                continue
+            try:
+                handle.extract(member, target)
+                taken += 1
+            except Exception:
+                bad.append(member)
+    print(f"   {label or Path(archive).name}: {taken} extracted, "
+          f"{len(members) - taken - len(bad)} already there, "
+          f"{len(bad)} unreadable")
+    if bad:
+        print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
+    return bad
+
+for _archive, _folder in SOURCE_ZIPS:
+    _target = Path(DATA_ROOT) / _folder
+    if not Path(_archive).is_file():
+        print("not there, skipping:", _archive)
+        continue
+    if _target.is_dir() and any(
+            any(_target.rglob(_glob)) for _glob in ("*.jpg", "*.png")):
+        print("already on disk:", _target)
+        continue
+    print("unzipping", _archive,
+          round(Path(_archive).stat().st_size / 2 ** 30, 2), "GiB ->", _target)
+    unpack(_archive, _target, _folder)
+
 if FETCH:
-    from tools.fetch_datasets import fetch
+    from tools.fetch_datasets import fetch, staged
     Path(STAGE_DIR).mkdir(parents=True, exist_ok=True)
     for (_recipe, _root), _parts in sorted(_wanted.items()):
         if not _recipe or (_recipe == "vtuav_track" and not _parts):
-            print("not fetched:", _root, "-- stage it yourself. SegFly is a "
-                  "761-shard parquet plan and VTUAV is ~16 GiB per part, so "
-                  "neither is downloaded on a whim; name the parts in cell 1 "
-                  "or drop the pool.")
+            print("not fetched:", _root, "-- no recipe, or no parts named. "
+                  "SegFly is a 761-shard parquet plan, VTUAV is ~16 GiB per "
+                  "part and Kaggle sets come through kagglehub below, so none "
+                  "of them is downloaded on a whim. Stage it, name its parts "
+                  "in cell 1, or let the pool drop.")
             continue
         if Path(_root).is_dir() and any(
                 any(Path(_root).rglob(_glob)) for _glob in ("*.jpg", "*.png")):
@@ -457,6 +502,14 @@ if FETCH:
                            DRIVE_MY, "/content/staging"))
         except Exception as _fetch_error:
             print("!!", _recipe, "->", _root, "failed:", _fetch_error)
+            _search = (STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
+                       DRIVE_MY, "/content/staging")
+            for _part in sorted(_parts) or [_recipe]:
+                _copy = staged(_part, _search)
+                if _copy is None:
+                    continue
+                print("   retrying", _copy.name, "member by member")
+                unpack(_copy, Path(_root), _part)
 
 for _pool, _slug in KAGGLE_DATASETS.items():
     if not any(_row["pool"] == _pool for _row in PLAN):
@@ -476,20 +529,6 @@ for _pool, _slug in KAGGLE_DATASETS.items():
     except Exception as _kaggle_error:
         print("!! could not fetch", _slug, "--", _kaggle_error)
         print("   put its frames under", _root, "or set IMAGE_ROOTS in cell 1")
-
-for _archive, _folder in SOURCE_ZIPS:
-    _target = Path(DATA_ROOT) / _folder
-    if not Path(_archive).is_file():
-        print("not there, skipping:", _archive)
-        continue
-    if _target.is_dir() and any(
-            any(_target.rglob(_glob)) for _glob in ("*.jpg", "*.png")):
-        print("already on disk:", _target)
-        continue
-    print("unzipping", _archive,
-          round(Path(_archive).stat().st_size / 2 ** 30, 2), "GiB ->", _target)
-    with zipfile.ZipFile(_archive) as _handle:
-        _handle.extractall(_target)
 
 subprocess.run(["df", "-h", "/content"], check=False)
 ''')
