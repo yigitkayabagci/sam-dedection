@@ -199,6 +199,78 @@ def discover_pools(root: str | Path, depth: int = 6) -> dict[str, Path]:
     return dict(sorted(found.items()))
 
 
+def group_records(root: str | Path, workers: int = 8) -> dict[str, list[Path]]:
+    """`{pool name: its record files}` under `root`, grouped by what they say.
+
+    The layout-independent answer, and the one a local pool root should use.
+    `pool_datasets` and `discover_pools` both infer a pool from a *directory*,
+    which works only when the archive that staged it happened to carry the pool
+    name at the top -- and the archives on a real Drive do not agree about
+    that: one harvest zipped per split (`train.zip`), another per chunk
+    (`000000.zip`), a third per pool. Every record already states which pool it
+    belongs to, so grouping on that field is right whatever the folders look
+    like, and it costs one JSON read per frame on local disk.
+
+    Use `discover_pools` for a **mounted** root instead: it is depth-bounded
+    because an `rglob` over Drive's FUSE mount takes minutes.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    records = sorted(Path(root).rglob(RECORD_FILE))
+
+    def named(path: Path) -> tuple[str, Path] | None:
+        try:
+            name = str(json.loads(path.read_text()).get("dataset") or "")
+        except (OSError, ValueError):
+            return None
+        return (name, path) if name else None
+
+    grouped: dict[str, list[Path]] = {}
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+        for row in pool.map(named, records):
+            if row is not None:
+                grouped.setdefault(row[0], []).append(row[1])
+    return {name: sorted(paths) for name, paths in sorted(grouped.items())}
+
+
+def link_pool(records: SequenceABC[Path], target: str | Path) -> Path:
+    """Gather one pool's frames under `target`, by hard link where possible.
+
+    `group_records` can say which frames belong to which pool whatever the
+    folders look like, but two things downstream still want a real directory:
+    `--pool` on the two CLIs, and the cache filename, which is the pool
+    directory's basename and has to be unique per pool. Rebuilding the tree
+    the harvest wrote -- `<target>/<key>/{record.json,pseudo_masks.npz}` --
+    gives both, and a hard link costs an inode rather than a copy of the data.
+
+    Falls back to copying when the link cannot be made (a different device,
+    a filesystem without links). Existing frames are left alone, so a second
+    call after a partial one finishes it rather than repeating it.
+    """
+    import os
+    import shutil
+
+    target = Path(target)
+    for record in records:
+        try:
+            key = str(json.loads(record.read_text()).get("key") or "")
+        except (OSError, ValueError):
+            continue
+        parts = [p for p in Path(key or record.parent.name).parts
+                 if p not in ("..", "/", "")]
+        folder = target.joinpath(*parts) if parts else target / record.parent.name
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in (RECORD_FILE, MASK_STORE):
+            source, destination = record.parent / name, folder / name
+            if destination.exists() or not source.is_file():
+                continue
+            try:
+                os.link(source, destination)
+            except OSError:
+                shutil.copy2(source, destination)
+    return target
+
+
 @dataclass(frozen=True)
 class PoolFrame:
     """One record, resolved against the local disk. `None` fields are misses."""
@@ -280,6 +352,7 @@ def index_pool(
     limit: int | None = None,
     workers: int = 8,
     progress=None,
+    records: SequenceABC[Path] | None = None,
 ) -> list[FrameIndex]:
     """Every accepted instance in one pool, as the index stage B samples from.
 
@@ -298,7 +371,8 @@ def index_pool(
     from concurrent.futures import ThreadPoolExecutor
 
     pool_dir = Path(pool_dir)
-    records = sorted(pool_dir.rglob(RECORD_FILE))
+    records = (sorted(pool_dir.rglob(RECORD_FILE)) if records is None
+               else sorted(records))
     if limit is not None:
         records = records[:limit]
     if not records:
@@ -515,7 +589,7 @@ def load_pool_index(path: str | Path, gates: InstanceGates | None = None,
 
 
 __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
-           "Relocator", "describe_pools", "discover_pools", "index_pool",
-           "index_pools",
+           "Relocator", "describe_pools", "discover_pools", "group_records",
+           "index_pool", "index_pools", "link_pool",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",
            "save_pool_index", "store_areas"]

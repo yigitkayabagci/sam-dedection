@@ -109,11 +109,13 @@ POOL_ROOT   = "/content/pool"
 DATA_ROOT   = "/content/data"
 WORK        = "/content/work"
 STAGE_DIR   = "/content/drive/MyDrive/datasets"
+DRIVE_MY    = "/content/drive/MyDrive"
 
 EVAL_DRAWN  = "kust4k"
 EVAL_SPEC   = "kust4k:{root}:thermal:components:eval"
 SKIP_POOLS  = ["broken", "rgbt234"]
 POOL_ROLE   = "all"
+POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
 
@@ -121,9 +123,9 @@ IMAGES = [
     ["hituav",       "hituav",       "HIT_UAV",      []],
     ["dronevehicle", "dronevehicle", "DroneVehicle", ["train"]],
     ["kust4k",       "kust4k",       "Kust4K",       ["tir", "labels", "rgb"]],
-    ["segfly_rgb",   "segfly_rgb",   "SegFly",       []],
-    ["segfly",       "segfly",       "SegFly",       []],
     ["visdrone",     "visdrone",     "VisDrone",     []],
+    ["segfly_rgb",   "",             "SegFly",       []],
+    ["segfly",       "",             "SegFly",       []],
     ["vtuav",        "vtuav_track",  "VTUAV",        VTUAV_PARTS],
 ]
 
@@ -250,24 +252,35 @@ print("stage B only: no stage A, no distillation, base =", BASE_CKPT)
 # frames cannot be trained on while that set is the grade.
 
 code('''
-from src.training.pool_reader import discover_pools
+from src.training.pool_reader import discover_pools, group_records, link_pool
 
 _done = Path(POOL_ROOT) / ".unpacked"
 _done.mkdir(parents=True, exist_ok=True)
 assert Path(DRIVE_POOLS).is_dir(), f"{DRIVE_POOLS} is not there -- set DRIVE_POOLS"
 
 for _zip in sorted(Path(DRIVE_POOLS).rglob("*.zip")):
-    _marker = _done / (_zip.stem + ".zip.done")
+    _size = round(_zip.stat().st_size / 2 ** 20, 1)
+    _marker = _done / (str(_zip.relative_to(DRIVE_POOLS)).replace("/", "__")
+                       + ".done")
     if _marker.is_file():
+        continue
+    if _size > POOL_ZIP_MAX_MB:
+        print("skipped", _zip.name, _size, "MiB -- a pool holds masks only, "
+              "so this is source data, not a pool")
         continue
     try:
         with zipfile.ZipFile(_zip) as _handle:
+            _members = _handle.namelist()
+            if not any(_m.endswith("record.json") for _m in _members):
+                print("skipped", _zip.name, "-- no record.json in it")
+                continue
             _handle.extractall(POOL_ROOT)
     except Exception as _unzip_error:
         print("!! could not read", _zip.name, "--", _unzip_error)
         continue
+    _marker.parent.mkdir(parents=True, exist_ok=True)
     _marker.touch()
-    print("unpacked", _zip.name, round(_zip.stat().st_size / 2 ** 20, 1), "MiB")
+    print("unpacked", _zip.name, _size, "MiB,", len(_members), "files")
 
 for _name, _folder in discover_pools(DRIVE_POOLS).items():
     _marker = _done / (_name + ".folder.done")
@@ -277,9 +290,14 @@ for _name, _folder in discover_pools(DRIVE_POOLS).items():
     _marker.touch()
     print("copied", _name, "from Drive (it was staged unzipped)")
 
-POOLS = discover_pools(POOL_ROOT)
+print()
+RAW = group_records(POOL_ROOT)
+POOLS = {}
+for _name, _records in RAW.items():
+    POOLS[_name] = str(link_pool(_records, Path(POOL_ROOT) / "_by_name" / _name))
+    print(f"{_name:<28}{len(_records):>8} frames")
 FOUND = sorted(POOLS)
-print("\\npools on disk:", FOUND or "none")
+assert FOUND, f"no record.json under {POOL_ROOT} -- nothing was unpacked"
 
 def modality_of(pool):
     lowered = pool.lower()
@@ -334,8 +352,10 @@ if FETCH:
     Path(STAGE_DIR).mkdir(parents=True, exist_ok=True)
     for (_recipe, _root), _parts in sorted(_wanted.items()):
         if not _recipe or (_recipe == "vtuav_track" and not _parts):
-            print("not fetched:", _root, "-- stage it yourself, or name its "
-                  "parts (VTUAV_PARTS in cell 1; every part is ~16 GiB)")
+            print("not fetched:", _root, "-- stage it yourself. SegFly is a "
+                  "761-shard parquet plan and VTUAV is ~16 GiB per part, so "
+                  "neither is downloaded on a whim; name the parts in cell 1 "
+                  "or drop the pool.")
             continue
         if Path(_root).is_dir() and any(
                 any(Path(_root).rglob(_glob)) for _glob in ("*.jpg", "*.png")):
@@ -343,7 +363,9 @@ if FETCH:
             continue
         try:
             fetch(_recipe, Path(_root), tuple(sorted(_parts)) or None,
-                  stage=STAGE_DIR)
+                  stage=STAGE_DIR,
+                  staging=(STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
+                           DRIVE_MY, "/content/staging"))
         except Exception as _fetch_error:
             print("!!", _recipe, "->", _root, "failed:", _fetch_error)
 

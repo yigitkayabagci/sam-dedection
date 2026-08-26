@@ -31,10 +31,10 @@ from src.training.aerial import (InstanceGates, Sample, pool_masks,  # noqa: E40
                                  image_origin, sample_masks)
 from src.training.labels import MASK_STORE, save_masks  # noqa: E402
 from src.training.pool import RECORD_FILE  # noqa: E402
-from src.training.pool_reader import (Relocator, index_pool,  # noqa: E402
-                                      load_pool_index, parse_pool,
-                                      pool_datasets, save_pool_index,
-                                      store_areas)
+from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
+                                      index_pool, link_pool, load_pool_index,
+                                      parse_pool, pool_datasets,
+                                      save_pool_index, store_areas)
 
 try:
     import cv2
@@ -245,6 +245,53 @@ class PoolIndexTest(unittest.TestCase):
         self.build()
         self.assertEqual(sorted(discover_pools(self.pool)), ["demo"])
         self.assertEqual(discover_pools(self.pool)["demo"], self.pool / "demo")
+
+    def test_records_group_by_pool_however_the_archives_were_cut(self):
+        """The layout question, settled by the records rather than the folders.
+
+        A real staging folder does not agree with itself: one harvest zipped
+        per split (`train.zip`), another per chunk (`000000.zip`), a third per
+        pool. All three land somewhere different under the extraction root and
+        all three carry the pool's name in every record.
+        """
+        for split in ("train", "val"):
+            for n in range(2):
+                key = f"{split}/{n:03d}"
+                image = write_image(self.images / f"{key}.png", *self.shape)
+                write_frame(self.root / "unzipped" / split, "hituav_thermal",
+                            image, self.shape,
+                            [(self.boxes[0][0], self.boxes[0][1],
+                              blob(self.shape, self.boxes[0][1]))],
+                            dataset="hituav_thermal")
+        grouped = group_records(self.root / "unzipped")
+        self.assertEqual(sorted(grouped), ["hituav_thermal"])
+        self.assertEqual(len(grouped["hituav_thermal"]), 2)
+
+    def test_linking_rebuilds_a_pool_directory_the_index_can_read(self):
+        for n in range(3):
+            image = write_image(self.images / f"scattered_{n}.png", *self.shape)
+            write_frame(self.root / "chunks" / f"{n:06d}", f"seq/{n:04d}",
+                        image, self.shape,
+                        [(name, box, blob(self.shape, box))
+                         for name, box in self.boxes], dataset="segfly_thermal")
+        grouped = group_records(self.root / "chunks")
+        target = link_pool(grouped["segfly_thermal"], self.root / "by_name"
+                           / "segfly_thermal")
+        index = index_pool(target, self.images, workers=1)
+        self.assertEqual(len(index), 3)
+        self.assertEqual(index[0].source.spec.name, "pool/segfly_thermal")
+        # A hard link, not a copy: same inode, so the tree costs no disk.
+        linked = sorted(target.rglob(MASK_STORE))[0]
+        original = sorted((self.root / "chunks").rglob(MASK_STORE))[0]
+        self.assertEqual(linked.stat().st_ino, original.stat().st_ino)
+
+    def test_linking_twice_finishes_a_partial_run_rather_than_failing(self):
+        self.build(keys=("solo",))
+        grouped = group_records(self.pool)
+        target = self.root / "by_name" / "demo"
+        link_pool(grouped["demo"], target)
+        link_pool(grouped["demo"], target)
+        self.assertEqual(len(list(target.rglob(RECORD_FILE))), 1)
 
     def test_a_pool_with_no_records_says_where_to_look(self):
         self.build()
