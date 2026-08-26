@@ -115,12 +115,17 @@ EVAL_DRAWN  = "kust4k"
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = []
 POOL_ROLE   = "all"
-POOL_ROLES  = {"kaggle_uav_thermal": "train"}
+POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
+               "aerovis_heldout": "eval"}
+POOL_MODALITIES = {"aerovis_train": "rgb", "aerovis_heldout": "rgb"}
+POOL_LIMITS = {"aerovis_train": 8000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
 
-IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal"}
+IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
+               "aerovis_train": "/content/data/AeroVIS",
+               "aerovis_heldout": "/content/data/AeroVIS"}
 KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
@@ -139,6 +144,7 @@ IMAGES = [
     ["segfly",       "",             "SegFly",       []],
     ["vtuav",        "vtuav_track",  "VTUAV",        VTUAV_PARTS],
     ["kaggle",       "",             "kaggle_uav_thermal", []],
+    ["aerovis",      "",             "AeroVIS",      []],
 ]
 
 SIZE           = 512
@@ -360,7 +366,12 @@ print("\\na box the first gate stops is never measured against its own "
 FOUND = sorted(POOLS)
 assert FOUND, f"no record.json under {POOL_ROOT} -- nothing was unpacked"
 
+GUESSED = set()
+
 def modality_of(pool):
+    if pool in POOL_MODALITIES:
+        return POOL_MODALITIES[pool]
+    GUESSED.add(pool)
     lowered = pool.lower()
     if lowered.endswith("_rgb") or "_rgb_" in lowered or "rgb" in lowered.split("_"):
         return "rgb"
@@ -399,6 +410,17 @@ for _pool, _role in POOL_ROLES.items():
         print(f"   {_pool} feeds training only -- it never reaches val or test, "
               f"so it cannot inflate the score with a domain the deployment "
               f"does not have.")
+_guessed = sorted(GUESSED & {_row["pool"] for _row in PLAN})
+if _guessed:
+    print(f"   modality guessed from the name for {_guessed}. A pool whose "
+          f"name does not say `rgb` is read as thermal, which converts colour "
+          f"frames to grey and trains them as thermal. Put it in "
+          f"POOL_MODALITIES if that is wrong.")
+if {"visdrone", "aerovis"} <= {_row["key"] for _row in PLAN}:
+    print("   !! a VisDrone pool and an AeroVIS pool are both in this run. "
+          "AeroVIS *is* VisDrone re-labelled (plus UAVDT and SeaDronesSee), "
+          "so they are the same frames and no AeroVIS grade is held out any "
+          "more. Drop one.")
 for _pool, _why in DROPPED:
     print(f"{_pool:<28}dropped   {_why}")
 assert PLAN, "nothing left to train on -- read the dropped list above"
@@ -483,6 +505,8 @@ subprocess.run(["df", "-h", "/content"], check=False)
 # taking the run down: five pools that resolve are worth more than a traceback.
 
 code('''
+import numpy as np
+
 from src.training.aerial import InstanceGates, sample_windows, split_index
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
@@ -535,6 +559,12 @@ for _row in PLAN:
         FAILED.append((_row["pool"], str(_index_error).splitlines()[0]))
         continue
     _skips = {k: v for k, v in _part[0].rejects.items() if k in SKIP_REASONS}
+    _capped = ""
+    _cap = POOL_LIMITS.get(_row["pool"])
+    if _cap and len(_part) > _cap:
+        _order = np.random.default_rng(SEED).permutation(len(_part))
+        _part = [_part[int(i)] for i in sorted(_order[:_cap])]
+        _capped = f"  (capped from {_order.size}, POOL_LIMITS)"
     _leak = ""
     if DRAWN_HELD and _row["key"] == EVAL_DRAWN:
         _before = len(_part)
@@ -553,8 +583,8 @@ for _row in PLAN:
     INDEX.extend(_part)
     print(f"{_row['pool']:<28}{len(_part):>7} frames "
           f"{sum(len(e.instances) for e in _part):>9} instances  "
-          f"{TEACHERS[_row['pool']]}"
-          f"{('  skipped ' + str(_skips)) if _skips else ''}{_leak}")
+          f"{_row['modality']:<8}{TEACHERS[_row['pool']]}"
+          f"{('  skipped ' + str(_skips)) if _skips else ''}{_capped}{_leak}")
 
 for _pool, _why in FAILED:
     print(f"{_pool:<28}unusable  {_why}")
@@ -591,6 +621,13 @@ for _name, _split in (("train", TRAIN), ("val", VAL), ("test", TEST)):
 print("\\ntrain windows by source:")
 for _source, _count in TRAIN.sources.items():
     print(f"  {_source:<34}{_count:>8}")
+_by_modality = {}
+for _sample in TRAIN.samples:
+    _key = "thermal" if (_sample.source is None or _sample.source.gray) else "rgb"
+    _by_modality[_key] = _by_modality.get(_key, 0) + 1
+_total = max(sum(_by_modality.values()), 1)
+print("  " + "  ".join(f"{_k}: {_v} ({_v / _total:.0%})"
+                       for _k, _v in sorted(_by_modality.items())))
 print("\\ntest windows by source:")
 for _source, _count in TEST.sources.items():
     print(f"  {_source:<34}{_count:>8}")
@@ -858,6 +895,8 @@ VERDICT = {
     "test_windows_by_source": TEST.sources,
     "gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,
     "roles": {_row["pool"]: _row["role"] for _row in PLAN},
+    "modalities": {_row["pool"]: _row["modality"] for _row in PLAN},
+    "limits": POOL_LIMITS,
     "prompt": PROMPT, "prompt_jitter": PROMPT_JITTER,
     "epochs": EPOCHS, "steps": STEPS, "seed": SEED,
     "run_log": RUN_LOG, "before": BEFORE, "after": AFTER,

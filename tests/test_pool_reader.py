@@ -348,6 +348,46 @@ class PoolIndexTest(unittest.TestCase):
 
         self.assertEqual(acceptance([])["rate"], 0.0)
 
+    def test_an_archive_relative_path_beats_the_suffix_search(self):
+        """`aerovis.write_pool` writes `image_rel` so a pool that travelled to
+        Drive without its 12.6 GiB of frames can be re-pointed exactly."""
+        image = write_image(self.images / "seq" / "0001.png", *self.shape)
+        target = write_frame(self.pool, "seq/0001", Path("/gone/seq/0001.png"),
+                             self.shape,
+                             [(self.boxes[0][0], self.boxes[0][1],
+                               blob(self.shape, self.boxes[0][1]))])
+        record = json.loads((target / RECORD_FILE).read_text())
+        record["image_rel"] = "seq/0001.png"
+        (target / RECORD_FILE).write_text(json.dumps(record))
+        index = index_pool(self.pool / "demo", self.images, workers=1)
+        self.assertEqual(index[0].frame.image, image)
+
+    def test_a_record_with_no_usable_path_at_all_is_counted(self):
+        write_frame(self.pool, "gone", Path("/gone/x.png"), self.shape,
+                    [(self.boxes[0][0], self.boxes[0][1],
+                      blob(self.shape, self.boxes[0][1]))])
+        with self.assertRaises(ValueError) as caught:
+            index_pool(self.pool / "demo", self.images, workers=1)
+        self.assertIn("no_image", str(caught.exception))
+
+    def test_an_ungated_pool_reads_as_fully_accepted(self):
+        """AeroVIS ships its own masks, so `write_pool` sets every `verdict` to
+        None and no gate ever ran. 100 % here is provenance, not quality."""
+        from src.training.pool_reader import acceptance
+
+        image = write_image(self.images / "ungated.png", *self.shape)
+        target = write_frame(self.pool, "ungated", image, self.shape,
+                             [(n, b, blob(self.shape, b)) for n, b in self.boxes])
+        record = json.loads((target / RECORD_FILE).read_text())
+        record["teacher"] = "aerovis:ytvis"
+        for row in record["instances"]:
+            row["teacher_iou"] = None
+        (target / RECORD_FILE).write_text(json.dumps(record))
+        report = acceptance([target / RECORD_FILE])
+        self.assertEqual(report["rate"], 1.0)
+        self.assertEqual(report["rejected"], {})
+        self.assertEqual(report["teachers"], ["aerovis:ytvis"])
+
     def test_a_pool_with_no_records_says_where_to_look(self):
         self.build()
         with self.assertRaises(FileNotFoundError) as caught:

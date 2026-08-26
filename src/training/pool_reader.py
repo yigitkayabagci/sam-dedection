@@ -91,6 +91,21 @@ class Relocator:
         self.depth: int | None = None
         self.misses = 0
 
+    def direct(self, relative: str | Path | None) -> Path | None:
+        """`root / relative`, when the record carried an archive-relative path.
+
+        `aerovis.write_pool` writes `image_rel` beside `image` for exactly this
+        reason -- its stores are a few hundred megabytes and its frames are
+        12.6 GiB, so the pool reaches Drive without them and a training run
+        re-points at its own copy. Where a record says where the frame sits
+        *inside its archive*, that is an answer rather than a search, and it
+        cannot pick the wrong file the way a suffix match can.
+        """
+        if not relative or self.root is None:
+            return None
+        candidate = self.root / str(relative)
+        return candidate if candidate.is_file() else None
+
     def __call__(self, recorded: str | Path) -> Path | None:
         path = Path(recorded)
         if self.root is None:
@@ -368,7 +383,7 @@ def _read_frame(record_path: Path, relocate: Relocator,
     store = record_path.parent / MASK_STORE
     if not store.is_file():
         return "no_store"
-    image = relocate(record["image"])
+    image = relocate.direct(record.get("image_rel")) or relocate(record["image"])
     if image is None:
         return "no_image"
 
