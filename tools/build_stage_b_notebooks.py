@@ -188,8 +188,13 @@ import torch
 _TORCH_WAS = torch.__version__
 
 subprocess.run(["bash", "scripts/setup_edgetam.sh"], check=False)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r",
-                "requirements.txt"], check=False)
+
+REQUIREMENTS = [_line.split("#")[0].strip() for _line in
+                (Path(REPO_DIR) / "requirements.txt").read_text().splitlines()]
+REQUIREMENTS = [_line for _line in REQUIREMENTS
+                if _line and not _line.lower().startswith("opencv")]
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", *REQUIREMENTS],
+               check=False)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "hf_transfer",
                 "tqdm", "matplotlib"], check=False)
 
@@ -200,6 +205,36 @@ assert _md.version("torch") == _TORCH_WAS, (
     f"torch=={_TORCH_WAS}")
 
 import importlib
+
+OPENCV = ["opencv-python", "opencv-python-headless", "opencv-contrib-python",
+          "opencv-contrib-python-headless"]
+
+def cv2_works():
+    try:
+        import cv2
+        return hasattr(cv2, "imread")
+    except Exception:
+        return False
+
+CV2_REPAIRED = False
+if not cv2_works():
+    print("cv2 is broken -- reinstalling one distribution over the several "
+          "that share its directory")
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q",
+                    *OPENCV], check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                    "opencv-python-headless>=4.8"], check=False)
+    for _stale in [n for n in list(sys.modules) if n.split(".")[0] == "cv2"]:
+        del sys.modules[_stale]
+    importlib.invalidate_caches()
+    CV2_REPAIRED = True
+assert cv2_works(), (
+    "cv2 imports but has no imread, and reinstalling did not fix it in this "
+    "kernel. Runtime > Restart session (your /content files survive it) and "
+    "run this cell again -- the repair is already on disk.")
+if CV2_REPAIRED:
+    print("cv2 repaired; restart the runtime if anything below still fails")
+
 EDGETAM = str(Path(REPO_DIR) / "third_party" / "EdgeTAM")
 if EDGETAM not in sys.path:
     sys.path.insert(sys.path.index(REPO_DIR) + 1, EDGETAM)

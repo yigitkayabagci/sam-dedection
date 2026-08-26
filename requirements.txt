@@ -4,6 +4,18 @@
 # Do not install torch/torchvision from PyPI on Jetson.
 
 numpy>=1.24
+# `opencv-python`, not `-headless`: `src/prompts/interactive.py` opens a window
+# to pick the target, and the headless build has no GUI at all.
+#
+# **It collides on an environment that already ships a different opencv
+# distribution, and Colab is one.** All four (`opencv-python`,
+# `opencv-python-headless`, and the two `-contrib-` variants) install into the
+# same `cv2/` directory and pip uninstalls none of them, so the second install
+# overwrites part of the first and leaves a module that imports and then has no
+# `imread` -- an AttributeError forty minutes into a run, on a line that has
+# been correct for a year. Install exactly one, or let the notebooks' first
+# cell repair it: they install this file *minus* this line and add a single
+# opencv only if `cv2.imread` is missing.
 opencv-python>=4.8
 Pillow>=10.0
 pyyaml>=6.0
