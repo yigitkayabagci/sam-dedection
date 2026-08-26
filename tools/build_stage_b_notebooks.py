@@ -297,10 +297,11 @@ for _name, _folder in discover_pools(DRIVE_POOLS).items():
 
 print()
 RAW = group_records(POOL_ROOT)
-POOLS = {}
+POOLS, TEACHERS = {}, {}
 for _name, _records in RAW.items():
     POOLS[_name] = str(link_pool(_records, Path(POOL_ROOT) / "_by_name" / _name))
-    print(f"{_name:<28}{len(_records):>8} frames")
+    TEACHERS[_name] = json.loads(_records[0].read_text()).get("teacher", "?")
+    print(f"{_name:<28}{len(_records):>8} frames   {TEACHERS[_name]}")
 FOUND = sorted(POOLS)
 assert FOUND, f"no record.json under {POOL_ROOT} -- nothing was unpacked"
 
@@ -469,12 +470,20 @@ for _row in PLAN:
     POOL_FLAGS.append(_flag)
     INDEX.extend(_part)
     print(f"{_row['pool']:<28}{len(_part):>7} frames "
-          f"{sum(len(e.instances) for e in _part):>9} instances"
+          f"{sum(len(e.instances) for e in _part):>9} instances  "
+          f"{TEACHERS[_row['pool']]}"
           f"{('  skipped ' + str(_skips)) if _skips else ''}{_leak}")
 
 for _pool, _why in FAILED:
     print(f"{_pool:<28}unusable  {_why}")
 assert POOL_FLAGS, "no pool resolved its frames -- check the IMAGES roots above"
+
+_used = {TEACHERS[_row["pool"]] for _row in PLAN
+         if any(_row["dir"] in _f for _f in POOL_FLAGS)}
+if len(_used) > 1:
+    print(f"\\n!! two teachers in one training set: {sorted(_used)}. The run "
+          f"still works, but a per-pool difference now has two causes and "
+          f"neither can be read off the result.")
 
 COMMON = []
 for _flag in POOL_FLAGS:
@@ -758,7 +767,7 @@ print("yellow = the target's outline | green = only stage B found it | "
 code('''
 VERDICT = {
     "run": RUN, "modalities": MODALITIES, "image_size": SIZE,
-    "pools": POOL_FLAGS, "datasets": DATASET_FLAGS,
+    "pools": POOL_FLAGS, "datasets": DATASET_FLAGS, "teachers": TEACHERS,
     "dropped": DROPPED, "unusable": FAILED,
     "frames": {k: len(v) for k, v in SPLITS.items()},
     "train_windows_by_source": TRAIN.sources,
