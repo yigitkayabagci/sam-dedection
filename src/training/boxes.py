@@ -1109,6 +1109,94 @@ def scale_table(frames: SequenceABC[BoxFrame],
     return "\n".join(lines)
 
 
+def _relative_scales(frame: BoxFrame) -> np.ndarray:
+    """Each box's longer side as a fraction of the frame, or a loud refusal."""
+    if not frame.normalized:
+        raise ValueError(
+            f"{frame.key}: scale filtering needs normalised boxes, and this "
+            "frame carries pixel coordinates. A pixel box has no scale until "
+            "its image is decoded; filter it after `resolved`, or read the "
+            "set with a reader that keeps YOLO fractions.")
+    return np.maximum(np.abs(frame.boxes[:, 2]), np.abs(frame.boxes[:, 3]))
+
+
+def filter_by_scale(frames: SequenceABC[BoxFrame], min_rel: float = 0.01,
+                    max_rel: float = 0.5, large_rel: float = 0.25,
+                    large_quota: float | None = None,
+                    seed: int = 0) -> tuple[list[BoxFrame], dict[str, int]]:
+    """Drop the boxes at both ends of `scale_table`, and cap the close-ups.
+
+    The two ends are the same lines that table draws, so its columns predict
+    what this removes. Under `min_rel` the box is a handful of pixels and the
+    teacher's mask for it is mostly noise -- the gates reject most of them
+    anyway, after paying for the crop. At or over `max_rel` the box is not an
+    object in a scene but nearly the scene, which on a merged export is
+    usually a mislabelled whole-image annotation; a mask of it teaches the
+    student that the answer is always "everything".
+
+    The quota is the other problem a merged export has, and it is a *frame*
+    decision rather than a box one. One source shooting close-ups can supply
+    most of the images while a mask pool wants the distant, small-object
+    frames the tracker will actually see. A frame counts as a close-up when
+    its largest surviving box is at least `large_rel`; `large_quota` is the
+    share of the *kept* set those frames may hold, and the surplus is dropped
+    whole -- a close-up frame costs a decode and a teacher pass whether one of
+    its boxes is dropped or not, so trimming its boxes would save nothing.
+
+    Solving the quota against the final set, not the input, is deliberate:
+    with `s` small frames kept, at most `floor(q * s / (1 - q))` close-ups can
+    survive before they exceed `q` of everything, and that is the number this
+    keeps. Which ones survive is a seeded draw over the frames in key order,
+    so the same export and seed select the same images on any machine.
+
+    Returns the kept frames in their input order and a report of what went:
+    every count in it is a decision this made, and `boxes_kept` plus
+    `below_min`, `above_max` and `quota_boxes` is `boxes`.
+    """
+    if not 0 <= min_rel <= max_rel:
+        raise ValueError(f"min_rel {min_rel} is not below max_rel {max_rel}")
+
+    report = {"images": 0, "boxes": 0, "below_min": 0, "above_max": 0,
+              "emptied": 0, "large": 0, "over_quota": 0, "quota_boxes": 0}
+    trimmed: list[tuple[BoxFrame, bool]] = []      # (frame, is a close-up)
+    for frame in frames:
+        report["images"] += 1
+        report["boxes"] += len(frame.classes)
+        scales = _relative_scales(frame)
+        keep = [i for i, rel in enumerate(scales)
+                if min_rel <= rel < max_rel]
+        report["below_min"] += int((scales < min_rel).sum())
+        report["above_max"] += int((scales >= max_rel).sum())
+        if not keep:
+            report["emptied"] += 1
+            continue
+        if len(keep) < len(frame.classes):
+            frame = replace(frame, boxes=frame.boxes[keep],
+                            classes=tuple(frame.classes[i] for i in keep))
+        large = bool(scales[keep].max() >= large_rel)
+        report["large"] += int(large)
+        trimmed.append((frame, large))
+
+    drop: set[int] = set()
+    if large_quota is not None and 0 <= large_quota < 1:
+        close_ups = [i for i, (_, large) in enumerate(trimmed) if large]
+        small = len(trimmed) - len(close_ups)
+        allowed = int(large_quota * small / (1 - large_quota))
+        if len(close_ups) > allowed:
+            order = sorted(close_ups, key=lambda i: trimmed[i][0].key)
+            rng = np.random.default_rng(seed)
+            cut = rng.permutation(len(order))[allowed:]
+            drop = {order[int(i)] for i in cut}
+            report["over_quota"] = len(drop)
+            report["quota_boxes"] = sum(len(trimmed[i][0].classes)
+                                        for i in drop)
+
+    kept = [frame for i, (frame, _) in enumerate(trimmed) if i not in drop]
+    report["kept"] = len(kept)
+    report["boxes_kept"] = sum(len(f.classes) for f in kept)
+    return kept, report
+
+
 def summarise_frames(frames: SequenceABC[BoxFrame], name: str = "") -> str:
     """One markdown block: volume, class balance, box-size distribution."""
     total = sum(len(f.classes) for f in frames)

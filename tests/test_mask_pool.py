@@ -44,6 +44,7 @@ from src.training.boxes import (  # noqa: E402
     kust4k_frames,
     summarise_frames,
     vtuavdet_frames,
+    filter_by_scale,
     scale_table,
     yolo_frames,
     yolo_label_frames,
@@ -542,6 +543,77 @@ class TestProbes(unittest.TestCase):
         self.assertIn("| ? | 1 | 2 |", table)       # densest group first
         self.assertIn("| visdrone | 1 | 1 |", table)
         self.assertIn("| all | 2 | 3 |", table)     # and a total under them
+
+    def test_the_scale_filter_drops_both_ends_and_the_report_adds_up(self):
+        frames = [BoxFrame(key="a", image=Path("a"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.005, 0.005],
+                                           [0.5, 0.5, 0.100, 0.050],
+                                           [0.5, 0.5, 0.900, 0.900]]),
+                           classes=("car", "car", "car"))]
+        kept, report = filter_by_scale(frames, min_rel=0.01, max_rel=0.5)
+        self.assertEqual(kept[0].classes, ("car",))       # only the middle one
+        np.testing.assert_allclose(kept[0].boxes[0, 2], 0.100)
+        self.assertEqual(report["below_min"], 1)
+        self.assertEqual(report["above_max"], 1)
+        self.assertEqual(report["boxes_kept"] + report["below_min"]
+                         + report["above_max"] + report["quota_boxes"],
+                         report["boxes"])
+
+    def test_a_frame_left_with_nothing_to_prompt_is_dropped_and_counted(self):
+        frames = [BoxFrame(key="a", image=Path("a"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.90, 0.90]]),
+                           classes=("car",)),
+                  BoxFrame(key="b", image=Path("b"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.10, 0.10]]),
+                           classes=("car",))]
+        kept, report = filter_by_scale(frames, max_rel=0.5)
+        self.assertEqual([f.key for f in kept], ["b"])
+        self.assertEqual(report["emptied"], 1)
+        self.assertEqual(report["kept"], 1)
+
+    def test_the_quota_is_a_share_of_the_kept_set_and_drops_whole_frames(self):
+        small = [BoxFrame(key=f"s{i}", image=Path("s"), normalized=True,
+                          boxes=np.array([[0.5, 0.5, 0.05, 0.05]]),
+                          classes=("car",)) for i in range(8)]
+        large = [BoxFrame(key=f"l{i}", image=Path("l"), normalized=True,
+                          boxes=np.array([[0.5, 0.5, 0.30, 0.30],
+                                          [0.5, 0.5, 0.05, 0.05]]),
+                          classes=("car", "car")) for i in range(6)]
+        kept, report = filter_by_scale(small + large, large_rel=0.25,
+                                       large_quota=0.2, max_rel=0.5)
+        # 8 small, quota 0.2 of the final set: floor(0.2 * 8 / 0.8) = 2.
+        close_ups = [f for f in kept if f.key.startswith("l")]
+        self.assertEqual(len(close_ups), 2)
+        self.assertEqual(len(kept), 10)
+        self.assertEqual(report["large"], 6)
+        self.assertEqual(report["over_quota"], 4)
+        self.assertEqual(report["quota_boxes"], 8)     # two boxes each
+        # A close-up keeps all its boxes -- the quota is not a box filter.
+        self.assertEqual(len(close_ups[0].classes), 2)
+
+    def test_the_same_seed_selects_the_same_close_ups(self):
+        frames = [BoxFrame(key=f"k{i}", image=Path("k"), normalized=True,
+                           boxes=np.array([[0.5, 0.5, 0.30, 0.30]]),
+                           classes=("car",)) for i in range(12)]
+        frames += [BoxFrame(key="s", image=Path("s"), normalized=True,
+                            boxes=np.array([[0.5, 0.5, 0.05, 0.05]]),
+                            classes=("car",))] * 4
+        first = filter_by_scale(frames, large_quota=0.5, seed=7)[0]
+        again = filter_by_scale(frames, large_quota=0.5, seed=7)[0]
+        other = filter_by_scale(frames, large_quota=0.5, seed=8)[0]
+        self.assertEqual([f.key for f in first], [f.key for f in again])
+        self.assertNotEqual([f.key for f in first], [f.key for f in other])
+        # ...and the input order survives the draw.
+        self.assertEqual([f.key for f in first],
+                         sorted([f.key for f in first],
+                                key=lambda k: [f.key for f in frames].index(k)))
+
+    def test_pixel_boxes_are_refused_rather_than_scaled_by_guess(self):
+        frames = [BoxFrame(key="a", image=Path("a"),
+                           boxes=np.array([[0, 0, 10, 10]]), classes=("car",))]
+        with self.assertRaises(ValueError) as caught:
+            filter_by_scale(frames)
+        self.assertIn("normalised boxes", str(caught.exception))
 
     def test_pixel_boxes_are_counted_but_not_measured(self):
         frames = [BoxFrame(key="a", image=Path("a"),
