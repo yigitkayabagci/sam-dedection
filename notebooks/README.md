@@ -24,6 +24,7 @@ recipe, not the implementation.
 | 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17 |
 | 17 | `17_vtuav_thermal_pool.ipynb` | VTUAV's **thermal** half, on `ir.txt`'s own boxes — the two halves agree on only 12 % of rows, so neither mask serves the other | the same archives; runs beside 16 on a second runtime |
 | 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
+| 19 | `19_kaggle_uav_thermal_pool.ipynb` | the Kaggle merged UAV-thermal set (27 925 images, 6 sources, CC0) cut **to target scale** before a single image is written to disk: labels indexed out of the 13 GB archive, close-ups dropped on the median box, near targets capped at a quota so the model still knows they exist, then SAM 3 over what survives | Kaggle API credentials (`KAGGLE_USERNAME` / `KAGGLE_KEY` Colab secrets) and an HF token for SAM 3 |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of

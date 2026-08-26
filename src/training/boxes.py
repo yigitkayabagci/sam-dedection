@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Iterable, Sequence as SequenceABC
+from collections.abc import Iterable, Mapping, Sequence as SequenceABC
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -152,17 +152,7 @@ def yolo_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
 
     frames = []
     for stem, image in stems.items():
-        label = root / labels / f"{stem}.txt"
-        boxes, classes = [], []
-        if label.is_file():
-            for line in label.read_text().splitlines():
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                index = int(float(parts[0]))
-                boxes.append([float(v) for v in parts[1:5]])
-                classes.append(names[index] if 0 <= index < len(names)
-                               else f"class {index}")
+        boxes, classes = _yolo_boxes(root / labels / f"{stem}.txt", names)
         if boxes:
             frames.append(BoxFrame(
                 key=stem, image=image,
@@ -171,6 +161,56 @@ def yolo_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
     if not frames:
         raise FileNotFoundError(
             f"{root}: images found but not one readable label under {labels}/.")
+    return frames
+
+
+def _yolo_boxes(label: Path, names: SequenceABC[str]):
+    """One label file's `(boxes, class names)`; missing or empty reads as none."""
+    boxes, classes = [], []
+    if not label.is_file():
+        return boxes, classes
+    for line in label.read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        index = int(float(parts[0]))
+        boxes.append([float(v) for v in parts[1:5]])
+        classes.append(names[index] if 0 <= index < len(names)
+                       else f"class {index}")
+    return boxes, classes
+
+
+def yolo_label_frames(root: str | Path, names: SequenceABC[str] = VISDRONE_NAMES,
+                      images: str = "images", labels: str = "labels",
+                      suffix: str = ".png") -> list[BoxFrame]:
+    """The same index, built from the *labels*, for images not on disk yet.
+
+    `yolo_frames` starts from the images, which is right once a download is
+    complete. It is the wrong way round when the point of the pass is to
+    decide which images are worth the disk: a 13 GB archive whose label files
+    total a few tens of megabytes can be indexed, scored by
+    `filter_by_scale`, and cut to a selection **before a single image is
+    extracted**, and then only the survivors written out.
+
+    `image` therefore names where each frame *will* be, not where it is. Every
+    consumer of that path -- the teacher, the panel -- runs after extraction;
+    `box_scale` and the filters never touch pixels at all.
+    """
+    root = Path(root)
+    label_dir = root / labels
+    found = sorted(label_dir.glob("*.txt"))
+    if not found:
+        raise FileNotFoundError(
+            f"{label_dir}: no .txt labels. Extract the archive's {labels}/ "
+            f"members before indexing -- they are what this pass reads.")
+    frames = []
+    for label in found:
+        boxes, classes = _yolo_boxes(label, names)
+        if boxes:
+            frames.append(BoxFrame(
+                key=label.stem, image=root / images / f"{label.stem}{suffix}",
+                boxes=np.asarray(boxes, dtype=np.float64),
+                classes=tuple(classes), normalized=True))
     return frames
 
 
@@ -852,6 +892,141 @@ def _birdsai_images(folder: Path) -> tuple[dict[int, Path], list[Path]]:
         if tail.isdigit():
             by_number.setdefault(int(tail), path)
     return by_number, ordered
+
+
+# --------------------------------------------------------------------------
+# Selecting by target scale
+# --------------------------------------------------------------------------
+
+
+def box_scale(frame: BoxFrame) -> np.ndarray:
+    """Each box's `sqrt(w*h)` as a fraction of the image side.
+
+    One scale-free number per box, and the reason it is scale-free matters:
+    the sets this filter exists for are merged from sources shot at different
+    resolutions, so a pixel threshold would mean a different physical target
+    size in each half of the same directory. A fraction means the same thing
+    everywhere -- 0.05 is a target a twentieth of the frame across, which is
+    what a vehicle looks like from 100 m and is not what anything looks like
+    from three metres.
+    """
+    if not frame.normalized:
+        raise ValueError(
+            f"{frame.key}: box_scale needs normalised boxes, which is what "
+            f"`yolo_frames` produces. A pixel-coordinate frame has no scale "
+            f"until its image is decoded.")
+    boxes = np.asarray(frame.boxes, dtype=np.float64)
+    return np.sqrt(np.clip(boxes[:, 2], 0, None) * np.clip(boxes[:, 3], 0, None))
+
+
+def filter_by_scale(frames: SequenceABC[BoxFrame], min_rel: float = 0.01,
+                    max_rel: float = 0.35, large_rel: float = 0.15,
+                    large_quota: float = 0.15, seed: int = 0,
+                    ) -> tuple[list[BoxFrame], dict]:
+    """Keep the targets an aerial model should see, at the mix it should see.
+
+    Merged detection sets are merged across *viewpoints*, not just sources: a
+    collection sold as aerial-thermal can be more than half street-level
+    surveillance, plus close-range photographs of hand-held objects. Trained
+    on undifferentiated, the close-ups dominate the loss -- they carry the
+    most pixels per box -- and the model learns a scale it will never be
+    deployed at.
+
+    Three rules, at two levels, because "too big" means two different things:
+
+    **Per box**, anything outside `[min_rel, max_rel]` goes. Below the floor
+    is a handful of pixels, which no teacher segments usefully and the pool
+    gates reject anyway; above the ceiling is a single object filling the
+    frame.
+
+    **Per image**, a frame whose *median* box is above `max_rel` goes
+    entirely. That is the close-up test, and it is the median rather than the
+    maximum on purpose: one lorry among twelve cars is a wide scene with a big
+    object in it and its cars are worth keeping, while a photograph of one
+    rifle is a photograph of one rifle.
+
+    **Per selection**, images whose largest surviving box reaches `large_rel`
+    are capped at `large_quota` of what is kept, sampled with a seeded
+    generator. This is the part that is a judgement rather than a rule: drop
+    the large band entirely and the model forgets that near targets exist, so
+    the band stays, at a share small enough not to set the scale of the
+    training distribution. Raise the quota when large targets are part of the
+    deployment, lower it when they are not.
+
+    Returns the kept frames -- boxes filtered, classes kept in step -- and a
+    report that says what each rule cost, because a filter nobody can audit is
+    a filter nobody should trust.
+    """
+    rng = np.random.default_rng(seed)
+    counts = {"images": len(frames), "boxes": 0, "too_small": 0,
+              "too_large": 0, "close_up_images": 0, "empty_images": 0,
+              "quota_dropped": 0}
+    small_band: list[BoxFrame] = []
+    large_band: list[BoxFrame] = []
+
+    for frame in frames:
+        scale = box_scale(frame)
+        counts["boxes"] += len(scale)
+        if len(scale) and float(np.median(scale)) > max_rel:
+            counts["close_up_images"] += 1
+            counts["too_large"] += int((scale > max_rel).sum())
+            continue
+        keep = (scale >= min_rel) & (scale <= max_rel)
+        counts["too_small"] += int((scale < min_rel).sum())
+        counts["too_large"] += int((scale > max_rel).sum())
+        if not keep.any():
+            counts["empty_images"] += 1
+            continue
+        kept = replace(frame, boxes=frame.boxes[keep],
+                       classes=tuple(c for c, k in zip(frame.classes, keep) if k))
+        (large_band if scale[keep].max() >= large_rel else small_band).append(kept)
+
+    allowed = int(large_quota * len(small_band) / max(1 - large_quota, 1e-9))
+    if len(large_band) > allowed:
+        chosen = sorted(rng.choice(len(large_band), allowed, replace=False))
+        counts["quota_dropped"] = len(large_band) - allowed
+        large_band = [large_band[i] for i in chosen]
+
+    kept = sorted(small_band + large_band, key=lambda f: f.key)
+    counts.update(
+        kept_images=len(kept),
+        kept_boxes=sum(len(f.classes) for f in kept),
+        large_images=len(large_band),
+        large_share=round(len(large_band) / max(len(kept), 1), 4))
+    return kept, {"min_rel": min_rel, "max_rel": max_rel,
+                  "large_rel": large_rel, "large_quota": large_quota, **counts}
+
+
+def scale_table(frames: SequenceABC[BoxFrame],
+                groups: Mapping[str, str] | None = None,
+                max_rel: float = 0.35) -> str:
+    """Box scale per group, as percentiles -- the table a threshold is read off.
+
+    `groups` maps a frame key to whatever the rows should be; a merged set's
+    source dataset is the useful one, because that is the axis viewpoint
+    varies along. Without it the rows are class names.
+
+    Percentiles rather than a mean: these distributions are long-tailed by
+    construction and a mean sits in a bucket nothing occupies. The last column
+    is the share of boxes a given `max_rel` would cut, so the number can be
+    chosen against the data instead of guessed and then discovered later.
+    """
+    rows: dict[str, list[float]] = {}
+    for frame in frames:
+        scale = box_scale(frame)
+        for value, name in zip(scale, frame.classes):
+            key = groups.get(frame.key, "?") if groups is not None else name
+            rows.setdefault(key, []).append(float(value))
+
+    lines = ["| group | boxes | p10 | p50 | p90 | p99 | "
+             f"share > {max_rel} |", "|---|---:|---:|---:|---:|---:|---:|"]
+    for name, values in sorted(rows.items(), key=lambda kv: -len(kv[1])):
+        array = np.asarray(values)
+        p10, p50, p90, p99 = np.percentile(array, [10, 50, 90, 99])
+        lines.append(f"| {name} | {len(array)} | {p10:.3f} | {p50:.3f} | "
+                     f"{p90:.3f} | {p99:.3f} | "
+                     f"{(array > max_rel).mean():.1%} |")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------

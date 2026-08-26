@@ -36,15 +36,19 @@ from src.training.boxes import (  # noqa: E402
     VISDRONE_NAMES,
     BoxFrame,
     birdsai_frames,
+    box_scale,
     class_histogram,
+    filter_by_scale,
     coco_frames,
     dronevehicle_frames,
     hituav_frames,
     rgbtdroneperson_frames,
     kust4k_frames,
+    scale_table,
     summarise_frames,
     vtuavdet_frames,
     yolo_frames,
+    yolo_label_frames,
 )
 from src.training.labels import (  # noqa: E402
     MASK_STORE,
@@ -1259,6 +1263,131 @@ class TestModalityAgreement(unittest.TestCase):
         table = agreement_table(records, intact_modalities(records))
         self.assertIn("| clean | 11 |", table)
         self.assertIn("| thermal | 1 |", table)
+
+
+# --------------------------------------------------------------------------
+# Selecting by target scale
+# --------------------------------------------------------------------------
+
+
+def yolo_frame(key, *scales, cls="person"):
+    """One normalised frame carrying square boxes of the given relative sides."""
+    return BoxFrame(key=key, image=Path(f"{key}.png"), normalized=True,
+                    boxes=np.array([[0.5, 0.5, s, s] for s in scales]),
+                    classes=tuple([cls] * len(scales)))
+
+
+class TestScaleFilter(unittest.TestCase):
+    """A merged set is merged across viewpoints, and scale is how they differ."""
+
+    def test_the_scale_is_the_geometric_mean_of_the_two_fractions(self):
+        frame = BoxFrame(key="a", image=Path("a.png"), normalized=True,
+                         boxes=np.array([[0.5, 0.5, 0.04, 0.09]]),
+                         classes=("car",))
+        np.testing.assert_allclose(box_scale(frame), [0.06])
+
+    def test_pixel_boxes_are_refused_by_name(self):
+        frame = BoxFrame(key="a", image=Path("a.png"),
+                         boxes=np.array([[0, 0, 10, 10]]), classes=("car",))
+        with self.assertRaises(ValueError) as caught:
+            box_scale(frame)
+        self.assertIn("yolo_frames", str(caught.exception))
+
+    def test_a_box_outside_the_band_goes_and_its_class_goes_with_it(self):
+        kept, report = filter_by_scale([yolo_frame("a", 0.004, 0.05, 0.9)],
+                                       min_rel=0.01, max_rel=0.35,
+                                       large_quota=1.0)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(len(kept[0].classes), 1)
+        np.testing.assert_allclose(kept[0].boxes[0][2], 0.05)
+        self.assertEqual((report["too_small"], report["too_large"]), (1, 1))
+
+    def test_a_close_up_is_judged_on_the_median_not_the_maximum(self):
+        # One lorry among small cars is a wide scene; a lone rifle is not.
+        wide = yolo_frame("wide", 0.03, 0.04, 0.05, 0.05, 0.5)
+        close = yolo_frame("close", 0.6, 0.55)
+        kept, report = filter_by_scale([wide, close], large_quota=1.0)
+        self.assertEqual([f.key for f in kept], ["wide"])
+        self.assertEqual(report["close_up_images"], 1)
+        self.assertEqual(len(kept[0].classes), 4)     # the 0.5 box still goes
+
+    def test_an_image_whose_every_box_is_filtered_out_is_counted(self):
+        kept, report = filter_by_scale([yolo_frame("a", 0.001, 0.002)])
+        self.assertEqual(kept, [])
+        self.assertEqual(report["empty_images"], 1)
+
+    def test_the_large_band_is_capped_at_its_quota_of_what_is_kept(self):
+        frames = ([yolo_frame(f"s{i:03d}", 0.05) for i in range(100)]
+                  + [yolo_frame(f"l{i:03d}", 0.25) for i in range(100)])
+        kept, report = filter_by_scale(frames, large_rel=0.15, large_quota=0.2)
+        self.assertEqual(report["large_images"], 25)   # 25 / 125 = 0.2
+        self.assertAlmostEqual(report["large_share"], 0.2, places=3)
+        self.assertEqual(report["quota_dropped"], 75)
+        self.assertEqual(len(kept), 125)
+
+    def test_the_large_band_is_never_emptied_just_because_it_is_large(self):
+        # The point of a quota rather than a ceiling: near targets stay in.
+        frames = ([yolo_frame(f"s{i:03d}", 0.05) for i in range(20)]
+                  + [yolo_frame(f"l{i:03d}", 0.25) for i in range(200)])
+        kept, report = filter_by_scale(frames, large_quota=0.15)
+        self.assertGreater(report["large_images"], 0)
+        self.assertLessEqual(report["large_share"], 0.15 + 1e-6)
+
+    def test_the_same_seed_keeps_the_same_large_frames(self):
+        frames = ([yolo_frame(f"s{i:03d}", 0.05) for i in range(50)]
+                  + [yolo_frame(f"l{i:03d}", 0.25) for i in range(50)])
+        first, _ = filter_by_scale(frames, seed=7)
+        again, _ = filter_by_scale(frames, seed=7)
+        self.assertEqual([f.key for f in first], [f.key for f in again])
+
+    def test_the_table_groups_by_source_when_it_is_given_one(self):
+        frames = [yolo_frame("a", 0.05), yolo_frame("b", 0.5)]
+        table = scale_table(frames, groups={"a": "hituav", "b": "gundataset"},
+                            max_rel=0.35)
+        self.assertIn("hituav", table)
+        self.assertIn("100.0%", table)          # gundataset is entirely above
+
+    def test_the_table_falls_back_to_class_names(self):
+        table = scale_table([yolo_frame("a", 0.05, cls="drone")])
+        self.assertIn("drone", table)
+
+
+class TestYoloLabelFrames(unittest.TestCase):
+    """Indexing from the labels, so 13 GB of images can be cut before writing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "labels").mkdir()
+        (self.root / "labels" / "a.txt").write_text("0 0.5 0.5 0.1 0.1\n")
+        (self.root / "labels" / "b.txt").write_text("")        # a background
+
+    def test_the_index_exists_before_a_single_image_does(self):
+        frames = yolo_label_frames(self.root, names=("person",))
+        self.assertEqual([f.key for f in frames], ["a"])
+        self.assertFalse(frames[0].image.exists())
+        self.assertEqual(frames[0].image, self.root / "images" / "a.png")
+        self.assertTrue(frames[0].normalized)
+
+    def test_the_image_suffix_is_the_datasets_not_a_guess(self):
+        frames = yolo_label_frames(self.root, names=("person",), suffix=".jpg")
+        self.assertEqual(frames[0].image.name, "a.jpg")
+
+    def test_no_labels_at_all_says_to_extract_them_first(self):
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaises(FileNotFoundError) as caught:
+                yolo_label_frames(empty)
+            self.assertIn("Extract", str(caught.exception))
+
+    def test_it_reads_the_same_boxes_yolo_frames_would(self):
+        (self.root / "images").mkdir()
+        (self.root / "images" / "a.png").write_bytes(b"")
+        (self.root / "images" / "b.png").write_bytes(b"")
+        from_images = yolo_frames(self.root, names=("person",))
+        from_labels = yolo_label_frames(self.root, names=("person",))
+        self.assertEqual([f.key for f in from_images], [f.key for f in from_labels])
+        np.testing.assert_allclose(from_images[0].boxes, from_labels[0].boxes)
 
 
 if __name__ == "__main__":
