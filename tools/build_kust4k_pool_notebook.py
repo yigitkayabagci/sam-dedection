@@ -90,6 +90,7 @@ QUANTILE    = 0.02                   # clean-score floor the broken half must cl
 DROP_CORRUPT = True                  # False harvests both halves regardless
 EXPORT_PNG  = True                   # instance-id PNGs beside the run-length stores
 REQUIRE_DRIVE = True                 # False runs without Drive, no mirror
+PATCH_FILE  = "/content/drive/MyDrive/edgetam-pool/repo_patch.py"
 REPO_URL    = "https://github.com/yigitkayabagci/sam-dedection.git"
 BRANCH      = "claude/aerial-rgb-thermal-data-qhjpxd"
 REPO_DIR    = "/content/sam-dedection"
@@ -112,27 +113,6 @@ else:
                     f"origin/{BRANCH}"], check=False)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
-
-# And what the clone actually contains is checked here rather than discovered
-# as an ImportError four cells in. A branch that has not been pushed looks
-# exactly like a branch that has, right up to the traceback.
-REQUIRED = {
-    "tools/fetch_datasets.py": ("stage_rgbt_archives", "likely_dataset_dirs"),
-    "src/training/boxes.py": ("kust4k_frames", "semantic_frames"),
-    "src/training/pool.py": ("modality_agreement", "intact_modalities",
-                             "boundary_agreement"),
-}
-_stale = [f"{_file} -> {_name}"
-          for _file, _names in REQUIRED.items()
-          for _name in _names
-          if f"def {_name}(" not in (Path(REPO_DIR) / _file).read_text()]
-if _stale:
-    raise SystemExit(
-        "this clone of " + BRANCH + " is missing:\\n  " + "\\n  ".join(_stale)
-        + "\\n\\nThe branch on GitHub is behind the working copy. Push it:\\n"
-        "    git push origin " + BRANCH + "\\n"
-        "then re-run this cell -- it fetches and resets, so there is no need "
-        "to delete the runtime.")
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
@@ -174,6 +154,46 @@ try:
         os.environ["HF_TOKEN"] = _token
 except Exception as _token_error:
     print("no HF_TOKEN secret:", _token_error)
+
+# What the clone actually contains, checked here rather than discovered as an
+# ImportError four cells in: a branch that has not been pushed looks exactly
+# like one that has, right up to the traceback. `PATCH_FILE` is the way out
+# when pushing is not available -- a Drive-side copy of the functions the
+# clone is missing, applied only if it is missing them, so it becomes a no-op
+# the day the branch lands and can be deleted then.
+REQUIRED = {
+    "tools.fetch_datasets": ("stage_rgbt_archives", "likely_dataset_dirs"),
+    "src.training.boxes": ("kust4k_frames", "semantic_frames"),
+    "src.training.pool": ("modality_agreement", "intact_modalities",
+                          "boundary_agreement"),
+}
+
+def _missing():
+    import importlib
+    out = []
+    for _module_name, _names in REQUIRED.items():
+        try:
+            _module = importlib.import_module(_module_name)
+        except Exception as _import_error:
+            out.append(f"{_module_name} ({_import_error})")
+            continue
+        out += [f"{_module_name}.{_n}" for _n in _names
+                if not hasattr(_module, _n)]
+    return out
+
+_stale = _missing()
+if _stale and Path(PATCH_FILE).is_file():
+    print("clone is behind; applying", PATCH_FILE)
+    exec(compile(Path(PATCH_FILE).read_text(), PATCH_FILE, "exec"),
+         {"__name__": "repo_patch"})
+    _stale = _missing()
+if _stale:
+    raise SystemExit(
+        "this clone of " + BRANCH + " is missing:\\n  " + "\\n  ".join(_stale)
+        + "\\n\\nEither push the branch:\\n"
+        "    git push origin " + BRANCH + "\\n"
+        "or put an up-to-date repo_patch.py at " + PATCH_FILE)
+
 
 # No `login()` call. `huggingface_hub` reads HF_TOKEN from the environment on
 # its own, and calling login as well makes it print a warning that the env var

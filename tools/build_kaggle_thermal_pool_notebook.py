@@ -133,6 +133,7 @@ BOX_IOU      = 0.5
 EXPORT_PNG   = True
 KEEP_ARCHIVE = False         # True keeps the 13 GB zip after extraction
 REQUIRE_DRIVE = True         # False runs without Drive, no mirror
+PATCH_FILE   = "/content/drive/MyDrive/edgetam-pool/repo_patch.py"
 REPO_URL     = "https://github.com/yigitkayabagci/sam-dedection.git"
 BRANCH       = "claude/aerial-rgb-thermal-data-qhjpxd"
 REPO_DIR     = "/content/sam-dedection"
@@ -155,25 +156,6 @@ else:
                     f"origin/{BRANCH}"], check=False)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
-
-# And what the clone actually contains is checked here rather than discovered
-# as an ImportError four cells in. A branch that has not been pushed looks
-# exactly like a branch that has, right up to the traceback.
-REQUIRED = {
-    "src/training/boxes.py": ("yolo_label_frames", "filter_by_scale",
-                              "scale_table", "box_scale"),
-}
-_stale = [f"{_file} -> {_name}"
-          for _file, _names in REQUIRED.items()
-          for _name in _names
-          if f"def {_name}(" not in (Path(REPO_DIR) / _file).read_text()]
-if _stale:
-    raise SystemExit(
-        "this clone of " + BRANCH + " is missing:\\n  " + "\\n  ".join(_stale)
-        + "\\n\\nThe branch on GitHub is behind the working copy. Push it:\\n"
-        "    git push origin " + BRANCH + "\\n"
-        "then re-run this cell -- it fetches and resets, so there is no need "
-        "to delete the runtime.")
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
@@ -222,6 +204,44 @@ try:
             os.environ[_name] = _value
 except Exception as _secret_error:
     print("no Colab secrets:", _secret_error)
+
+# What the clone actually contains, checked here rather than discovered as an
+# ImportError four cells in: a branch that has not been pushed looks exactly
+# like one that has, right up to the traceback. `PATCH_FILE` is the way out
+# when pushing is not available -- a Drive-side copy of the functions the
+# clone is missing, applied only if it is missing them, so it becomes a no-op
+# the day the branch lands and can be deleted then.
+REQUIRED = {
+    "src.training.boxes": ("yolo_label_frames", "filter_by_scale",
+                           "scale_table", "box_scale"),
+}
+
+def _missing():
+    import importlib
+    out = []
+    for _module_name, _names in REQUIRED.items():
+        try:
+            _module = importlib.import_module(_module_name)
+        except Exception as _import_error:
+            out.append(f"{_module_name} ({_import_error})")
+            continue
+        out += [f"{_module_name}.{_n}" for _n in _names
+                if not hasattr(_module, _n)]
+    return out
+
+_stale = _missing()
+if _stale and Path(PATCH_FILE).is_file():
+    print("clone is behind; applying", PATCH_FILE)
+    exec(compile(Path(PATCH_FILE).read_text(), PATCH_FILE, "exec"),
+         {"__name__": "repo_patch"})
+    _stale = _missing()
+if _stale:
+    raise SystemExit(
+        "this clone of " + BRANCH + " is missing:\\n  " + "\\n  ".join(_stale)
+        + "\\n\\nEither push the branch:\\n"
+        "    git push origin " + BRANCH + "\\n"
+        "or put an up-to-date repo_patch.py at " + PATCH_FILE)
+
 
 # No `login()` call. `huggingface_hub` reads HF_TOKEN from the environment on
 # its own, and calling login as well makes it print a warning that the env var
