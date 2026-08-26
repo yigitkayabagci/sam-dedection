@@ -118,7 +118,7 @@ POOL_ROLE   = "all"
 POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
                "aerovis_heldout": "eval"}
 POOL_MODALITIES = {"aerovis_train": "rgb", "aerovis_heldout": "rgb"}
-POOL_LIMITS = {"aerovis_train": 8000, "aerovis_heldout": 1500}
+POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
@@ -512,7 +512,7 @@ from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
 from src.training.pool_reader import (SKIP_REASONS, exclude_frames, frame_keys,
                                       index_pool, load_pool_index, parse_pool,
-                                      save_pool_index)
+                                      save_pool_index, spread)
 from tools.train_encoder import build_indexes
 
 GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE, max_area=MAX_AREA,
@@ -562,9 +562,12 @@ for _row in PLAN:
     _capped = ""
     _cap = POOL_LIMITS.get(_row["pool"])
     if _cap and len(_part) > _cap:
-        _order = np.random.default_rng(SEED).permutation(len(_part))
-        _part = [_part[int(i)] for i in sorted(_order[:_cap])]
-        _capped = f"  (capped from {_order.size}, POOL_LIMITS)"
+        _was, _seqs = len(_part), len({e.frame.name.rsplit("/", 1)[0]
+                                       for e in _part})
+        _part = spread(_part, _cap, SEED)
+        _kept = len({e.frame.name.rsplit("/", 1)[0] for e in _part})
+        _capped = (f"  (spread to {_cap} of {_was} over {_kept}/{_seqs} "
+                   f"sequences)")
     _leak = ""
     if DRAWN_HELD and _row["key"] == EVAL_DRAWN:
         _before = len(_part)
@@ -608,6 +611,40 @@ COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),
            "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED)]
 
 SPLITS = split_index(INDEX, seed=SEED)
+
+DATASET_OF = {f"pool/{_row['pool']}": _row["key"] for _row in PLAN}
+if EVAL_DRAWN:
+    DATASET_OF[EVAL_DRAWN] = EVAL_DRAWN
+
+def dataset_of(entry):
+    _spec = entry.source.spec.name if entry.source else ""
+    return DATASET_OF.get(_spec, _spec)
+
+def stem_of(entry):
+    return Path(entry.frame.name).stem.lower()
+
+GRADED = {}
+for _name in ("val", "test"):
+    for _entry in SPLITS[_name]:
+        GRADED.setdefault(dataset_of(_entry), set()).add(stem_of(_entry))
+
+_kept, _dropped = [], {}
+for _entry in SPLITS["train"]:
+    _key = dataset_of(_entry)
+    if stem_of(_entry) in GRADED.get(_key, ()):
+        _dropped[_key] = _dropped.get(_key, 0) + 1
+    else:
+        _kept.append(_entry)
+SPLITS["train"] = _kept
+if _dropped:
+    print("dropped from training, graded elsewhere in the same dataset:")
+    for _key, _count in sorted(_dropped.items(), key=lambda kv: -kv[1]):
+        print(f"  {_key:<24}{_count:>7} frames")
+    print("   registered pairs are the same scene twice -- DroneVehicle's RGB "
+          "and thermal halves, Kust4K's -- and each half is its own source "
+          "with its own permutation, so a frame can train in one and be "
+          "scored in the other. Same geometry, same objects, same mask.")
+
 def windows(name, jitter):
     return ImageSplit(sample_windows(SPLITS[name], size=SIZE, per_image=PER_IMAGE,
                                      max_instances=MAX_INSTANCES, jitter=jitter,

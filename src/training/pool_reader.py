@@ -46,7 +46,7 @@ from pathlib import Path
 import numpy as np
 
 from .aerial import (ROLES, DatasetSpec, Frame, FrameIndex, Instance,
-                     InstanceGates, Source, reject_reason)
+                     InstanceGates, Source, group_of, reject_reason)
 from .labels import MASK_STORE
 from .pool import RECORD_FILE
 
@@ -297,6 +297,70 @@ def acceptance(records: SequenceABC[Path]) -> dict:
             "accepted_by_class": dict(sorted(classes.items(),
                                              key=lambda kv: -kv[1])),
             "teachers": sorted(teachers)}
+
+
+def spread(index: SequenceABC[FrameIndex], limit: int | None,
+           seed: int = 0) -> list[FrameIndex]:
+    """`limit` entries, chosen to sit as far apart as the pool allows.
+
+    A cap is only useful if what it keeps is a *sample*, and a uniform draw
+    over frames is not one here. AeroVIS is sequences with a median track of
+    117 frames, so 10 000 drawn uniformly out of 39 943 is roughly a quarter
+    of every sequence -- and a quarter of a sequence is mostly neighbouring
+    frames, which are the same picture. The batch would be large and its
+    variety would not.
+
+    So the cap is spent in two passes. **Across** sequences first, round-robin
+    from a seeded order, so a hundred sequences each give roughly the same
+    number and no sequence is dropped while another gives thousands.
+    **Within** a sequence second, at an even stride rather than at random,
+    because evenly spaced frames are the furthest apart the sequence can
+    offer and random ones cluster by chance.
+
+    Ungrouped pools -- detection sets whose frames have no sequence in their
+    key -- fall out as one frame per group, which makes the round-robin a
+    plain stride over the whole pool. That is the right answer there too.
+    """
+    if limit is None or limit >= len(index):
+        return list(index)
+    if limit <= 0:
+        return []
+
+    groups: dict[str, list[FrameIndex]] = {}
+    for entry in index:
+        groups.setdefault(group_of(entry), []).append(entry)
+    names = sorted(groups)
+    for name in names:
+        groups[name].sort(key=lambda entry: entry.frame.name)
+
+    # Seeded so the frames left over when `limit` does not divide evenly do
+    # not always land on the alphabetically first sequences.
+    order = [int(i) for i in np.random.default_rng(seed).permutation(len(names))]
+    counts = dict.fromkeys(names, 0)
+    remaining = limit
+    while remaining > 0:
+        moved = False
+        for position in order:
+            name = names[position]
+            if counts[name] >= len(groups[name]):
+                continue
+            counts[name] += 1
+            remaining -= 1
+            moved = True
+            if remaining == 0:
+                break
+        if not moved:                       # every group is exhausted
+            break
+
+    chosen: list[FrameIndex] = []
+    for name in names:
+        take, members = counts[name], groups[name]
+        if not take:
+            continue
+        step = len(members) / take
+        chosen += [members[min(int(i * step), len(members) - 1)]
+                   for i in range(take)]
+    return sorted(chosen, key=lambda entry: entry.frame.name)
 
 
 def frame_keys(index: SequenceABC[FrameIndex]) -> set[str]:
@@ -685,6 +749,6 @@ __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
            "Relocator", "SKIP_REASONS", "acceptance", "describe_pools",
            "discover_pools",
            "exclude_frames", "frame_keys", "group_records",
-           "index_pool", "index_pools", "link_pool",
+           "index_pool", "index_pools", "link_pool", "spread",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",
            "save_pool_index", "store_areas"]

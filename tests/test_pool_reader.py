@@ -388,6 +388,59 @@ class PoolIndexTest(unittest.TestCase):
         self.assertEqual(report["rejected"], {})
         self.assertEqual(report["teachers"], ["aerovis:ytvis"])
 
+    def test_a_cap_is_spread_over_sequences_not_drawn_uniformly(self):
+        """The reason a cap needs a sampler at all.
+
+        AeroVIS is 99 sequences with a median track of 117 frames, so a
+        uniform draw keeps roughly a quarter of every sequence -- and a
+        quarter of a sequence is mostly neighbouring frames, which are the
+        same picture. The batch would be large and its variety would not.
+        """
+        from src.training.pool_reader import spread
+
+        keys = [f"seq_{s:02d}/{f:04d}" for s in range(20) for f in range(100)]
+        for key in keys[:1]:                      # one real frame is enough
+            write_image(self.images / f"{key}.png", *self.shape)
+        index = index_pool(self.build(keys=keys), self.images, workers=4)
+        self.assertEqual(len(index), 2000)
+
+        kept = spread(index, 200, seed=0)
+        self.assertEqual(len(kept), 200)
+        per_sequence = {}
+        for entry in kept:
+            group = entry.frame.name.rsplit("/", 1)[0]
+            per_sequence[group] = per_sequence.get(group, 0) + 1
+        # Every sequence survives, and none dominates.
+        self.assertEqual(len(per_sequence), 20)
+        self.assertEqual(set(per_sequence.values()), {10})
+
+        # Within a sequence the frames are evenly spaced, not clustered.
+        first = sorted(int(e.frame.name.split("/")[1]) for e in kept
+                       if e.frame.name.startswith("seq_00/"))
+        gaps = {b - a for a, b in zip(first, first[1:])}
+        self.assertEqual(gaps, {10})
+
+    def test_spreading_is_deterministic_and_bounded(self):
+        from src.training.pool_reader import spread
+
+        keys = [f"seq_{s:02d}/{f:04d}" for s in range(4) for f in range(9)]
+        index = index_pool(self.build(keys=keys), self.images, workers=4)
+        self.assertEqual([e.frame.name for e in spread(index, 10, seed=0)],
+                         [e.frame.name for e in spread(index, 10, seed=0)])
+        self.assertEqual(len(spread(index, 10, seed=0)), 10)
+        # A cap at or above the pool changes nothing; a cap of zero empties it.
+        self.assertEqual(len(spread(index, 999, seed=0)), len(index))
+        self.assertEqual(spread(index, 0, seed=0), [])
+
+    def test_spreading_an_ungrouped_pool_is_a_stride_over_the_whole_thing(self):
+        from src.training.pool_reader import spread
+
+        index = index_pool(self.build(keys=[f"{n:04d}" for n in range(40)]),
+                           self.images, workers=4)
+        kept = spread(index, 10, seed=0)
+        self.assertEqual(len(kept), 10)
+        self.assertEqual(len({e.frame.name for e in kept}), 10)
+
     def test_a_pool_with_no_records_says_where_to_look(self):
         self.build()
         with self.assertRaises(FileNotFoundError) as caught:
