@@ -769,20 +769,41 @@ def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
     label rather than a draw from a stream, so it does not depend on order, on
     how many workers built the index, or on anything else being rebalanced
     first -- the same weights give the same set every time.
+
+    A weight is keyed by class name, by source, or by both -- `"car"`,
+    `"pool/dronevehicle_thermal"` (or just `"dronevehicle_thermal"`), or
+    `"pool/dronevehicle_thermal:car"`. Class alone is the wrong handle when
+    one dataset supplies most of a class: DroneVehicle carries twelve vehicles
+    a frame and Kaggle's thermal set carries a few, and thinning `car`
+    everywhere to reach the first also empties the second. Most specific wins
+    and nothing compounds, so each entry is one statement rather than a factor
+    in a product.
     """
     import hashlib
 
     kept: list[FrameIndex] = []
     before: dict[str, int] = {}
     after: dict[str, int] = {}
+    by_source: dict[str, tuple[int, int]] = {}
+    used: set[str] = set()
     for entry in index:
         spec = entry.source.spec if entry.source else None
+        source = spec.name if spec is not None else "?"
+        short = source.split("/", 1)[1] if source.startswith("pool/") else source
         survivors = []
         for instance in entry.instances:
             name = (spec.name_of(instance.class_id) if spec is not None
                     else str(instance.class_id))
             before[name] = before.get(name, 0) + 1
-            weight = float(weights.get(name, 1.0))
+            # Most specific wins, and nothing compounds: a source weight
+            # *replaces* a class weight for that source rather than
+            # multiplying it, so two entries can be reasoned about one at a
+            # time instead of as a product.
+            key = next((k for k in (f"{source}:{name}", f"{short}:{name}",
+                                    source, short, name) if k in weights), None)
+            weight = 1.0 if key is None else float(weights[key])
+            if key is not None:
+                used.add(key)
             if weight < 1.0:
                 digest = hashlib.blake2b(
                     f"{entry.source.name if entry.source else ''}"
@@ -792,6 +813,8 @@ def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
                     continue
             survivors.append(instance)
             after[name] = after.get(name, 0) + 1
+        was, now = by_source.get(source, (0, 0))
+        by_source[source] = (was + len(entry.instances), now + len(survivors))
         if survivors:
             kept.append(replace(entry, instances=tuple(survivors)))
     report = {
@@ -801,7 +824,8 @@ def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
         "by_class": {name: (count, after.get(name, 0))
                      for name, count in sorted(before.items(),
                                                key=lambda kv: -kv[1])},
-        "unmatched": sorted(set(weights) - set(before)),
+        "by_source": dict(sorted(by_source.items(), key=lambda kv: -kv[1][0])),
+        "unmatched": sorted(set(weights) - used),
     }
     return kept, report
 

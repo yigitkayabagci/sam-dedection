@@ -77,14 +77,20 @@ from pathlib import Path
 INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
-         "EXTRA_DATASETS": "[]"}
+         "EXTRA_DATASETS": "[]", "SKIP_POOLS": "[]",
+         "EPOCHS": "[1, 3]", "STEPS": "400"}
 
 # The three thermal-only pools that must be present for 22 to mean anything,
 # with a floor rather than a flag: a pool that resolved twelve frames out of
 # forty thousand has arrived in name only.
 REQUIRED = ('{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
-            '                 "hituav_thermal": 2000, "segfly_thermal": 5000,\n'
+            '                 "hituav_thermal": 2000,\n'
             '                 "kaggle_uav_thermal": 10000}')
+
+# SegFly ships semantic maps, so all 15 007 of its thermal frames come out of
+# `decompose` with no teacher pass. The pool harvested from it holds 5 378 of
+# the same frames under a different target, so it goes.
+SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
 
 ARMS = {
     "19_thermal_stage_b_pool.ipynb": {
@@ -103,14 +109,19 @@ ARMS = {
     # so they cannot outvote the rest, and the rate table inverted so the
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
-        "EXTRA_DATASETS": "[]",
+        "EPOCHS": "[1, 6]",
+        "STEPS": "800",
+        "EXTRA_DATASETS": SEGFLY,
+        "SKIP_POOLS": '["segfly_thermal"]',
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
         "REQUIRE_POOLS": REQUIRED,
-        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
-                          '                 "freight_car": 0.7}'),
-        "LR_HEAD": "1e-5",
+        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
+                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                          '                 "segfly": 0.6,\n'
+                          '                 "car": 0.7, "truck": 0.7}'),
+        "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
         # VTUAV's eleven tracking archives are 154 GiB and the disk is not.
@@ -123,14 +134,19 @@ ARMS = {
     # same seed, same split file -- so the two numbers differ by the method
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
-        "EXTRA_DATASETS": "[]",
+        "EPOCHS": "[1, 6]",
+        "STEPS": "800",
+        "EXTRA_DATASETS": SEGFLY,
+        "SKIP_POOLS": '["segfly_thermal"]',
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
         "REQUIRE_POOLS": REQUIRED,
-        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
-                          '                 "freight_car": 0.7}'),
-        "LR_HEAD": "1e-5",
+        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
+                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                          '                 "segfly": 0.6,\n'
+                          '                 "car": 0.7, "truck": 0.7}'),
+        "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
         "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
@@ -165,7 +181,7 @@ DRIVE_MY    = "/content/drive/MyDrive"
 EVAL_DRAWN  = "kust4k"
 EXTRA_DATASETS = {{EXTRA_DATASETS}}
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
-SKIP_POOLS  = []
+SKIP_POOLS  = {{SKIP_POOLS}}
 REQUIRE_POOLS = {{REQUIRE_POOLS}}
 CLASS_WEIGHTS = {{CLASS_WEIGHTS}}
 POOL_ROLE   = "all"
@@ -223,8 +239,8 @@ LORA_DROPOUT   = 0.0
 ANCHOR_WEIGHT  = 0.0
 BLEND_ALPHAS   = []
 MAX_REGRESSION = 0.15
-EPOCHS         = [1, 3]
-STEPS          = 400
+EPOCHS         = {{EPOCHS}}
+STEPS          = {{STEPS}}
 VAL_BATCHES    = 24
 DEPTH          = 2
 BATCH          = 0
@@ -915,11 +931,16 @@ if CLASS_WEIGHTS:
     for _name, (_was, _now) in list(_balance["by_class"].items())[:12]:
         print(f"{_name:<24}{_was:>10}{_was / _was_total:>8.1%}"
               f"{_now:>10}{_now / _now_total:>8.1%}")
+    print(f"{'source':<34}{'was':>10}{'share':>8}{'now':>10}{'share':>8}")
+    for _src, (_was, _now) in _balance["by_source"].items():
+        print(f"{_src:<34}{_was:>10}{_was / _was_total:>8.1%}"
+              f"{_now:>10}{_now / _now_total:>8.1%}")
     _matched = [_n for _n in CLASS_WEIGHTS if _n not in _balance["unmatched"]]
     assert _matched, (
-        f"CLASS_WEIGHTS names {_balance['unmatched']} and no pool here carries "
-        f"any of them, so the thinning did nothing. The names are the pools' "
-        f"own -- read the class table cell 2 printed and use those.")
+        f"CLASS_WEIGHTS names {_balance['unmatched']} and nothing here matched "
+        f"any of them, so the thinning did nothing. A key is a class name, a "
+        f"source, or `source:class` -- read the two tables above and use those "
+        f"names.")
     if _balance["unmatched"]:
         print(f"   !! no pool carries {_balance['unmatched']} -- those weights "
               f"thinned nothing. Not fatal, {_matched} did apply, but a "

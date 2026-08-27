@@ -1,0 +1,51 @@
+# EdgeTAM at 768x768 with 22_thermal_deep.ipynb's checkpoint -- WHICH WAS
+# TRAINED AT 512. Read the next paragraph before using any number this
+# produces.
+#
+# WHAT THIS CONFIG MEASURES, AND WHAT IT DOES NOT. The weights load here with
+# no error and no warning from PyTorch: EdgeTAM keeps no resolution in any
+# parameter, so the 982 keys and their shapes are identical at 512, 768 and
+# 1024, and `strict=True` is satisfied by all three. That is precisely why this
+# file needs a warning attached to it -- the mismatch is undetectable at load
+# time and shows up only as a model that quietly underperforms.
+# src/checkpoint_meta.py prints a line about it at startup, wired into the
+# tracker and the ONNX exporter both.
+#
+# So: a run with this config against configs/edgetam_768.yaml (stock weights,
+# same size) is a fair A/B and answers "did the training help at 768". A run
+# with this config compared to 22's own before/after table, or to
+# configs/edgetam_512_pool_deep.yaml, answers nothing -- the resolution changed
+# too. If what you want is "did the training help", take it at 512, where the
+# training happened.
+#
+# WHY 768 IS AN AWKWARD SIZE FOR THIS PARTICULAR CHECKPOINT. Two reasons that
+# compound:
+#
+#   1) It is off the training resolution, as above.
+#   2) 22 is a thermal run. configs/edgetam_768.yaml already argues that 768 is
+#      for sources that carry the detail -- 1280x720 recordings -- and the
+#      wrong tool for thermal frames like Anti-UAV410's 640x512, where 768
+#      *upsamples*: 2.25x the 512 token count spent on interpolated pixels, and
+#      a 6-pixel drone becomes a 9-pixel one, still inside a single stride-16
+#      cell. If your footage is genuinely 720p or better, 768 has something to
+#      work with; if it is thermal at 640x512, src/trackers/adaptive.py buys the
+#      magnification at the 512 price instead.
+#
+# 768 itself is a sound size -- 768 = 3 * 2^8 and 768/16 = 48, so every stride-2
+# stage lands exactly and the memory attention's query RoPE table reads 48*48 =
+# 2304. See configs/edgetam_768.yaml for that derivation in full. None of it is
+# in question here; only the checkpoint's training size is.
+#
+# THE MEMORY PATH IS STOCK, as in every stage B config: image_loop.py trains
+# with no memory bank, so tracking quality was never what the notebook scored.
+#
+# TensorRT at this size: configs/edgetam_trt_768_pool_deep.yaml, and the
+# engines have to be exported from *this* checkpoint -- see that file.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_thermal_deep_512.pt
+image_size: 768                           # NOT the size this checkpoint trained at
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
