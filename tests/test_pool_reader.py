@@ -596,6 +596,43 @@ class RelocatorTest(unittest.TestCase):
         here.write_bytes(b"")
         self.assertEqual(Relocator(None)(here), here)
 
+    def test_a_tree_that_gained_a_level_is_found_by_name(self):
+        # HIT-UAV's archive nests under a branch-named folder; a pool
+        # harvested from a copy without it records the shallower path, and
+        # stripping leading components can never put the level back.
+        local = self.root / "HIT-UAV-main" / "normal_json" / "train"
+        local.mkdir(parents=True)
+        (local / "0_01.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        found = relocate("/content/data/HIT_UAV/normal_json/train/0_01.jpg")
+        self.assertEqual(found, local / "0_01.jpg")
+        self.assertEqual((relocate.found_by_name, relocate.misses), (1, 0))
+
+    def test_the_longest_matching_tail_picks_between_two_of_a_name(self):
+        # DroneVehicle keeps one file name per frame in each modality.
+        for folder in ("trainimg", "trainimgr"):
+            (self.root / "train" / folder).mkdir(parents=True)
+            (self.root / "train" / folder / "04991.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        found = relocate("/data/DroneVehicle/train/trainimgr/04991.jpg")
+        self.assertEqual(found, self.root / "train" / "trainimgr" / "04991.jpg")
+
+    def test_a_name_two_files_share_equally_is_refused_not_guessed(self):
+        for folder in ("a", "b"):
+            (self.root / folder).mkdir(parents=True)
+            (self.root / folder / "0.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        self.assertIsNone(relocate("/data/somewhere/else/0.jpg"))
+        self.assertEqual((relocate.ambiguous, relocate.misses), (1, 1))
+
+    def test_the_fallback_can_be_turned_off(self):
+        deep = self.root / "wrapper" / "train"
+        deep.mkdir(parents=True)
+        (deep / "0_01.jpg").write_bytes(b"")
+        relocate = Relocator(self.root, by_name=False)
+        self.assertIsNone(relocate("/data/HIT_UAV/train/0_01.jpg"))
+        self.assertEqual(relocate.misses, 1)
+
 
 class ParsePoolTest(unittest.TestCase):
     def test_the_pool_alone_is_enough(self):

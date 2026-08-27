@@ -39,6 +39,7 @@ across, and a four-pixel target is not a prompt anyone would give.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterable, Sequence as SequenceABC
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,12 +85,33 @@ class Relocator:
     rather than thirty thousand searches. `misses` counts what could not be
     found at all, which is the number that tells you the images were never
     downloaded rather than that the pool is empty.
+
+    **Stripping is not enough when the tree gained a level.** Suffix matching
+    can only drop leading components, so a record written as
+    `/content/data/HIT_UAV/normal_json/train/0_01.jpg` misses every candidate
+    once the archive unpacks one folder deeper
+    (`HIT_UAV/HIT-UAV-...-main/normal_json/train/0_01.jpg`) -- and misses it
+    for all 2 866 frames, which reads exactly like a dataset that was never
+    downloaded. So a miss falls back to an index of the root by file name,
+    built once and shared by every frame after it. Where a name repeats --
+    DroneVehicle keeps `trainimg/04991.jpg` beside `trainimgr/04991.jpg`, one
+    per modality -- the candidate sharing the longest tail with the recorded
+    path wins, and a tie is left unresolved rather than guessed: picking the
+    wrong modality's frame would train thermal masks on RGB pixels.
+    `found_by_name` counts what came back this way, because a run that needed
+    it is a run whose images moved.
     """
 
-    def __init__(self, images_root: str | Path | None) -> None:
+    def __init__(self, images_root: str | Path | None,
+                 by_name: bool = True) -> None:
         self.root = Path(images_root) if images_root else None
         self.depth: int | None = None
         self.misses = 0
+        self.found_by_name = 0
+        self.ambiguous = 0
+        self._by_name = by_name
+        self._names: dict[str, list[Path]] | None = None
+        self._lock = threading.Lock()
 
     def direct(self, relative: str | Path | None) -> Path | None:
         """`root / relative`, when the record carried an archive-relative path.
@@ -123,11 +145,54 @@ class Relocator:
             if candidate.is_file():
                 self.depth = depth
                 return candidate
-        return self._miss()
+        return self._named(parts) or self._miss()
+
+    def _named(self, parts: tuple[str, ...]) -> Path | None:
+        """The file under the root that carries this name, when one does.
+
+        The index is built on the first miss rather than up front, so a pool
+        whose paths all resolve by stripping never pays for the walk.
+        """
+        if not self._by_name or self.root is None or not parts:
+            return None
+        with self._lock:
+            if self._names is None:
+                self._names = _index_by_name(self.root)
+        candidates = self._names.get(parts[-1], ())
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            ranked = sorted(candidates, key=lambda p: -_shared_tail(p.parts, parts))
+            if _shared_tail(ranked[0].parts, parts) \
+                    == _shared_tail(ranked[1].parts, parts):
+                self.ambiguous += 1
+                return None
+            candidates = ranked
+        self.found_by_name += 1
+        return candidates[0]
 
     def _miss(self) -> None:
         self.misses += 1
         return None
+
+
+def _index_by_name(root: Path) -> dict[str, list[Path]]:
+    """`{file name: paths}` for everything under `root`, walked once."""
+    names: dict[str, list[Path]] = {}
+    for path in root.rglob("*"):
+        if path.is_file():
+            names.setdefault(path.name, []).append(path)
+    return names
+
+
+def _shared_tail(left: SequenceABC[str], right: SequenceABC[str]) -> int:
+    """How many trailing components two paths have in common."""
+    shared = 0
+    for one, other in zip(reversed(left), reversed(right)):
+        if one != other:
+            break
+        shared += 1
+    return shared
 
 
 # --------------------------------------------------------------------------
@@ -440,6 +505,14 @@ class PoolFrame:
     rows: tuple[tuple[int, str, tuple[float, float, float, float], int], ...]
 
 
+def _example_image(record_path: Path) -> str:
+    """The image path one record asks for, for an error that names it."""
+    try:
+        return str(json.loads(record_path.read_text()).get("image", "?"))
+    except Exception:                        # noqa: BLE001 - diagnostics only
+        return "?"
+
+
 def _read_frame(record_path: Path, relocate: Relocator,
                 areas_of=store_areas) -> PoolFrame | str:
     """One `record.json` + its store, or the name of what went wrong."""
@@ -582,6 +655,7 @@ def index_pool(
     workers: int = 8,
     progress=None,
     records: SequenceABC[Path] | None = None,
+    report=None,
 ) -> list[FrameIndex]:
     """Every accepted instance in one pool, as the index stage B samples from.
 
@@ -596,6 +670,11 @@ def index_pool(
     cannot be found or read, the file on disk is a different size from the one
     the teacher saw, or every box in them was rejected at harvest. The counts
     ride on each entry's `rejects` so `summarise` prints them.
+
+    `report` is called with one line of prose when the frames were not where
+    the records said -- a relocation that needed the by-name fallback, or one
+    that gave up. Nothing else here prints, so a caller that wants silence
+    passes nothing and reads the counts instead.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -622,12 +701,23 @@ def index_pool(
     for result in results:
         if isinstance(result, str):
             skipped[result] = skipped.get(result, 0) + 1
+    if relocate.found_by_name and report is not None:
+        report(f"   {pool_dir.name}: {relocate.found_by_name} frame(s) found by "
+               f"name under {images_root} -- the tree moved since the harvest, "
+               f"so the recorded paths no longer strip down to it.")
+    if relocate.ambiguous and report is not None:
+        report(f"   {pool_dir.name}: {relocate.ambiguous} frame(s) skipped "
+               f"because two files under {images_root} carry that name and "
+               f"nothing in the record picks one. DroneVehicle's two "
+               f"modalities do this -- point --images at one half.")
     if not frames:
         raise ValueError(
             f"{pool_dir}: {len(records)} records and not one usable frame "
             f"({skipped}). `no_image` means --images points somewhere the "
             f"frames are not; `shape_mismatch` means it points at a different "
-            f"copy of them.")
+            f"copy of them. The first record wants "
+            f"{_example_image(records[0])!r} and nothing of that name is under "
+            f"{images_root}.")
 
     borders = {f.border for f in frames}
     if len(borders) > 1:

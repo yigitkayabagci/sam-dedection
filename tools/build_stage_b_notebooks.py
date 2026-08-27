@@ -458,6 +458,7 @@ def unpack(archive, target, label=""):
     is also the resume path.
     """
     bad, taken = [], 0
+    Path(target).mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as handle:
         members = handle.namelist()
         for member in members:
@@ -476,18 +477,56 @@ def unpack(archive, target, label=""):
         print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
     return bad
 
+_DONE = Path(DATA_ROOT) / ".unpacked"
+_DONE.mkdir(parents=True, exist_ok=True)
+_PICTURES = ("*.jpg", "*.jpeg", "*.png")
+
+def on_disk(root):
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    return sum(1 for _glob in _PICTURES for _ in root.rglob(_glob))
+
+def complete(archive, target, mark):
+    """Whether `target` already holds every frame `archive` carries.
+
+    Answered for a staged archive before anything is unpacked, and again for
+    each part of a dataset whose archives are all on this disk: an archive
+    the tree is short of is walked member by member, which finishes what an
+    earlier run left behind instead of reading it as done.
+
+    "Some jpgs are under the root" is the check this used to make, and it is
+    the check that let a quarter-extracted DroneVehicle look finished to every
+    run after the one a bad CRC stopped -- the pools then lost 9 859 of 13 098
+    frames to `no_image` and nothing said why. Counting the archive's own
+    image members against the tree answers the question the jpg probe was
+    standing in for, and costs one central-directory read.
+    """
+    if (_DONE / mark).is_file():
+        return True
+    try:
+        with zipfile.ZipFile(archive) as handle:
+            want = sum(1 for _m in handle.namelist()
+                       if _m.lower().endswith((".jpg", ".jpeg", ".png")))
+    except Exception:
+        return False
+    if want and on_disk(target) >= want:
+        (_DONE / mark).touch()
+        return True
+    return False
+
 for _archive, _folder in SOURCE_ZIPS:
     _target = Path(DATA_ROOT) / _folder
     if not Path(_archive).is_file():
         print("not there, skipping:", _archive)
         continue
-    if _target.is_dir() and any(
-            any(_target.rglob(_glob)) for _glob in ("*.jpg", "*.png")):
+    if complete(_archive, _target, _folder + ".zip.done"):
         print("already on disk:", _target)
         continue
     print("unzipping", _archive,
           round(Path(_archive).stat().st_size / 2 ** 30, 2), "GiB ->", _target)
-    unpack(_archive, _target, _folder)
+    if not unpack(_archive, _target, _folder):
+        (_DONE / (_folder + ".zip.done")).touch()
 
 if FETCH:
     from tools.fetch_datasets import fetch, staged
@@ -500,19 +539,38 @@ if FETCH:
                   "of them is downloaded on a whim. Stage it, name its parts "
                   "in cell 1, or let the pool drop.")
             continue
+        _mark = Path(_root).name + ".fetch.done"
+        if (_DONE / _mark).is_file():
+            print("already on disk:", _root)
+            continue
+        _search = (STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
+                   DRIVE_MY, "/content/staging")
+        _staged = {_p: staged(_p, _search) for _p in (sorted(_parts) or [_recipe])}
+        if all(_c is not None for _c in _staged.values()):
+            print("staged already:", _root, "-- counting each archive against "
+                  "the tree rather than downloading it")
+            _bad, _short = [], False
+            for _part, _copy in sorted(_staged.items()):
+                if complete(_copy, _root, f"{Path(_root).name}.{_part}.done"):
+                    print("already on disk:", _copy.name, "->", _root)
+                    continue
+                _short = True
+                print("unpacking staged", _copy.name, "->", _root)
+                _bad += unpack(_copy, Path(_root), _part)
+            if not _bad and not _short:
+                (_DONE / _mark).touch()
+            continue
         if Path(_root).is_dir() and any(
                 any(Path(_root).rglob(_glob)) for _glob in ("*.jpg", "*.png")):
-            print("already on disk:", _root)
+            print("already on disk:", _root, "-- staged by hand, not checked")
             continue
         try:
             fetch(_recipe, Path(_root), tuple(sorted(_parts)) or None,
                   stage=STAGE_DIR,
-                  staging=(STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
-                           DRIVE_MY, "/content/staging"))
+                  staging=_search)
+            (_DONE / _mark).touch()
         except Exception as _fetch_error:
             print("!!", _recipe, "->", _root, "failed:", _fetch_error)
-            _search = (STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
-                       DRIVE_MY, "/content/staging")
             for _part in sorted(_parts) or [_recipe]:
                 _copy = staged(_part, _search)
                 if _copy is None:
@@ -597,12 +655,21 @@ for _row in PLAN:
     _request = parse_pool(_flag, GATES)
     _cache = Path(INDEX_DIR) / f"{_request.cache_name}.json"
     try:
+        _part = None
         if _cache.is_file():
             _part = load_pool_index(_cache, GATES, _row["role"])
-        else:
+            _short = {_k: _v for _k, _v in (_part[0].rejects if _part else {}).items()
+                      if _k in ("no_image", "unreadable_image", "shape_mismatch")}
+            if _short:
+                print(f"   {_row['pool']}: the cached index was built while "
+                      f"{sum(_short.values())} frame(s) were unreadable "
+                      f"({_short}), so it is provisional -- indexing again in "
+                      f"case the download it was waiting on has finished")
+                _part = None
+        if _part is None:
             _part = index_pool(_request.pool, _request.images, _request.modality,
                                _row["role"], GATES, _request.name,
-                               workers=WORKERS, progress=progress)
+                               workers=WORKERS, progress=progress, report=print)
             save_pool_index(_cache, _part)
     except Exception as _index_error:
         FAILED.append((_row["pool"], f"{type(_index_error).__name__}: "
