@@ -74,6 +74,26 @@ because an archive that re-packs itself nests the same folder name twice, and
 the inner one is the tree with the splits in it -- which is also what made the
 by-name fallback refuse, two files of that name on disk.
 
+## A budget for a night, and a net under it
+
+22 and 23 run `[2, 24]` epochs of 800 steps with `PATIENCE = 4`. The budget is
+long on purpose and the patience is what makes that safe: a stage gives up
+after four epochs with no improvement in the validation loss, so the run ends
+when it has stopped learning rather than when a counter runs out.
+
+Two things follow from the one-cycle schedule and are worth saying plainly.
+`total_steps` is sized from the stage's **budget**, not from where patience
+stops it, so a longer budget is a slower anneal -- which is the point of
+raising it -- and a stage cut short never reaches the low-rate end of that
+descent. Patience is a net, not a tuner: set it loose enough that it only fires
+on a genuine plateau.
+
+And the checkpoint reaches Drive on **every improvement**, not only when the
+run finishes (`--mirror`). A Colab runtime reclaimed at 4am used to take the
+weights with it, because the only copy was on `/content`. The copy goes to a
+`.part` and is renamed, so a run killed mid-write leaves the previous good file
+rather than a truncated one.
+
 ## Cutting a pool tighter than its harvest did
 
 `MIN_BOX_IOU`, and `POOL_MIN_BOX_IOU` per pool, drops instances whose stored
@@ -115,7 +135,8 @@ INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
          "EXTRA_DATASETS": "[]", "SKIP_POOLS": "[]",
-         "EPOCHS": "[1, 3]", "STEPS": "400", "MIN_BOX_IOU": "0.0"}
+         "EPOCHS": "[1, 3]", "STEPS": "400", "MIN_BOX_IOU": "0.0",
+         "PATIENCE": "0"}
 
 # The three thermal-only pools that must be present for 22 to mean anything,
 # with a floor rather than a flag: a pool that resolved twelve frames out of
@@ -146,7 +167,8 @@ ARMS = {
     # so they cannot outvote the rest, and the rate table inverted so the
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
-        "EPOCHS": "[1, 6]",
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
         "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
@@ -174,7 +196,8 @@ ARMS = {
     # same seed, same split file -- so the two numbers differ by the method
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
-        "EPOCHS": "[1, 6]",
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
         "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
@@ -288,6 +311,7 @@ BLEND_ALPHAS   = []
 MAX_REGRESSION = 0.15
 EPOCHS         = {{EPOCHS}}
 STEPS          = {{STEPS}}
+PATIENCE       = {{PATIENCE}}
 VAL_BATCHES    = 24
 DEPTH          = 2
 BATCH          = 0
@@ -1168,6 +1192,7 @@ subprocess.run(
      "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),
      "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),
      "--epochs", str(EPOCHS[0]), str(EPOCHS[1]),
+     "--patience", str(PATIENCE), "--mirror", MIRROR_DIR,
      "--val-batches", str(VAL_BATCHES), "--workers", str(WORKERS),
      "--depth", str(DEPTH),
      "--anchor-weight", str(ANCHOR_WEIGHT), "--device", "cuda",
