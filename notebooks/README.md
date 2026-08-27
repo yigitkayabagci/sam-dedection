@@ -146,6 +146,17 @@ is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
 
+**The reject table names one gate per instance, which is not what the data
+says.** `reject_reason` returns the *first* gate an instance fails, in a fixed
+order, so a harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
+masks sat badly on their box — it is saying nine of the ones `teacher_iou` let
+through did, and nothing about the 2 312 it stopped first. `summarise_gates`
+re-reads the stored readings and asks each gate independently over every
+instance, then says what raising the box-IoU cut would remove from the accepted
+set at 0.5–0.9. That last table is the decision itself: the cut is applied at
+read time by `index_pool(min_box_iou=…)`, so its cost is a number to look up
+rather than a harvest to repeat.
+
 **The gate that decides is `box_iou`, and it is back at the library default.**
 Four gates stand between a teacher mask and the pool: `teacher_iou` (the
 teacher's own confidence — *measured* to be weak, +0.25 to +0.38 over-confident

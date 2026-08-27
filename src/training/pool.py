@@ -602,6 +602,86 @@ def summarise_pool(datasets: Mapping[str, dict]) -> str:
     return "\n".join(lines)
 
 
+GATE_READINGS = ("teacher_iou", "box_iou", "area_ratio", "component")
+
+
+def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
+    """Each gate scored on its own, and what a stricter box-IoU would cost.
+
+    `reject_reason` returns the **first** gate an instance fails, in a fixed
+    order, which is right for the harvest -- one name per rejection, and the
+    counts add up. It is misleading as a picture of the data. A run that
+    reports `teacher_iou 2312, box_iou 9` is not saying nine masks sat badly on
+    their box; it is saying nine of the ones *teacher_iou let through* did, and
+    saying nothing at all about the 2 312 it stopped first.
+
+    So this re-reads the stored readings and asks each gate independently, over
+    every instance. It also prints what raising the box-IoU cut would remove
+    from the accepted set, which is the number that decides whether tightening
+    it is worth a thing -- `pool_reader.index_pool(min_box_iou=...)` applies it
+    without touching the GPU, so the cost of the decision is this table.
+
+    A pool harvested before the readings were stored reports them as
+    `not recorded` rather than as zero.
+    """
+    out_dir = Path(out_dir)
+    cuts = (0.5, 0.6, 0.7, 0.8, 0.9)
+    tables: dict[str, dict] = {}
+    for record_file in out_dir.rglob(RECORD_FILE):
+        record = json.loads(record_file.read_text())
+        entry = tables.setdefault(record["dataset"], {
+            "instances": 0, "accepted": 0, "not_recorded": 0,
+            "fails": {name: 0 for name in GATE_READINGS},
+            "accepted_below": {cut: 0 for cut in cuts}})
+        for instance in record["instances"]:
+            entry["instances"] += 1
+            accepted = instance.get("verdict") is None
+            entry["accepted"] += int(accepted)
+            if any(instance.get(name) is None for name in GATE_READINGS):
+                entry["not_recorded"] += 1
+                continue
+            if float(instance["teacher_iou"]) < gates.teacher_iou:
+                entry["fails"]["teacher_iou"] += 1
+            if float(instance["box_iou"]) < gates.box_iou:
+                entry["fails"]["box_iou"] += 1
+            if not (gates.area[0] <= float(instance["area_ratio"])
+                    <= gates.area[1]):
+                entry["fails"]["area_ratio"] += 1
+            if float(instance["component"]) < gates.component:
+                entry["fails"]["component"] += 1
+            if accepted:
+                for cut in cuts:
+                    if float(instance["box_iou"]) < cut:
+                        entry["accepted_below"][cut] += 1
+    return {"cuts": list(cuts), "datasets": tables}
+
+
+def summarise_gates(out_dir: str | Path, gates: Gates = Gates()) -> str:
+    """`gate_report` as markdown: each gate alone, then the box-IoU cuts."""
+    report = gate_report(out_dir, gates)
+    lines: list[str] = []
+    for dataset, entry in sorted(report["datasets"].items()):
+        total = max(entry["instances"], 1)
+        lines += [f"**{dataset}** -- each gate asked on its own, over all "
+                  f"{entry['instances']} instances",
+                  "", "| gate | would reject | share |", "|---|---:|---:|"]
+        for name in GATE_READINGS:
+            count = entry["fails"][name]
+            lines.append(f"| `{name}` | {count} | {count / total:.1%} |")
+        if entry["not_recorded"]:
+            lines.append(f"| not recorded | {entry['not_recorded']} | "
+                         f"{entry['not_recorded'] / total:.1%} |")
+        lines += ["", f"| raise box_iou to | would drop of the "
+                      f"{entry['accepted']} accepted | left |",
+                  "|---|---:|---:|"]
+        for cut in report["cuts"]:
+            drop = entry["accepted_below"][cut]
+            lines.append(f"| {cut:g} | {drop} ({drop / max(entry['accepted'], 1):.1%}) "
+                         f"| {entry['accepted'] - drop} |")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 LUMA_EDGES = (24.0, 48.0, 80.0, 120.0, 160.0)
 
 

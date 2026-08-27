@@ -65,11 +65,13 @@ from src.training.pool import (  # noqa: E402
     label_boxes,
     label_many,
     calibration_table,
+    gate_report,
     label_pool,
     luma,
     luma_report,
     ordered_map,
     read_workers,
+    summarise_gates,
     summarise_luma,
     target_luma,
     modality_agreement,
@@ -479,6 +481,77 @@ class TestProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "labelling decodes real image files")
+class TestGateReport(unittest.TestCase):
+    """`reject_reason` names one gate; the data has four opinions."""
+
+    def frames(self, tmp: Path, count: int = 3) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def rewrite(self, root: Path, rows) -> None:
+        """Put chosen readings on the first frame's instances."""
+        path = root / "pool" / "toy" / "img0" / RECORD_FILE
+        record = json.loads(path.read_text())
+        for instance, values in zip(record["instances"], rows):
+            instance.update(values)
+        path.write_text(json.dumps(record))
+
+    def test_a_gate_hidden_behind_an_earlier_one_is_still_counted(self):
+        """The reading that made this worth storing.
+
+        A harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
+        masks sat badly on their box. It is saying nine of the ones teacher_iou
+        let through did, and nothing at all about the 2 312 it stopped first.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.2, "box_iou": 0.1, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": "teacher_iou"},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None}])
+            fails = gate_report(root / "pool")["datasets"]["toy"]["fails"]
+            self.assertEqual(fails["teacher_iou"], 1)
+            self.assertEqual(fails["box_iou"], 1, "hidden behind teacher_iou")
+
+    def test_it_says_what_a_stricter_cut_would_cost_the_accepted_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.99, "box_iou": 0.65, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None}])
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["accepted"], 2)
+            self.assertEqual(entry["accepted_below"][0.6], 0)
+            self.assertEqual(entry["accepted_below"][0.7], 1)
+            self.assertEqual(entry["accepted_below"][0.9], 1)
+            table = summarise_gates(root / "pool")
+            self.assertIn("box_iou", table)
+            self.assertIn("toy", table)
+
+    def test_a_pool_from_before_the_readings_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            path = root / "pool" / "toy" / "img0" / RECORD_FILE
+            record = json.loads(path.read_text())
+            for instance in record["instances"]:
+                for name in ("box_iou", "area_ratio", "component"):
+                    instance.pop(name, None)
+            path.write_text(json.dumps(record))
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["not_recorded"], 2)
+            self.assertEqual(sum(entry["fails"].values()), 0)
+            self.assertIn("not recorded", summarise_gates(root / "pool"))
+
+
 class TestIllumination(unittest.TestCase):
     """Night RGB is where a promptable teacher quietly gets worse."""
 

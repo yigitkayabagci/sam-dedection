@@ -46,6 +46,18 @@ targets are darker than a threshold -- **for the RGB arm only**. It defaults to
 off rather than to a sensible-looking number because on a thermal harvest a low
 reading is a *cold* target, and dropping those is exactly backwards.
 
+**The reject table names one gate per instance, which is not the same as
+what the data says.** `reject_reason` returns the *first* gate an instance
+fails, in a fixed order, so a harvest reporting `teacher_iou 2312, box_iou 9`
+is not saying nine masks sat badly on their box -- it is saying nine of the
+ones `teacher_iou` let through did, and nothing at all about the 2 312 it
+stopped first. Cell 5 now also prints `summarise_gates`, which re-reads the
+stored readings and asks each gate **independently** over every instance, and
+then says what raising the box-IoU cut would remove from the accepted set at
+0.5 / 0.6 / 0.7 / 0.8 / 0.9. That last table is the whole decision: the cut is
+applied at read time by `index_pool(min_box_iou=...)`, so its cost is a number
+you can look up rather than a harvest you have to repeat.
+
 **`BOX_IOU` is back at the library default, because 0.5 was somebody else's
 number.** These four inherited it from 15, where it is *argued*: DroneVehicle
 ships oriented boxes and the prompt is their axis-aligned envelope, which on a
@@ -543,8 +555,8 @@ plt.show()
 # --------------------------------------------------------------------------
 
 code('''
-from src.training.pool import (label_pool, pool_report, summarise_luma,
-                               summarise_pool, write_index)
+from src.training.pool import (label_pool, pool_report, summarise_gates,
+                               summarise_luma, summarise_pool, write_index)
 
 def harvest(frames, dataset):
     global BATCH, FRAME_GROUP
@@ -568,6 +580,8 @@ REPORT = harvest(FRAMES, POOL)
 print(json.dumps(REPORT, indent=1))
 write_index(POOL_ROOT)
 print(summarise_pool(pool_report(POOL_ROOT)))
+print()
+print(summarise_gates(POOL_ROOT, GATES))
 print()
 print(summarise_luma(POOL_ROOT))
 ''')
