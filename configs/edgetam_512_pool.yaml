@@ -1,0 +1,38 @@
+# EdgeTAM at 512x512, image encoder trained on the mask pools (stage B).
+#
+# Identical to configs/edgetam_512.yaml except for the checkpoint, the same way
+# configs/edgetam_512_aerial.yaml is: the training moves weights and nothing
+# else, so the ONNX export, the engine build, check_trt_parity.py and
+# compare_backends.py keep working untouched.
+#
+# `image_size: 512` is load-bearing. The checkpoint was trained at 512 and the
+# Hydra config says 1024; the tracker's override also fixes up the memory
+# attention's cross-attention RoPE table, which does not self-heal. Running
+# these weights at 1024 loads and runs and measures the resolution change
+# rather than the training.
+#
+# The memory path is stock. Stage B never trains it -- src/training/image_loop.py
+# runs with no memory bank at all -- so tracking quality is not what the
+# notebook's numbers measured. Expect a better first mask and re-measure the
+# track.
+#
+# Produce the checkpoint with notebooks/19_thermal_stage_b_pool.ipynb (thermal
+# only) or notebooks/20_thermal_stage_b_pool_rgb.ipynb (thermal + RGB), which
+# write edgetam_pool_thermal_512.pt and edgetam_pool_thermal_rgb_512.pt. Point
+# `checkpoint` at whichever of the two scored better on your own clips.
+#
+# Then re-export and rebuild engines:
+#   python tools/export_edgetam_onnx.py --outdir models512_pool/ --image-size 512 \
+#       --checkpoint checkpoints/edgetam_pool_thermal_512.pt --verify
+#   python tools/build_trt_engines.py --outdir models512_pool/ --max-batch 4
+#
+# Compare against configs/edgetam_512.yaml (the stock checkpoint at the same
+# resolution), never against the 1024 config.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_thermal_512.pt
+image_size: 512                           # overrides the Hydra config's 1024
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

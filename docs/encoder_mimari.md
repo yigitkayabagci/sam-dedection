@@ -552,6 +552,7 @@ takipçi için **ön koşuldur, kanıt değildir.**
 | `tools/eval_instances.py` | held-out örnek IoU |
 | `notebooks/07_encoder_aerial_rgbt.ipynb` | hepsinin tek oturumdaki tarifi |
 | `configs/edgetam_512_aerial{,_lora}.yaml` | çıkan checkpoint'lerin dağıtım config'i |
+| `configs/edgetam_512_pool.yaml` | havuzlarla eğitilmiş checkpoint'in dağıtım config'i (19/20) |
 
 ---
 
