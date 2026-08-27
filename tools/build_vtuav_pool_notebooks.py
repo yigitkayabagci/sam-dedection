@@ -46,6 +46,22 @@ targets are darker than a threshold -- **for the RGB arm only**. It defaults to
 off rather than to a sensible-looking number because on a thermal harvest a low
 reading is a *cold* target, and dropping those is exactly backwards.
 
+**Cell 1 installs nothing it does not have to, and stops when it does.** The
+line used to be an unconditional `pip install --upgrade transformers>=5
+accelerate huggingface_hub pillow tqdm` on every run, and the `pillow` in it
+was the trap. Colab has already imported PIL by the time a cell runs, so pip
+writes Pillow 12 to disk while `PIL._typing` stays in `sys.modules` from
+Pillow 11 -- and the next new import, `PIL.ImageText`, reads the new file and
+asks the old module for a name it does not have. What surfaces is
+`ImportError: cannot import name '_Ink' from 'PIL._typing'` thirty frames
+under `build_image_teacher`, blamed on SAM 3, which is not involved.
+
+So: `pillow` is gone (transformers depends on it and Colab ships it), the
+install runs only when `transformers` is missing or older than 5, and when it
+does run the cell **stops** and asks for a session restart rather than
+continuing into a half-old, half-new interpreter. The same three lines were in
+15 and 18 and got the same fix.
+
 **Cell 1 updates the clone rather than skipping it.** It used to clone only
 when `/content/sam-dedection` was absent, which is right exactly once: a
 runtime that has already run any of these notebooks keeps whatever it cloned
@@ -261,9 +277,28 @@ print("repo at", subprocess.run(["git", "-C", REPO_DIR, "rev-parse", "--short",
                                  "HEAD"], capture_output=True,
                                 text=True).stdout.strip())
 
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
-                "transformers>=5.0.0", "accelerate", "huggingface_hub",
-                "pillow", "tqdm"], check=False)
+_missing = []
+try:
+    import transformers as _transformers
+    if int(_transformers.__version__.split(".")[0]) < 5:
+        _missing.append("transformers>=5.0.0")
+except Exception:
+    _missing.append("transformers>=5.0.0")
+for _name in ("accelerate", "huggingface_hub", "tqdm"):
+    try:
+        __import__(_name)
+    except ImportError:
+        _missing.append(_name)
+if _missing:
+    print("installing", _missing)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
+                    *_missing], check=False)
+    raise SystemExit(
+        "installed " + ", ".join(_missing) + " into a running kernel. "
+        "Runtime > Restart session, then run this cell again. pip replaced "
+        "files this kernel has already imported, and the half-old half-new "
+        "import that follows fails somewhere unrelated -- PIL, torchvision -- "
+        "rather than here.")
 
 try:
     from google.colab import drive as _drive
