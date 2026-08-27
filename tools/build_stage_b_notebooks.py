@@ -176,7 +176,8 @@ VTUAV_VIS_PARTS = []
 
 IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
                "aerovis_train": "/content/data/AeroVIS",
-               "aerovis_heldout": "/content/data/AeroVIS"}
+               "aerovis_heldout": "/content/data/AeroVIS",
+               "hituav_thermal": "/content/data/HIT_UAV/*/normal_json"}
 KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
@@ -468,6 +469,9 @@ def images_for(pool):
     for key, recipe, folder, parts in IMAGES:
         if key in lowered:
             root = IMAGE_ROOTS.get(pool) or str(Path(DATA_ROOT) / folder)
+            if "*" in root:
+                _hits = sorted(Path("/").glob(root.lstrip("/")))
+                root = str(_hits[0]) if _hits else root
             return key, recipe, root, list(parts)
     return None, "", "", []
 

@@ -11,11 +11,11 @@
  "16_vtuav_rgb_pool.ipynb": "bb53563d90",
  "17_vtuav_thermal_pool.ipynb": "546aa484b8",
  "18_kust4k_mask_pool.ipynb": "87aaa0d7f4",
- "19_thermal_stage_b_pool.ipynb": "e4019ba063",
- "20_thermal_stage_b_pool_rgb.ipynb": "1657638d94",
+ "19_thermal_stage_b_pool.ipynb": "b27b8e95e1",
+ "20_thermal_stage_b_pool_rgb.ipynb": "c268d1342b",
  "21_pool_data_readiness.ipynb": "9aa34bec94",
- "22_thermal_deep.ipynb": "2bd690a915",
- "23_thermal_deep_lora.ipynb": "ed477913d5",
+ "22_thermal_deep.ipynb": "102d454804",
+ "23_thermal_deep_lora.ipynb": "920c7193b0",
  "24_vtuav_lt_rgb_pool.ipynb": "91fb793695",
  "25_vtuav_lt_thermal_pool.ipynb": "b91730b969"
 }
