@@ -611,6 +611,26 @@ def summarise_pool(datasets: Mapping[str, dict]) -> str:
 
 GATE_READINGS = ("teacher_iou", "box_iou", "area_ratio", "component")
 
+# Target size as sqrt(box area), the axis this project is judged on. The edges
+# straddle EdgeTAM's stride 16 and the 32 px line SAM 2's own reporting uses.
+SIZE_EDGES = (16.0, 32.0, 64.0, 128.0, 256.0)
+
+
+def _size_bucket(side: float) -> int:
+    """Index of the `SIZE_EDGES` bucket a target of this side falls in."""
+    for index, top in enumerate(SIZE_EDGES):
+        if side < top:
+            return index
+    return len(SIZE_EDGES)
+
+
+def size_names() -> list[str]:
+    """The bucket labels `_size_bucket`'s indices point at."""
+    names = [f"< {SIZE_EDGES[0]:g}"]
+    names += [f"{low:g}-{high:g}"
+              for low, high in zip(SIZE_EDGES, SIZE_EDGES[1:])]
+    return names + [f">= {SIZE_EDGES[-1]:g}"]
+
 
 def backfill_readings(out_dir: str | Path, progress=None) -> dict:
     """Recompute a pool's missing gate readings from the masks it already has.
@@ -694,6 +714,13 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
     it is worth a thing -- `pool_reader.index_pool(min_box_iou=...)` applies it
     without touching the GPU, so the cost of the decision is this table.
 
+    The per-size breakdown is the one that decides. A box-IoU threshold is
+    hardest on a **small** target: a few pixels of slack between a 20 px object
+    and the rectangle drawn round it costs far more IoU than the same slack
+    round a 200 px one, so a cut that looks class-neutral can still be a
+    small-target filter -- and small targets are the axis this project is
+    judged on.
+
     The per-class breakdown is there because **a threshold is a class filter
     nobody chose**. `box_iou` asks whether the mask covers the box's *extent*,
     and what fails to is the partly-hidden target and the ragged silhouette --
@@ -721,7 +748,7 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
             "missing": {name: 0 for name in GATE_READINGS},
             "accepted_scored": 0,
             "accepted_below": {cut: 0 for cut in cuts},
-            "classes": {}})
+            "classes": {}, "sizes": {}})
         for instance in record["instances"]:
             entry["instances"] += 1
             accepted = instance.get("verdict") is None
@@ -747,13 +774,23 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
                     str(instance.get("class", "?")),
                     {"accepted": 0, "box_iou": 0.0, "area_ratio": 0.0,
                      "below": {cut: 0 for cut in cuts}})
+                box = [float(v) for v in instance.get("box", (0, 0, 0, 0))]
+                side = float(np.sqrt(max((box[2] - box[0])
+                                         * (box[3] - box[1]), 0.0)))
+                bucket = entry["sizes"].setdefault(
+                    _size_bucket(side),
+                    {"accepted": 0, "box_iou": 0.0,
+                     "below": {cut: 0 for cut in cuts}})
                 row["accepted"] += 1
+                bucket["accepted"] += 1
                 row["box_iou"] += float(instance["box_iou"])
+                bucket["box_iou"] += float(instance["box_iou"])
                 row["area_ratio"] += float(instance.get("area_ratio") or 0.0)
                 for cut in cuts:
                     if float(instance["box_iou"]) < cut:
                         entry["accepted_below"][cut] += 1
                         row["below"][cut] += 1
+                        bucket["below"][cut] += 1
     return {"cuts": list(cuts), "datasets": tables}
 
 
@@ -807,6 +844,28 @@ def summarise_gates(out_dir: str | Path, gates: Gates = Gates()) -> str:
             lines.append(f"| {name} | {row['accepted']} | "
                          f"{row['box_iou'] / kept:.3f} | "
                          f"{row['area_ratio'] / kept:.3f} | {left} |")
+        lines.append("")
+        # And the same cut by target size, which is the axis this project is
+        # judged on. A box-IoU threshold is hardest on a small target: a few
+        # pixels of slack between a 20 px object and the rectangle drawn round
+        # it costs far more IoU than the same slack round a 200 px one, so a
+        # cut that looks class-neutral can still be a small-target filter.
+        names = size_names()
+        lines += ["", "| target sqrt(area) px | accepted | mean box_iou | "
+                      + " | ".join(f"left at {cut:g}" for cut in report["cuts"])
+                      + " |",
+                  "|---|---:|---:|" + "---:|" * len(report["cuts"])]
+        for index, name in enumerate(names):
+            bucket = entry["sizes"].get(index)
+            if not bucket or not bucket["accepted"]:
+                continue
+            kept = bucket["accepted"]
+            left = " | ".join(
+                f"{kept - bucket['below'][cut]} "
+                f"({1 - bucket['below'][cut] / kept:.0%})"
+                for cut in report["cuts"])
+            lines.append(f"| {name} | {kept} | "
+                         f"{bucket['box_iou'] / kept:.3f} | {left} |")
         lines.append("")
     return "\n".join(lines).rstrip()
 

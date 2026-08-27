@@ -66,6 +66,8 @@ from src.training.pool import (  # noqa: E402
     label_many,
     calibration_table,
     backfill_readings,
+    SIZE_EDGES,
+    _size_bucket,
     gate_report,
     label_pool,
     luma,
@@ -73,6 +75,7 @@ from src.training.pool import (  # noqa: E402
     ordered_map,
     read_workers,
     summarise_gates,
+    size_names,
     summarise_luma,
     target_luma,
     modality_agreement,
@@ -563,6 +566,39 @@ class TestGateReport(unittest.TestCase):
             table = summarise_gates(root / "pool")
             self.assertIn("mean area_ratio", table)
             self.assertIn("left at 0.7", table)
+
+    def test_the_cut_is_broken_down_by_target_size(self):
+        """The axis a box-IoU threshold is least neutral on.
+
+        A few pixels of slack between a 20 px object and the rectangle drawn
+        round it costs far more IoU than the same slack round a 200 px one. So
+        a cut can be class-neutral and still be a small-target filter -- and
+        small targets are the axis this project is judged on.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"box_iou": 0.95, "area_ratio": 0.7, "component": 1.0,
+                 "teacher_iou": 0.99, "verdict": None},
+                {"box_iou": 0.62, "area_ratio": 0.7, "component": 1.0,
+                 "teacher_iou": 0.99, "verdict": None}])
+            sizes = gate_report(root / "pool")["datasets"]["toy"]["sizes"]
+            # The fixture's boxes are 60x20 (sqrt 34.6) and 10x5 (sqrt 7.1).
+            small = sizes[_size_bucket(7.1)]
+            large = sizes[_size_bucket(34.6)]
+            self.assertEqual(small["accepted"], 1)
+            self.assertEqual(large["accepted"], 1)
+            self.assertEqual(small["below"][0.8], 1, "the small one is cut")
+            self.assertEqual(large["below"][0.8], 0)
+            self.assertIn("target sqrt(area) px",
+                          summarise_gates(root / "pool"))
+
+    def test_the_size_buckets_cover_every_side_they_are_given(self):
+        self.assertEqual(_size_bucket(0.0), 0)
+        self.assertEqual(_size_bucket(10 ** 6), len(SIZE_EDGES))
+        self.assertEqual(len(size_names()), len(SIZE_EDGES) + 1)
 
     def test_it_says_what_a_stricter_cut_would_cost_the_accepted_set(self):
         with tempfile.TemporaryDirectory() as tmp:
