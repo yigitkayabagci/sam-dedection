@@ -59,6 +59,28 @@ number of updates -- and the linear scaling rule says the step should grow with
 it. The notebook sets `--lr-scale` from the measured batch against a 16-window
 reference, capped, and prints both.
 
+## Cutting a pool tighter than its harvest did
+
+`MIN_BOX_IOU`, and `POOL_MIN_BOX_IOU` per pool, drops instances whose stored
+box-IoU falls below it. The harvest already applied a gate; this is a
+**second, stricter** one, applied when the index is built rather than when the
+teacher ran, so trying 0.7 against 0.8 costs two indexing passes instead of two
+harvests. It only ever removes: a pool harvested at 0.5 has no record of what
+0.4 would have kept.
+
+Two things to know before raising it. `box_iou` compares the mask's own box
+with the annotation's, so it measures *extent*, not shape -- `pool.summarise_gates`
+prints mean `area_ratio` beside it, and a pool whose masks all sit near 1.0 is
+a pool of rectangles that no threshold repairs. And a threshold is a filter
+nobody chose: the same table breaks the cut down by class and by target size,
+because a few pixels of slack round a 20 px object costs far more IoU than the
+same slack round a 200 px one, and small targets are the axis this project is
+judged on. Read those two tables, then pick a number.
+
+A cached index is rebuilt whenever a cut is asked for: the file on disk was
+written under whatever cut the run before it used, and nothing in it says
+which.
+
 ## What none of it measures
 
 Tracking. Every number here scores one prompted frame with the memory path
@@ -194,6 +216,8 @@ POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
 POOL_MODALITIES = {"aerovis_train": "rgb", "aerovis_heldout": "rgb"}
 POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
+MIN_BOX_IOU = 0.0
+POOL_MIN_BOX_IOU = {}
 
 VTUAV_PARTS = []
 VTUAV_VIS_PARTS = []
@@ -823,10 +847,16 @@ for _row in PLAN:
                       f"({_short}), so it is provisional -- indexing again in "
                       f"case the download it was waiting on has finished")
                 _part = None
+        _cut_at = POOL_MIN_BOX_IOU.get(_row["pool"], MIN_BOX_IOU)
+        if _part is not None and _cut_at:
+            print(f"   {_row['pool']}: re-indexing, the cached index predates "
+                  f"a min_box_iou of {_cut_at}")
+            _part = None
         if _part is None:
             _part = index_pool(_request.pool, _request.images, _request.modality,
                                _row["role"], GATES, _request.name,
-                               workers=WORKERS, progress=progress, report=print)
+                               workers=WORKERS, min_box_iou=_cut_at,
+                               progress=progress, report=print)
             save_pool_index(_cache, _part)
     except Exception as _index_error:
         FAILED.append((_row["pool"], f"{type(_index_error).__name__}: "
@@ -1418,6 +1448,7 @@ VERDICT = {
     "rates": {"head": LR_HEAD, "neck": LR_NECK, "trunk": LR_TRUNK,
               "scale": LR_SCALE},
     "class_weights": CLASS_WEIGHTS, "require_pools": REQUIRE_POOLS,
+    "min_box_iou": MIN_BOX_IOU, "pool_min_box_iou": POOL_MIN_BOX_IOU,
     "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT}
             if METHOD == "lora" else {},
     "blend": BLEND, "checkpoint": CHECKPOINT,
