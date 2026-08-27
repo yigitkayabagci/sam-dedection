@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -34,7 +35,8 @@ from src.training.pool import RECORD_FILE  # noqa: E402
 from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
                                       index_pool, link_pool, load_pool_index,
                                       parse_pool, pool_datasets,
-                                      save_pool_index, store_areas,
+                                      extract_frames, save_pool_index,
+                                      store_areas, wanted_frames,
                                       why_no_image)
 
 try:
@@ -546,6 +548,83 @@ class WhyNoImageTest(unittest.TestCase):
         report = why_no_image(self.root / "empty", self.root)
         self.assertEqual(report["records"], 0)
         self.assertIn("pool zip is missing", report["verdict"])
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed to write the frames")
+class ExtractFramesTest(unittest.TestCase):
+    """A pool is a manifest: 214 GiB of archives to reach a few percent of it
+    is a bill nobody has to pay."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "pool"
+        self.shape = (24, 32)
+        self.box = (2, 2, 12, 12)
+        # Two modalities keeping the same frame name, which is what makes a
+        # basename match unsafe and a tail match necessary.
+        self.wanted = ["/content/data/VTUAV/train_ST_008/car_01/ir/000000.jpg",
+                       "/content/data/VTUAV/train_ST_008/car_01/ir/000010.jpg"]
+        for index, recorded in enumerate(self.wanted):
+            write_frame(self.pool, f"car_01/{index:06d}", Path(recorded),
+                        self.shape,
+                        [("car", self.box, blob(self.shape, self.box))])
+
+    def archive(self, name, members):
+        path = self.root / name
+        with zipfile.ZipFile(path, "w") as handle:
+            for member in members:
+                handle.writestr(member, b"x" * 16)
+        return path
+
+    def records(self):
+        return sorted((self.pool / "demo").rglob(RECORD_FILE))
+
+    def test_only_the_frames_the_pool_names_come_out(self):
+        archive = self.archive("train_ST_008.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg",
+            "train_ST_008/car_01/ir/000020.jpg",     # not in the pool
+            "train_ST_008/car_01/rgb/000000.jpg",    # other modality, same name
+        ])
+        out = self.root / "out"
+        report = extract_frames(self.records(), [archive], out)
+        self.assertEqual(report["asked"], 2)
+        self.assertEqual(report["taken"], 2)
+        self.assertEqual(report["missing"], 0)
+        taken = sorted(p.relative_to(out).as_posix()
+                       for p in out.rglob("*") if p.is_file())
+        self.assertEqual(taken, ["train_ST_008/car_01/ir/000000.jpg",
+                                 "train_ST_008/car_01/ir/000010.jpg"])
+
+    def test_a_frame_no_archive_holds_is_counted_as_missing(self):
+        archive = self.archive("part.zip", ["train_ST_008/car_01/ir/000000.jpg"])
+        report = extract_frames(self.records(), [archive], self.root / "out")
+        self.assertEqual(report["taken"], 1)
+        self.assertEqual(report["missing"], 1)
+
+    def test_a_second_run_takes_nothing_and_loses_nothing(self):
+        archive = self.archive("part.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg"])
+        out = self.root / "out"
+        extract_frames(self.records(), [archive], out)
+        again = extract_frames(self.records(), [archive], out)
+        self.assertEqual(again["taken"], 0)
+        self.assertEqual(again["already"], 2)
+        self.assertEqual(again["missing"], 0)
+
+    def test_the_report_says_which_archive_carried_what(self):
+        first = self.archive("a.zip", ["train_ST_008/car_01/ir/000000.jpg"])
+        second = self.archive("b.zip", ["train_ST_008/car_01/ir/000010.jpg"])
+        report = extract_frames(self.records(), [first, second], self.root / "out")
+        self.assertEqual(report["by_archive"], {"a.zip": 1, "b.zip": 1})
+
+    def test_wanted_frames_keys_by_basename(self):
+        wanted = wanted_frames(self.records())
+        self.assertEqual(sorted(wanted), ["000000.jpg", "000010.jpg"])
+        self.assertEqual(wanted["000000.jpg"], {self.wanted[0]})
 
 
 class StoreAreasTest(unittest.TestCase):

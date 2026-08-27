@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import threading
+import zipfile
 from collections.abc import Iterable, Sequence as SequenceABC
 from dataclasses import dataclass
 from pathlib import Path
@@ -584,6 +585,76 @@ def pool_spec(name: str, classes: SequenceABC[str], border: int = 0) -> DatasetS
         palette_source=PALETTE_SOURCE)
 
 
+def wanted_frames(records: SequenceABC[Path]) -> dict[str, set[str]]:
+    """`{basename: {recorded path}}` over a pool's records -- what to extract.
+
+    A pool names every frame it needs and nothing else, so it is a
+    manifest. Keying by basename first makes the membership test against an
+    archive's name list one dict hit per member rather than a scan.
+    """
+    wanted: dict[str, set[str]] = {}
+    for record_path in records:
+        recorded = json.loads(record_path.read_text()).get("image")
+        if recorded:
+            posix = Path(recorded).as_posix()
+            wanted.setdefault(Path(posix).name, set()).add(posix)
+    return wanted
+
+
+def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
+                   target: str | Path, progress=None) -> dict:
+    """Only the frames `records` asks for, out of `archives`, into `target`.
+
+    VTUAV's tracking split is 214 GiB across fifteen archives and annotates
+    every tenth frame, so a pool built from it wants a few percent of what the
+    archives hold. Extracting all of it to reach that few percent is a disk
+    bill nobody has to pay: the pool *is* the manifest, and a zip's central
+    directory can be read without inflating a byte.
+
+    A member is taken when a recorded path ends with it -- exact, and it cannot
+    pick the wrong modality the way a basename match could, because the
+    recorded path carries `.../ir/000000.jpg` and so does the member. Members
+    already on disk with a non-zero size are skipped, which makes a second run
+    the resume path.
+    """
+    target = Path(target)
+    wanted = wanted_frames(records)
+    report = {"asked": sum(len(v) for v in wanted.values()), "taken": 0,
+              "already": 0, "unreadable": [], "by_archive": {}, "missing": 0}
+    still = {name: set(paths) for name, paths in wanted.items()}
+    stream = archives if progress is None else progress(
+        archives, total=len(archives), desc="archives")
+    for archive in stream:
+        took = 0
+        with zipfile.ZipFile(archive) as handle:
+            for member in handle.namelist():
+                if member.endswith("/"):
+                    continue
+                base = member.rsplit("/", 1)[-1]
+                candidates = still.get(base)
+                if not candidates:
+                    continue
+                hit = next((c for c in candidates
+                            if c.endswith("/" + member) or c == member), None)
+                if hit is None:
+                    continue
+                candidates.discard(hit)
+                landing = target / member
+                if landing.is_file() and landing.stat().st_size:
+                    report["already"] += 1
+                    took += 1
+                    continue
+                try:
+                    handle.extract(member, target)
+                    report["taken"] += 1
+                    took += 1
+                except Exception:
+                    report["unreadable"].append(member)
+        report["by_archive"][Path(archive).name] = took
+    report["missing"] = sum(len(v) for v in still.values())
+    return report
+
+
 def why_no_image(pool_dir: str | Path, images_root: str | Path | None,
                  sample: int = 3) -> dict:
     """Why a pool's frames could not be found, in terms of the two paths.
@@ -912,6 +983,6 @@ __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
            "discover_pools",
            "exclude_frames", "frame_keys", "group_records",
            "index_pool", "index_pools", "link_pool", "spread",
-           "why_no_image",
+           "extract_frames", "wanted_frames", "why_no_image",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",
            "save_pool_index", "store_areas"]

@@ -51,6 +51,8 @@ ARCHIVE_DIRS = ["/content/drive/MyDrive/datasets",
 
 FETCH       = []
 
+POOL_ARCHIVES = {}
+
 VTUAV_PARTS     = []
 VTUAV_VIS_PARTS = []
 
@@ -436,7 +438,53 @@ if not FETCH:
 
 
 # --------------------------------------------------------------------------
-# 5. Re-check, and the exact flags a training run would take
+# 5. Take only the frames a pool names out of archives already on the shelf
+# --------------------------------------------------------------------------
+
+code('''
+from src.training.pool_reader import extract_frames, wanted_frames
+
+for _pool, _folder in POOL_ARCHIVES.items():
+    if _pool not in POOLS:
+        print(f"!! {_pool} is not a pool here -- known: {sorted(POOLS)}")
+        continue
+    _key, _recipe, _root, _parts = images_for(_pool)
+    _archives = sorted(Path(_folder).glob("*.zip")) if Path(_folder).is_dir() \
+        else [Path(_folder)]
+    if _parts:
+        _archives = [a for a in _archives if a.stem in _parts]
+    _records = sorted(Path(POOLS[_pool]).rglob(RECORD_FILE))
+    _shelf = sum(a.stat().st_size for a in _archives) / 2 ** 30
+    print(f"\\n{_pool}: {len(_records)} records against {len(_archives)} "
+          f"archives ({_shelf:.1f} GiB on the shelf) -> {_root}")
+    print(f"   {sorted(a.name for a in _archives)}")
+    print(f"   free before {_free():.1f} GiB")
+    _report = extract_frames(_records, _archives, _root, progress=None)
+    print(f"   asked {_report['asked']}, extracted {_report['taken']}, "
+          f"already there {_report['already']}, missing {_report['missing']}, "
+          f"unreadable {len(_report['unreadable'])}")
+    for _name, _took in sorted(_report["by_archive"].items()):
+        if _took:
+            print(f"      {_name:<24}{_took:>8} frames")
+    if _report["missing"]:
+        print(f"   !! {_report['missing']} frames are in no archive listed "
+              f"here -- name the missing parts, or drop them from the run")
+    if _report["unreadable"]:
+        print(f"   !! unreadable: {_report['unreadable'][:5]}")
+    print(f"   {_root}: {_used(_root):.2f} GiB, free now {_free():.1f} GiB")
+
+if not POOL_ARCHIVES:
+    print("POOL_ARCHIVES is empty -- nothing extracted. It maps a pool name to "
+          "the folder holding its archives, e.g.")
+    print("   POOL_ARCHIVES = {'vtuav_thermal': '/content/drive/MyDrive/VTUAV'}")
+    print("A pool names every frame it needs and nothing else, so only those "
+          "members come out: VTUAV's tracking split annotates every tenth "
+          "frame, so a 214 GiB shelf yields a few GiB of frames.")
+''')
+
+
+# --------------------------------------------------------------------------
+# 6. Re-check, and the exact flags a training run would take
 # --------------------------------------------------------------------------
 
 code('''

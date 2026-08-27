@@ -50,7 +50,7 @@ COMMENT_FREE = {
     "16_vtuav_rgb_pool.ipynb": 6,
     "17_vtuav_thermal_pool.ipynb": 6,
     "19_thermal_stage_b_pool.ipynb": 8,
-    "21_pool_data_readiness.ipynb": 5,
+    "21_pool_data_readiness.ipynb": 6,
     "20_thermal_stage_b_pool_rgb.ipynb": 8,
 }
 
