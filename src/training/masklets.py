@@ -135,6 +135,24 @@ def read_boxes(path: str | Path) -> tuple[np.ndarray, np.ndarray]:
     return boxes, exist
 
 
+def _strided(files: SequenceABC[Path]) -> int | None:
+    """The spacing of `files` when their names are numbers that skip.
+
+    `None` where they run 0, 1, 2, ... from zero -- the only arrangement in
+    which "the i-th file is frame i" is true, which is the assumption every
+    index in this module rests on. A tracking archive unpacked with
+    `--frames tracked_rgb` holds frames 0, 10, 20, ... instead, and a VIS
+    archive unpacked with `--frames masked` holds every 30th; pairing either
+    one against box rows by position labels frame 10 with frame 1's box and
+    files the mask under a frame number that never had one.
+    """
+    numbers = sorted(int(f.stem) for f in files if f.stem.isdigit())
+    if len(numbers) != len(files) or numbers == list(range(len(numbers))):
+        return None
+    steps = {b - a for a, b in zip(numbers, numbers[1:])}
+    return steps.pop() if len(steps) == 1 else -1
+
+
 def find_sequences(root: str | Path,
                    names: SequenceABC[str] | None = None) -> list[VideoSequence]:
     """Every VTUAV-shaped sequence under `root`, by its `rgb.txt`.
@@ -144,6 +162,16 @@ def find_sequences(root: str | Path,
     order*, which is how the VTUAV toolkit reads them; a count mismatch is
     tolerated to the shorter of the two, loudly, because half-extracted
     archives are a fact of Colab life.
+
+    That tolerance is for a *truncated* extraction -- files 0..k of 0..n, where
+    position still equals frame number. A **strided** one is a different animal
+    and is refused rather than tolerated: `_strided` catches a tree holding
+    every 10th frame (a `tracked_*` unpack of a tracking archive) or every 30th
+    (a `masked` unpack of the VIS split), where pairing by position silently
+    shifts every box by a factor of the stride and, because the store is keyed
+    by frame number, files each mask under a frame nobody annotated. Masklets
+    over a strided tree need positions and frame numbers held apart, which this
+    dataclass does not do yet; until it does, saying so is the honest answer.
     """
     root = Path(root)
     sequences = []
@@ -159,6 +187,14 @@ def find_sequences(root: str | Path,
                     p for p in folder.iterdir()
                     if p.suffix.lower() in (".jpg", ".jpeg", ".png")))
         if not frames.get("rgb"):
+            continue
+        strided = {m: _strided(f) for m, f in frames.items()}
+        if any(step is not None for step in strided.values()):
+            gaps = {m: s for m, s in strided.items() if s is not None}
+            print(f"  {seq_dir.name}: frame files skip ({gaps}) "
+                  f"-- skipped. Masklets index by frame number, and this tree "
+                  f"was unpacked with a stride; extract it whole "
+                  f"(`--frames all`) to make masklets from it.")
             continue
         boxes, exist = read_boxes(box_file)
         count = min(len(boxes), *(len(f) for f in frames.values()))

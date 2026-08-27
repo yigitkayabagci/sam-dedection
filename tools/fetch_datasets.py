@@ -851,27 +851,69 @@ def tracked_members(archive: zipfile.ZipFile, modality: str = "rgb",
     10k** and nine frames in ten carry no label at all. Extracting everything
     spends 15.4 GB of disk to make 3 750 usable pairs.
 
-    Keeping one modality on top of that halves it again, which is what makes
-    the RGB and thermal pools runnable side by side on two ordinary runtimes:
-    each unzips only the half it prompts on. Both `.txt` files are always
-    kept -- they are a few kilobytes and the other modality's boxes are what
-    any later agreement check reads.
+    `modality` is `rgb`, `ir`, or **`both`**. One modality halves it again,
+    which is what makes the RGB and thermal pools runnable side by side on two
+    ordinary runtimes: each unzips only the half it prompts on. `both` keeps
+    that tenth in *both* halves, for staging one tree a harvest of either half
+    can read -- `--frames tracked` on the command line. (Putting a finished
+    pool's frames back is a different question with a better answer:
+    `pool_reader.extract_frames` takes exactly the members the records name,
+    and needs no stride at all.) Both `.txt` files are always kept: they are a
+    few kilobytes and the other modality's boxes are what any later agreement
+    check reads.
+
+    **The stride is read out of each sequence, not taken on faith.** That 10
+    was measured on one short-term part; the long-term parts are a separate
+    download and this function is the first thing that touches them. Getting
+    it wrong is silent -- extract every 9th frame and the harvest labels frame
+    9 with frame 10's box -- so `boxes.annotated_stride` derives it from the
+    sequence's own frame and row counts, `stride` is preferred wherever those
+    counts allow it, and a sequence whose counts allow no single answer is
+    **dropped** with its numbers printed. A dropped sequence costs a sequence;
+    a guessed stride costs the pool.
     """
+    from src.training.boxes import annotated_stride
+
+    if modality not in ("rgb", "ir", "both"):
+        raise ValueError(f"modality must be rgb, ir or both, got {modality!r}")
+    kept = ("rgb", "ir") if modality == "both" else (modality,)
+
     counts: dict[str, int] = {}
+    present: dict[str, int] = {}
     for name in archive.namelist():
         parts = name.split("/")
-        if len(parts) == 2 and parts[1] == f"{modality}.txt":
+        if len(parts) == 2 and parts[1] == f"{kept[0]}.txt":
             with archive.open(name) as handle:
                 counts[parts[0]] = sum(1 for line in handle if line.strip())
+        elif len(parts) == 3 and parts[1] == kept[0]:
+            if Path(parts[-1]).stem.isdigit():
+                present[parts[0]] = present.get(parts[0], 0) + 1
 
-    wanted = {(sequence, index * stride)
-              for sequence, lines in counts.items() for index in range(lines)}
+    wanted: set[tuple[str, int]] = set()
+    strides: dict[int, int] = {}
+    dropped = 0
+    for sequence, lines in sorted(counts.items()):
+        try:
+            step = annotated_stride(present.get(sequence, 0), lines, stride)
+        except ValueError as mismatch:
+            print(f"   {sequence}: {mismatch} -- dropped, no frame of it is "
+                  f"extracted; both .txt files are kept so the numbers can be "
+                  f"read back on disk")
+            dropped += 1
+            continue
+        strides[step] = strides.get(step, 0) + 1
+        wanted.update((sequence, index * step) for index in range(lines))
+
+    if set(strides) - {stride} or dropped:
+        print(f"   stride -> sequences: {dict(sorted(strides.items()))}, "
+              f"{dropped} dropped")
+
     keep = []
     for name in archive.namelist():
         parts = name.split("/")
         if len(parts) == 2 and parts[1].endswith(".txt"):
             keep.append(name)
-        elif len(parts) == 3 and parts[1] == modality:
+        elif len(parts) == 3 and parts[1] in kept:
             stem = Path(parts[-1]).stem
             if stem.isdigit() and (parts[0], int(stem)) in wanted:
                 keep.append(name)
@@ -894,6 +936,8 @@ def extract(archive_path: Path, dest: Path, into: str = "",
         with zipfile.ZipFile(archive_path) as archive:
             if frames == "masked":
                 members = masked_members(archive)
+            elif frames == "tracked":
+                members = tracked_members(archive, "both")
             elif frames.startswith("tracked_"):
                 members = tracked_members(archive, frames.split("_", 1)[1])
             else:
@@ -1246,13 +1290,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="Which archives to fetch. Without it, the defaults: "
                         "Kust4K thermal+labels, VTUAV train_001.")
     p.add_argument("--frames",
-                   choices=("all", "masked", "tracked_rgb", "tracked_ir"),
+                   choices=("all", "masked", "tracked", "tracked_rgb",
+                            "tracked_ir"),
                    default="all",
                    help="`masked` keeps only annotated frames and their twins "
                         "-- a twentieth of the disk, and too few pairs for "
-                        "stage-A distillation. `tracked_rgb` / `tracked_ir` "
-                        "are the same idea for VTUAV's tracking archives: one "
-                        "modality, and only the frames its box file names.")
+                        "stage-A distillation. `tracked` / `tracked_rgb` / "
+                        "`tracked_ir` are the same idea for VTUAV's tracking "
+                        "archives, in both halves or one -- only the frames "
+                        "the box file names, at the stride each sequence's own "
+                        "counts imply.")
     p.add_argument("--limit", type=int, default=None,
                    help="Hub datasets only: stop after N rows.")
     p.add_argument("--keep", action="store_true",
