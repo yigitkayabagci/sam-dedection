@@ -17,5 +17,6 @@
  "22_thermal_deep.ipynb": "029a14dfb8",
  "23_thermal_deep_lora.ipynb": "939c5fd0f8",
  "24_vtuav_lt_rgb_pool.ipynb": "3424bae860",
- "25_vtuav_lt_thermal_pool.ipynb": "ab9cf7818d"
+ "25_vtuav_lt_thermal_pool.ipynb": "ab9cf7818d",
+ "26_segfly_instance_audit.ipynb": "3c121796aa"
 }

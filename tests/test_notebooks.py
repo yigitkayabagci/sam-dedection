@@ -41,6 +41,7 @@ BUILDERS = {
     "21_": "build_data_readiness_notebook",
     "22_": "build_stage_b_notebooks",
     "23_": "build_stage_b_notebooks",
+    "26_": "build_segfly_audit_notebook",
 }
 
 # 15-20 were all asked for the same way -- cells only, no prose, no comments --

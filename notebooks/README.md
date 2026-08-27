@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty-five notebooks, meant for Colab. Everything they orchestrate lives in
+Twenty-six notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -31,6 +31,7 @@ recipe, not the implementation.
 | 23 | `23_thermal_deep_lora.ipynb` | 22 with `METHOD = "lora"` and nothing else changed — the A/B for the method | the same |
 | 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive; SAM 3 is required, there is no fallback |
 | 25 | `25_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 24 on a second runtime |
+| 26 | `26_segfly_instance_audit.ipynb` | real SegFly thermal/RGB/label panels, `components` vs `watershed` sensitivity, JSON evidence and optional SAM disagreement audit | **nothing** — it exports a 64-row SegFly slice; SAM check needs a GPU |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
