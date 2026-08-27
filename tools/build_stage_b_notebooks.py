@@ -59,6 +59,21 @@ number of updates -- and the linear scaling rule says the step should grow with
 it. The notebook sets `--lr-scale` from the measured batch against a 16-window
 reference, capped, and prints both.
 
+## The two archives HIT-UAV ships as
+
+Its pool was harvested from the kagglehub copy, whose frames sit under
+`hit-uav/images/{train,val,test}/`, and the run stages the GitHub archive,
+whose frames sit under `normal_json/{train,val,test}/` inside a folder named
+after a branch. `Relocator` re-roots a recorded path by matching its *suffix*,
+and these two disagree on a component rather than on a depth -- `images/test/f`
+against `normal_json/test/f` -- so no suffix of one is a suffix of the other
+and every frame reports `no_image`. Pointing the root at the directory that
+holds the splits fixes it, which is what `IMAGE_ROOTS["hituav_thermal"]` now
+does with a glob. The glob resolves to the **deepest** matching directory
+because an archive that re-packs itself nests the same folder name twice, and
+the inner one is the tree with the splits in it -- which is also what made the
+by-name fallback refuse, two files of that name on disk.
+
 ## Cutting a pool tighter than its harvest did
 
 `MIN_BOX_IOU`, and `POOL_MIN_BOX_IOU` per pool, drops instances whose stored
@@ -100,7 +115,7 @@ INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
          "EXTRA_DATASETS": "[]", "SKIP_POOLS": "[]",
-         "EPOCHS": "[1, 3]", "STEPS": "400"}
+         "EPOCHS": "[1, 3]", "STEPS": "400", "MIN_BOX_IOU": "0.0"}
 
 # The three thermal-only pools that must be present for 22 to mean anything,
 # with a floor rather than a flag: a pool that resolved twelve frames out of
@@ -132,6 +147,7 @@ ARMS = {
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
         "EPOCHS": "[1, 6]",
+        "MIN_BOX_IOU": "0.7",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
         "SKIP_POOLS": '["segfly_thermal"]',
@@ -159,6 +175,7 @@ ARMS = {
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
         "EPOCHS": "[1, 6]",
+        "MIN_BOX_IOU": "0.7",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
         "SKIP_POOLS": '["segfly_thermal"]',
@@ -216,7 +233,7 @@ POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
 POOL_MODALITIES = {"aerovis_train": "rgb", "aerovis_heldout": "rgb"}
 POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
-MIN_BOX_IOU = 0.0
+MIN_BOX_IOU = {{MIN_BOX_IOU}}
 POOL_MIN_BOX_IOU = {}
 
 VTUAV_PARTS = []
@@ -225,7 +242,7 @@ VTUAV_VIS_PARTS = []
 IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
                "aerovis_train": "/content/data/AeroVIS",
                "aerovis_heldout": "/content/data/AeroVIS",
-               "hituav_thermal": "/content/data/HIT_UAV/*/normal_json",
+               "hituav_thermal": "/content/data/HIT_UAV/**/normal_json",
                "vtuav_lt_thermal": "/content/data/VTUAV_lt_ir",
                "vtuav_lt_rgb": "/content/data/VTUAV_lt_rgb"}
 KAGGLE_DATASETS = {
@@ -520,8 +537,10 @@ def images_for(pool):
         if key in lowered:
             root = IMAGE_ROOTS.get(pool) or str(Path(DATA_ROOT) / folder)
             if "*" in root:
-                _hits = sorted(Path("/").glob(root.lstrip("/")))
-                root = str(_hits[0]) if _hits else root
+                _hits = [_p for _p in Path("/").glob(root.lstrip("/"))
+                         if _p.is_dir()]
+                _hits.sort(key=lambda _p: (len(_p.parts), str(_p)))
+                root = str(_hits[-1]) if _hits else root
             return key, recipe, root, list(parts)
     return None, "", "", []
 
