@@ -21,7 +21,7 @@ recipe, not the implementation.
 | 13 | `13_rgb_mask_pool.ipynb` | an aerial-RGB mask pool: VisDrone boxes → gated teacher masks, on your Drive | **nothing** — it downloads VisDrone and Kust4K's RGB half itself; SAM 3 wants an HF token |
 | 14 | `14_thermal_mask_pool.ipynb` | the **thermal** mask pool: HIT-UAV + DroneVehicle boxes and RGBT234 masklets, with the thermal-vs-RGB-prompt route *measured* first | **nothing** — it downloads all four sets itself; SAM 3 wants an HF token |
 | 15 | `15_dronevehicle_shared_pool.ipynb` | all of DroneVehicle in four pools: the 53 % of boxes both halves annotate identically (one RGB pass, mirrored onto thermal), plus the 33 383 thermal-only and 3 797 rgb-only targets, each prompted on the half that can see them | a copy of DroneVehicle's `train.zip` in your own Drive (set `DRIVE_DIR` in cell 1); SAM 3 wants an HF token |
-| 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17 |
+| 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17; SAM 3 is required, there is no fallback |
 | 17 | `17_vtuav_thermal_pool.ipynb` | VTUAV's **thermal** half, on `ir.txt`'s own boxes — the two halves agree on only 12 % of rows, so neither mask serves the other | the same archives; runs beside 16 on a second runtime |
 | 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
 | 19 | `19_thermal_stage_b_pool.ipynb` | stage B trained on the **thermal** mask pools 13-18 produced, from stock EdgeTAM with no stage A — plus a stock-vs-trained score and a before/after panel | the pools staged under `MyDrive/edgetam-pool`, and the frames they were harvested from (a pool holds masks, not pixels) |
@@ -29,7 +29,7 @@ recipe, not the implementation.
 | 21 | `21_pool_data_readiness.ipynb` | no training: what every pool recorded, which of its frames are on disk, why the rest are not, and the exact `--pool` flags a run would take | the pools under `MyDrive/edgetam-pool`; it fetches only what `FETCH` names |
 | 22 | `22_thermal_deep.ipynb` | thermal only, every thermal pool required to be present before a step is taken, the vehicle classes thinned, and the rate table inverted so the trunk learns the modality | the pools, plus VTUAV's archives in `MyDrive/VTUAV` (only the frames the pool names come out of them) |
 | 23 | `23_thermal_deep_lora.ipynb` | 22 with `METHOD = "lora"` and nothing else changed — the A/B for the method | the same |
-| 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive |
+| 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive; SAM 3 is required, there is no fallback |
 | 25 | `25_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 24 on a second runtime |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
@@ -145,6 +145,41 @@ single answer is skipped with its numbers printed. Cell 2 of all four notebooks
 is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
+
+**Night is a question about the teacher, and it is asked with a number.** A
+promptable segmenter trained on web images reads a daylit street well and a
+frame where the target is a smear around a headlight badly — and the gates do
+not save you there: they catch a mask that has drifted off its box, not a
+plausible one drawn around glare. The structural answer is why these are pairs
+at all: each modality is prompted on **its own** pixels, so a night frame's
+thermal half is 25's business and its RGB half is 24's, and no night RGB mask
+is ever mirrored onto thermal. Every record now carries `luma` (the frame) and
+`target_luma` (inside the boxes — an aerial night frame is mostly black with
+the annotated thing under a lamp, so the frame's own mean files a well-lit
+target under "night"), and cell 5 prints acceptance bucketed by the second.
+`MIN_LUMA` drops frames whose targets fall below a threshold, **for the RGB arm
+only**: on a thermal harvest a low reading is a *cold* target, so it defaults
+to off rather than to a sensible-looking number.
+
+**Neither stage leaves the other idle.** The harvest is two costs that used to
+take turns. Unzipping is not bandwidth but seeks — `tracked_ir` keeps a
+twentieth of a 15.7 GiB part, so the read is a few thousand random seeks over a
+Drive mount, and `UNZIP_WORKERS` reads on that many threads with one zip handle
+each. Decoding used to run on the thread that then waited for the teacher: a
+1920×1080 JPEG is ~20 ms and a VTUAV frame carries **one box**, so a group of 32
+put ~0.6 s of decode in front of every batch with the card doing nothing.
+`label_pool(readers=…, read_ahead=…)` decodes ahead on its own threads — cv2
+releases the GIL, so it is real parallelism — and the bound is in frames
+because a decoded one is 6.2 MB. On a synthetic 1080p pool it takes the harvest
+from 3.07 s to 1.18 s for identical output.
+
+**No fallback teacher, in any of the four.** The load used to catch a failure
+and quietly continue on `facebook/sam2.1-hiera-large`. Those four pools are
+meant to be mixed into one training set, so a pool whose masks came from a
+different teacher than its neighbour's is a variable nobody chose and the run
+cannot see. `build_image_teacher` already fails with the gated-repo
+instructions, so an unset `HF_TOKEN` says so up front instead of costing a
+harvest that has to be thrown away.
 
 **Neither split ships a mask.** VTUAV's drawn instance masks are the separate
 VIS release, 100 sequences; the tracking download's 500 carry one `x y w h` per

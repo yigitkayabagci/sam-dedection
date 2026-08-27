@@ -27,6 +27,62 @@ annotated absent. `boxes.vtuav_frames` drops an absent row rather than
 prompting the teacher with a zero-area or NaN box, and cell 2 prints how many
 rows that was per archive before anything is staged.
 
+**Night is a question about the teacher, and it is asked with a number.** A
+promptable segmenter trained on web images reads a daylit street well and a
+frame where the target is a smear around a headlight badly, and the gates do
+not save you there -- they catch a mask that has drifted off its box, not a
+plausible one drawn around glare. The structural answer is already in place and
+is why 16/17 and 24/25 are pairs: each modality is prompted on **its own**
+pixels, so a night frame's thermal half is 25's business and its RGB half is
+24's, and there is no route where a night RGB mask is mirrored onto thermal
+(VTUAV closed that door anyway -- 12.2 % box agreement).
+
+What was missing was the evidence. Every record now carries `luma` (the frame)
+and `target_luma` (inside the boxes -- an aerial night frame is mostly black
+with the annotated thing under a lamp, so the frame's own mean files a well-lit
+target under "night" and reads the failure off the wrong rows), and cell 5
+prints acceptance bucketed by the second. `MIN_LUMA` then drops frames whose
+targets are darker than a threshold -- **for the RGB arm only**. It defaults to
+off rather than to a sensible-looking number because on a thermal harvest a low
+reading is a *cold* target, and dropping those is exactly backwards.
+
+**Cell 1 updates the clone rather than skipping it.** It used to clone only
+when `/content/sam-dedection` was absent, which is right exactly once: a
+runtime that has already run any of these notebooks keeps whatever it cloned
+first, so a fix pushed since then is invisible and surfaces as an `ImportError`
+on a name the repo does have. It now fetches and hard-resets to the branch
+every run, and drops every already-imported `src.*` and `tools.*` module from
+`sys.modules` so re-running the cell picks the new code up without a kernel
+restart. The commit it landed on is printed.
+
+**Neither stage is allowed to leave the other idle.** Two knobs, because the
+harvest is two costs that used to take turns:
+
+- **Unzipping** is not bandwidth, it is seeks. `tracked_ir` keeps a twentieth
+  of a 15.7 GiB part, so the read is a few thousand random seeks over a Drive
+  mount rather than one stream, and a FUSE seek is latency. `UNZIP_WORKERS`
+  reads on that many threads, each with its own zip handle -- the only way to
+  hide latency is to have more of it outstanding.
+- **Decoding** used to run on the thread that then waited for the teacher. A
+  1920x1080 JPEG is ~20 ms and a VTUAV frame carries **one box**, so a group of
+  32 put ~0.6 s of decode in front of every batch with the card doing nothing.
+  `READERS` decodes ahead on its own threads (cv2 releases the GIL, so this is
+  real parallelism), `READ_AHEAD` bounds how many decoded frames may wait --
+  6.2 MB each, and cell 1 prints what that comes to.
+
+`cv2.setNumThreads(1)` goes with them: OpenCV parallelises `cvtColor`
+internally, and eight readers each spawning a pool of its own is
+oversubscription on a memory-bound op, not speed.
+
+**No fallback teacher.** The cell that loads `facebook/sam3` used to catch a
+failure and quietly continue on `facebook/sam2.1-hiera-large`. That is the one
+error worth stopping for: the pools these four write are meant to be mixed into
+one training set, and a pool whose masks came from a different teacher than its
+neighbour's is a variable nobody chose and the run cannot see. `build_image_teacher`
+already fails with the gated-repo instructions, so an unset `HF_TOKEN` says so
+instead of costing a harvest that has to be thrown away. 18 made the same call
+for the same reason.
+
 **Neither split ships a mask.** VTUAV's drawn instance masks are the separate
 *VIS* release -- 100 sequences, a different download -- and the other 400 carry
 one `x y w h` per annotated frame and nothing else. That is the whole reason
@@ -165,12 +221,15 @@ EXTRACT_MODE = "{{extract_mode}}"
 MIRROR_DIR  = "{{mirror}}"
 ARCHIVES    = {{archives}}
 TEACHER     = "facebook/sam3"
-FALLBACK    = "facebook/sam2.1-hiera-large"
 DTYPE       = "bfloat16"
 ZOOM        = 4.0
 MIN_SIZE    = 128
+MIN_LUMA    = 0.0
 BATCH       = 0
 FRAME_GROUP = 0
+READERS     = 0
+READ_AHEAD  = 0
+UNZIP_WORKERS = 16
 MAX_BOXES   = None
 LIMIT       = None
 BOX_IOU     = 0.5
@@ -183,11 +242,24 @@ STAMP    = "{{STAMP}}"
 import json, os, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
-if not Path(REPO_DIR).exists():
+if Path(REPO_DIR).exists():
+    subprocess.run(["git", "-C", REPO_DIR, "fetch", "--depth", "1",
+                    "origin", BRANCH], check=True)
+    subprocess.run(["git", "-C", REPO_DIR, "reset", "--hard", "FETCH_HEAD"],
+                   check=True)
+else:
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
                     REPO_URL, REPO_DIR], check=True)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
+import importlib
+for _stale in [_m for _m in list(sys.modules)
+               if _m.split(".")[0] in ("src", "tools")]:
+    del sys.modules[_stale]
+importlib.invalidate_caches()
+print("repo at", subprocess.run(["git", "-C", REPO_DIR, "rev-parse", "--short",
+                                 "HEAD"], capture_output=True,
+                                text=True).stdout.strip())
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
@@ -214,14 +286,25 @@ if os.environ.get("HF_TOKEN"):
     except Exception as _login_error:
         print("hf login skipped:", _login_error)
 
-import torch
+import torch, cv2
+from src.training.pool import read_workers
+
+cv2.setNumThreads(1)
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
 _device = torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None
 VRAM = round(_device.total_memory / 2 ** 30, 1) if _device else 0.0
+CORES = os.cpu_count() or 1
 if BATCH <= 0:
     BATCH = max(4, int(VRAM * 0.8)) if VRAM else 4
 if FRAME_GROUP <= 0:
     FRAME_GROUP = BATCH
+READERS = read_workers(READERS)
+if READ_AHEAD <= 0:
+    READ_AHEAD = max(2 * FRAME_GROUP, READERS)
 
 def progress(stream, total, desc):
     from tqdm.auto import tqdm
@@ -233,6 +316,9 @@ print(NOTEBOOK, STAMP, "| repo:", _want,
       "| OK" if _want == STAMP else "| STALE, re-open from the repo")
 print(_device.name if _device else "no GPU", VRAM, "GiB",
       "| BATCH", BATCH, "| FRAME_GROUP", FRAME_GROUP, "| modality", MODALITY)
+print(CORES, "cores | READERS", READERS, "| READ_AHEAD", READ_AHEAD,
+      "|", round(READ_AHEAD * 1920 * 1080 * 3 / 2 ** 30, 2), "GiB of frames "
+      "in flight | UNZIP_WORKERS", UNZIP_WORKERS)
 ''')
 
 
@@ -331,7 +417,8 @@ for _archive in ARCHIVES:
         raise SystemExit(f"{_source} is not there -- set DRIVE_DIR in cell 1")
     print("staging", _archive,
           round(_source.stat().st_size / 2 ** 30, 2), "GiB from Drive")
-    extract(_source, Path(DATA_ROOT), frames=EXTRACT_MODE)
+    extract(_source, Path(DATA_ROOT), frames=EXTRACT_MODE,
+            workers=UNZIP_WORKERS)
     _marker.write_text("ok")
 
 from src.training import boxes as B
@@ -355,15 +442,9 @@ import matplotlib.pyplot as plt
 from src.training.labels import Gates, build_image_teacher
 from src.training.pool import label_boxes
 
-try:
-    TEACHER_USED = TEACHER
-    TEACHER_MODEL = build_image_teacher(TEACHER, dtype=DTYPE)
-except (Exception, SystemExit) as _teacher_error:
-    print("falling back:", str(_teacher_error).splitlines()[0])
-    TEACHER_USED = FALLBACK
-    TEACHER_MODEL = build_image_teacher(FALLBACK, dtype=DTYPE)
+TEACHER_MODEL = build_image_teacher(TEACHER, dtype=DTYPE)
 GATES = Gates(box_iou=BOX_IOU)
-print("teacher:", TEACHER_USED)
+print("teacher:", TEACHER)
 
 _shown = [FRAMES[i] for i in
           np.linspace(0, len(FRAMES) - 1, 4).astype(int).tolist()]
@@ -394,7 +475,8 @@ plt.show()
 # --------------------------------------------------------------------------
 
 code('''
-from src.training.pool import label_pool, pool_report, summarise_pool, write_index
+from src.training.pool import (label_pool, pool_report, summarise_luma,
+                               summarise_pool, write_index)
 
 def harvest(frames, dataset):
     global BATCH, FRAME_GROUP
@@ -404,7 +486,9 @@ def harvest(frames, dataset):
                               prompt="self", gates=GATES, zoom=ZOOM,
                               min_size=MIN_SIZE, batch_size=BATCH,
                               frame_group=FRAME_GROUP, limit=LIMIT,
-                              max_boxes=MAX_BOXES, progress=progress)
+                              max_boxes=MAX_BOXES, min_luma=MIN_LUMA,
+                              readers=READERS, read_ahead=READ_AHEAD,
+                              progress=progress)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             BATCH = max(1, BATCH // 2)
@@ -416,6 +500,8 @@ REPORT = harvest(FRAMES, POOL)
 print(json.dumps(REPORT, indent=1))
 write_index(POOL_ROOT)
 print(summarise_pool(pool_report(POOL_ROOT)))
+print()
+print(summarise_luma(POOL_ROOT))
 ''')
 
 
@@ -436,7 +522,7 @@ print(_target, len(_files), "files",
 _index = Path(POOL_ROOT) / "pool_index.jsonl"
 if _index.is_file():
     shutil.copy(_index, Path(MIRROR_DIR) / _index.name)
-print("teacher:", TEACHER_USED, "| modality:", MODALITY,
+print("teacher:", TEACHER, "| modality:", MODALITY,
       "| accepted:", REPORT["accepted"], "of", REPORT["attempted"])
 ''')
 
