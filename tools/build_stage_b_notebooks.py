@@ -159,6 +159,13 @@ FILL           = 0.25
 JITTER         = 32
 PROMPT         = "mix"
 PROMPT_JITTER  = 0.3
+METHOD         = "finetune"
+LORA_R         = 16
+LORA_ALPHA     = 0
+LORA_DROPOUT   = 0.0
+ANCHOR_WEIGHT  = 0.0
+BLEND_ALPHAS   = []
+MAX_REGRESSION = 0.15
 EPOCHS         = [1, 3]
 STEPS          = 400
 VAL_BATCHES    = 24
@@ -268,11 +275,15 @@ assert Path(sam2.__file__).resolve().parent.parent == Path(EDGETAM).resolve(), (
 BASE_CKPT = str(Path(EDGETAM) / "checkpoints" / "edgetam.pt")
 assert Path(BASE_CKPT).is_file(), "edgetam.pt did not download"
 
+assert METHOD in ("finetune", "lora"), f"METHOD is finetune or lora, not {METHOD!r}"
+if METHOD != "finetune":
+    MIRROR_DIR = f"{MIRROR_DIR.rstrip('/')}_{METHOD}"
 for _dir in (POOL_ROOT, DATA_ROOT, WORK, MIRROR_DIR,
              str(Path(WORK) / "index"), str(Path(REPO_DIR) / "checkpoints")):
     Path(_dir).mkdir(parents=True, exist_ok=True)
 INDEX_DIR = str(Path(WORK) / "index")
-CHECKPOINT = str(Path(REPO_DIR) / "checkpoints" / f"edgetam_pool_{RUN}_{SIZE}.pt")
+TAG = RUN if METHOD == "finetune" else f"{RUN}_{METHOD}"
+CHECKPOINT = str(Path(REPO_DIR) / "checkpoints" / f"edgetam_pool_{TAG}_{SIZE}.pt")
 
 _props = torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None
 VRAM = round(_props.total_memory / 2 ** 30, 1) if _props else 0.0
@@ -295,7 +306,16 @@ print(NOTEBOOK, STAMP, "| repo:", _want,
       "| OK" if _want == STAMP else "| STALE, re-open from the repo")
 print(_props.name if _props else "no GPU", VRAM, "GiB |", WORKERS, "loader threads")
 print("run:", RUN, "| modalities:", MODALITIES, "| checkpoint ->", CHECKPOINT)
+print("method:", METHOD, f"(r={LORA_R})" if METHOD == "lora" else "",
+      "| anchor weight:", ANCHOR_WEIGHT,
+      "| blend sweep:", BLEND_ALPHAS or "off")
 print("stage B only: no stage A, no distillation, base =", BASE_CKPT)
+if ANCHOR_WEIGHT:
+    print("   the anchor is the model this run starts from, which without a "
+          "stage A is stock EdgeTAM: the loss gains a term for how far the "
+          "encoder's features travel from it, which is what holds down the "
+          "instances stock already handled. It costs one extra frozen encoder "
+          "pass per batch.")
 ''')
 
 
@@ -877,15 +897,20 @@ for _prompt, _row in BEFORE.items():
 code('''
 import time
 _started = time.time()
+_method_flags = ["--method", METHOD]
+if METHOD == "lora":
+    _method_flags += ["--lora-r", str(LORA_R), "--lora-dropout", str(LORA_DROPOUT)]
+    if LORA_ALPHA:
+        _method_flags += ["--lora-alpha", str(LORA_ALPHA)]
 subprocess.run(
-    [sys.executable, "tools/train_encoder.py", *COMMON,
-     "--method", "finetune", "--base", BASE_CKPT, "--out", CHECKPOINT,
+    [sys.executable, "tools/train_encoder.py", *COMMON, *_method_flags,
+     "--base", BASE_CKPT, "--out", CHECKPOINT,
      "--prompt", PROMPT, "--prompt-jitter", str(PROMPT_JITTER),
      "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),
      "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),
      "--epochs", str(EPOCHS[0]), str(EPOCHS[1]),
      "--val-batches", str(VAL_BATCHES), "--workers", str(WORKERS),
-     "--anchor-weight", "0.0", "--device", "cuda",
+     "--anchor-weight", str(ANCHOR_WEIGHT), "--device", "cuda",
      "--json", str(Path(WORK) / "run.json")], check=True)
 
 RUN_LOG = json.loads((Path(WORK) / "run.json").read_text())
@@ -900,6 +925,95 @@ print("wall clock", round((time.time() - _started) / 60, 1), "min")
 
 
 # --------------------------------------------------------------------------
+# 5b. Trading a little of the gain for the instances it lost
+# --------------------------------------------------------------------------
+#
+# The first thermal run improved 1 222 of 1 707 held-out instances under a
+# point prompt and made 281 worse. Those 281 are instances stock EdgeTAM
+# already handled, and no amount of extra pool data removes the category: an
+# encoder that moves at all moves some of them the wrong way.
+#
+# `theta = (1 - a) * base + a * tuned` is the cheapest answer -- no retraining,
+# and the merged LoRA checkpoint has the same keys, so it applies to either
+# method. The sweep is scored on **val** and paired per instance, because the
+# question is not "is the mean higher" but "which instances did each alpha win
+# and lose"; picking alpha on the test split would be fitting the grade.
+
+code('''
+def per_instance(checkpoint, tag, prompt, split):
+    """`{instance key: IoU}` for one checkpoint, cached per tag."""
+    rows = Path(WORK) / f"rows_{tag}_{prompt}_{split}.json"
+    if not rows.is_file():
+        subprocess.run(
+            [sys.executable, "tools/eval_instances.py", *COMMON,
+             "--checkpoint", checkpoint, "--split", split, "--prompt", prompt,
+             "--batch", str(max(BATCH // 2, 1)), "--device", "cuda",
+             "--json", str(Path(WORK) / f"score_{tag}_{prompt}_{split}.json"),
+             "--per-instance", str(rows)], check=True)
+    return {r["key"]: r["iou"] for r in json.loads(rows.read_text())["rows"]}
+
+BLEND = {}
+if not BLEND_ALPHAS:
+    print("no blend sweep (BLEND_ALPHAS is empty). Set it to e.g. "
+          "[1.0, 0.8, 0.6, 0.4] to trade a little of the gain for the "
+          "held-out instances this run made worse; 1.0 is the trained "
+          "checkpoint itself and belongs in the list as the baseline.")
+else:
+    _prompt = SCORE_PROMPTS[-1]
+    _stock = per_instance(BASE_CKPT, "stock", _prompt, "val")
+    _rows = []
+    for _alpha in sorted({float(a) for a in BLEND_ALPHAS}, reverse=True):
+        _name = f"a{int(round(_alpha * 100)):03d}"
+        _path = CHECKPOINT
+        if _alpha < 1.0:
+            _path = str(Path(WORK) / f"blend_{_name}.pt")
+            if not Path(_path).is_file():
+                subprocess.run(
+                    [sys.executable, "tools/blend_checkpoints.py",
+                     "--base", BASE_CKPT, "--tuned", CHECKPOINT,
+                     "--alpha", str(_alpha), "--out", _path], check=True)
+        _scored = per_instance(_path, f"{TAG}_{_name}", _prompt, "val")
+        _shared = sorted(set(_scored) & set(_stock))
+        assert _shared, ("the two scorings share no instance key -- they were "
+                         "run on different splits or different flags")
+        _deltas = [_scored[_k] - _stock[_k] for _k in _shared]
+        _lost = [_d for _d in _deltas if _d < -0.05]
+        _rows.append({
+            "alpha": _alpha, "path": _path, "instances": len(_shared),
+            "mean_iou": sum(_scored[_k] for _k in _shared) / len(_shared),
+            "delta": sum(_deltas) / len(_deltas),
+            "better": sum(1 for _d in _deltas if _d > 0.05),
+            "worse": len(_lost),
+            "rate": len(_lost) / len(_deltas),
+            "lost": -sum(_lost) / max(len(_lost), 1)})
+
+    print(f"\\n{'alpha':>6}{'val mean IoU':>14}{'vs stock':>10}{'better':>9}"
+          f"{'worse':>8}{'worse %':>9}{'when worse':>12}")
+    for _row in _rows:
+        print(f"{_row['alpha']:>6.2f}{_row['mean_iou']:>14.4f}"
+              f"{_row['delta']:>+10.4f}{_row['better']:>9}{_row['worse']:>8}"
+              f"{_row['rate']:>8.1%}{-_row['lost']:>+12.4f}")
+    _capped = [_r for _r in _rows if _r["rate"] <= MAX_REGRESSION]
+    BLEND = max(_capped or _rows, key=lambda _r: _r["mean_iou"])
+    print(f"\\nkept alpha {BLEND['alpha']:.2f}: the highest val IoU among the "
+          f"alphas whose regression rate is at or under {MAX_REGRESSION:.0%}"
+          if _capped else
+          f"\\nkept alpha {BLEND['alpha']:.2f}: no alpha in the sweep keeps "
+          f"the regression rate at or under {MAX_REGRESSION:.0%}, so this is "
+          f"the best val IoU of the whole sweep -- add a smaller alpha")
+    print("   `worse` counts instances that lost more than 0.05 IoU against "
+          "stock, and `when worse` is how much they lost on average. An alpha "
+          "below 1 gives most of them back for a fraction of the gain, which "
+          "is the trade a deployment usually wants.")
+    if BLEND["alpha"] < 1.0:
+        CHECKPOINT, TAG = BLEND["path"], f"{TAG}_a{int(round(BLEND['alpha'] * 100)):03d}"
+        shutil.copy(CHECKPOINT, Path(MIRROR_DIR) / Path(CHECKPOINT).name)
+        print("   everything below now scores the blend, which is what would "
+              "ship:", CHECKPOINT)
+''')
+
+
+# --------------------------------------------------------------------------
 # 6. The after picture, on the same instances
 # --------------------------------------------------------------------------
 #
@@ -908,7 +1022,7 @@ print("wall clock", round((time.time() - _started) / 60, 1), "min")
 # experiment can be compared on.
 
 code('''
-AFTER = {p: score_to(CHECKPOINT, RUN, p) for p in SCORE_PROMPTS}
+AFTER = {p: score_to(CHECKPOINT, TAG, p) for p in SCORE_PROMPTS}
 
 print(f"{'prompt':<8}{'':<10}{'mean IoU':>10}{'>=.50':>8}{'>=.75':>8}"
       f"{'small':>10}{'larger':>9}")
@@ -1089,6 +1203,10 @@ VERDICT = {
     "train_windows_by_source": TRAIN.sources,
     "test_windows_by_source": TEST.sources,
     "gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,
+    "method": METHOD, "anchor_weight": ANCHOR_WEIGHT,
+    "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT}
+            if METHOD == "lora" else {},
+    "blend": BLEND, "checkpoint": CHECKPOINT,
     "roles": {_row["pool"]: _row["role"] for _row in PLAN},
     "modalities": {_row["pool"]: _row["modality"] for _row in PLAN},
     "limits": POOL_LIMITS,
@@ -1115,7 +1233,14 @@ print(f"  {sum(len(v) for v in SPLITS.values())} frames, "
       f"{sum(len(s.instances) for s in TRAIN.samples)} instances")
 for _source, _count in TRAIN.sources.items():
     print(f"    {_source:<36}{_count:>8} windows")
-print(f"  base {Path(BASE_CKPT).name}, stage A: none")
+_how = [f"method {METHOD}"]
+if METHOD == "lora":
+    _how.append(f"r={LORA_R}")
+if ANCHOR_WEIGHT:
+    _how.append(f"anchor {ANCHOR_WEIGHT}")
+if BLEND:
+    _how.append(f"blended at alpha {BLEND['alpha']:.2f}")
+print(f"  base {Path(BASE_CKPT).name}, stage A: none, " + ", ".join(_how))
 print(_line)
 print("DID IT HELP")
 for _prompt in SCORE_PROMPTS:

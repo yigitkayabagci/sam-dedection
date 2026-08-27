@@ -66,7 +66,8 @@ SMALL_SIDE = 32.0
 
 
 def score(model, split, batch: int, device: str, progress=None,
-          prompt: str = "box", jitter: float = 0.0, seed: int = 0) -> dict:
+          prompt: str = "box", jitter: float = 0.0, seed: int = 0,
+          detail: bool = False) -> dict:
     """Mean IoU over every instance in `split`, and the breakdowns that matter.
 
     `prompt` is what the model is told about the target -- the default `box`
@@ -78,6 +79,12 @@ def score(model, split, batch: int, device: str, progress=None,
     The jitter generator is seeded per call, so two checkpoints scored with the
     same `--seed` are handed the *same* perturbed boxes and the difference
     between their numbers is still the checkpoint.
+
+    `detail` adds a `rows` list, one entry per instance, each keyed by the
+    window it was scored in. Two runs over the same split and seed produce the
+    same keys in the same order, so pairing them says which *instances* a
+    checkpoint gained and which it lost -- the question a mean IoU cannot
+    answer, and the one that decides whether a change is worth shipping.
     """
     import torch
 
@@ -88,6 +95,7 @@ def score(model, split, batch: int, device: str, progress=None,
     classes: list[str] = []
     sides: list[float] = []
     mods: list[str] = []
+    rows: list[dict] = []
 
     generator = torch.Generator(device=device).manual_seed(seed)
     chunks = list(batch_clips(split.samples, batch, seed=0, drop_last=False))
@@ -114,7 +122,19 @@ def score(model, split, batch: int, device: str, progress=None,
                 # what actually changed what the model saw -- unblends it.
                 mods.append("thermal" if sample.source is None
                             or sample.source.gray else "rgb")
+                if detail:
+                    # The window is in the key because `--per-image` samples
+                    # several crops of one frame and each is its own question.
+                    rows.append({
+                        "key": f"{classes[-1]}|{sample.frame.name}|"
+                               f"{tuple(sample.window)}|{instance.label}",
+                        "source": spec.name if spec else "?",
+                        "frame": sample.frame.name, "label": int(instance.label),
+                        "side": sides[-1], "modality": mods[-1]})
 
+    if detail:
+        for row, value in zip(rows, ious):
+            row["iou"] = float(value)
     ious = np.asarray(ious, dtype=np.float64)
     classes = np.asarray(classes)
     sides = np.asarray(sides, dtype=np.float64)
@@ -133,6 +153,7 @@ def score(model, split, batch: int, device: str, progress=None,
 
     return {
         "instances": int(ious.size),
+        **({"rows": rows} if detail else {}),
         "mean_iou": float(ious.mean()) if ious.size else float("nan"),
         "iou_50": float((ious >= 0.5).mean()) if ious.size else float("nan"),
         "iou_75": float((ious >= 0.75).mean()) if ious.size else float("nan"),
@@ -226,6 +247,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
     p.add_argument("--json", default=None)
+    p.add_argument("--per-instance", default=None,
+                   help="Also write one row per scored instance here, keyed by "
+                        "window. Two checkpoints scored with the same --seed "
+                        "and --splits produce the same keys, so pairing the "
+                        "two files says which instances each one won and lost.")
     args = p.parse_args(argv)
 
     from src.training.image_loop import ImageSplit
@@ -270,7 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     model = build_model(args.size, args.checkpoint, args.device)
     result = score(model, split, args.batch, args.device, progress=_tqdm(),
                    prompt=args.prompt, jitter=args.prompt_jitter,
-                   seed=args.seed)
+                   seed=args.seed, detail=bool(args.per_instance))
+    rows = result.pop("rows", [])
     # The axes go in the JSON, not just the filename: the probe notebook reads
     # a directory of these back into one table, and a run that cannot say how
     # it was scored is a row that cannot be placed.
@@ -288,6 +315,13 @@ def main(argv: list[str] | None = None) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, indent=2) + "\n")
         print(f"\nwrote {out}")
+    if args.per_instance:
+        out = Path(args.per_instance)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "checkpoint": args.checkpoint, "split": args.split,
+            "prompt": args.prompt, "seed": args.seed, "rows": rows}) + "\n")
+        print(f"wrote {out} ({len(rows)} instances)")
     return 0
 
 
