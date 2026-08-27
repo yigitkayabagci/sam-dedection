@@ -853,12 +853,14 @@ def tracked_members(archive: zipfile.ZipFile, modality: str = "rgb",
 
     `modality` is `rgb`, `ir`, or **`both`**. One modality halves it again,
     which is what makes the RGB and thermal pools runnable side by side on two
-    ordinary runtimes: each unzips only the half it prompts on. `both` is for
-    the other direction -- a training run that has to put the *frames* back
-    under a pool harvested from either half, where one tree serving both beats
-    downloading 16 GiB of part twice. Both `.txt` files are always kept: they
-    are a few kilobytes and the other modality's boxes are what any later
-    agreement check reads.
+    ordinary runtimes: each unzips only the half it prompts on. `both` keeps
+    that tenth in *both* halves, for staging one tree a harvest of either half
+    can read -- `--frames tracked` on the command line. (Putting a finished
+    pool's frames back is a different question with a better answer:
+    `pool_reader.extract_frames` takes exactly the members the records name,
+    and needs no stride at all.) Both `.txt` files are always kept: they are a
+    few kilobytes and the other modality's boxes are what any later agreement
+    check reads.
 
     **The stride is read out of each sequence, not taken on faith.** That 10
     was measured on one short-term part; the long-term parts are a separate
@@ -942,7 +944,19 @@ def extract(archive_path: Path, dest: Path, into: str = "",
                 members = archive.namelist()
             if not quiet:
                 print(f"   extracting {len(members)} entries -> {target}")
-            archive.extractall(target, members=members)
+            try:
+                archive.extractall(target, members=members)
+            except Exception as failure:     # noqa: BLE001 - see below
+                # `extractall` stops at the first member it cannot read and
+                # leaves every member after it on the floor. One bad CRC in a
+                # Drive copy of DroneVehicle's train.zip cost 9 859 of 13 098
+                # thermal frames that way, and the run that lost them reported
+                # only `no_image`. So a failure drops to a member-by-member
+                # pass that keeps what the archive can still give and names
+                # what it cannot.
+                if not quiet:
+                    print(f"   !! {failure} -- extracting member by member")
+                return _extract_each(archive, members, target, quiet)
         return len(members)
 
     import tarfile
@@ -963,6 +977,36 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     if not quiet:
         print(f"   extracted {count} entries -> {target}")
     return count
+
+
+def _extract_each(archive, members: SequenceABC[str], target: Path,
+                  quiet: bool = False) -> int:
+    """Every member the archive can still give, one at a time.
+
+    Members already on disk are skipped, so this is also the resume path: a
+    second run over a partly extracted tree writes only what is missing.
+    """
+    taken, skipped, bad = 0, 0, []
+    for member in members:
+        landing = target / member
+        if landing.exists() and (landing.is_dir() or landing.stat().st_size):
+            skipped += 1
+            continue
+        try:
+            archive.extract(member, target)
+            taken += 1
+        except Exception:                    # noqa: BLE001 - one bad member
+            bad.append(member)
+    if not quiet:
+        print(f"   {taken} extracted, {skipped} already there, "
+              f"{len(bad)} unreadable")
+        if bad:
+            print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
+    if not taken and not skipped:
+        raise RuntimeError(
+            f"{target}: not one member of the archive could be read. The "
+            f"staged copy is corrupt -- delete it and let the download run.")
+    return taken + skipped
 
 
 def _tar_extract(archive, member, target: Path) -> None:

@@ -59,6 +59,8 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,6 +103,36 @@ RATES = {
     "lora": {"head": Rates(head=1e-3),
              "encoder": Rates(head=5e-4, neck=5e-4, trunk=5e-4)},
 }
+
+
+def scaled_rates(rates: Rates, scale: float = 1.0,
+                 overrides: Mapping[str, float] | None = None) -> Rates:
+    """`rates` after the batch's scaling rule and then any absolute override.
+
+    Two knobs that answer different questions, in that order. `scale` follows
+    the batch -- a bigger batch puts more samples behind one update, and the
+    linear rule says the step grows with it -- so it multiplies every part
+    equally and leaves the *shape* of the table alone.
+
+    An override replaces one part's rate outright, and is applied after the
+    scaling because a run that says "hold the decoder at 1e-5" means that
+    number, not that number times whatever batch fitted on the card. A zero
+    override means "leave this part alone", so the flag's own default is
+    inert.
+
+    The shape is the interesting knob. The table this repo shipped moves the
+    head five times faster than the trunk, which is right when the training
+    set is small: the trunk carries general visual features that took far more
+    data to learn than the set contains. On a set of tens of thousands of
+    frames that argument weakens, and a modality shift is a *trunk* problem --
+    so a run that wants the encoder to learn thermal rather than the decoder
+    to compensate for it sets trunk above head, deliberately.
+    """
+    out = Rates(head=rates.head * scale, neck=rates.neck * scale,
+                trunk=rates.trunk * scale, weight_decay=rates.weight_decay)
+    chosen = {part: float(value)
+              for part, value in (overrides or {}).items() if value}
+    return replace(out, **chosen) if chosen else out
 
 
 def build_index(request: Request, cache_dir: Path | None, workers: int,
@@ -261,6 +293,18 @@ def main(argv: list[str] | None = None) -> int:
                         "which is what every number recorded before this flag "
                         "was taken with.")
     p.add_argument("--accum", type=int, default=1)
+    for _part, _why in (
+            ("head", "the mask decoder, the prompt encoder and the object head"),
+            ("neck", "the image encoder above its trunk"),
+            ("trunk", "the RepViT backbone -- where a modality shift lives")):
+        p.add_argument(f"--lr-{_part}", type=float, default=0.0,
+                       help=f"Absolute learning rate for {_why}, in the "
+                            f"encoder stage only -- the head stage's warmup "
+                            f"keeps the method's own rate. 0 leaves this part "
+                            f"alone. Setting trunk above head moves the "
+                            f"features and holds the decoder, which inverts "
+                            f"the shipped table and only makes sense on a "
+                            f"training set large enough to earn it.")
     p.add_argument("--splits", default="",
                    help="A `save_splits` file naming the frames each "
                         "split holds. Without it the split is made "
@@ -382,17 +426,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # Scaling the rates rather than editing RATES keeps the table above the one
     # every recorded run used, and keeps `--lr-scale 1` byte-identical to it.
-    def scaled(rates: Rates) -> Rates:
-        if args.lr_scale == 1.0:
-            return rates
-        return Rates(head=rates.head * args.lr_scale,
-                     neck=rates.neck * args.lr_scale,
-                     trunk=rates.trunk * args.lr_scale,
-                     weight_decay=rates.weight_decay)
+    def scaled(rates: Rates, overrides: bool = True) -> Rates:
+        return scaled_rates(rates, args.lr_scale,
+                            {part: getattr(args, f"lr_{part}")
+                             for part in ("head", "neck", "trunk")}
+                            if overrides else None)
 
     meta |= {"batch_reserve": args.batch_reserve, "lr_scale": args.lr_scale}
+    # The overrides shape the *encoder* stage and leave the head stage's warmup
+    # alone. That first stage trains the head and nothing else -- a trunk rate
+    # there has no parameters to act on -- and its job is to let the mask
+    # decoder settle on thermal statistics before the features under it move.
+    # Slowing it would not protect the decoder; it would skip the one stage
+    # that adapts it.
     schedule = Schedule(
-        stages=(("head", args.epochs[0], scaled(RATES[args.method]["head"])),
+        stages=(("head", args.epochs[0],
+                 scaled(RATES[args.method]["head"], overrides=False)),
                 ("encoder", args.epochs[1],
                  scaled(RATES[args.method]["encoder"]))),
         batch=batch, accum=args.accum, steps_per_epoch=args.steps,

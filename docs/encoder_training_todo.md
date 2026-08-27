@@ -247,7 +247,7 @@ bir arabaya değen bir insan böylece iki örnek kalıyor.
   konum ile kare numarasını bir tutuyor (depo kare numarasıyla anahtarlanıyor,
   `calibrate` de çizilmiş PNG'nin adındaki sayıyla arıyor), o yüzden `tracked_*`
   ya da `masked` ile açılmış — kareleri 10'ar/30'ar atlayan — bir ağacı artık
-  **okumayı reddediyor**. Havuz defterlerinin (16/17/21/22) `tracked_*`
+  **okumayı reddediyor**. Havuz defterlerinin (16/17/24/25) `tracked_*`
   çıkarımı masklet'e yaramaz; bu ikisi ayrı çıkarım istiyor. Aşama C'nin
   gerçek işi burada: konum ile kare numarasını `VideoSequence` içinde ayırmak,
   ki 1/10 örneklenmiş bir ağaç da masklet üretebilsin.

@@ -59,19 +59,6 @@ number of updates -- and the linear scaling rule says the step should grow with
 it. The notebook sets `--lr-scale` from the measured batch against a 16-window
 reference, capped, and prints both.
 
-## Putting a VTUAV pool's pixels back
-
-A pool holds masks, not frames, and VTUAV's frames are the most expensive to
-put back: eight parts of the tracking download unpacked whole are ~128 GiB and
-no Colab disk holds that. But a pool only ever looks up the frames its boxes
-named -- one in ten -- so the staging asks for `frames="tracked"`, which keeps
-that tenth in **both** halves. Both, because 16 and 17 harvest the short-term
-parts and 21 and 22 the long-term ones, in RGB and thermal respectively, and a
-run mixing their pools would otherwise download each 16 GiB part twice to
-unpack a different tenth of it each time. Eight parts then cost ~6 GiB on disk.
-Name them in `VTUAV_PARTS`; the download itself is still 16 GiB per part, so
-nothing here is fetched on a whim.
-
 ## What none of it measures
 
 Tracking. Every number here scores one prompted frame with the memory path
@@ -87,16 +74,64 @@ from pathlib import Path
 
 # Only these move between the two arms. Everything else is shared source, so a
 # difference anywhere else is a bug rather than a variant.
+INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
+         "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
+         "POOL_ARCHIVES": "{}", "METHOD": '"finetune"'}
+
+# The three thermal-only pools that must be present for 22 to mean anything,
+# with a floor rather than a flag: a pool that resolved twelve frames out of
+# forty thousand has arrived in name only.
+REQUIRED = ('{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
+            '                 "hituav_thermal": 2000, "segfly_thermal": 5000,\n'
+            '                 "kaggle_uav_thermal": 10000}')
+
 ARMS = {
     "19_thermal_stage_b_pool.ipynb": {
+        **INERT,
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal"',
     },
     "20_thermal_stage_b_pool_rgb.ipynb": {
+        **INERT,
         "MODALITIES": '["thermal", "rgb"]',
         "RUN": '"thermal_rgb"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_rgb"',
+    },
+    # Everything thermal this repo has harvested, the vehicle classes thinned
+    # so they cannot outvote the rest, and the rate table inverted so the
+    # trunk learns the modality instead of the decoder compensating for it.
+    "22_thermal_deep.ipynb": {
+        "MODALITIES": '["thermal"]',
+        "RUN": '"thermal_deep"',
+        "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
+        "REQUIRE_POOLS": REQUIRED,
+        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
+                          '                 "freight_car": 0.7}'),
+        "LR_HEAD": "1e-5",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        # VTUAV's eleven tracking archives are 154 GiB and the disk is not.
+        # The pool names the ~40 000 frames it wants, so only those come out.
+        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "METHOD": '"finetune"',
+    },
+    # 22's third arm, and the only line that differs from it: LoRA instead of
+    # a partial fine-tune. Same pools, same gate, same thinning, same rates,
+    # same seed, same split file -- so the two numbers differ by the method
+    # and by nothing else, which is the only thing that makes them comparable.
+    "23_thermal_deep_lora.ipynb": {
+        "MODALITIES": '["thermal"]',
+        "RUN": '"thermal_deep"',
+        "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
+        "REQUIRE_POOLS": REQUIRED,
+        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
+                          '                 "freight_car": 0.7}'),
+        "LR_HEAD": "1e-5",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "METHOD": '"lora"',
     },
 }
 
@@ -127,6 +162,8 @@ DRIVE_MY    = "/content/drive/MyDrive"
 EVAL_DRAWN  = "kust4k"
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = []
+REQUIRE_POOLS = {{REQUIRE_POOLS}}
+CLASS_WEIGHTS = {{CLASS_WEIGHTS}}
 POOL_ROLE   = "all"
 POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
                "aerovis_heldout": "eval"}
@@ -135,6 +172,7 @@ POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
+VTUAV_VIS_PARTS = []
 
 IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
                "aerovis_train": "/content/data/AeroVIS",
@@ -142,6 +180,8 @@ IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
 KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
+
+POOL_ARCHIVES = {{POOL_ARCHIVES}}
 
 SOURCE_ZIPS = [
     ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
@@ -153,9 +193,10 @@ IMAGES = [
     ["dronevehicle", "dronevehicle", "DroneVehicle", ["train"]],
     ["kust4k",       "kust4k",       "Kust4K",       ["tir", "labels", "rgb"]],
     ["visdrone",     "visdrone",     "VisDrone",     []],
-    ["segfly_rgb",   "",             "SegFly",       []],
+    ["segfly_rgb",   "segfly_rgb",   "SegFly_RGB",   []],
     ["segfly",       "",             "SegFly",       []],
     ["vtuav",        "vtuav_track",  "VTUAV",        VTUAV_PARTS],
+    ["vtuav_vis",    "vtuav_vis",    "VTUAV_VIS",    VTUAV_VIS_PARTS],
     ["kaggle",       "",             "kaggle_uav_thermal", []],
     ["aerovis",      "",             "AeroVIS",      []],
 ]
@@ -170,6 +211,13 @@ FILL           = 0.25
 JITTER         = 32
 PROMPT         = "mix"
 PROMPT_JITTER  = 0.3
+METHOD         = {{METHOD}}
+LORA_R         = 16
+LORA_ALPHA     = 0
+LORA_DROPOUT   = 0.0
+ANCHOR_WEIGHT  = 0.0
+BLEND_ALPHAS   = []
+MAX_REGRESSION = 0.15
 EPOCHS         = [1, 3]
 STEPS          = 400
 VAL_BATCHES    = 24
@@ -178,6 +226,9 @@ BATCH_CEILING  = 512
 BATCH_RESERVE  = 0.12
 LR_REFERENCE   = 16
 LR_SCALE_MAX   = 4.0
+LR_HEAD        = {{LR_HEAD}}
+LR_NECK        = {{LR_NECK}}
+LR_TRUNK       = {{LR_TRUNK}}
 SEED           = 0
 SCORE_PROMPTS  = ["box", "point"]
 PANEL_CASES    = 6
@@ -279,11 +330,15 @@ assert Path(sam2.__file__).resolve().parent.parent == Path(EDGETAM).resolve(), (
 BASE_CKPT = str(Path(EDGETAM) / "checkpoints" / "edgetam.pt")
 assert Path(BASE_CKPT).is_file(), "edgetam.pt did not download"
 
+assert METHOD in ("finetune", "lora"), f"METHOD is finetune or lora, not {METHOD!r}"
+if METHOD != "finetune":
+    MIRROR_DIR = f"{MIRROR_DIR.rstrip('/')}_{METHOD}"
 for _dir in (POOL_ROOT, DATA_ROOT, WORK, MIRROR_DIR,
              str(Path(WORK) / "index"), str(Path(REPO_DIR) / "checkpoints")):
     Path(_dir).mkdir(parents=True, exist_ok=True)
 INDEX_DIR = str(Path(WORK) / "index")
-CHECKPOINT = str(Path(REPO_DIR) / "checkpoints" / f"edgetam_pool_{RUN}_{SIZE}.pt")
+TAG = RUN if METHOD == "finetune" else f"{RUN}_{METHOD}"
+CHECKPOINT = str(Path(REPO_DIR) / "checkpoints" / f"edgetam_pool_{TAG}_{SIZE}.pt")
 
 _props = torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None
 VRAM = round(_props.total_memory / 2 ** 30, 1) if _props else 0.0
@@ -306,7 +361,16 @@ print(NOTEBOOK, STAMP, "| repo:", _want,
       "| OK" if _want == STAMP else "| STALE, re-open from the repo")
 print(_props.name if _props else "no GPU", VRAM, "GiB |", WORKERS, "loader threads")
 print("run:", RUN, "| modalities:", MODALITIES, "| checkpoint ->", CHECKPOINT)
+print("method:", METHOD, f"(r={LORA_R})" if METHOD == "lora" else "",
+      "| anchor weight:", ANCHOR_WEIGHT,
+      "| blend sweep:", BLEND_ALPHAS or "off")
 print("stage B only: no stage A, no distillation, base =", BASE_CKPT)
+if ANCHOR_WEIGHT:
+    print("   the anchor is the model this run starts from, which without a "
+          "stage A is stock EdgeTAM: the loss gains a term for how far the "
+          "encoder's features travel from it, which is what holds down the "
+          "instances stock already handled. It costs one extra frozen encoder "
+          "pass per batch.")
 ''')
 
 
@@ -325,8 +389,9 @@ print("stage B only: no stage A, no distillation, base =", BASE_CKPT)
 # frames cannot be trained on while that set is the grade.
 
 code('''
+from src.training.pool import RECORD_FILE
 from src.training.pool_reader import (acceptance, discover_pools,
-                                      group_records, link_pool)
+                                      extract_frames, group_records, link_pool)
 
 _done = Path(POOL_ROOT) / ".unpacked"
 _done.mkdir(parents=True, exist_ok=True)
@@ -459,7 +524,7 @@ if EVAL_DRAWN:
 else:
     EVAL_ROOT = ""
 
-def unpack(archive, target, label="", frames="all"):
+def unpack(archive, target, label=""):
     """Every member the archive can still give, one at a time.
 
     `extractall` stops at the first bad member and leaves the rest on the
@@ -467,18 +532,11 @@ def unpack(archive, target, label="", frames="all"):
     enough that one corrupt JPEG out of seventy thousand must not cost the
     other sixty-nine thousand. Already-extracted members are skipped, so this
     is also the resume path.
-
-    `frames` is the same choice `fetch` takes, and it is here because this is
-    the *fallback* path: a VTUAV part unpacked whole is 16 GiB of which one
-    frame in ten is ever looked up, so the retry has to keep the same tenth
-    the download would have kept or it fills the disk instead of the gap.
     """
-    from tools.fetch_datasets import tracked_members
-
     bad, taken = [], 0
+    Path(target).mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as handle:
-        members = (tracked_members(handle, "both") if frames == "tracked"
-                   else handle.namelist())
+        members = handle.namelist()
         for member in members:
             landing = Path(target) / member
             if landing.exists() and (landing.is_dir() or landing.stat().st_size):
@@ -495,18 +553,80 @@ def unpack(archive, target, label="", frames="all"):
         print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
     return bad
 
+_DONE = Path(DATA_ROOT) / ".unpacked"
+_DONE.mkdir(parents=True, exist_ok=True)
+_PICTURES = ("*.jpg", "*.jpeg", "*.png")
+
+def on_disk(root):
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    return sum(1 for _glob in _PICTURES for _ in root.rglob(_glob))
+
+def complete(archive, target, mark):
+    """Whether `target` already holds every frame `archive` carries.
+
+    Answered for a staged archive before anything is unpacked, and again for
+    each part of a dataset whose archives are all on this disk: an archive
+    the tree is short of is walked member by member, which finishes what an
+    earlier run left behind instead of reading it as done.
+
+    "Some jpgs are under the root" is the check this used to make, and it is
+    the check that let a quarter-extracted DroneVehicle look finished to every
+    run after the one a bad CRC stopped -- the pools then lost 9 859 of 13 098
+    frames to `no_image` and nothing said why. Counting the archive's own
+    image members against the tree answers the question the jpg probe was
+    standing in for, and costs one central-directory read.
+    """
+    if (_DONE / mark).is_file():
+        return True
+    try:
+        with zipfile.ZipFile(archive) as handle:
+            want = sum(1 for _m in handle.namelist()
+                       if _m.lower().endswith((".jpg", ".jpeg", ".png")))
+    except Exception:
+        return False
+    if want and on_disk(target) >= want:
+        (_DONE / mark).touch()
+        return True
+    return False
+
 for _archive, _folder in SOURCE_ZIPS:
     _target = Path(DATA_ROOT) / _folder
     if not Path(_archive).is_file():
         print("not there, skipping:", _archive)
         continue
-    if _target.is_dir() and any(
-            any(_target.rglob(_glob)) for _glob in ("*.jpg", "*.png")):
+    if complete(_archive, _target, _folder + ".zip.done"):
         print("already on disk:", _target)
         continue
     print("unzipping", _archive,
           round(Path(_archive).stat().st_size / 2 ** 30, 2), "GiB ->", _target)
-    unpack(_archive, _target, _folder)
+    if not unpack(_archive, _target, _folder):
+        (_DONE / (_folder + ".zip.done")).touch()
+
+for _pool, _folder in POOL_ARCHIVES.items():
+    if _pool not in POOLS:
+        print(f"!! {_pool} is not a pool here -- known: {sorted(POOLS)}")
+        continue
+    _key, _recipe, _root, _parts = images_for(_pool)
+    _shelf = (sorted(Path(_folder).glob("*.zip")) if Path(_folder).is_dir()
+              else [Path(_folder)])
+    if _parts:
+        _shelf = [_a for _a in _shelf if _a.stem in _parts]
+    _records = sorted(Path(POOLS[_pool]).rglob(RECORD_FILE))
+    print(f"\\n{_pool}: {len(_records)} records against {len(_shelf)} archives "
+          f"({sum(_a.stat().st_size for _a in _shelf) / 2 ** 30:.1f} GiB) "
+          f"-> {_root}")
+    _report = extract_frames(_records, _shelf, _root)
+    print(f"   asked {_report['asked']}, extracted {_report['taken']}, "
+          f"already there {_report['already']}, missing {_report['missing']}, "
+          f"unreadable {len(_report['unreadable'])}")
+    for _name, _took in sorted(_report["by_archive"].items()):
+        if _took:
+            print(f"      {_name:<24}{_took:>8} frames")
+    if _report["missing"]:
+        print(f"   !! {_report['missing']} frames are in no archive listed "
+              f"here -- name the missing parts in POOL_ARCHIVES")
 
 if FETCH:
     from tools.fetch_datasets import fetch, staged
@@ -515,33 +635,48 @@ if FETCH:
         if not _recipe or (_recipe == "vtuav_track" and not _parts):
             print("not fetched:", _root, "-- no recipe, or no parts named. "
                   "SegFly is a 761-shard parquet plan, VTUAV is ~16 GiB per "
-                  "part to download and Kaggle sets come through kagglehub "
-                  "below, so none of them is downloaded on a whim. Stage it, "
-                  "name its parts in cell 1 (16, 17, 21 and 22 harvested "
-                  "from train_ST_* and train_LT_*), or let the pool drop. "
-                  "VTUAV lands as `tracked` -- one frame in ten, both halves "
-                  "-- so eight parts cost ~6 GiB of disk rather than ~128.")
+                  "part and Kaggle sets come through kagglehub below, so none "
+                  "of them is downloaded on a whim. Stage it, name its parts "
+                  "in cell 1, or let the pool drop.")
             continue
-        _frames = "tracked" if _recipe == "vtuav_track" else "all"
+        _mark = Path(_root).name + ".fetch.done"
+        if (_DONE / _mark).is_file():
+            print("already on disk:", _root)
+            continue
+        _search = (STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
+                   DRIVE_MY, "/content/staging")
+        _staged = {_p: staged(_p, _search) for _p in (sorted(_parts) or [_recipe])}
+        if all(_c is not None for _c in _staged.values()):
+            print("staged already:", _root, "-- counting each archive against "
+                  "the tree rather than downloading it")
+            _bad, _short = [], False
+            for _part, _copy in sorted(_staged.items()):
+                if complete(_copy, _root, f"{Path(_root).name}.{_part}.done"):
+                    print("already on disk:", _copy.name, "->", _root)
+                    continue
+                _short = True
+                print("unpacking staged", _copy.name, "->", _root)
+                _bad += unpack(_copy, Path(_root), _part)
+            if not _bad and not _short:
+                (_DONE / _mark).touch()
+            continue
         if Path(_root).is_dir() and any(
                 any(Path(_root).rglob(_glob)) for _glob in ("*.jpg", "*.png")):
-            print("already on disk:", _root)
+            print("already on disk:", _root, "-- staged by hand, not checked")
             continue
         try:
             fetch(_recipe, Path(_root), tuple(sorted(_parts)) or None,
-                  frames=_frames, stage=STAGE_DIR,
-                  staging=(STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
-                           DRIVE_MY, "/content/staging"))
+                  stage=STAGE_DIR,
+                  staging=_search)
+            (_DONE / _mark).touch()
         except Exception as _fetch_error:
             print("!!", _recipe, "->", _root, "failed:", _fetch_error)
-            _search = (STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
-                       DRIVE_MY, "/content/staging")
             for _part in sorted(_parts) or [_recipe]:
                 _copy = staged(_part, _search)
                 if _copy is None:
                     continue
                 print("   retrying", _copy.name, "member by member")
-                unpack(_copy, Path(_root), _part, frames=_frames)
+                unpack(_copy, Path(_root), _part)
 
 for _pool, _slug in KAGGLE_DATASETS.items():
     if not any(_row["pool"] == _pool for _row in PLAN):
@@ -578,13 +713,13 @@ subprocess.run(["df", "-h", "/content"], check=False)
 code('''
 import numpy as np
 
-from src.training.aerial import (InstanceGates, sample_windows, save_splits,
-                                 split_index)
+from src.training.aerial import (InstanceGates, rebalance, sample_windows,
+                                 save_splits, split_index)
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
 from src.training.pool_reader import (SKIP_REASONS, exclude_frames, frame_keys,
                                       index_pool, load_pool_index, parse_pool,
-                                      save_pool_index, spread)
+                                      save_pool_index, spread, why_no_image)
 from tools.train_encoder import build_indexes
 
 GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE, max_area=MAX_AREA,
@@ -620,12 +755,21 @@ for _row in PLAN:
     _request = parse_pool(_flag, GATES)
     _cache = Path(INDEX_DIR) / f"{_request.cache_name}.json"
     try:
+        _part = None
         if _cache.is_file():
             _part = load_pool_index(_cache, GATES, _row["role"])
-        else:
+            _short = {_k: _v for _k, _v in (_part[0].rejects if _part else {}).items()
+                      if _k in ("no_image", "unreadable_image", "shape_mismatch")}
+            if _short:
+                print(f"   {_row['pool']}: the cached index was built while "
+                      f"{sum(_short.values())} frame(s) were unreadable "
+                      f"({_short}), so it is provisional -- indexing again in "
+                      f"case the download it was waiting on has finished")
+                _part = None
+        if _part is None:
             _part = index_pool(_request.pool, _request.images, _request.modality,
                                _row["role"], GATES, _request.name,
-                               workers=WORKERS, progress=progress)
+                               workers=WORKERS, progress=progress, report=print)
             save_pool_index(_cache, _part)
     except Exception as _index_error:
         FAILED.append((_row["pool"], f"{type(_index_error).__name__}: "
@@ -661,7 +805,38 @@ for _row in PLAN:
 
 for _pool, _why in FAILED:
     print(f"{_pool:<28}unusable  {_why}")
+    if "no_image" not in _why:
+        continue
+    _row = next(r for r in PLAN if r["pool"] == _pool)
+    _report = why_no_image(_row["dir"], _row["images"])
+    print(f"    recorded {_report['recorded'][0]['image']}")
+    print(f"    -> {_report['verdict']}")
+    if _report["extensions"]:
+        print(f"    {_report['root']} holds {_report['files_under_root']} "
+              f"files {_report['extensions']}")
 assert POOL_FLAGS, "no pool resolved its frames -- check the IMAGES roots above"
+
+_have = {}
+for _row in PLAN:
+    if any(_row["dir"] in _f for _f in POOL_FLAGS):
+        _have[_row["pool"]] = sum(len(e.instances) for e in INDEX
+                                  if e.source
+                                  and e.source.spec.name == f"pool/{_row['pool']}")
+_short = {_name: (_have.get(_name, 0), _least)
+          for _name, _least in REQUIRE_POOLS.items()
+          if _have.get(_name, 0) < _least}
+if REQUIRE_POOLS:
+    print(f"\\n{'required pool':<28}{'instances':>11}{'least':>9}  state")
+    for _name, _least in REQUIRE_POOLS.items():
+        _got = _have.get(_name, 0)
+        print(f"{_name:<28}{_got:>11}{_least:>9}  "
+              f"{'ok' if _got >= _least else 'MISSING'}")
+assert not _short, (
+    f"this run is defined by pools that did not arrive: {_short} (got, least). "
+    f"Read the unusable list above -- a `no_image` there means the frames are "
+    f"not on disk, and POOL_ARCHIVES in cell 1 is how a pool takes them out of "
+    f"an archive Drive already holds. Training without them would answer a "
+    f"different question than the one this notebook is for.")
 
 assert not CUTS or any(CUTS.values()), (
     f"every pool built from {EVAL_DRAWN} ({sorted(CUTS)}) shares none of the "
@@ -693,6 +868,30 @@ COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),
            "--per-image", str(PER_IMAGE), "--max-instances", str(MAX_INSTANCES),
            "--min-area", str(MIN_AREA), "--min-side", str(MIN_SIDE),
            "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED)]
+
+if CLASS_WEIGHTS:
+    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)
+    print(f"\\nthinning: {_balance['frames']['before']} frames / "
+          f"{_balance['instances']['before']} instances -> "
+          f"{_balance['frames']['after']} / {_balance['instances']['after']}")
+    _was_total = max(_balance["instances"]["before"], 1)
+    _now_total = max(_balance["instances"]["after"], 1)
+    print(f"{'class':<24}{'was':>10}{'share':>8}{'now':>10}{'share':>8}")
+    for _name, (_was, _now) in list(_balance["by_class"].items())[:12]:
+        print(f"{_name:<24}{_was:>10}{_was / _was_total:>8.1%}"
+              f"{_now:>10}{_now / _now_total:>8.1%}")
+    _matched = [_n for _n in CLASS_WEIGHTS if _n not in _balance["unmatched"]]
+    assert _matched, (
+        f"CLASS_WEIGHTS names {_balance['unmatched']} and no pool here carries "
+        f"any of them, so the thinning did nothing. The names are the pools' "
+        f"own -- read the class table cell 2 printed and use those.")
+    if _balance["unmatched"]:
+        print(f"   !! no pool carries {_balance['unmatched']} -- those weights "
+              f"thinned nothing. Not fatal, {_matched} did apply, but a "
+              f"misspelt class looks exactly like a class that is already rare.")
+    print("   thinned per instance, not per frame: dropping a frame that holds "
+          "one pedestrian beside six cars would throw the pedestrian away "
+          "too. A frame left with nothing is dropped.")
 
 SPLITS = split_index(INDEX, seed=SEED)
 
@@ -824,15 +1023,35 @@ for _prompt, _row in BEFORE.items():
 code('''
 import time
 _started = time.time()
+_method_flags = ["--method", METHOD]
+if METHOD == "lora":
+    _method_flags += ["--lora-r", str(LORA_R), "--lora-dropout", str(LORA_DROPOUT)]
+    if LORA_ALPHA:
+        _method_flags += ["--lora-alpha", str(LORA_ALPHA)]
+for _part, _rate in (("head", LR_HEAD), ("neck", LR_NECK), ("trunk", LR_TRUNK)):
+    if _rate:
+        _method_flags += [f"--lr-{_part}", str(_rate)]
+if LR_HEAD or LR_NECK or LR_TRUNK:
+    print(f"rates overridden in the encoder stage: head {LR_HEAD or 'table'}, "
+          f"neck {LR_NECK or 'table'}, trunk {LR_TRUNK or 'table'} -- "
+          f"absolute, so --lr-scale {LR_SCALE} does not touch the ones named. "
+          f"The head stage ({EPOCHS[0]} epoch) keeps its own warmup rate: it "
+          f"trains the decoder alone, and that is the stage that adapts it.")
+    if LR_TRUNK and LR_HEAD and LR_TRUNK > LR_HEAD:
+        print("   the trunk leads the head here, which inverts the shipped "
+              "table. A modality shift lives in the trunk, and the reason the "
+              "table holds it back -- a training set too small for the "
+              "features it carries -- is weaker at this size. It is still a "
+              "measurement, not a given.")
 subprocess.run(
-    [sys.executable, "tools/train_encoder.py", *COMMON,
-     "--method", "finetune", "--base", BASE_CKPT, "--out", CHECKPOINT,
+    [sys.executable, "tools/train_encoder.py", *COMMON, *_method_flags,
+     "--base", BASE_CKPT, "--out", CHECKPOINT,
      "--prompt", PROMPT, "--prompt-jitter", str(PROMPT_JITTER),
      "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),
      "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),
      "--epochs", str(EPOCHS[0]), str(EPOCHS[1]),
      "--val-batches", str(VAL_BATCHES), "--workers", str(WORKERS),
-     "--anchor-weight", "0.0", "--device", "cuda",
+     "--anchor-weight", str(ANCHOR_WEIGHT), "--device", "cuda",
      "--json", str(Path(WORK) / "run.json")], check=True)
 
 RUN_LOG = json.loads((Path(WORK) / "run.json").read_text())
@@ -847,6 +1066,95 @@ print("wall clock", round((time.time() - _started) / 60, 1), "min")
 
 
 # --------------------------------------------------------------------------
+# 5b. Trading a little of the gain for the instances it lost
+# --------------------------------------------------------------------------
+#
+# The first thermal run improved 1 222 of 1 707 held-out instances under a
+# point prompt and made 281 worse. Those 281 are instances stock EdgeTAM
+# already handled, and no amount of extra pool data removes the category: an
+# encoder that moves at all moves some of them the wrong way.
+#
+# `theta = (1 - a) * base + a * tuned` is the cheapest answer -- no retraining,
+# and the merged LoRA checkpoint has the same keys, so it applies to either
+# method. The sweep is scored on **val** and paired per instance, because the
+# question is not "is the mean higher" but "which instances did each alpha win
+# and lose"; picking alpha on the test split would be fitting the grade.
+
+code('''
+def per_instance(checkpoint, tag, prompt, split):
+    """`{instance key: IoU}` for one checkpoint, cached per tag."""
+    rows = Path(WORK) / f"rows_{tag}_{prompt}_{split}.json"
+    if not rows.is_file():
+        subprocess.run(
+            [sys.executable, "tools/eval_instances.py", *COMMON,
+             "--checkpoint", checkpoint, "--split", split, "--prompt", prompt,
+             "--batch", str(max(BATCH // 2, 1)), "--device", "cuda",
+             "--json", str(Path(WORK) / f"score_{tag}_{prompt}_{split}.json"),
+             "--per-instance", str(rows)], check=True)
+    return {r["key"]: r["iou"] for r in json.loads(rows.read_text())["rows"]}
+
+BLEND = {}
+if not BLEND_ALPHAS:
+    print("no blend sweep (BLEND_ALPHAS is empty). Set it to e.g. "
+          "[1.0, 0.8, 0.6, 0.4] to trade a little of the gain for the "
+          "held-out instances this run made worse; 1.0 is the trained "
+          "checkpoint itself and belongs in the list as the baseline.")
+else:
+    _prompt = SCORE_PROMPTS[-1]
+    _stock = per_instance(BASE_CKPT, "stock", _prompt, "val")
+    _rows = []
+    for _alpha in sorted({float(a) for a in BLEND_ALPHAS}, reverse=True):
+        _name = f"a{int(round(_alpha * 100)):03d}"
+        _path = CHECKPOINT
+        if _alpha < 1.0:
+            _path = str(Path(WORK) / f"blend_{_name}.pt")
+            if not Path(_path).is_file():
+                subprocess.run(
+                    [sys.executable, "tools/blend_checkpoints.py",
+                     "--base", BASE_CKPT, "--tuned", CHECKPOINT,
+                     "--alpha", str(_alpha), "--out", _path], check=True)
+        _scored = per_instance(_path, f"{TAG}_{_name}", _prompt, "val")
+        _shared = sorted(set(_scored) & set(_stock))
+        assert _shared, ("the two scorings share no instance key -- they were "
+                         "run on different splits or different flags")
+        _deltas = [_scored[_k] - _stock[_k] for _k in _shared]
+        _lost = [_d for _d in _deltas if _d < -0.05]
+        _rows.append({
+            "alpha": _alpha, "path": _path, "instances": len(_shared),
+            "mean_iou": sum(_scored[_k] for _k in _shared) / len(_shared),
+            "delta": sum(_deltas) / len(_deltas),
+            "better": sum(1 for _d in _deltas if _d > 0.05),
+            "worse": len(_lost),
+            "rate": len(_lost) / len(_deltas),
+            "lost": -sum(_lost) / max(len(_lost), 1)})
+
+    print(f"\\n{'alpha':>6}{'val mean IoU':>14}{'vs stock':>10}{'better':>9}"
+          f"{'worse':>8}{'worse %':>9}{'when worse':>12}")
+    for _row in _rows:
+        print(f"{_row['alpha']:>6.2f}{_row['mean_iou']:>14.4f}"
+              f"{_row['delta']:>+10.4f}{_row['better']:>9}{_row['worse']:>8}"
+              f"{_row['rate']:>8.1%}{-_row['lost']:>+12.4f}")
+    _capped = [_r for _r in _rows if _r["rate"] <= MAX_REGRESSION]
+    BLEND = max(_capped or _rows, key=lambda _r: _r["mean_iou"])
+    print(f"\\nkept alpha {BLEND['alpha']:.2f}: the highest val IoU among the "
+          f"alphas whose regression rate is at or under {MAX_REGRESSION:.0%}"
+          if _capped else
+          f"\\nkept alpha {BLEND['alpha']:.2f}: no alpha in the sweep keeps "
+          f"the regression rate at or under {MAX_REGRESSION:.0%}, so this is "
+          f"the best val IoU of the whole sweep -- add a smaller alpha")
+    print("   `worse` counts instances that lost more than 0.05 IoU against "
+          "stock, and `when worse` is how much they lost on average. An alpha "
+          "below 1 gives most of them back for a fraction of the gain, which "
+          "is the trade a deployment usually wants.")
+    if BLEND["alpha"] < 1.0:
+        CHECKPOINT, TAG = BLEND["path"], f"{TAG}_a{int(round(BLEND['alpha'] * 100)):03d}"
+        shutil.copy(CHECKPOINT, Path(MIRROR_DIR) / Path(CHECKPOINT).name)
+        print("   everything below now scores the blend, which is what would "
+              "ship:", CHECKPOINT)
+''')
+
+
+# --------------------------------------------------------------------------
 # 6. The after picture, on the same instances
 # --------------------------------------------------------------------------
 #
@@ -855,7 +1163,7 @@ print("wall clock", round((time.time() - _started) / 60, 1), "min")
 # experiment can be compared on.
 
 code('''
-AFTER = {p: score_to(CHECKPOINT, RUN, p) for p in SCORE_PROMPTS}
+AFTER = {p: score_to(CHECKPOINT, TAG, p) for p in SCORE_PROMPTS}
 
 print(f"{'prompt':<8}{'':<10}{'mean IoU':>10}{'>=.50':>8}{'>=.75':>8}"
       f"{'small':>10}{'larger':>9}")
@@ -1036,6 +1344,13 @@ VERDICT = {
     "train_windows_by_source": TRAIN.sources,
     "test_windows_by_source": TEST.sources,
     "gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,
+    "method": METHOD, "anchor_weight": ANCHOR_WEIGHT,
+    "rates": {"head": LR_HEAD, "neck": LR_NECK, "trunk": LR_TRUNK,
+              "scale": LR_SCALE},
+    "class_weights": CLASS_WEIGHTS, "require_pools": REQUIRE_POOLS,
+    "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT}
+            if METHOD == "lora" else {},
+    "blend": BLEND, "checkpoint": CHECKPOINT,
     "roles": {_row["pool"]: _row["role"] for _row in PLAN},
     "modalities": {_row["pool"]: _row["modality"] for _row in PLAN},
     "limits": POOL_LIMITS,
@@ -1062,7 +1377,14 @@ print(f"  {sum(len(v) for v in SPLITS.values())} frames, "
       f"{sum(len(s.instances) for s in TRAIN.samples)} instances")
 for _source, _count in TRAIN.sources.items():
     print(f"    {_source:<36}{_count:>8} windows")
-print(f"  base {Path(BASE_CKPT).name}, stage A: none")
+_how = [f"method {METHOD}"]
+if METHOD == "lora":
+    _how.append(f"r={LORA_R}")
+if ANCHOR_WEIGHT:
+    _how.append(f"anchor {ANCHOR_WEIGHT}")
+if BLEND:
+    _how.append(f"blended at alpha {BLEND['alpha']:.2f}")
+print(f"  base {Path(BASE_CKPT).name}, stage A: none, " + ", ".join(_how))
 print(_line)
 print("DID IT HELP")
 for _prompt in SCORE_PROMPTS:

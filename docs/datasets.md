@@ -424,7 +424,7 @@ demek için yeterli değil.
 Ardışık parça almak iki kategorilik bir havuz demek. Defterlerin `ARCHIVES`
 varsayılanı bu yüzden bir **serpme**: `ST_001 + ST_005 + ST_008 + ST_011` =
 47,4 GiB → ~12 800 etiketli kare, animal/bike/bus/car/elebike/pedestrian/truck.
-LT yarısı zaten yalnız dört parça, o yüzden 21 ve 22 hepsini alıyor ve soru
+LT yarısı zaten yalnız dört parça, o yüzden 24 ve 25 hepsini alıyor ve soru
 ortaya çıkmıyor.
 
 Train yarısının tamamı **214,5 GiB** (11 ST + 4 LT parça). `fetch_datasets.py`
@@ -467,7 +467,7 @@ sonunda, yani saniyeler.
 
 VTUAV'ın çizilmiş instance maskeleri **ayrı** bir yayın: VIS bölümü, 100 video.
 Takip bölümünün 500 dizisi (ST + LT) kare başına tek bir `x y w h` taşıyor ve
-başka hiçbir şey. 16/17/21/22'nin var olma sebebi tam olarak bu: kutuyu maskeye
+başka hiçbir şey. 16/17/24/25'in var olma sebebi tam olarak bu: kutuyu maskeye
 çeviren şey öğretmen.
 
 ## DroneVehicle — tam sayım (evet, kullanıyoruz; evet, kutu)

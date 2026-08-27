@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate notebooks 16, 17, 21 and 22: VTUAV's halves and splits, one pool each.
+"""Generate notebooks 16, 17, 24 and 25: VTUAV's halves and splits, one pool each.
 
 Same shape as 15 -- code cells only, no prose, no comments -- and the same
 generator pattern as `build_pool_notebooks.py`: one file, four variants, so no
 two of them can drift apart by an edit that only landed on one.
 
 **Four, because the tracking download is two splits.** 16 and 17 harvest the
-short-term parts; 21 and 22 harvest the long-term ones, into pools of their
+short-term parts; 24 and 25 harvest the long-term ones, into pools of their
 own (`vtuav_lt_rgb`, `vtuav_lt_thermal`) rather than into 16 and 17's. Three
 reasons, none of them tidiness:
 
@@ -69,7 +69,7 @@ of one modality, which turns a 15.4 GiB archive into roughly 0.8 GiB on disk.
 object kinds: ST_001 is animal/bike/bus, ST_005 car/elebike, ST_008 pedestrian
 (24 of 28 sequences), ST_011 car/pedestrian/truck. `ARCHIVES` ships with a
 spread rather than a run, because consecutive parts make a two-category pool.
-The long-term split is only four parts, so 21 and 22 take all of it and the
+The long-term split is only four parts, so 24 and 25 take all of it and the
 question does not arise.
 
 **Cell 2 is a probe, and it is there because of LT.** The stride -- line k of
@@ -126,12 +126,12 @@ VARIANTS = {
                   data="/content/data/VTUAV_ir",
                   mirror="/content/drive/MyDrive/edgetam-pool/vtuav_thermal",
                   extract_mode="tracked_ir", archives=ST_ARCHIVES),
-    "lt_rgb": Variant(key="lt_rgb", path="notebooks/21_vtuav_lt_rgb_pool.ipynb",
+    "lt_rgb": Variant(key="lt_rgb", path="notebooks/24_vtuav_lt_rgb_pool.ipynb",
                       modality="rgb", pool="vtuav_lt_rgb",
                       data="/content/data/VTUAV_lt_rgb",
                       mirror="/content/drive/MyDrive/edgetam-pool/vtuav_lt_rgb",
                       extract_mode="tracked_rgb", archives=LT_ARCHIVES),
-    "lt_ir": Variant(key="lt_ir", path="notebooks/22_vtuav_lt_thermal_pool.ipynb",
+    "lt_ir": Variant(key="lt_ir", path="notebooks/25_vtuav_lt_thermal_pool.ipynb",
                      modality="ir", pool="vtuav_lt_thermal",
                      data="/content/data/VTUAV_lt_ir",
                      mirror="/content/drive/MyDrive/edgetam-pool/vtuav_lt_thermal",

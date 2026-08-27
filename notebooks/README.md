@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty-two notebooks, meant for Colab. Everything they orchestrate lives in
+Twenty-five notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -26,8 +26,11 @@ recipe, not the implementation.
 | 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
 | 19 | `19_thermal_stage_b_pool.ipynb` | stage B trained on the **thermal** mask pools 13-18 produced, from stock EdgeTAM with no stage A — plus a stock-vs-trained score and a before/after panel | the pools staged under `MyDrive/edgetam-pool`, and the frames they were harvested from (a pool holds masks, not pixels) |
 | 20 | `20_thermal_stage_b_pool_rgb.ipynb` | the same run with the **RGB** pools mixed into the same batches — the one variable | the same, plus the RGB pools' frames |
-| 21 | `21_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive |
-| 22 | `22_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 21 on a second runtime |
+| 21 | `21_pool_data_readiness.ipynb` | no training: what every pool recorded, which of its frames are on disk, why the rest are not, and the exact `--pool` flags a run would take | the pools under `MyDrive/edgetam-pool`; it fetches only what `FETCH` names |
+| 22 | `22_thermal_deep.ipynb` | thermal only, every thermal pool required to be present before a step is taken, the vehicle classes thinned, and the rate table inverted so the trunk learns the modality | the pools, plus VTUAV's archives in `MyDrive/VTUAV` (only the frames the pool names come out of them) |
+| 23 | `23_thermal_deep_lora.ipynb` | 22 with `METHOD = "lora"` and nothing else changed — the A/B for the method | the same |
+| 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive |
+| 25 | `25_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 24 on a second runtime |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -112,8 +115,8 @@ sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
 
-**16, 17, 21 and 22 are one generator and two splits.** All four come out of
-`tools/build_vtuav_pool_notebooks.py`. 16/17 take the short-term parts, 21/22
+**16, 17, 24 and 25 are one generator and two splits.** All four come out of
+`tools/build_vtuav_pool_notebooks.py`. 16/17 take the short-term parts, 24/25
 the long-term ones, and each writes a pool of its own — `vtuav_rgb`,
 `vtuav_thermal`, `vtuav_lt_rgb`, `vtuav_lt_thermal`. Separate pools rather than
 four archives in one list, for three reasons: a short-term pool already

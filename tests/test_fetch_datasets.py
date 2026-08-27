@@ -175,6 +175,39 @@ class TestExtract(unittest.TestCase):
             self.assertEqual(
                 len(list((root / "out").glob(SPECS["kust4k"].thermal))), 2)
 
+    def test_one_bad_member_does_not_cost_the_rest_of_the_archive(self):
+        # A Drive copy of DroneVehicle's train.zip failed its CRC on one JPEG
+        # and `extractall` abandoned the other 66 974 members, which reached
+        # the pools as `no_image` on three quarters of their frames.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "train.zip"
+            with zipfile.ZipFile(archive, "w") as handle:
+                for name in ("a.jpg", "bad.jpg", "c.jpg"):
+                    handle.writestr(f"train/{name}", b"x" * 32)
+            raw = bytearray(archive.read_bytes())
+            spot = raw.index(b"x" * 32, raw.index(b"bad.jpg"))
+            raw[spot] = ord("y")             # the stored bytes, not the CRC
+            archive.write_bytes(bytes(raw))
+
+            written = extract(archive, root / "out", quiet=True)
+            self.assertEqual(written, 2)
+            for name in ("a.jpg", "c.jpg"):
+                self.assertTrue((root / "out" / "train" / name).is_file())
+
+    def test_an_archive_that_gives_nothing_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "train.zip"
+            with zipfile.ZipFile(archive, "w") as handle:
+                handle.writestr("train/only.jpg", b"x" * 32)
+            raw = bytearray(archive.read_bytes())
+            raw[raw.index(b"x" * 32)] = ord("y")
+            archive.write_bytes(bytes(raw))
+
+            with self.assertRaises(RuntimeError):
+                extract(archive, root / "out", quiet=True)
+
 
 class TestStagedCopy(unittest.TestCase):
     """The escape hatch from Drive's download quota.

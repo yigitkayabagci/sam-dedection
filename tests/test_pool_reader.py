@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -34,7 +35,9 @@ from src.training.pool import RECORD_FILE  # noqa: E402
 from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
                                       index_pool, link_pool, load_pool_index,
                                       parse_pool, pool_datasets,
-                                      save_pool_index, store_areas)
+                                      extract_frames, save_pool_index,
+                                      store_areas, wanted_frames,
+                                      why_no_image)
 
 try:
     import cv2
@@ -494,6 +497,136 @@ class PoolIndexTest(unittest.TestCase):
         self.assertIn("demo", str(caught.exception))
 
 
+@unittest.skipIf(cv2 is None, "OpenCV is needed to write the frames")
+class WhyNoImageTest(unittest.TestCase):
+    """`no_image` on every record has three different fixes, and the report has
+    to say which one rather than leaving a re-index to find out."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "pool"
+        self.shape = (40, 60)
+        self.image = write_image(self.root / "elsewhere" / "seq" / "000000.png",
+                                 *self.shape)
+        write_frame(self.pool, "seq/000000", self.image, self.shape,
+                    [("car", (2, 2, 20, 20), blob(self.shape, (2, 2, 20, 20)))])
+
+    def test_a_root_that_is_not_there_says_so(self):
+        report = why_no_image(self.pool / "demo", self.root / "never_fetched")
+        self.assertFalse(report["root_exists"])
+        self.assertIn("never fetched", report["verdict"])
+
+    def test_a_root_holding_a_different_part_of_the_set_says_so(self):
+        other = self.root / "other"
+        write_image(other / "seq" / "999999.png", *self.shape)
+        report = why_no_image(self.pool / "demo", other)
+        self.assertTrue(report["root_exists"])
+        self.assertEqual(report["files_under_root"], 1)
+        self.assertIn("different part of the set", report["verdict"])
+        self.assertEqual(report["extensions"], {".png": 1})
+
+    def test_the_frame_being_there_under_another_prefix_is_named(self):
+        # A tree that gained a level: no suffix of the recorded path matches,
+        # which is what the by-name fallback exists for. Suffix matching alone
+        # still misses it, and that is the case the report has to describe.
+        moved = self.root / "moved" / "train" / "images" / "000000.png"
+        write_image(moved, *self.shape)
+        # The harvest runtime's own copy is gone, which is the situation this
+        # runs in: at depth 0 the recorded path is absolute and joinpath keeps
+        # it, so while it exists the relocator resolves to it and never misses.
+        self.image.unlink()
+        self.assertIsNone(
+            Relocator(self.root / "moved", by_name=False)(self.image))
+        self.assertEqual(Relocator(self.root / "moved")(self.image), moved)
+        report = why_no_image(self.pool / "demo", self.root / "moved")
+        self.assertIn("000000.png", report["same_name_here"][0])
+        self.assertIn("one level off", report["verdict"])
+
+    def test_a_pool_with_no_records_is_named_as_that(self):
+        report = why_no_image(self.root / "empty", self.root)
+        self.assertEqual(report["records"], 0)
+        self.assertIn("pool zip is missing", report["verdict"])
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed to write the frames")
+class ExtractFramesTest(unittest.TestCase):
+    """A pool is a manifest: 214 GiB of archives to reach a few percent of it
+    is a bill nobody has to pay."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "pool"
+        self.shape = (24, 32)
+        self.box = (2, 2, 12, 12)
+        # Two modalities keeping the same frame name, which is what makes a
+        # basename match unsafe and a tail match necessary.
+        self.wanted = ["/content/data/VTUAV/train_ST_008/car_01/ir/000000.jpg",
+                       "/content/data/VTUAV/train_ST_008/car_01/ir/000010.jpg"]
+        for index, recorded in enumerate(self.wanted):
+            write_frame(self.pool, f"car_01/{index:06d}", Path(recorded),
+                        self.shape,
+                        [("car", self.box, blob(self.shape, self.box))])
+
+    def archive(self, name, members):
+        path = self.root / name
+        with zipfile.ZipFile(path, "w") as handle:
+            for member in members:
+                handle.writestr(member, b"x" * 16)
+        return path
+
+    def records(self):
+        return sorted((self.pool / "demo").rglob(RECORD_FILE))
+
+    def test_only_the_frames_the_pool_names_come_out(self):
+        archive = self.archive("train_ST_008.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg",
+            "train_ST_008/car_01/ir/000020.jpg",     # not in the pool
+            "train_ST_008/car_01/rgb/000000.jpg",    # other modality, same name
+        ])
+        out = self.root / "out"
+        report = extract_frames(self.records(), [archive], out)
+        self.assertEqual(report["asked"], 2)
+        self.assertEqual(report["taken"], 2)
+        self.assertEqual(report["missing"], 0)
+        taken = sorted(p.relative_to(out).as_posix()
+                       for p in out.rglob("*") if p.is_file())
+        self.assertEqual(taken, ["train_ST_008/car_01/ir/000000.jpg",
+                                 "train_ST_008/car_01/ir/000010.jpg"])
+
+    def test_a_frame_no_archive_holds_is_counted_as_missing(self):
+        archive = self.archive("part.zip", ["train_ST_008/car_01/ir/000000.jpg"])
+        report = extract_frames(self.records(), [archive], self.root / "out")
+        self.assertEqual(report["taken"], 1)
+        self.assertEqual(report["missing"], 1)
+
+    def test_a_second_run_takes_nothing_and_loses_nothing(self):
+        archive = self.archive("part.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg"])
+        out = self.root / "out"
+        extract_frames(self.records(), [archive], out)
+        again = extract_frames(self.records(), [archive], out)
+        self.assertEqual(again["taken"], 0)
+        self.assertEqual(again["already"], 2)
+        self.assertEqual(again["missing"], 0)
+
+    def test_the_report_says_which_archive_carried_what(self):
+        first = self.archive("a.zip", ["train_ST_008/car_01/ir/000000.jpg"])
+        second = self.archive("b.zip", ["train_ST_008/car_01/ir/000010.jpg"])
+        report = extract_frames(self.records(), [first, second], self.root / "out")
+        self.assertEqual(report["by_archive"], {"a.zip": 1, "b.zip": 1})
+
+    def test_wanted_frames_keys_by_basename(self):
+        wanted = wanted_frames(self.records())
+        self.assertEqual(sorted(wanted), ["000000.jpg", "000010.jpg"])
+        self.assertEqual(wanted["000000.jpg"], {self.wanted[0]})
+
+
 class StoreAreasTest(unittest.TestCase):
     def test_areas_match_a_decoded_mask(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -544,6 +677,43 @@ class RelocatorTest(unittest.TestCase):
         here = self.root / "x.jpg"
         here.write_bytes(b"")
         self.assertEqual(Relocator(None)(here), here)
+
+    def test_a_tree_that_gained_a_level_is_found_by_name(self):
+        # HIT-UAV's archive nests under a branch-named folder; a pool
+        # harvested from a copy without it records the shallower path, and
+        # stripping leading components can never put the level back.
+        local = self.root / "HIT-UAV-main" / "normal_json" / "train"
+        local.mkdir(parents=True)
+        (local / "0_01.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        found = relocate("/content/data/HIT_UAV/normal_json/train/0_01.jpg")
+        self.assertEqual(found, local / "0_01.jpg")
+        self.assertEqual((relocate.found_by_name, relocate.misses), (1, 0))
+
+    def test_the_longest_matching_tail_picks_between_two_of_a_name(self):
+        # DroneVehicle keeps one file name per frame in each modality.
+        for folder in ("trainimg", "trainimgr"):
+            (self.root / "train" / folder).mkdir(parents=True)
+            (self.root / "train" / folder / "04991.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        found = relocate("/data/DroneVehicle/train/trainimgr/04991.jpg")
+        self.assertEqual(found, self.root / "train" / "trainimgr" / "04991.jpg")
+
+    def test_a_name_two_files_share_equally_is_refused_not_guessed(self):
+        for folder in ("a", "b"):
+            (self.root / folder).mkdir(parents=True)
+            (self.root / folder / "0.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        self.assertIsNone(relocate("/data/somewhere/else/0.jpg"))
+        self.assertEqual((relocate.ambiguous, relocate.misses), (1, 1))
+
+    def test_the_fallback_can_be_turned_off(self):
+        deep = self.root / "wrapper" / "train"
+        deep.mkdir(parents=True)
+        (deep / "0_01.jpg").write_bytes(b"")
+        relocate = Relocator(self.root, by_name=False)
+        self.assertIsNone(relocate("/data/HIT_UAV/train/0_01.jpg"))
+        self.assertEqual(relocate.misses, 1)
 
 
 class ParsePoolTest(unittest.TestCase):

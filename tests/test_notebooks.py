@@ -38,6 +38,9 @@ BUILDERS = {
     "18_": "build_kust4k_pool_notebook",
     "19_": "build_stage_b_notebooks",
     "20_": "build_stage_b_notebooks",
+    "21_": "build_data_readiness_notebook",
+    "22_": "build_stage_b_notebooks",
+    "23_": "build_stage_b_notebooks",
 }
 
 # 15-20 were all asked for the same way -- cells only, no prose, no comments --
@@ -48,8 +51,11 @@ COMMENT_FREE = {
     "15_dronevehicle_shared_pool.ipynb": 6,
     "16_vtuav_rgb_pool.ipynb": 6,
     "17_vtuav_thermal_pool.ipynb": 6,
-    "19_thermal_stage_b_pool.ipynb": 8,
-    "20_thermal_stage_b_pool_rgb.ipynb": 8,
+    "19_thermal_stage_b_pool.ipynb": 9,
+    "20_thermal_stage_b_pool_rgb.ipynb": 9,
+    "21_pool_data_readiness.ipynb": 6,
+    "22_thermal_deep.ipynb": 9,
+    "23_thermal_deep_lora.ipynb": 9,
 }
 
 
@@ -253,7 +259,10 @@ class TestEveryNotebook(unittest.TestCase):
                         (ROOT / "notebooks" / name).read_text())["cells"]
                     for line in cell["source"])
                 self.assertIn('"--base", BASE_CKPT', source)
-                self.assertIn('"--anchor-weight", "0.0"', source)
+                # The anchor is a knob now -- the arms still *default* to
+                # running without one, which is what "stage B alone" means.
+                self.assertIn("ANCHOR_WEIGHT  = 0.0", source)
+                self.assertIn('"--anchor-weight", str(ANCHOR_WEIGHT)', source)
                 self.assertNotIn("pretrain_encoder", source)
                 self.assertNotIn("DISTILL", source)
 
