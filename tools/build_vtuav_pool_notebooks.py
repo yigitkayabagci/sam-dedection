@@ -27,6 +27,25 @@ annotated absent. `boxes.vtuav_frames` drops an absent row rather than
 prompting the teacher with a zero-area or NaN box, and cell 2 prints how many
 rows that was per archive before anything is staged.
 
+**Night is a question about the teacher, and it is asked with a number.** A
+promptable segmenter trained on web images reads a daylit street well and a
+frame where the target is a smear around a headlight badly, and the gates do
+not save you there -- they catch a mask that has drifted off its box, not a
+plausible one drawn around glare. The structural answer is already in place and
+is why 16/17 and 24/25 are pairs: each modality is prompted on **its own**
+pixels, so a night frame's thermal half is 25's business and its RGB half is
+24's, and there is no route where a night RGB mask is mirrored onto thermal
+(VTUAV closed that door anyway -- 12.2 % box agreement).
+
+What was missing was the evidence. Every record now carries `luma` (the frame)
+and `target_luma` (inside the boxes -- an aerial night frame is mostly black
+with the annotated thing under a lamp, so the frame's own mean files a well-lit
+target under "night" and reads the failure off the wrong rows), and cell 5
+prints acceptance bucketed by the second. `MIN_LUMA` then drops frames whose
+targets are darker than a threshold -- **for the RGB arm only**. It defaults to
+off rather than to a sensible-looking number because on a thermal harvest a low
+reading is a *cold* target, and dropping those is exactly backwards.
+
 **Cell 1 updates the clone rather than skipping it.** It used to clone only
 when `/content/sam-dedection` was absent, which is right exactly once: a
 runtime that has already run any of these notebooks keeps whatever it cloned
@@ -205,6 +224,7 @@ TEACHER     = "facebook/sam3"
 DTYPE       = "bfloat16"
 ZOOM        = 4.0
 MIN_SIZE    = 128
+MIN_LUMA    = 0.0
 BATCH       = 0
 FRAME_GROUP = 0
 READERS     = 0
@@ -455,7 +475,8 @@ plt.show()
 # --------------------------------------------------------------------------
 
 code('''
-from src.training.pool import label_pool, pool_report, summarise_pool, write_index
+from src.training.pool import (label_pool, pool_report, summarise_luma,
+                               summarise_pool, write_index)
 
 def harvest(frames, dataset):
     global BATCH, FRAME_GROUP
@@ -465,8 +486,9 @@ def harvest(frames, dataset):
                               prompt="self", gates=GATES, zoom=ZOOM,
                               min_size=MIN_SIZE, batch_size=BATCH,
                               frame_group=FRAME_GROUP, limit=LIMIT,
-                              max_boxes=MAX_BOXES, readers=READERS,
-                              read_ahead=READ_AHEAD, progress=progress)
+                              max_boxes=MAX_BOXES, min_luma=MIN_LUMA,
+                              readers=READERS, read_ahead=READ_AHEAD,
+                              progress=progress)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             BATCH = max(1, BATCH // 2)
@@ -478,6 +500,8 @@ REPORT = harvest(FRAMES, POOL)
 print(json.dumps(REPORT, indent=1))
 write_index(POOL_ROOT)
 print(summarise_pool(pool_report(POOL_ROOT)))
+print()
+print(summarise_luma(POOL_ROOT))
 ''')
 
 

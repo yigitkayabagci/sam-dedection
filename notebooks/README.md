@@ -146,6 +146,21 @@ is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
 
+**Night is a question about the teacher, and it is asked with a number.** A
+promptable segmenter trained on web images reads a daylit street well and a
+frame where the target is a smear around a headlight badly — and the gates do
+not save you there: they catch a mask that has drifted off its box, not a
+plausible one drawn around glare. The structural answer is why these are pairs
+at all: each modality is prompted on **its own** pixels, so a night frame's
+thermal half is 25's business and its RGB half is 24's, and no night RGB mask
+is ever mirrored onto thermal. Every record now carries `luma` (the frame) and
+`target_luma` (inside the boxes — an aerial night frame is mostly black with
+the annotated thing under a lamp, so the frame's own mean files a well-lit
+target under "night"), and cell 5 prints acceptance bucketed by the second.
+`MIN_LUMA` drops frames whose targets fall below a threshold, **for the RGB arm
+only**: on a thermal harvest a low reading is a *cold* target, so it defaults
+to off rather than to a sensible-looking number.
+
 **Neither stage leaves the other idle.** The harvest is two costs that used to
 take turns. Unzipping is not bandwidth but seeks — `tracked_ir` keeps a
 twentieth of a 15.7 GiB part, so the read is a few thousand random seeks over a

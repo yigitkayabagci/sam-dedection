@@ -66,8 +66,12 @@ from src.training.pool import (  # noqa: E402
     label_many,
     calibration_table,
     label_pool,
+    luma,
+    luma_report,
     ordered_map,
     read_workers,
+    summarise_luma,
+    target_luma,
     modality_agreement,
     pool_report,
     summarise_pool,
@@ -475,6 +479,102 @@ class TestProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "labelling decodes real image files")
+class TestIllumination(unittest.TestCase):
+    """Night RGB is where a promptable teacher quietly gets worse."""
+
+    def frames(self, tmp: Path, count: int = 4) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def darken(self, frame, scale: float) -> None:
+        import cv2
+
+        pixels = cv2.imread(str(frame.image))
+        cv2.imwrite(str(frame.image), (pixels * scale).astype(np.uint8))
+
+    def test_a_dark_frame_and_a_dark_target_are_different_numbers(self):
+        """The distinction the whole knob rests on.
+
+        An aerial night frame is mostly black with the annotated thing under a
+        lamp. Bucketing that by the frame's brightness files a well-lit target
+        under "night" and reads the teacher's failure off the wrong rows.
+        """
+        pixels = np.full((40, 60, 3), 10, dtype=np.uint8)
+        pixels[10:20, 20:30] = 200
+        boxes = np.array([[20.0, 10.0, 30.0, 20.0]])
+        self.assertLess(luma(pixels), 40)
+        self.assertGreater(target_luma(pixels, boxes, [0]), 150)
+
+    def test_every_record_carries_both_readings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                                root / "pool", dataset="toy")
+            self.assertEqual(report["too_dark"], 0)
+            record = json.loads((root / "pool" / "toy" / "img0"
+                                 / RECORD_FILE).read_text())
+            self.assertIn("luma", record)
+            self.assertIn("target_luma", record)
+
+    def test_min_luma_drops_the_frames_it_says_it_drops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=4)
+            for frame in frames[:2]:
+                self.darken(frame, 0.05)
+            report = label_pool(frames, FakeImageTeacher(), root / "pool",
+                                dataset="toy", min_luma=40.0)
+            self.assertEqual(report["too_dark"], 2)
+            self.assertEqual(report["images"], 2)
+            self.assertFalse((root / "pool" / "toy" / "img0").exists())
+
+    def test_off_by_default_so_a_thermal_harvest_keeps_its_cold_targets(self):
+        """A low reading on thermal pixels is a cold object, not night.
+
+        Raising this on the thermal arm would drop exactly the targets the
+        project exists to segment, so the default has to be off rather than a
+        sensible-looking number.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=2)
+            for frame in frames:
+                self.darken(frame, 0.02)
+            report = label_pool(frames, FakeImageTeacher(), root / "pool",
+                                dataset="toy")
+            self.assertEqual(report["too_dark"], 0)
+            self.assertEqual(report["images"], 2)
+
+    def test_the_table_splits_acceptance_by_how_lit_the_targets_were(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=4)
+            for frame in frames[:2]:
+                self.darken(frame, 0.05)
+            label_pool(frames, FakeImageTeacher(), root / "pool",
+                       dataset="toy")
+            report = luma_report(root / "pool")
+            rows = report["datasets"]["toy"]
+            self.assertEqual(sum(r["images"] for r in rows), 4)
+            self.assertEqual(rows[0]["images"], 2, "the darkened pair")
+            table = summarise_luma(root / "pool")
+            self.assertIn("toy", table)
+            self.assertIn("target luma", table)
+
+    def test_a_record_written_before_this_existed_is_counted_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            path = root / "pool" / "toy" / "img0" / RECORD_FILE
+            old = json.loads(path.read_text())
+            del old["target_luma"]
+            path.write_text(json.dumps(old))
+            report = luma_report(root / "pool")
+            self.assertEqual(report["unknown"]["toy"]["images"], 1)
+            self.assertIn("not recorded", summarise_luma(root / "pool"))
+
+
 class TestOrderedMap(unittest.TestCase):
     """Threads for the decode, but the order and the bound are the contract."""
 
