@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -818,6 +819,32 @@ class TestThinningAnOverRepresentedClass(unittest.TestCase):
         spec = kept[0].source.spec
         self.assertEqual({spec.name_of(i.class_id)
                           for e in kept for i in e.instances}, {rare})
+
+    def test_a_source_weight_thins_only_that_source(self):
+        common, _ = self.names()
+        gates = InstanceGates()
+        other = Source(SPECS["segfly"], gates, role="train")
+        mine = self.index([common] * 4)
+        theirs = [replace(e, source=other) for e in self.index([common] * 4)]
+        kept, report = rebalance(mine + theirs, {"kust4k": 0.0}, seed=0)
+        left = {e.source.spec.name for e in kept}
+        self.assertEqual(left, {"segfly"},
+                         "a source weight must not reach another source")
+        self.assertEqual(report["by_source"]["kust4k"][1], 0)
+        self.assertEqual(*report["by_source"]["segfly"])
+
+    def test_a_source_scoped_class_beats_the_bare_class(self):
+        common, rare = self.names()
+        kept, report = rebalance(self.index([common, rare]),
+                                 {common: 0.0, f"kust4k:{common}": 1.0}, seed=0)
+        self.assertEqual(report["by_class"][common][1],
+                         report["by_class"][common][0],
+                         "the specific weight wins, and nothing compounds")
+
+    def test_the_report_counts_instances_per_source(self):
+        common, _ = self.names()
+        _, report = rebalance(self.index([common] * 3, frames=10), {}, seed=0)
+        self.assertEqual(report["by_source"], {"kust4k": (30, 30)})
 
     def test_a_weight_naming_no_class_here_is_reported(self):
         common, _ = self.names()
