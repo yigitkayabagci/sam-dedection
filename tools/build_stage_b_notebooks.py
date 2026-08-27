@@ -131,6 +131,8 @@ KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
 
+POOL_ARCHIVES = {}
+
 SOURCE_ZIPS = [
     ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
     ["/content/drive/MyDrive/edgetam-pool/kust4k/29476610.zip", "Kust4K"],
@@ -334,8 +336,9 @@ if ANCHOR_WEIGHT:
 # frames cannot be trained on while that set is the grade.
 
 code('''
+from src.training.pool import RECORD_FILE
 from src.training.pool_reader import (acceptance, discover_pools,
-                                      group_records, link_pool)
+                                      extract_frames, group_records, link_pool)
 
 _done = Path(POOL_ROOT) / ".unpacked"
 _done.mkdir(parents=True, exist_ok=True)
@@ -547,6 +550,30 @@ for _archive, _folder in SOURCE_ZIPS:
           round(Path(_archive).stat().st_size / 2 ** 30, 2), "GiB ->", _target)
     if not unpack(_archive, _target, _folder):
         (_DONE / (_folder + ".zip.done")).touch()
+
+for _pool, _folder in POOL_ARCHIVES.items():
+    if _pool not in POOLS:
+        print(f"!! {_pool} is not a pool here -- known: {sorted(POOLS)}")
+        continue
+    _key, _recipe, _root, _parts = images_for(_pool)
+    _shelf = (sorted(Path(_folder).glob("*.zip")) if Path(_folder).is_dir()
+              else [Path(_folder)])
+    if _parts:
+        _shelf = [_a for _a in _shelf if _a.stem in _parts]
+    _records = sorted(Path(POOLS[_pool]).rglob(RECORD_FILE))
+    print(f"\\n{_pool}: {len(_records)} records against {len(_shelf)} archives "
+          f"({sum(_a.stat().st_size for _a in _shelf) / 2 ** 30:.1f} GiB) "
+          f"-> {_root}")
+    _report = extract_frames(_records, _shelf, _root)
+    print(f"   asked {_report['asked']}, extracted {_report['taken']}, "
+          f"already there {_report['already']}, missing {_report['missing']}, "
+          f"unreadable {len(_report['unreadable'])}")
+    for _name, _took in sorted(_report["by_archive"].items()):
+        if _took:
+            print(f"      {_name:<24}{_took:>8} frames")
+    if _report["missing"]:
+        print(f"   !! {_report['missing']} frames are in no archive listed "
+              f"here -- name the missing parts in POOL_ARCHIVES")
 
 if FETCH:
     from tools.fetch_datasets import fetch, staged
