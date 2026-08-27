@@ -43,6 +43,11 @@ DATA_ROOT   = "/content/data"
 WORK        = "/content/work"
 STAGE_DIR   = "/content/drive/MyDrive/datasets"
 DRIVE_MY    = "/content/drive/MyDrive"
+ARCHIVE_DIRS = ["/content/drive/MyDrive/datasets",
+                "/content/drive/MyDrive/VTUAV",
+                "/content/drive/MyDrive/DroneVehicle",
+                "/content/drive/MyDrive",
+                "/content/staging"]
 
 FETCH       = []
 
@@ -140,6 +145,23 @@ print(f"{DRIVE_POOLS} exists: {Path(DRIVE_POOLS).is_dir()}")
 for _name in sorted(Path(DATA_ROOT).iterdir()) if Path(DATA_ROOT).is_dir() else []:
     if _name.is_dir():
         print(f"  {DATA_ROOT}/{_name.name:<28}{_used(_name):>8.2f} GiB")
+
+print("\\narchives already staged where `fetch` looks for them")
+STAGED = {}
+for _dir in ARCHIVE_DIRS:
+    if not Path(_dir).is_dir():
+        print(f"  {_dir}  (not there)")
+        continue
+    _found = [f for f in sorted(Path(_dir).iterdir())
+              if f.is_file() and f.name.endswith((".zip", ".tar.gz", ".tgz"))]
+    print(f"  {_dir}  {len(_found)} archives")
+    for _archive in _found:
+        _gib = _archive.stat().st_size / 2 ** 30
+        STAGED.setdefault(_archive.stem.replace(".tar", ""), str(_archive))
+        print(f"      {_archive.name:<40}{_gib:>8.2f} GiB")
+print("\\nan archive here is never re-downloaded -- `staged()` finds it by "
+      "name, so a part called train_ST_008 needs a train_ST_008.zip in one "
+      "of these folders.")
 ''')
 
 
@@ -213,6 +235,25 @@ for _name in sorted(POOLS):
     _top = ", ".join(f"{k} {v}" for k, v in
                      sorted(_classes.items(), key=lambda kv: -kv[1])[:6])
     print(f"  {_name:<28}{len(_classes):>3} classes  {_top}")
+
+print("\\nwhich sequences each pool was harvested from")
+from src.training.aerial import group_of
+
+GROUPS = {}
+for _name in sorted(POOLS):
+    _seen = {}
+    for _record_path in sorted(Path(POOLS[_name]).rglob(RECORD_FILE)):
+        _key = json.loads(_record_path.read_text())["key"]
+        _group = _key.rsplit("/", 1)[0] if "/" in _key else "(no sequence)"
+        _seen[_group] = _seen.get(_group, 0) + 1
+    GROUPS[_name] = _seen
+    _shown = ", ".join(f"{k} {v}" for k, v in
+                       sorted(_seen.items(), key=lambda kv: -kv[1])[:8])
+    print(f"  {_name:<28}{len(_seen):>4} sequences  {_shown}"
+          f"{' ...' if len(_seen) > 8 else ''}")
+print("   a pool's sequences say which archive parts it needs: VTUAV files "
+      "one sequence per directory and each tracking part holds a different "
+      "set of them, so this is the list to match VTUAV_PARTS against.")
 
 print("\\nthe path each pool recorded for its first frame")
 RECORDED = {}
@@ -377,13 +418,12 @@ for _name in FETCH:
     print(f"\\n--- {_recipe} -> {_root}  (free {_free():.1f} GiB)")
     try:
         fetch(_recipe, _root, tuple(_parts) or None, stage=STAGE_DIR,
-              staging=(STAGE_DIR, str(Path(DRIVE_MY) / _root.name), DRIVE_MY,
-                       "/content/staging"))
+              staging=tuple(ARCHIVE_DIRS + [str(Path(DRIVE_MY) / _root.name)]))
     except Exception as _fetch_error:
         print("!!", _recipe, "failed:", type(_fetch_error).__name__, _fetch_error)
         for _part in sorted(_parts) or [_recipe]:
-            _copy = staged(_part, (STAGE_DIR, str(Path(DRIVE_MY) / _root.name),
-                                   DRIVE_MY, "/content/staging"))
+            _copy = staged(_part, tuple(ARCHIVE_DIRS
+                                        + [str(Path(DRIVE_MY) / _root.name)]))
             if _copy is None:
                 continue
             print("   retrying", _copy.name, "member by member")
