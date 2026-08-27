@@ -27,6 +27,15 @@ annotated absent. `boxes.vtuav_frames` drops an absent row rather than
 prompting the teacher with a zero-area or NaN box, and cell 2 prints how many
 rows that was per archive before anything is staged.
 
+**No fallback teacher.** The cell that loads `facebook/sam3` used to catch a
+failure and quietly continue on `facebook/sam2.1-hiera-large`. That is the one
+error worth stopping for: the pools these four write are meant to be mixed into
+one training set, and a pool whose masks came from a different teacher than its
+neighbour's is a variable nobody chose and the run cannot see. `build_image_teacher`
+already fails with the gated-repo instructions, so an unset `HF_TOKEN` says so
+instead of costing a harvest that has to be thrown away. 18 made the same call
+for the same reason.
+
 **Neither split ships a mask.** VTUAV's drawn instance masks are the separate
 *VIS* release -- 100 sequences, a different download -- and the other 400 carry
 one `x y w h` per annotated frame and nothing else. That is the whole reason
@@ -165,7 +174,6 @@ EXTRACT_MODE = "{{extract_mode}}"
 MIRROR_DIR  = "{{mirror}}"
 ARCHIVES    = {{archives}}
 TEACHER     = "facebook/sam3"
-FALLBACK    = "facebook/sam2.1-hiera-large"
 DTYPE       = "bfloat16"
 ZOOM        = 4.0
 MIN_SIZE    = 128
@@ -355,15 +363,9 @@ import matplotlib.pyplot as plt
 from src.training.labels import Gates, build_image_teacher
 from src.training.pool import label_boxes
 
-try:
-    TEACHER_USED = TEACHER
-    TEACHER_MODEL = build_image_teacher(TEACHER, dtype=DTYPE)
-except (Exception, SystemExit) as _teacher_error:
-    print("falling back:", str(_teacher_error).splitlines()[0])
-    TEACHER_USED = FALLBACK
-    TEACHER_MODEL = build_image_teacher(FALLBACK, dtype=DTYPE)
+TEACHER_MODEL = build_image_teacher(TEACHER, dtype=DTYPE)
 GATES = Gates(box_iou=BOX_IOU)
-print("teacher:", TEACHER_USED)
+print("teacher:", TEACHER)
 
 _shown = [FRAMES[i] for i in
           np.linspace(0, len(FRAMES) - 1, 4).astype(int).tolist()]
@@ -436,7 +438,7 @@ print(_target, len(_files), "files",
 _index = Path(POOL_ROOT) / "pool_index.jsonl"
 if _index.is_file():
     shutil.copy(_index, Path(MIRROR_DIR) / _index.name)
-print("teacher:", TEACHER_USED, "| modality:", MODALITY,
+print("teacher:", TEACHER, "| modality:", MODALITY,
       "| accepted:", REPORT["accepted"], "of", REPORT["attempted"])
 ''')
 
