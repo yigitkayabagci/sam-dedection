@@ -694,6 +694,14 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
     it is worth a thing -- `pool_reader.index_pool(min_box_iou=...)` applies it
     without touching the GPU, so the cost of the decision is this table.
 
+    The per-class breakdown is there because **a threshold is a class filter
+    nobody chose**. `box_iou` asks whether the mask covers the box's *extent*,
+    and what fails to is the partly-hidden target and the ragged silhouette --
+    neither of which falls evenly across a pool that is half pedestrian. Mean
+    `area_ratio` sits beside it as the other half of the picture: a pool whose
+    masks all sit near 1.0 is a pool of rectangles, and no box-IoU threshold
+    fixes that.
+
     **Each reading is counted separately**, because pools are not all of one
     vintage: `teacher_iou` has been stored since the first harvest and the
     other three only since the readings were kept, so an older pool can answer
@@ -712,7 +720,8 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
             "fails": {name: 0 for name in GATE_READINGS},
             "missing": {name: 0 for name in GATE_READINGS},
             "accepted_scored": 0,
-            "accepted_below": {cut: 0 for cut in cuts}})
+            "accepted_below": {cut: 0 for cut in cuts},
+            "classes": {}})
         for instance in record["instances"]:
             entry["instances"] += 1
             accepted = instance.get("verdict") is None
@@ -734,9 +743,17 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
                     entry["fails"][name] += 1
             if accepted and instance.get("box_iou") is not None:
                 entry["accepted_scored"] += 1
+                row = entry["classes"].setdefault(
+                    str(instance.get("class", "?")),
+                    {"accepted": 0, "box_iou": 0.0, "area_ratio": 0.0,
+                     "below": {cut: 0 for cut in cuts}})
+                row["accepted"] += 1
+                row["box_iou"] += float(instance["box_iou"])
+                row["area_ratio"] += float(instance.get("area_ratio") or 0.0)
                 for cut in cuts:
                     if float(instance["box_iou"]) < cut:
                         entry["accepted_below"][cut] += 1
+                        row["below"][cut] += 1
     return {"cuts": list(cuts), "datasets": tables}
 
 
@@ -771,6 +788,25 @@ def summarise_gates(out_dir: str | Path, gates: Gates = Gates()) -> str:
             drop = entry["accepted_below"][cut]
             lines.append(f"| {cut:g} | {drop} ({drop / scored:.1%}) "
                          f"| {scored - drop} |")
+
+        # The same cut, per class, because a threshold is a class filter
+        # nobody chose. A mask has to cover the box's extent to score high, and
+        # what fails to is the partly-hidden target and the ragged silhouette --
+        # which do not fall evenly across a pool that is 53 % pedestrian.
+        lines += ["", "| class | accepted | mean box_iou | mean area_ratio | "
+                      + " | ".join(f"left at {cut:g}" for cut in report["cuts"])
+                      + " |",
+                  "|---|---:|---:|---:|" + "---:|" * len(report["cuts"])]
+        for name, row in sorted(entry["classes"].items(),
+                                key=lambda kv: -kv[1]["accepted"]):
+            kept = max(row["accepted"], 1)
+            left = " | ".join(
+                f"{row['accepted'] - row['below'][cut]} "
+                f"({1 - row['below'][cut] / kept:.0%})"
+                for cut in report["cuts"])
+            lines.append(f"| {name} | {row['accepted']} | "
+                         f"{row['box_iou'] / kept:.3f} | "
+                         f"{row['area_ratio'] / kept:.3f} | {left} |")
         lines.append("")
     return "\n".join(lines).rstrip()
 

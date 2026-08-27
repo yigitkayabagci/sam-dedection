@@ -538,6 +538,32 @@ class TestGateReport(unittest.TestCase):
             self.assertEqual(fails["teacher_iou"], 1)
             self.assertEqual(fails["box_iou"], 1, "hidden behind teacher_iou")
 
+    def test_the_cut_is_broken_down_per_class(self):
+        """A threshold is a class filter nobody chose.
+
+        `box_iou` asks whether the mask covers the box's extent, and what fails
+        to is the partly-hidden target and the ragged silhouette -- neither of
+        which falls evenly across a pool that is half one class. A cut that
+        looks like "-16 %" in total can be "-45 % of pedestrians" underneath.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.99, "box_iou": 0.65, "area_ratio": 0.42,
+                 "component": 1.0, "verdict": None},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.88,
+                 "component": 1.0, "verdict": None}])
+            classes = gate_report(root / "pool")["datasets"]["toy"]["classes"]
+            self.assertEqual(classes["car"]["accepted"], 1)
+            self.assertEqual(classes["car"]["below"][0.7], 1)
+            self.assertEqual(classes["pedestrian"]["below"][0.7], 0)
+            self.assertAlmostEqual(classes["car"]["area_ratio"], 0.42, places=3)
+            table = summarise_gates(root / "pool")
+            self.assertIn("mean area_ratio", table)
+            self.assertIn("left at 0.7", table)
+
     def test_it_says_what_a_stricter_cut_would_cost_the_accepted_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
