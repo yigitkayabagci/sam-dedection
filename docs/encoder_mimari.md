@@ -553,6 +553,10 @@ takipçi için **ön koşuldur, kanıt değildir.**
 | `notebooks/07_encoder_aerial_rgbt.ipynb` | hepsinin tek oturumdaki tarifi |
 | `configs/edgetam_512_aerial{,_lora}.yaml` | çıkan checkpoint'lerin dağıtım config'i |
 | `configs/edgetam_512_pool.yaml` | havuzlarla eğitilmiş checkpoint'in dağıtım config'i (19/20) |
+| `configs/edgetam_512_pool_deep.yaml` | 22'nin derin çalıştırmasının dağıtım config'i — eğitim çözünürlüğünde (512) |
+| `configs/edgetam_768_pool_deep.yaml` | aynı checkpoint 768'de: kasıtlı bir çözünürlük ölçümü, eğitim ölçümü değil |
+| `configs/edgetam_trt_{512,768}_pool_deep.yaml` | aynı ikisinin TensorRT karşılığı; motorlar bu checkpoint'ten ayrı dizine export edilir |
+| `src/checkpoint_meta.py` | `meta["image_size"]` okuyucusu: checkpoint eğitildiği boyuttan farklı bir boyutta çalıştırılırsa uyarır (tracker ve ONNX export'a bağlı) |
 
 ---
 

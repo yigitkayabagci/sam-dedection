@@ -46,6 +46,46 @@ targets are darker than a threshold -- **for the RGB arm only**. It defaults to
 off rather than to a sensible-looking number because on a thermal harvest a low
 reading is a *cold* target, and dropping those is exactly backwards.
 
+**A pool that predates the readings gets them back without a teacher.**
+`box_iou`, `area_ratio` and `component` are functions of an accepted mask and
+its box -- and the mask is in the store, the box is in the record. So
+`backfill_readings` recomputes them off disk, CPU only, minutes rather than
+GPU-hours, and cell 5 runs it before the gate table so an older pool answers
+for all four gates instead of one. Only accepted instances can be recovered: a
+rejected one has no mask to measure, and inventing a number for it would be
+worse than the gap. That is the right side to lose, because every question
+worth asking here is about the set that was kept.
+
+**The reject table names one gate per instance, which is not the same as
+what the data says.** `reject_reason` returns the *first* gate an instance
+fails, in a fixed order, so a harvest reporting `teacher_iou 2312, box_iou 9`
+is not saying nine masks sat badly on their box -- it is saying nine of the
+ones `teacher_iou` let through did, and nothing at all about the 2 312 it
+stopped first. Cell 5 now also prints `summarise_gates`, which re-reads the
+stored readings and asks each gate **independently** over every instance, and
+then says what raising the box-IoU cut would remove from the accepted set at
+0.5 / 0.6 / 0.7 / 0.8 / 0.9. That last table is the whole decision: the cut is
+applied at read time by `index_pool(min_box_iou=...)`, so its cost is a number
+you can look up rather than a harvest you have to repeat.
+
+**`BOX_IOU` is back at the library default, because 0.5 was somebody else's
+number.** These four inherited it from 15, where it is *argued*: DroneVehicle
+ships oriented boxes and the prompt is their axis-aligned envelope, which on a
+45-degree vehicle is about twice the area of the object -- so a correct mask
+scores a low box-IoU against a box that was never tight, and the gate has to be
+loosened or it rejects the good ones. VTUAV has none of that. Its boxes are
+plain per-frame `x y w h`, drawn per modality, around a target whose median
+size is 77 px. Nothing here justifies loosening the gate that
+`Gates`'s own docstring calls the load-bearing one, so it sits at the 0.6
+default and 0.7 is one edit away.
+
+Two things make that edit cheap. The harvest now writes **all four gate
+readings** into each instance's record rather than only the verdict they
+produced, and `pool_reader.index_pool(min_box_iou=...)` re-cuts on the stored
+number -- so "actually, only masks whose box agrees at 0.7" is a pass over the
+index, not another run of the teacher. Upwards only: a pool harvested at 0.6
+has no record of what 0.5 would have kept.
+
 **A Drive mount that is still listed is not a Drive mount that works.** A
 session that dropped while nobody was watching -- which is the normal end of a
 long staging run -- comes back with `/content/drive` present and its FUSE
@@ -258,7 +298,7 @@ READ_AHEAD  = 0
 UNZIP_WORKERS = 16
 MAX_BOXES   = None
 LIMIT       = None
-BOX_IOU     = 0.5
+BOX_IOU     = 0.6
 REPO_URL    = "https://github.com/yigitkayabagci/sam-dedection.git"
 BRANCH      = "claude/thermal-stage-b-training-43ktcl"
 REPO_DIR    = "/content/sam-dedection"
@@ -525,8 +565,9 @@ plt.show()
 # --------------------------------------------------------------------------
 
 code('''
-from src.training.pool import (label_pool, pool_report, summarise_luma,
-                               summarise_pool, write_index)
+from src.training.pool import (backfill_readings, label_pool, pool_report,
+                               summarise_gates, summarise_luma, summarise_pool,
+                               write_index)
 
 def harvest(frames, dataset):
     global BATCH, FRAME_GROUP
@@ -550,6 +591,10 @@ REPORT = harvest(FRAMES, POOL)
 print(json.dumps(REPORT, indent=1))
 write_index(POOL_ROOT)
 print(summarise_pool(pool_report(POOL_ROOT)))
+print()
+print(backfill_readings(POOL_ROOT, progress=progress))
+print()
+print(summarise_gates(POOL_ROOT, GATES))
 print()
 print(summarise_luma(POOL_ROOT))
 ''')

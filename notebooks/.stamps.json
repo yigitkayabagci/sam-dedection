@@ -8,14 +8,14 @@
  "13_rgb_mask_pool.ipynb": "d6e99551d0",
  "14_thermal_mask_pool.ipynb": "e5293f2b3a",
  "15_dronevehicle_shared_pool.ipynb": "4ee8c2520b",
- "16_vtuav_rgb_pool.ipynb": "145f93e6c9",
- "17_vtuav_thermal_pool.ipynb": "570eb44ceb",
+ "16_vtuav_rgb_pool.ipynb": "9ccb0aa318",
+ "17_vtuav_thermal_pool.ipynb": "c72d3a8366",
  "18_kust4k_mask_pool.ipynb": "106871adf9",
  "19_thermal_stage_b_pool.ipynb": "172d43b2fd",
  "20_thermal_stage_b_pool_rgb.ipynb": "c407a4aec8",
  "21_pool_data_readiness.ipynb": "f0f63e49a4",
  "22_thermal_deep.ipynb": "f6b4f029d3",
  "23_thermal_deep_lora.ipynb": "d8e182eb0c",
- "24_vtuav_lt_rgb_pool.ipynb": "ce712af36a",
- "25_vtuav_lt_thermal_pool.ipynb": "e261362636"
+ "24_vtuav_lt_rgb_pool.ipynb": "3424bae860",
+ "25_vtuav_lt_thermal_pool.ipynb": "ab9cf7818d"
 }

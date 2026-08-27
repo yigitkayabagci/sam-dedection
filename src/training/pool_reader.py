@@ -515,8 +515,20 @@ def _example_image(record_path: Path) -> str:
 
 
 def _read_frame(record_path: Path, relocate: Relocator,
-                areas_of=store_areas) -> PoolFrame | str:
-    """One `record.json` + its store, or the name of what went wrong."""
+                areas_of=store_areas,
+                min_box_iou: float = 0.0) -> PoolFrame | str:
+    """One `record.json` + its store, or the name of what went wrong.
+
+    `min_box_iou` is a **second, stricter** cut on the gate the harvest already
+    applied. The harvest writes every instance's four gate readings beside its
+    verdict, so tightening the box-IoU threshold after the fact is a pass over
+    the records rather than another run of the teacher -- which on a pool of a
+    hundred thousand frames is the difference between a minute and a day. It
+    can only ever remove instances: a harvest run at 0.6 has no record of what
+    0.5 would have kept. An instance from an older harvest, written before the
+    readings were stored, is kept rather than dropped -- silently discarding a
+    pool because its records are a version behind is the worse failure.
+    """
     record = json.loads(record_path.read_text())
     store = record_path.parent / MASK_STORE
     if not store.is_file():
@@ -543,6 +555,10 @@ def _read_frame(record_path: Path, relocate: Relocator,
             key = int(instance["i"])
             if "verdict" in instance:
                 if instance["verdict"] is not None:
+                    continue
+                measured = instance.get("box_iou")
+                if (min_box_iou > 0 and measured is not None
+                        and float(measured) < min_box_iou):
                     continue
                 if key not in areas:
                     return "store_disagrees"
@@ -724,6 +740,7 @@ def index_pool(
     name: str | None = None,
     limit: int | None = None,
     workers: int = 8,
+    min_box_iou: float = 0.0,
     progress=None,
     records: SequenceABC[Path] | None = None,
     report=None,
@@ -741,6 +758,13 @@ def index_pool(
     cannot be found or read, the file on disk is a different size from the one
     the teacher saw, or every box in them was rejected at harvest. The counts
     ride on each entry's `rejects` so `summarise` prints them.
+
+    `min_box_iou` re-cuts the harvest's own box-IoU gate, upwards only. The
+    records carry every gate reading, not just the verdict they produced, so
+    "actually, only keep masks whose box agrees with the annotation at 0.7"
+    costs a pass over the index instead of a second run of the teacher. A frame
+    left with no instance under the stricter cut is dropped as `no_accepted`,
+    the same as one the harvest itself emptied.
 
     `report` is called with one line of prose when the frames were not where
     the records said -- a relocation that needed the by-name fallback, or one
@@ -762,7 +786,9 @@ def index_pool(
 
     relocate = Relocator(images_root)
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
-        stream = pool.map(lambda r: _read_frame(r, relocate), records)
+        stream = pool.map(
+            lambda r: _read_frame(r, relocate, min_box_iou=min_box_iou),
+            records)
         if progress is not None:
             stream = progress(stream, total=len(records), desc=pool_dir.name)
         results = list(stream)
