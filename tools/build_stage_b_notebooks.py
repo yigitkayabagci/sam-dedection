@@ -126,7 +126,9 @@ ARMS = {
         "LR_TRUNK": "1e-4",
         # VTUAV's eleven tracking archives are 154 GiB and the disk is not.
         # The pool names the ~40 000 frames it wants, so only those come out.
-        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_thermal": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"finetune"',
     },
     # 22's third arm, and the only line that differs from it: LoRA instead of
@@ -149,7 +151,9 @@ ARMS = {
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
-        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_thermal": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"lora"',
     },
 }
@@ -197,7 +201,9 @@ VTUAV_VIS_PARTS = []
 IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
                "aerovis_train": "/content/data/AeroVIS",
                "aerovis_heldout": "/content/data/AeroVIS",
-               "hituav_thermal": "/content/data/HIT_UAV/*/normal_json"}
+               "hituav_thermal": "/content/data/HIT_UAV/*/normal_json",
+               "vtuav_lt_thermal": "/content/data/VTUAV_lt_ir",
+               "vtuav_lt_rgb": "/content/data/VTUAV_lt_rgb"}
 KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
