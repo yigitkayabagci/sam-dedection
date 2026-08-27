@@ -27,6 +27,15 @@ annotated absent. `boxes.vtuav_frames` drops an absent row rather than
 prompting the teacher with a zero-area or NaN box, and cell 2 prints how many
 rows that was per archive before anything is staged.
 
+**Cell 1 updates the clone rather than skipping it.** It used to clone only
+when `/content/sam-dedection` was absent, which is right exactly once: a
+runtime that has already run any of these notebooks keeps whatever it cloned
+first, so a fix pushed since then is invisible and surfaces as an `ImportError`
+on a name the repo does have. It now fetches and hard-resets to the branch
+every run, and drops every already-imported `src.*` and `tools.*` module from
+`sys.modules` so re-running the cell picks the new code up without a kernel
+restart. The commit it landed on is printed.
+
 **Neither stage is allowed to leave the other idle.** Two knobs, because the
 harvest is two costs that used to take turns:
 
@@ -213,11 +222,24 @@ STAMP    = "{{STAMP}}"
 import json, os, shutil, subprocess, sys, zipfile
 from pathlib import Path
 
-if not Path(REPO_DIR).exists():
+if Path(REPO_DIR).exists():
+    subprocess.run(["git", "-C", REPO_DIR, "fetch", "--depth", "1",
+                    "origin", BRANCH], check=True)
+    subprocess.run(["git", "-C", REPO_DIR, "reset", "--hard", "FETCH_HEAD"],
+                   check=True)
+else:
     subprocess.run(["git", "clone", "--depth", "1", "--branch", BRANCH,
                     REPO_URL, REPO_DIR], check=True)
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
+import importlib
+for _stale in [_m for _m in list(sys.modules)
+               if _m.split(".")[0] in ("src", "tools")]:
+    del sys.modules[_stale]
+importlib.invalidate_caches()
+print("repo at", subprocess.run(["git", "-C", REPO_DIR, "rev-parse", "--short",
+                                 "HEAD"], capture_output=True,
+                                text=True).stdout.strip())
 
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
                 "transformers>=5.0.0", "accelerate", "huggingface_hub",
