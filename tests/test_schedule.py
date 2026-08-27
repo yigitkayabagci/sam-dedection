@@ -24,6 +24,7 @@ from src.training.antiuav import Clip, Sequence, SequenceLabels  # noqa: E402
 from src.training.finetune import Rates, apply_freeze  # noqa: E402
 from src.training.schedule import Schedule, Split, run_stages, validate  # noqa: E402
 from tests.test_clip_loop import FakeSam2  # noqa: E402
+from tools.train_encoder import scaled_rates  # noqa: E402
 
 SIZE = 32
 FRAMES = 4
@@ -56,6 +57,41 @@ def patch_pixels(test):
     clip_loop.clip_tensor = lambda clip, device="cpu": torch.randn(
         len(clip.indices), 3, clip.size, clip.size, device=device)
     test.addCleanup(lambda: setattr(clip_loop, "clip_tensor", original))
+
+
+class TestScaledRates(unittest.TestCase):
+    """Two knobs, in order: the batch's scaling rule keeps the table's shape,
+    and an absolute override changes it."""
+
+    BASE = Rates(head=5e-5, neck=5e-5, trunk=1e-5, weight_decay=1e-4)
+
+    def test_scale_one_and_no_override_is_the_table_itself(self):
+        self.assertEqual(scaled_rates(self.BASE), self.BASE)
+        self.assertEqual(scaled_rates(self.BASE, 1.0, {}), self.BASE)
+
+    def test_the_scale_multiplies_every_part_and_leaves_decay_alone(self):
+        out = scaled_rates(self.BASE, 4.0)
+        self.assertAlmostEqual(out.head, 2e-4)
+        self.assertAlmostEqual(out.neck, 2e-4)
+        self.assertAlmostEqual(out.trunk, 4e-5)
+        self.assertEqual(out.weight_decay, self.BASE.weight_decay)
+
+    def test_an_override_is_absolute_and_wins_over_the_scale(self):
+        out = scaled_rates(self.BASE, 4.0, {"head": 1e-5, "trunk": 1e-4})
+        self.assertAlmostEqual(out.head, 1e-5, msg="not 1e-5 * 4")
+        self.assertAlmostEqual(out.trunk, 1e-4)
+        self.assertAlmostEqual(out.neck, 2e-4, msg="unnamed parts still scale")
+
+    def test_a_zero_override_leaves_that_part_alone(self):
+        out = scaled_rates(self.BASE, 2.0, {"head": 0.0, "trunk": 1e-4})
+        self.assertAlmostEqual(out.head, 1e-4)
+        self.assertAlmostEqual(out.trunk, 1e-4)
+
+    def test_the_shape_can_be_inverted_so_the_trunk_leads(self):
+        out = scaled_rates(self.BASE, 1.0, {"head": 1e-5, "trunk": 1e-4})
+        self.assertGreater(out.trunk, out.head,
+                           "a modality shift lives in the trunk; a run that "
+                           "wants the encoder to learn it must be able to say so")
 
 
 class TestValidate(unittest.TestCase):

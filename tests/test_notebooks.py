@@ -39,6 +39,8 @@ BUILDERS = {
     "19_": "build_stage_b_notebooks",
     "20_": "build_stage_b_notebooks",
     "21_": "build_data_readiness_notebook",
+    "22_": "build_stage_b_notebooks",
+    "23_": "build_stage_b_notebooks",
 }
 
 # 15-20 were all asked for the same way -- cells only, no prose, no comments --
@@ -52,6 +54,8 @@ COMMENT_FREE = {
     "19_thermal_stage_b_pool.ipynb": 9,
     "20_thermal_stage_b_pool_rgb.ipynb": 9,
     "21_pool_data_readiness.ipynb": 6,
+    "22_thermal_deep.ipynb": 9,
+    "23_thermal_deep_lora.ipynb": 9,
 }
 
 

@@ -74,16 +74,64 @@ from pathlib import Path
 
 # Only these move between the two arms. Everything else is shared source, so a
 # difference anywhere else is a bug rather than a variant.
+INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
+         "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
+         "POOL_ARCHIVES": "{}", "METHOD": '"finetune"'}
+
+# The three thermal-only pools that must be present for 22 to mean anything,
+# with a floor rather than a flag: a pool that resolved twelve frames out of
+# forty thousand has arrived in name only.
+REQUIRED = ('{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
+            '                 "hituav_thermal": 2000, "segfly_thermal": 5000,\n'
+            '                 "kaggle_uav_thermal": 10000}')
+
 ARMS = {
     "19_thermal_stage_b_pool.ipynb": {
+        **INERT,
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal"',
     },
     "20_thermal_stage_b_pool_rgb.ipynb": {
+        **INERT,
         "MODALITIES": '["thermal", "rgb"]',
         "RUN": '"thermal_rgb"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_rgb"',
+    },
+    # Everything thermal this repo has harvested, the vehicle classes thinned
+    # so they cannot outvote the rest, and the rate table inverted so the
+    # trunk learns the modality instead of the decoder compensating for it.
+    "22_thermal_deep.ipynb": {
+        "MODALITIES": '["thermal"]',
+        "RUN": '"thermal_deep"',
+        "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
+        "REQUIRE_POOLS": REQUIRED,
+        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
+                          '                 "freight_car": 0.7}'),
+        "LR_HEAD": "1e-5",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        # VTUAV's eleven tracking archives are 154 GiB and the disk is not.
+        # The pool names the ~40 000 frames it wants, so only those come out.
+        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "METHOD": '"finetune"',
+    },
+    # 22's third arm, and the only line that differs from it: LoRA instead of
+    # a partial fine-tune. Same pools, same gate, same thinning, same rates,
+    # same seed, same split file -- so the two numbers differ by the method
+    # and by nothing else, which is the only thing that makes them comparable.
+    "23_thermal_deep_lora.ipynb": {
+        "MODALITIES": '["thermal"]',
+        "RUN": '"thermal_deep"',
+        "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
+        "REQUIRE_POOLS": REQUIRED,
+        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
+                          '                 "freight_car": 0.7}'),
+        "LR_HEAD": "1e-5",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "METHOD": '"lora"',
     },
 }
 
@@ -114,6 +162,8 @@ DRIVE_MY    = "/content/drive/MyDrive"
 EVAL_DRAWN  = "kust4k"
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = []
+REQUIRE_POOLS = {{REQUIRE_POOLS}}
+CLASS_WEIGHTS = {{CLASS_WEIGHTS}}
 POOL_ROLE   = "all"
 POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
                "aerovis_heldout": "eval"}
@@ -131,7 +181,7 @@ KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
 
-POOL_ARCHIVES = {}
+POOL_ARCHIVES = {{POOL_ARCHIVES}}
 
 SOURCE_ZIPS = [
     ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
@@ -161,7 +211,7 @@ FILL           = 0.25
 JITTER         = 32
 PROMPT         = "mix"
 PROMPT_JITTER  = 0.3
-METHOD         = "finetune"
+METHOD         = {{METHOD}}
 LORA_R         = 16
 LORA_ALPHA     = 0
 LORA_DROPOUT   = 0.0
@@ -176,6 +226,9 @@ BATCH_CEILING  = 512
 BATCH_RESERVE  = 0.12
 LR_REFERENCE   = 16
 LR_SCALE_MAX   = 4.0
+LR_HEAD        = {{LR_HEAD}}
+LR_NECK        = {{LR_NECK}}
+LR_TRUNK       = {{LR_TRUNK}}
 SEED           = 0
 SCORE_PROMPTS  = ["box", "point"]
 PANEL_CASES    = 6
@@ -660,8 +713,8 @@ subprocess.run(["df", "-h", "/content"], check=False)
 code('''
 import numpy as np
 
-from src.training.aerial import (InstanceGates, sample_windows, save_splits,
-                                 split_index)
+from src.training.aerial import (InstanceGates, rebalance, sample_windows,
+                                 save_splits, split_index)
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
 from src.training.pool_reader import (SKIP_REASONS, exclude_frames, frame_keys,
@@ -763,6 +816,28 @@ for _pool, _why in FAILED:
               f"files {_report['extensions']}")
 assert POOL_FLAGS, "no pool resolved its frames -- check the IMAGES roots above"
 
+_have = {}
+for _row in PLAN:
+    if any(_row["dir"] in _f for _f in POOL_FLAGS):
+        _have[_row["pool"]] = sum(len(e.instances) for e in INDEX
+                                  if e.source
+                                  and e.source.spec.name == f"pool/{_row['pool']}")
+_short = {_name: (_have.get(_name, 0), _least)
+          for _name, _least in REQUIRE_POOLS.items()
+          if _have.get(_name, 0) < _least}
+if REQUIRE_POOLS:
+    print(f"\\n{'required pool':<28}{'instances':>11}{'least':>9}  state")
+    for _name, _least in REQUIRE_POOLS.items():
+        _got = _have.get(_name, 0)
+        print(f"{_name:<28}{_got:>11}{_least:>9}  "
+              f"{'ok' if _got >= _least else 'MISSING'}")
+assert not _short, (
+    f"this run is defined by pools that did not arrive: {_short} (got, least). "
+    f"Read the unusable list above -- a `no_image` there means the frames are "
+    f"not on disk, and POOL_ARCHIVES in cell 1 is how a pool takes them out of "
+    f"an archive Drive already holds. Training without them would answer a "
+    f"different question than the one this notebook is for.")
+
 assert not CUTS or any(CUTS.values()), (
     f"every pool built from {EVAL_DRAWN} ({sorted(CUTS)}) shares none of the "
     f"{len(DRAWN_HELD)} held-out keys, so the two readers name frames "
@@ -793,6 +868,30 @@ COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),
            "--per-image", str(PER_IMAGE), "--max-instances", str(MAX_INSTANCES),
            "--min-area", str(MIN_AREA), "--min-side", str(MIN_SIDE),
            "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED)]
+
+if CLASS_WEIGHTS:
+    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)
+    print(f"\\nthinning: {_balance['frames']['before']} frames / "
+          f"{_balance['instances']['before']} instances -> "
+          f"{_balance['frames']['after']} / {_balance['instances']['after']}")
+    _was_total = max(_balance["instances"]["before"], 1)
+    _now_total = max(_balance["instances"]["after"], 1)
+    print(f"{'class':<24}{'was':>10}{'share':>8}{'now':>10}{'share':>8}")
+    for _name, (_was, _now) in list(_balance["by_class"].items())[:12]:
+        print(f"{_name:<24}{_was:>10}{_was / _was_total:>8.1%}"
+              f"{_now:>10}{_now / _now_total:>8.1%}")
+    _matched = [_n for _n in CLASS_WEIGHTS if _n not in _balance["unmatched"]]
+    assert _matched, (
+        f"CLASS_WEIGHTS names {_balance['unmatched']} and no pool here carries "
+        f"any of them, so the thinning did nothing. The names are the pools' "
+        f"own -- read the class table cell 2 printed and use those.")
+    if _balance["unmatched"]:
+        print(f"   !! no pool carries {_balance['unmatched']} -- those weights "
+              f"thinned nothing. Not fatal, {_matched} did apply, but a "
+              f"misspelt class looks exactly like a class that is already rare.")
+    print("   thinned per instance, not per frame: dropping a frame that holds "
+          "one pedestrian beside six cars would throw the pedestrian away "
+          "too. A frame left with nothing is dropped.")
 
 SPLITS = split_index(INDEX, seed=SEED)
 
@@ -929,6 +1028,21 @@ if METHOD == "lora":
     _method_flags += ["--lora-r", str(LORA_R), "--lora-dropout", str(LORA_DROPOUT)]
     if LORA_ALPHA:
         _method_flags += ["--lora-alpha", str(LORA_ALPHA)]
+for _part, _rate in (("head", LR_HEAD), ("neck", LR_NECK), ("trunk", LR_TRUNK)):
+    if _rate:
+        _method_flags += [f"--lr-{_part}", str(_rate)]
+if LR_HEAD or LR_NECK or LR_TRUNK:
+    print(f"rates overridden in the encoder stage: head {LR_HEAD or 'table'}, "
+          f"neck {LR_NECK or 'table'}, trunk {LR_TRUNK or 'table'} -- "
+          f"absolute, so --lr-scale {LR_SCALE} does not touch the ones named. "
+          f"The head stage ({EPOCHS[0]} epoch) keeps its own warmup rate: it "
+          f"trains the decoder alone, and that is the stage that adapts it.")
+    if LR_TRUNK and LR_HEAD and LR_TRUNK > LR_HEAD:
+        print("   the trunk leads the head here, which inverts the shipped "
+              "table. A modality shift lives in the trunk, and the reason the "
+              "table holds it back -- a training set too small for the "
+              "features it carries -- is weaker at this size. It is still a "
+              "measurement, not a given.")
 subprocess.run(
     [sys.executable, "tools/train_encoder.py", *COMMON, *_method_flags,
      "--base", BASE_CKPT, "--out", CHECKPOINT,
@@ -1231,6 +1345,9 @@ VERDICT = {
     "test_windows_by_source": TEST.sources,
     "gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,
     "method": METHOD, "anchor_weight": ANCHOR_WEIGHT,
+    "rates": {"head": LR_HEAD, "neck": LR_NECK, "trunk": LR_TRUNK,
+              "scale": LR_SCALE},
+    "class_weights": CLASS_WEIGHTS, "require_pools": REQUIRE_POOLS,
     "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT}
             if METHOD == "lora" else {},
     "blend": BLEND, "checkpoint": CHECKPOINT,

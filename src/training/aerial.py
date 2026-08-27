@@ -749,6 +749,63 @@ def _allocate(total: int, fractions: SequenceABC[float]) -> list[int]:
     return counts
 
 
+def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
+              seed: int = 0) -> tuple[list[FrameIndex], dict]:
+    """`index` with over-represented classes thinned, and what that cost.
+
+    A pool built from vehicle datasets is mostly vehicles: DroneVehicle alone
+    contributes 155 000 instances and nearly all of them are cars. An encoder
+    trained on that learns "a target is a car" as surely as it learns thermal,
+    and the classes that make the set *general* -- pedestrians, bicycles,
+    animals -- are outvoted before the first step.
+
+    Thinning is per instance rather than per frame, because dropping a frame
+    that holds one pedestrian beside six cars would throw the pedestrian away
+    too. A frame left with nothing is dropped; every other frame keeps its
+    remaining instances and its window budget, so a thinned set still teaches
+    the same scenes.
+
+    The keep decision is a hash of the frame's identity and the instance's own
+    label rather than a draw from a stream, so it does not depend on order, on
+    how many workers built the index, or on anything else being rebalanced
+    first -- the same weights give the same set every time.
+    """
+    import hashlib
+
+    kept: list[FrameIndex] = []
+    before: dict[str, int] = {}
+    after: dict[str, int] = {}
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        survivors = []
+        for instance in entry.instances:
+            name = (spec.name_of(instance.class_id) if spec is not None
+                    else str(instance.class_id))
+            before[name] = before.get(name, 0) + 1
+            weight = float(weights.get(name, 1.0))
+            if weight < 1.0:
+                digest = hashlib.blake2b(
+                    f"{entry.source.name if entry.source else ''}"
+                    f"|{entry.frame.name}|{instance.label}|{seed}".encode(),
+                    digest_size=8).digest()
+                if int.from_bytes(digest, "big") / 2 ** 64 >= weight:
+                    continue
+            survivors.append(instance)
+            after[name] = after.get(name, 0) + 1
+        if survivors:
+            kept.append(replace(entry, instances=tuple(survivors)))
+    report = {
+        "frames": {"before": len(index), "after": len(kept)},
+        "instances": {"before": sum(before.values()),
+                      "after": sum(after.values())},
+        "by_class": {name: (count, after.get(name, 0))
+                     for name, count in sorted(before.items(),
+                                               key=lambda kv: -kv[1])},
+        "unmatched": sorted(set(weights) - set(before)),
+    }
+    return kept, report
+
+
 def save_splits(path: str | Path,
                 splits: Mapping[str, SequenceABC[FrameIndex]]) -> Path:
     """Which frames each split holds, as `source -> [frame key]`.
@@ -1625,6 +1682,6 @@ __all__ = [
     "list_frames", "list_pairs", "split_bridges", "image_origin", "pool_masks",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",
-    "apply_splits", "save_splits",
+    "apply_splits", "rebalance", "save_splits",
     "split_frames", "split_index", "summarise", "windows_for",
 ]

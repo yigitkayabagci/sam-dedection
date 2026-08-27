@@ -27,6 +27,8 @@ recipe, not the implementation.
 | 19 | `19_thermal_stage_b_pool.ipynb` | stage B trained on the **thermal** mask pools 13-18 produced, from stock EdgeTAM with no stage A — plus a stock-vs-trained score and a before/after panel | the pools staged under `MyDrive/edgetam-pool`, and the frames they were harvested from (a pool holds masks, not pixels) |
 | 20 | `20_thermal_stage_b_pool_rgb.ipynb` | the same run with the **RGB** pools mixed into the same batches — the one variable | the same, plus the RGB pools' frames |
 | 21 | `21_pool_data_readiness.ipynb` | no training: what every pool recorded, which of its frames are on disk, why the rest are not, and the exact `--pool` flags a run would take | the pools under `MyDrive/edgetam-pool`; it fetches only what `FETCH` names |
+| 22 | `22_thermal_deep.ipynb` | thermal only, every thermal pool required to be present before a step is taken, the vehicle classes thinned, and the rate table inverted so the trunk learns the modality | the pools, plus VTUAV's archives in `MyDrive/VTUAV` (only the frames the pool names come out of them) |
+| 23 | `23_thermal_deep_lora.ipynb` | 22 with `METHOD = "lora"` and nothing else changed — the A/B for the method | the same |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
