@@ -221,6 +221,7 @@ MAX_REGRESSION = 0.15
 EPOCHS         = [1, 3]
 STEPS          = 400
 VAL_BATCHES    = 24
+DEPTH          = 2
 BATCH          = 0
 BATCH_CEILING  = 512
 BATCH_RESERVE  = 0.12
@@ -1051,6 +1052,7 @@ subprocess.run(
      "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),
      "--epochs", str(EPOCHS[0]), str(EPOCHS[1]),
      "--val-batches", str(VAL_BATCHES), "--workers", str(WORKERS),
+     "--depth", str(DEPTH),
      "--anchor-weight", str(ANCHOR_WEIGHT), "--device", "cuda",
      "--json", str(Path(WORK) / "run.json")], check=True)
 
