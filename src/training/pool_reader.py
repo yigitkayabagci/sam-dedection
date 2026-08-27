@@ -511,6 +511,66 @@ def pool_spec(name: str, classes: SequenceABC[str], border: int = 0) -> DatasetS
         palette_source=PALETTE_SOURCE)
 
 
+def why_no_image(pool_dir: str | Path, images_root: str | Path | None,
+                 sample: int = 3) -> dict:
+    """Why a pool's frames could not be found, in terms of the two paths.
+
+    `no_image` on every record has three causes and they need different fixes:
+    the root is not there at all (the archive was never fetched), the root is
+    there but holds a different part of the set (a thermal export standing in
+    for an RGB one), or the frames are there under a name the recorded path
+    does not end with. Guessing between them costs a re-index each time, so
+    this reads one record and the filesystem and says which it is.
+    """
+    pool_dir = Path(pool_dir)
+    records = sorted(pool_dir.rglob(RECORD_FILE))[:max(sample, 1)]
+    report: dict = {"pool": str(pool_dir), "records": len(records),
+                    "root": str(images_root) if images_root else None,
+                    "recorded": [], "verdict": "", "root_exists": False,
+                    "files_under_root": 0, "extensions": {}}
+    if not records:
+        report["verdict"] = "no records here at all -- the pool zip is missing"
+        return report
+    for record_path in records:
+        record = json.loads(record_path.read_text())
+        report["recorded"].append({"image": record.get("image"),
+                                   "image_rel": record.get("image_rel")})
+    root = Path(images_root) if images_root else None
+    if root is None:
+        report["verdict"] = "no images root given -- pass one on the --pool flag"
+        return report
+    report["root_exists"] = root.is_dir()
+    if not report["root_exists"]:
+        report["verdict"] = (f"{root} does not exist -- the archive was never "
+                             f"fetched or went somewhere else")
+        return report
+    counted: dict[str, int] = {}
+    total = 0
+    for found in root.rglob("*"):
+        if found.is_file():
+            total += 1
+            counted[found.suffix.lower()] = counted.get(found.suffix.lower(), 0) + 1
+            if total >= 200_000:
+                break
+    report["files_under_root"] = total
+    report["extensions"] = dict(sorted(counted.items(), key=lambda kv: -kv[1])[:6])
+    if not total:
+        report["verdict"] = f"{root} is empty -- the archive unpacked nowhere"
+        return report
+    stem = Path(report["recorded"][0]["image"] or "").name
+    matches = [str(m) for m in root.rglob(stem)][:3] if stem else []
+    report["same_name_here"] = matches
+    if matches:
+        report["verdict"] = (
+            f"the frame is here as {matches[0]} but its recorded path does not "
+            f"end with the same components -- the root is one level off")
+    else:
+        report["verdict"] = (
+            f"{root} holds {total} files and none is named {stem}. This root "
+            f"is a different part of the set than the pool was harvested from")
+    return report
+
+
 def index_pool(
     pool_dir: str | Path,
     images_root: str | Path | None = None,
@@ -762,5 +822,6 @@ __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
            "discover_pools",
            "exclude_frames", "frame_keys", "group_records",
            "index_pool", "index_pools", "link_pool", "spread",
+           "why_no_image",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",
            "save_pool_index", "store_areas"]

@@ -122,6 +122,7 @@ POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
 
 VTUAV_PARTS = []
+VTUAV_VIS_PARTS = []
 
 IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
                "aerovis_train": "/content/data/AeroVIS",
@@ -140,9 +141,10 @@ IMAGES = [
     ["dronevehicle", "dronevehicle", "DroneVehicle", ["train"]],
     ["kust4k",       "kust4k",       "Kust4K",       ["tir", "labels", "rgb"]],
     ["visdrone",     "visdrone",     "VisDrone",     []],
-    ["segfly_rgb",   "",             "SegFly",       []],
+    ["segfly_rgb",   "segfly_rgb",   "SegFly_RGB",   []],
     ["segfly",       "",             "SegFly",       []],
     ["vtuav",        "vtuav_track",  "VTUAV",        VTUAV_PARTS],
+    ["vtuav_vis",    "vtuav_vis",    "VTUAV_VIS",    VTUAV_VIS_PARTS],
     ["kaggle",       "",             "kaggle_uav_thermal", []],
     ["aerovis",      "",             "AeroVIS",      []],
 ]
@@ -559,7 +561,7 @@ from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
 from src.training.pool_reader import (SKIP_REASONS, exclude_frames, frame_keys,
                                       index_pool, load_pool_index, parse_pool,
-                                      save_pool_index, spread)
+                                      save_pool_index, spread, why_no_image)
 from tools.train_encoder import build_indexes
 
 GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE, max_area=MAX_AREA,
@@ -636,6 +638,15 @@ for _row in PLAN:
 
 for _pool, _why in FAILED:
     print(f"{_pool:<28}unusable  {_why}")
+    if "no_image" not in _why:
+        continue
+    _row = next(r for r in PLAN if r["pool"] == _pool)
+    _report = why_no_image(_row["dir"], _row["images"])
+    print(f"    recorded {_report['recorded'][0]['image']}")
+    print(f"    -> {_report['verdict']}")
+    if _report["extensions"]:
+        print(f"    {_report['root']} holds {_report['files_under_root']} "
+              f"files {_report['extensions']}")
 assert POOL_FLAGS, "no pool resolved its frames -- check the IMAGES roots above"
 
 assert not CUTS or any(CUTS.values()), (

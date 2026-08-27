@@ -34,7 +34,8 @@ from src.training.pool import RECORD_FILE  # noqa: E402
 from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
                                       index_pool, link_pool, load_pool_index,
                                       parse_pool, pool_datasets,
-                                      save_pool_index, store_areas)
+                                      save_pool_index, store_areas,
+                                      why_no_image)
 
 try:
     import cv2
@@ -492,6 +493,56 @@ class PoolIndexTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as caught:
             index_pool(self.pool / "missing", self.images, workers=1)
         self.assertIn("demo", str(caught.exception))
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed to write the frames")
+class WhyNoImageTest(unittest.TestCase):
+    """`no_image` on every record has three different fixes, and the report has
+    to say which one rather than leaving a re-index to find out."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "pool"
+        self.shape = (40, 60)
+        self.image = write_image(self.root / "elsewhere" / "seq" / "000000.png",
+                                 *self.shape)
+        write_frame(self.pool, "seq/000000", self.image, self.shape,
+                    [("car", (2, 2, 20, 20), blob(self.shape, (2, 2, 20, 20)))])
+
+    def test_a_root_that_is_not_there_says_so(self):
+        report = why_no_image(self.pool / "demo", self.root / "never_fetched")
+        self.assertFalse(report["root_exists"])
+        self.assertIn("never fetched", report["verdict"])
+
+    def test_a_root_holding_a_different_part_of_the_set_says_so(self):
+        other = self.root / "other"
+        write_image(other / "seq" / "999999.png", *self.shape)
+        report = why_no_image(self.pool / "demo", other)
+        self.assertTrue(report["root_exists"])
+        self.assertEqual(report["files_under_root"], 1)
+        self.assertIn("different part of the set", report["verdict"])
+        self.assertEqual(report["extensions"], {".png": 1})
+
+    def test_the_frame_being_there_under_another_prefix_says_so(self):
+        # The same file, but under a directory chain no suffix of the recorded
+        # path ends with -- so `Relocator` misses it and an rglob finds it.
+        moved = self.root / "moved" / "train" / "images" / "000000.png"
+        write_image(moved, *self.shape)
+        # The harvest runtime's own copy is gone, which is the situation this
+        # runs in: at depth 0 the recorded path is absolute and joinpath keeps
+        # it, so while it exists the relocator resolves to it and never misses.
+        self.image.unlink()
+        self.assertIsNone(Relocator(self.root / "moved")(self.image))
+        report = why_no_image(self.pool / "demo", self.root / "moved")
+        self.assertIn("000000.png", report["same_name_here"][0])
+        self.assertIn("one level off", report["verdict"])
+
+    def test_a_pool_with_no_records_is_named_as_that(self):
+        report = why_no_image(self.root / "empty", self.root)
+        self.assertEqual(report["records"], 0)
+        self.assertIn("pool zip is missing", report["verdict"])
 
 
 class StoreAreasTest(unittest.TestCase):
