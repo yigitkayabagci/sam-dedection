@@ -909,6 +909,8 @@ def dataset_of(entry):
     return DATASET_OF.get(_spec, _spec)
 
 def stem_of(entry):
+    if entry.source is not None and entry.source.mode == "pool":
+        return entry.frame.name.lower()
     return Path(entry.frame.name).stem.lower()
 
 GRADED = {}
@@ -932,6 +934,11 @@ if _dropped:
           "and thermal halves, Kust4K's -- and each half is its own source "
           "with its own permutation, so a frame can train in one and be "
           "scored in the other. Same geometry, same objects, same mask.")
+    print("   two pools match on the whole key a harvest recorded, not on its "
+          "stem: VTUAV numbers every sequence from zero, so `000120` names one "
+          "frame per sequence and a stem match would drop every sequence's "
+          "frame because one of them is graded. The drawn grade is the case "
+          "that needs a stem, and `exclude_frames` above has already done it.")
 
 SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS))
 COMMON += ["--splits", SPLIT_FILE]
