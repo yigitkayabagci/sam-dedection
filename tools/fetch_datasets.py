@@ -921,7 +921,7 @@ def tracked_members(archive: zipfile.ZipFile, modality: str = "rgb",
 
 
 def extract(archive_path: Path, dest: Path, into: str = "",
-            frames: str = "all", quiet: bool = False) -> int:
+            frames: str = "all", quiet: bool = False, workers: int = 1) -> int:
     """Unpack into `dest/into`, returning how many files were written.
 
     Zip or tar.gz, told apart by the file itself rather than its name -- a
@@ -929,6 +929,15 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     (`r|gz`): `getmembers()` on a compressed tar decompresses the whole file
     once just to list it and a second time to extract, which on RGBT234's
     7.7 GB doubles a ten-minute step for nothing.
+
+    `workers > 1` reads a **zip** on that many threads, each with its own
+    handle on the file. It is off by default and it is not for speed on a
+    local disk -- one thread already saturates that. It is for a `frames`
+    filter over a Drive mount: `tracked_ir` keeps a twentieth of a 15.7 GiB
+    part, so the read stops being a stream and becomes a few thousand random
+    seeks, and a FUSE seek is latency, not bandwidth. Concurrency is the only
+    thing that hides latency. Inflating releases the GIL, so threads are
+    enough. A tar is a stream with no index and cannot be read this way.
     """
     target = dest / into if into else dest
     target.mkdir(parents=True, exist_ok=True)
@@ -943,7 +952,11 @@ def extract(archive_path: Path, dest: Path, into: str = "",
             else:
                 members = archive.namelist()
             if not quiet:
-                print(f"   extracting {len(members)} entries -> {target}")
+                print(f"   extracting {len(members)} entries -> {target}"
+                      + (f" on {workers} threads" if workers > 1 else ""))
+            if workers > 1:
+                return _extract_parallel(archive_path, members, target,
+                                         workers, quiet)
             try:
                 archive.extractall(target, members=members)
             except Exception as failure:     # noqa: BLE001 - see below
@@ -977,6 +990,76 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     if not quiet:
         print(f"   extracted {count} entries -> {target}")
     return count
+
+
+def _extract_parallel(archive_path: Path, members: SequenceABC[str],
+                      target: Path, workers: int, quiet: bool = False) -> int:
+    """The same members, on `workers` threads, each with its own zip handle.
+
+    A `ZipFile` holds one file position, so sharing one across threads
+    interleaves seeks and returns garbage. Opening one per thread is the whole
+    trick; the central directory is parsed per handle, which is milliseconds
+    against the seeks this exists to overlap.
+
+    A member that cannot be read is counted rather than raised, the way the
+    serial fallback does it: one bad CRC in a Drive copy must not cost the
+    other seventy thousand frames.
+
+    Every directory is made **before** the pool starts. `ZipFile.extract`
+    creates a member's parent with a `isdir` test followed by `makedirs`, and
+    two threads landing in the same folder both pass the test and one of them
+    raises -- which showed up as a single "unreadable" frame per folder, on
+    an archive with nothing wrong with it.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    local = threading.local()
+    opened: list[zipfile.ZipFile] = []
+    counts = {"taken": 0, "already": 0}
+    bad: list[str] = []
+    lock = threading.Lock()
+
+    def handle() -> zipfile.ZipFile:
+        if not hasattr(local, "zip"):
+            local.zip = zipfile.ZipFile(archive_path)
+            with lock:
+                opened.append(local.zip)
+        return local.zip
+
+    def one(member: str) -> None:
+        landing = target / member
+        if landing.is_file() and landing.stat().st_size:
+            with lock:
+                counts["already"] += 1
+            return
+        try:
+            handle().extract(member, target)
+        except Exception:                    # noqa: BLE001 - one bad member
+            with lock:
+                bad.append(member)
+            return
+        with lock:
+            counts["taken"] += 1
+
+    for folder in {(target / member).parent for member in members}:
+        folder.mkdir(parents=True, exist_ok=True)
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, members))
+    finally:
+        for opened_zip in opened:
+            opened_zip.close()
+    if not quiet:
+        print(f"   {counts['taken']} extracted, {counts['already']} already "
+              f"there, {len(bad)} unreadable")
+        if bad:
+            print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
+    if not counts["taken"] and not counts["already"]:
+        raise RuntimeError(
+            f"{target}: not one member of the archive could be read. The "
+            f"staged copy is corrupt -- delete it and let the download run.")
+    return counts["taken"] + counts["already"]
 
 
 def _extract_each(archive, members: SequenceABC[str], target: Path,

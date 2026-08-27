@@ -146,6 +146,18 @@ is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
 
+**Neither stage leaves the other idle.** The harvest is two costs that used to
+take turns. Unzipping is not bandwidth but seeks — `tracked_ir` keeps a
+twentieth of a 15.7 GiB part, so the read is a few thousand random seeks over a
+Drive mount, and `UNZIP_WORKERS` reads on that many threads with one zip handle
+each. Decoding used to run on the thread that then waited for the teacher: a
+1920×1080 JPEG is ~20 ms and a VTUAV frame carries **one box**, so a group of 32
+put ~0.6 s of decode in front of every batch with the card doing nothing.
+`label_pool(readers=…, read_ahead=…)` decodes ahead on its own threads — cv2
+releases the GIL, so it is real parallelism — and the bound is in frames
+because a decoded one is 6.2 MB. On a synthetic 1080p pool it takes the harvest
+from 3.07 s to 1.18 s for identical output.
+
 **No fallback teacher, in any of the four.** The load used to catch a failure
 and quietly continue on `facebook/sam2.1-hiera-large`. Those four pools are
 meant to be mixed into one training set, so a pool whose masks came from a

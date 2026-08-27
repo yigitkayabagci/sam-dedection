@@ -66,6 +66,8 @@ from src.training.pool import (  # noqa: E402
     label_many,
     calibration_table,
     label_pool,
+    ordered_map,
+    read_workers,
     modality_agreement,
     pool_report,
     summarise_pool,
@@ -73,6 +75,7 @@ from src.training.pool import (  # noqa: E402
 )
 from tools.fetch_datasets import (  # noqa: E402
     RECIPES,
+    extract,
     staged,
     stream_extract,
     tracked_members,
@@ -472,6 +475,100 @@ class TestProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "labelling decodes real image files")
+class TestOrderedMap(unittest.TestCase):
+    """Threads for the decode, but the order and the bound are the contract."""
+
+    def test_results_keep_their_order_however_the_work_finishes(self):
+        import time
+
+        def slow(value):
+            time.sleep(0.02 if value % 2 == 0 else 0.0)
+            return value
+
+        self.assertEqual(list(ordered_map(slow, range(12), 4, 8)),
+                         list(range(12)))
+
+    def test_no_more_than_the_depth_is_in_flight_at_once(self):
+        """A decoded 1920x1080 frame is 6.2 MB; an unbounded queue is the bug.
+
+        The consumer here never pulls a second item, so everything the pool
+        chose to start is still started -- which is exactly what a queue tied
+        to the worker count rather than a depth would run away with.
+        """
+        import threading
+
+        started = []
+        lock = threading.Lock()
+        gate = threading.Event()
+
+        def blocking(value):
+            with lock:
+                started.append(value)
+            gate.wait(2.0)
+            return value
+
+        stream = ordered_map(blocking, range(200), 4, 6)
+        try:
+            next(stream)                      # unblocks nothing until `gate`
+        finally:
+            gate.set()
+        self.assertLessEqual(len(started), 8,
+                             "the lookahead is not bounded by depth")
+
+    def test_one_worker_is_the_serial_path_unchanged(self):
+        self.assertEqual(list(ordered_map(lambda v: v * 2, range(4), 1, 8)),
+                         [0, 2, 4, 6])
+
+    def test_the_worker_count_asks_the_machine_when_it_is_zero(self):
+        self.assertGreaterEqual(read_workers(0), 1)
+        self.assertLessEqual(read_workers(0), 16)
+        self.assertEqual(read_workers(3), 3)
+
+
+class TestLabelPoolThreading(unittest.TestCase):
+    """Decoding ahead of the teacher must change the clock and nothing else."""
+
+    def frames(self, tmp: Path, count: int = 6) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def strip(self, report: dict) -> dict:
+        return {k: v for k, v in report.items()
+                if k not in ("readers", "read_ahead")}
+
+    def test_threaded_and_serial_runs_agree_on_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root)
+            serial = label_pool(frames, FakeImageTeacher(), root / "a",
+                                dataset="toy", frame_group=2, readers=1)
+            threaded = label_pool(frames, FakeImageTeacher(), root / "b",
+                                  dataset="toy", frame_group=2, readers=4)
+            self.assertEqual(self.strip(threaded), self.strip(serial))
+            for stem in (f"img{i}" for i in range(6)):
+                self.assertEqual(
+                    sorted(open_masks(root / "a" / "toy" / stem / MASK_STORE)),
+                    sorted(open_masks(root / "b" / "toy" / stem / MASK_STORE)))
+
+    def test_an_unreadable_frame_is_counted_on_the_calling_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=3)
+            frames[1].image.unlink()
+            report = label_pool(frames, FakeImageTeacher(), root / "pool",
+                                dataset="toy", readers=4)
+            self.assertEqual(report["unreadable"], 1)
+            self.assertEqual(report["images"], 2)
+
+    def test_the_report_says_what_the_run_actually_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = label_pool(self.frames(Path(tmp), count=2),
+                                FakeImageTeacher(), Path(tmp) / "pool",
+                                dataset="toy", frame_group=8, readers=2)
+            self.assertEqual(report["readers"], 2)
+            self.assertEqual(report["read_ahead"], 16)
+
+
 class TestLabelPool(unittest.TestCase):
     def frames(self, tmp: Path, count: int = 2) -> list:
         write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
@@ -945,6 +1042,52 @@ class TestTrackedMembers(unittest.TestCase):
             keep = tracked_members(archive, "rgb")
             self.assertEqual([n for n in keep if n.endswith(".jpg")], [])
             self.assertIn("bus_017/rgb.txt", keep)
+
+
+class TestParallelExtract(unittest.TestCase):
+    """Threads hide FUSE seek latency; they must change nothing else."""
+
+    def archive(self, tmp: Path) -> Path:
+        path = tmp / "part.zip"
+        with zipfile.ZipFile(path, "w") as handle:
+            for sequence in ("bus_017", "car_003", "van_009"):
+                for index in range(120):
+                    handle.writestr(f"{sequence}/rgb/{index:06d}.jpg",
+                                    bytes([index % 251]) * 64)
+                    handle.writestr(f"{sequence}/ir/{index:06d}.jpg",
+                                    bytes([(index + 7) % 251]) * 64)
+                rows = "".join(f"{i} 2 3 4\n" for i in range(12))
+                handle.writestr(f"{sequence}/rgb.txt", rows)
+                handle.writestr(f"{sequence}/ir.txt", rows)
+        return path
+
+    def tree(self, root: Path) -> dict:
+        return {p.relative_to(root).as_posix(): p.read_bytes()
+                for p in sorted(root.rglob("*")) if p.is_file()}
+
+    def test_a_threaded_unpack_writes_exactly_what_a_serial_one_does(self):
+        """Including the folders. `ZipFile.extract` makes a member's parent
+        with an `isdir` test then a `makedirs`, so two threads landing in one
+        folder both pass the test and one raises -- which reads as a corrupt
+        archive when the archive is fine."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = self.archive(root)
+            serial = extract(part, root / "a", frames="tracked_ir",
+                             workers=1, quiet=True)
+            threaded = extract(part, root / "b", frames="tracked_ir",
+                               workers=8, quiet=True)
+            self.assertEqual(threaded, serial)
+            self.assertEqual(self.tree(root / "b"), self.tree(root / "a"))
+
+    def test_a_second_pass_is_the_resume_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = self.archive(root)
+            first = extract(part, root / "a", frames="tracked_ir",
+                            workers=4, quiet=True)
+            self.assertEqual(extract(part, root / "a", frames="tracked_ir",
+                                     workers=4, quiet=True), first)
 
 
 class TestAnnotatedStride(unittest.TestCase):

@@ -36,8 +36,11 @@ double-counts.
 from __future__ import annotations
 
 import json
+import os
 import shutil
-from collections.abc import Iterable, Mapping, Sequence as SequenceABC
+from collections import deque
+from collections.abc import Callable, Iterable, Mapping, Sequence as SequenceABC
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +64,56 @@ def _read_rgb(path: Path) -> np.ndarray:
 def iou(a: np.ndarray, b: np.ndarray) -> float:
     union = np.logical_or(a, b).sum()
     return float(np.logical_and(a, b).sum() / union) if union else 1.0
+
+
+def read_workers(readers: int = 0) -> int:
+    """How many frames to decode at once, `0` meaning "ask the machine"."""
+    return max(readers, 1) if readers else max(1, min(os.cpu_count() or 4, 16))
+
+
+def ordered_map(function: Callable, items: Iterable, workers: int,
+                depth: int) -> Iterable:
+    """`map` on threads, results **in order**, at most `depth` in flight.
+
+    The harvest's shape is one CPU stage feeding one GPU stage: decode a
+    1920x1080 JPEG, hand its crops to a 1024-input teacher. Run serially, the
+    card idles for the whole decode -- and on VTUAV that is one full-frame
+    decode per *box*, because a tracking sequence carries one target per frame,
+    so `frame_group` frames of decode sit in front of every batch.
+
+    Order is kept because the caller's counters, its progress bar and its crash
+    contract are all positional: a frame is done when its store exists, and a
+    run that reordered its frames would still be correct but would stop being
+    reproducible. `depth` rather than an unbounded queue because a decoded
+    1920x1080 frame is 6.2 MB and a queue tied to the worker count would put
+    gigabytes of pixels in front of a card happy with a few dozen.
+
+    cv2's JPEG decode releases the GIL, which is the only reason threads are
+    the right tool here rather than processes -- no pickling of frames, no
+    second CUDA context.
+    """
+    if workers <= 1:
+        for item in items:
+            yield function(item)
+        return
+    source = iter(items)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending: deque = deque()
+
+        def submit() -> bool:
+            item = next(source, None)
+            if item is None:
+                return False
+            pending.append(pool.submit(function, item))
+            return True
+
+        for _ in range(max(depth, workers)):
+            if not submit():
+                break
+        while pending:
+            result = pending.popleft().result()
+            submit()
+            yield result
 
 
 # --------------------------------------------------------------------------
@@ -226,6 +279,8 @@ def label_pool(
     resume: bool = True,
     mirror: str | None = None,
     frame_group: int = 1,
+    readers: int = 0,
+    read_ahead: int = 0,
     progress=None,
 ) -> dict:
     """Run the teacher over a box dataset; write one store per image.
@@ -257,6 +312,18 @@ def label_pool(
     Frames are still written one at a time, after their group's inference, so
     the crash contract is unchanged.
 
+    `readers` is how many frames are decoded at once, ahead of the teacher --
+    `0` asks the machine for its core count. Decoding is the other half of this
+    loop and it used to run on the same thread as inference, so the card sat
+    idle through it: a 1920x1080 JPEG is ~20 ms and VTUAV carries **one box per
+    frame**, which puts `frame_group` whole decodes in front of every batch.
+    `read_ahead` bounds how many decoded frames may wait in host memory (`0` is
+    twice the group, floored at the reader count); a decoded frame is 6.2 MB,
+    so this is the knob that keeps the lookahead from becoming the memory
+    problem. Order, counters and the crash contract are unchanged --
+    `ordered_map` yields in submission order and every counter still moves on
+    the calling thread.
+
     The report is the honest statement of what this produced: images and
     boxes attempted, accepted, skipped, and every gate's reject count.
     """
@@ -277,8 +344,12 @@ def label_pool(
     rejected: dict[str, int] = {}
     by_class: dict[str, int] = {}
 
-    def prepared():
-        """The frames that still need the teacher, decoded and box-filtered."""
+    def jobs():
+        """The frames that still need the teacher -- one stat each, no pixels.
+
+        Deliberately cheap and deliberately on this thread: everything it
+        touches is a counter, so the reader threads below never write one.
+        """
         for frame in iterator:
             target = _frame_dir(out_root, frame.key)
             store = target / MASK_STORE
@@ -299,26 +370,30 @@ def label_pool(
             if source is None:
                 counts["no_pair"] += 1
                 continue
-            try:
-                pixels = _read_rgb(source)
-            except FileNotFoundError:
-                counts["unreadable"] += 1
-                continue
+            yield frame, target, store, source
 
-            boxes, keep = frame.resolved(pixels.shape[:2])
-            full_shape = pixels.shape[:2]
-            if frame.inset:
-                b = frame.inset
-                pixels = pixels[b:-b, b:-b]
-            indices = [i for i in range(len(boxes)) if keep[i]]
-            if max_boxes is not None and len(indices) > max_boxes:
-                areas = ((boxes[:, 2] - boxes[:, 0])
-                         * (boxes[:, 3] - boxes[:, 1]))
-                indices = sorted(
-                    sorted(indices, key=lambda i: -areas[i])[:max_boxes])
-            if not indices:
-                continue
-            yield frame, target, store, pixels, boxes, indices, full_shape
+    def decode(job):
+        """One frame's pixels and the boxes worth prompting, on any thread."""
+        frame, target, store, source = job
+        try:
+            pixels = _read_rgb(source)
+        except FileNotFoundError:
+            return "unreadable", None
+
+        boxes, keep = frame.resolved(pixels.shape[:2])
+        full_shape = pixels.shape[:2]
+        if frame.inset:
+            b = frame.inset
+            pixels = pixels[b:-b, b:-b]
+        indices = [i for i in range(len(boxes)) if keep[i]]
+        if max_boxes is not None and len(indices) > max_boxes:
+            areas = ((boxes[:, 2] - boxes[:, 0])
+                     * (boxes[:, 3] - boxes[:, 1]))
+            indices = sorted(
+                sorted(indices, key=lambda i: -areas[i])[:max_boxes])
+        if not indices:
+            return "no_boxes", None
+        return "ok", (frame, target, store, pixels, boxes, indices, full_shape)
 
     def write(item, masks, rows) -> None:
         frame, target, store, pixels, boxes, indices, full_shape = item
@@ -372,13 +447,20 @@ def label_pool(
             write(item, masks, rows)
         group.clear()
 
-    for item in prepared():
+    threads = read_workers(readers)
+    lookahead = read_ahead if read_ahead > 0 else max(2 * frame_group, threads)
+    for status, item in ordered_map(decode, jobs(), threads, lookahead):
+        if status != "ok":
+            if status == "unreadable":
+                counts["unreadable"] += 1
+            continue
         group.append(item)
         if len(group) >= max(frame_group, 1):
             flush()
     flush()
 
-    report = {"dataset": dataset, "prompt": prompt, "mirror": mirror, **counts,
+    report = {"dataset": dataset, "prompt": prompt, "mirror": mirror,
+              "readers": threads, "read_ahead": lookahead, **counts,
               "acceptance_rate": (counts["accepted"] / counts["attempted"]
                                   if counts["attempted"] else 0.0),
               "rejected": rejected, "accepted_by_class": by_class,

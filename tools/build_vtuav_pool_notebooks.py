@@ -27,6 +27,25 @@ annotated absent. `boxes.vtuav_frames` drops an absent row rather than
 prompting the teacher with a zero-area or NaN box, and cell 2 prints how many
 rows that was per archive before anything is staged.
 
+**Neither stage is allowed to leave the other idle.** Two knobs, because the
+harvest is two costs that used to take turns:
+
+- **Unzipping** is not bandwidth, it is seeks. `tracked_ir` keeps a twentieth
+  of a 15.7 GiB part, so the read is a few thousand random seeks over a Drive
+  mount rather than one stream, and a FUSE seek is latency. `UNZIP_WORKERS`
+  reads on that many threads, each with its own zip handle -- the only way to
+  hide latency is to have more of it outstanding.
+- **Decoding** used to run on the thread that then waited for the teacher. A
+  1920x1080 JPEG is ~20 ms and a VTUAV frame carries **one box**, so a group of
+  32 put ~0.6 s of decode in front of every batch with the card doing nothing.
+  `READERS` decodes ahead on its own threads (cv2 releases the GIL, so this is
+  real parallelism), `READ_AHEAD` bounds how many decoded frames may wait --
+  6.2 MB each, and cell 1 prints what that comes to.
+
+`cv2.setNumThreads(1)` goes with them: OpenCV parallelises `cvtColor`
+internally, and eight readers each spawning a pool of its own is
+oversubscription on a memory-bound op, not speed.
+
 **No fallback teacher.** The cell that loads `facebook/sam3` used to catch a
 failure and quietly continue on `facebook/sam2.1-hiera-large`. That is the one
 error worth stopping for: the pools these four write are meant to be mixed into
@@ -179,6 +198,9 @@ ZOOM        = 4.0
 MIN_SIZE    = 128
 BATCH       = 0
 FRAME_GROUP = 0
+READERS     = 0
+READ_AHEAD  = 0
+UNZIP_WORKERS = 16
 MAX_BOXES   = None
 LIMIT       = None
 BOX_IOU     = 0.5
@@ -222,14 +244,25 @@ if os.environ.get("HF_TOKEN"):
     except Exception as _login_error:
         print("hf login skipped:", _login_error)
 
-import torch
+import torch, cv2
+from src.training.pool import read_workers
+
+cv2.setNumThreads(1)
+torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
 _device = torch.cuda.get_device_properties(0) if torch.cuda.is_available() else None
 VRAM = round(_device.total_memory / 2 ** 30, 1) if _device else 0.0
+CORES = os.cpu_count() or 1
 if BATCH <= 0:
     BATCH = max(4, int(VRAM * 0.8)) if VRAM else 4
 if FRAME_GROUP <= 0:
     FRAME_GROUP = BATCH
+READERS = read_workers(READERS)
+if READ_AHEAD <= 0:
+    READ_AHEAD = max(2 * FRAME_GROUP, READERS)
 
 def progress(stream, total, desc):
     from tqdm.auto import tqdm
@@ -241,6 +274,9 @@ print(NOTEBOOK, STAMP, "| repo:", _want,
       "| OK" if _want == STAMP else "| STALE, re-open from the repo")
 print(_device.name if _device else "no GPU", VRAM, "GiB",
       "| BATCH", BATCH, "| FRAME_GROUP", FRAME_GROUP, "| modality", MODALITY)
+print(CORES, "cores | READERS", READERS, "| READ_AHEAD", READ_AHEAD,
+      "|", round(READ_AHEAD * 1920 * 1080 * 3 / 2 ** 30, 2), "GiB of frames "
+      "in flight | UNZIP_WORKERS", UNZIP_WORKERS)
 ''')
 
 
@@ -339,7 +375,8 @@ for _archive in ARCHIVES:
         raise SystemExit(f"{_source} is not there -- set DRIVE_DIR in cell 1")
     print("staging", _archive,
           round(_source.stat().st_size / 2 ** 30, 2), "GiB from Drive")
-    extract(_source, Path(DATA_ROOT), frames=EXTRACT_MODE)
+    extract(_source, Path(DATA_ROOT), frames=EXTRACT_MODE,
+            workers=UNZIP_WORKERS)
     _marker.write_text("ok")
 
 from src.training import boxes as B
@@ -406,7 +443,8 @@ def harvest(frames, dataset):
                               prompt="self", gates=GATES, zoom=ZOOM,
                               min_size=MIN_SIZE, batch_size=BATCH,
                               frame_group=FRAME_GROUP, limit=LIMIT,
-                              max_boxes=MAX_BOXES, progress=progress)
+                              max_boxes=MAX_BOXES, readers=READERS,
+                              read_ahead=READ_AHEAD, progress=progress)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             BATCH = max(1, BATCH // 2)
