@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty notebooks, meant for Colab. Everything they orchestrate lives in
+Twenty-two notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -26,6 +26,8 @@ recipe, not the implementation.
 | 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
 | 19 | `19_thermal_stage_b_pool.ipynb` | stage B trained on the **thermal** mask pools 13-18 produced, from stock EdgeTAM with no stage A — plus a stock-vs-trained score and a before/after panel | the pools staged under `MyDrive/edgetam-pool`, and the frames they were harvested from (a pool holds masks, not pixels) |
 | 20 | `20_thermal_stage_b_pool_rgb.ipynb` | the same run with the **RGB** pools mixed into the same batches — the one variable | the same, plus the RGB pools' frames |
+| 21 | `21_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive |
+| 22 | `22_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 21 on a second runtime |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -109,6 +111,41 @@ name rather than by position, so **all three hold out the same VTUAV
 sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
+
+**16, 17, 21 and 22 are one generator and two splits.** All four come out of
+`tools/build_vtuav_pool_notebooks.py`. 16/17 take the short-term parts, 21/22
+the long-term ones, and each writes a pool of its own — `vtuav_rgb`,
+`vtuav_thermal`, `vtuav_lt_rgb`, `vtuav_lt_thermal`. Separate pools rather than
+four archives in one list, for three reasons: a short-term pool already
+mirrored to Drive stays valid and the long-term harvest is purely additive
+(`pool_reader.discover_pools` is how 19 and 20 find their food, and it picks a
+new folder up with no edit anywhere); `aerial.split_index` stratifies per
+dataset, so the long-term sequences get their own held-out slice instead of
+being diluted into the short-term split; and the long-term parts are the ones
+with real disappearances, so a pool that keeps them apart can be weighed apart.
+
+**LT and ST are the same data.** Long-term versus short-term is about the
+*tracking task*: same sensor, same 1920×1080 registered RGB-T pairs, same
+`<sequence>/{rgb,ir}/` + `{rgb,ir}.txt` layout. Nothing in this pipeline reads
+a tracking protocol, so the split barely matters — with two exceptions it does
+have to handle. The target really leaves the frame in a long-term sequence and
+those rows are marked absent, as a zero-extent box or a NaN one, and both are
+dropped rather than handed to the teacher (`nan <= 0` is False, so testing only
+the extent used to let a not-a-number rectangle through as a prompt). And the
+stride — line k is frame 10k — was measured on `train_ST_001` and nowhere
+else; a stride assumed one too small does not fail, it labels frame 9 with
+frame 10's box and mirrors a pool of quietly wrong masks to Drive. So it is
+derived per sequence from that sequence's own frame and row counts
+(`boxes.annotated_stride`), 10 wins wherever those counts allow it (which keeps
+every short-term harvest byte-identical), and a sequence whose counts allow no
+single answer is skipped with its numbers printed. Cell 2 of all four notebooks
+is a probe that prints exactly that — per archive: sequences, frames, rows,
+implied stride, absent share — from the zip's central directory, before a byte
+is extracted.
+
+**Neither split ships a mask.** VTUAV's drawn instance masks are the separate
+VIS release, 100 sequences; the tracking download's 500 carry one `x y w h` per
+annotated frame and nothing else. That is the whole reason these four exist.
 
 **19 and 20 are the pools' first training run, and one experiment.** They are
 generated from `tools/build_stage_b_notebooks.py`, are the comment-free shape

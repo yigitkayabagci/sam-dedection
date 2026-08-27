@@ -1,9 +1,36 @@
 #!/usr/bin/env python3
-"""Generate notebooks 16 and 17: VTUAV's two halves, two pools, two runtimes.
+"""Generate notebooks 16, 17, 21 and 22: VTUAV's halves and splits, one pool each.
 
 Same shape as 15 -- code cells only, no prose, no comments -- and the same
-generator pattern as `build_pool_notebooks.py`: one file, two variants, so the
-pair cannot drift apart by an edit that only landed on one of them.
+generator pattern as `build_pool_notebooks.py`: one file, four variants, so no
+two of them can drift apart by an edit that only landed on one.
+
+**Four, because the tracking download is two splits.** 16 and 17 harvest the
+short-term parts; 21 and 22 harvest the long-term ones, into pools of their
+own (`vtuav_lt_rgb`, `vtuav_lt_thermal`) rather than into 16 and 17's. Three
+reasons, none of them tidiness:
+
+- a short-term pool already mirrored to Drive stays valid, and the long-term
+  harvest is *additive* -- `pool_reader.discover_pools`, which is how 19 and 20
+  find their food, picks a new folder up with no edit anywhere;
+- `aerial.split_index` stratifies per dataset, so a separate pool gets its own
+  held-out sequences instead of being diluted into the short-term split;
+- the long-term parts are the ones with real disappearances, and a pool that
+  keeps them separate can be weighed separately.
+
+**What "long-term" changes, and what it does not.** LT and ST are the same
+sensor, the same 1920x1080 registered RGB-T pairs and the same
+`<sequence>/{rgb,ir}/` + `<sequence>/{rgb,ir}.txt` layout; the split is about
+the *tracking task*, not the data. What differs is that LT sequences are
+longer, the target leaves the frame and comes back, and those frames are
+annotated absent. `boxes.vtuav_frames` drops an absent row rather than
+prompting the teacher with a zero-area or NaN box, and cell 2 prints how many
+rows that was per archive before anything is staged.
+
+**Neither split ships a mask.** VTUAV's drawn instance masks are the separate
+*VIS* release -- 100 sequences, a different download -- and the other 400 carry
+one `x y w h` per annotated frame and nothing else. That is the whole reason
+these notebooks exist: the teacher is what turns the box into a mask.
 
 **Why two notebooks rather than one with a mirror.** DroneVehicle earned its
 single pass: 53 % of its thermal boxes are the same rectangle as an RGB one, so
@@ -42,6 +69,20 @@ of one modality, which turns a 15.4 GiB archive into roughly 0.8 GiB on disk.
 object kinds: ST_001 is animal/bike/bus, ST_005 car/elebike, ST_008 pedestrian
 (24 of 28 sequences), ST_011 car/pedestrian/truck. `ARCHIVES` ships with a
 spread rather than a run, because consecutive parts make a two-category pool.
+The long-term split is only four parts, so 21 and 22 take all of it and the
+question does not arise.
+
+**Cell 2 is a probe, and it is there because of LT.** The stride -- line k of
+the box file is frame 10k -- was measured on `train_ST_001` and on nothing
+else, and a stride assumed one too small does not fail loudly: it labels frame
+9 with frame 10's box and mirrors a pool of quietly wrong masks to Drive. So
+before a single byte is extracted, the probe opens each archive's central
+directory (seconds, it is a seek to the end of the file), reads the kilobyte
+of `.txt` per sequence, and prints frames, rows, the stride those two counts
+actually imply, and the share of rows marking the target absent.
+`boxes.annotated_stride` is the same function the extractor and the indexer
+use, so what the probe prints is what the run will do -- and a sequence whose
+counts imply no single stride is dropped by all three rather than guessed at.
 """
 from __future__ import annotations
 
@@ -63,19 +104,38 @@ class Variant:
     path: str
     modality: str            # the folder inside a sequence: rgb or ir
     pool: str
+    data: str                # this arm's own extraction tree
     mirror: str              # where on Drive this arm's pool is zipped
     extract_mode: str        # `extract(frames=...)`, one modality's frames
+    archives: str            # the parts of the tracking download to read
 
+
+ST_ARCHIVES = '["train_ST_001.zip", "train_ST_005.zip",\n' \
+              '               "train_ST_008.zip", "train_ST_011.zip"]'
+LT_ARCHIVES = '["train_LT_001.zip", "train_LT_002.zip",\n' \
+              '               "train_LT_003.zip", "train_LT_004.zip"]'
 
 VARIANTS = {
     "rgb": Variant(key="rgb", path="notebooks/16_vtuav_rgb_pool.ipynb",
                    modality="rgb", pool="vtuav_rgb",
+                   data="/content/data/VTUAV_rgb",
                    mirror="/content/drive/MyDrive/edgetam-pool/vtuav_rgb",
-                   extract_mode="tracked_rgb"),
+                   extract_mode="tracked_rgb", archives=ST_ARCHIVES),
     "ir": Variant(key="ir", path="notebooks/17_vtuav_thermal_pool.ipynb",
                   modality="ir", pool="vtuav_thermal",
+                  data="/content/data/VTUAV_ir",
                   mirror="/content/drive/MyDrive/edgetam-pool/vtuav_thermal",
-                  extract_mode="tracked_ir"),
+                  extract_mode="tracked_ir", archives=ST_ARCHIVES),
+    "lt_rgb": Variant(key="lt_rgb", path="notebooks/21_vtuav_lt_rgb_pool.ipynb",
+                      modality="rgb", pool="vtuav_lt_rgb",
+                      data="/content/data/VTUAV_lt_rgb",
+                      mirror="/content/drive/MyDrive/edgetam-pool/vtuav_lt_rgb",
+                      extract_mode="tracked_rgb", archives=LT_ARCHIVES),
+    "lt_ir": Variant(key="lt_ir", path="notebooks/22_vtuav_lt_thermal_pool.ipynb",
+                     modality="ir", pool="vtuav_lt_thermal",
+                     data="/content/data/VTUAV_lt_ir",
+                     mirror="/content/drive/MyDrive/edgetam-pool/vtuav_lt_thermal",
+                     extract_mode="tracked_ir", archives=LT_ARCHIVES),
 }
 
 V = VARIANTS[sys.argv[1]] if len(sys.argv) > 1 else VARIANTS["rgb"]
@@ -97,14 +157,13 @@ def resolve(text: str) -> str:
 
 code('''
 DRIVE_DIR   = "/content/drive/MyDrive/VTUAV"
-DATA_ROOT   = "/content/data/VTUAV_{{modality}}"
+DATA_ROOT   = "{{data}}"
 POOL_ROOT   = "/content/pool"
 POOL        = "{{pool}}"
 MODALITY    = "{{modality}}"
 EXTRACT_MODE = "{{extract_mode}}"
 MIRROR_DIR  = "{{mirror}}"
-ARCHIVES    = ["train_ST_001.zip", "train_ST_005.zip",
-               "train_ST_008.zip", "train_ST_011.zip"]
+ARCHIVES    = {{archives}}
 TEACHER     = "facebook/sam3"
 FALLBACK    = "facebook/sam2.1-hiera-large"
 DTYPE       = "bfloat16"
@@ -116,7 +175,7 @@ MAX_BOXES   = None
 LIMIT       = None
 BOX_IOU     = 0.5
 REPO_URL    = "https://github.com/yigitkayabagci/sam-dedection.git"
-BRANCH      = "claude/aerial-rgb-thermal-data-qhjpxd"
+BRANCH      = "claude/thermal-stage-b-training-43ktcl"
 REPO_DIR    = "/content/sam-dedection"
 NOTEBOOK = "{{path}}".split("/")[-1]
 STAMP    = "{{STAMP}}"
@@ -178,7 +237,82 @@ print(_device.name if _device else "no GPU", VRAM, "GiB",
 
 
 # --------------------------------------------------------------------------
-# 2. Unzip one modality's labelled frames, then index them
+# 2. What is in each archive, before 15 GiB of it is read
+# --------------------------------------------------------------------------
+
+code('''
+import math
+from src.training.boxes import annotated_stride
+
+def absent_row(text):
+    cells = text.replace(",", " ").split()
+    if len(cells) < 4:
+        return True
+    try:
+        x, y, w, h = (float(v) for v in cells[:4])
+    except ValueError:
+        return True
+    return not all(math.isfinite(v) for v in (x, y, w, h)) or w <= 0 or h <= 0
+
+MISSING, PROBE = [], []
+for _archive in ARCHIVES:
+    _source = Path(DRIVE_DIR) / _archive
+    if not _source.is_file():
+        MISSING.append(_archive)
+        continue
+    _rows, _present, _gone = {}, {}, {}
+    with zipfile.ZipFile(_source) as _zip:
+        for _name in _zip.namelist():
+            _parts = _name.split("/")
+            if len(_parts) == 2 and _parts[1] == f"{MODALITY}.txt":
+                _lines = [_l for _l in _zip.read(_name).decode(
+                    "utf-8", "replace").splitlines() if _l.strip()]
+                _rows[_parts[0]] = len(_lines)
+                _gone[_parts[0]] = sum(1 for _l in _lines if absent_row(_l))
+            elif len(_parts) == 3 and _parts[1] == MODALITY:
+                if Path(_parts[-1]).stem.isdigit():
+                    _present[_parts[0]] = _present.get(_parts[0], 0) + 1
+    _strides, _unreadable = {}, []
+    for _sequence, _lines in sorted(_rows.items()):
+        try:
+            _step = annotated_stride(_present.get(_sequence, 0), _lines)
+        except ValueError as _mismatch:
+            _unreadable.append(f"{_sequence}: {_mismatch}")
+            continue
+        _strides[_step] = _strides.get(_step, 0) + 1
+    PROBE.append({"archive": _archive, "sequences": len(_rows),
+                  "frames": sum(_present.values()), "rows": sum(_rows.values()),
+                  "absent": sum(_gone.values()), "strides": _strides,
+                  "unreadable": _unreadable,
+                  "GiB": round(_source.stat().st_size / 2 ** 30, 1)})
+
+print(f"{'archive':<22}{'seq':>5}{'frames':>10}{'rows':>8}{'absent':>9}"
+      f"{'GiB':>7}  strides")
+for _row in PROBE:
+    _share = f"{_row['absent'] / max(_row['rows'], 1):.1%}"
+    print(f"{_row['archive']:<22}{_row['sequences']:>5}{_row['frames']:>10}"
+          f"{_row['rows']:>8}{_share:>9}{_row['GiB']:>7}  {_row['strides']}")
+    for _line in _row["unreadable"]:
+        print("   !! dropped --", _line)
+if MISSING:
+    print("\\nnot in", DRIVE_DIR, "--", MISSING)
+KEEPS = sum(_r["rows"] for _r in PROBE)
+PROMPTS = sum(_r["rows"] - _r["absent"] for _r in PROBE)
+print(f"\\n{KEEPS} annotated {MODALITY} frame(s) to extract, {PROMPTS} of them "
+      f"with a target to prompt; "
+      f"{round(sum(_r['GiB'] for _r in PROBE), 1)} GiB read from Drive, "
+      f"about {round(sum(_r['GiB'] for _r in PROBE) / 20, 1)} GiB on disk.")
+assert PROBE, f"no archive of {ARCHIVES} is under {DRIVE_DIR} -- set DRIVE_DIR"
+if any(set(_r["strides"]) - {10} or _r["unreadable"] for _r in PROBE):
+    print("\\n!! a stride other than 10, or a sequence whose counts imply "
+          "none. The extractor and the indexer derive it the same way this "
+          "cell does, so the harvest follows what is printed above -- but "
+          "read it before spending the GPU-hours.")
+''')
+
+
+# --------------------------------------------------------------------------
+# 3. Unzip one modality's labelled frames, then index them
 # --------------------------------------------------------------------------
 
 code('''
@@ -212,7 +346,7 @@ print(round(sum(p.stat().st_size for p in Path(DATA_ROOT).rglob("*")
 
 
 # --------------------------------------------------------------------------
-# 3. Teacher, and four frames drawn before any of it runs
+# 4. Teacher, and four frames drawn before any of it runs
 # --------------------------------------------------------------------------
 
 code('''
@@ -256,7 +390,7 @@ plt.show()
 
 
 # --------------------------------------------------------------------------
-# 4. Harvest this modality, on its own boxes
+# 5. Harvest this modality, on its own boxes
 # --------------------------------------------------------------------------
 
 code('''
@@ -286,7 +420,7 @@ print(summarise_pool(pool_report(POOL_ROOT)))
 
 
 # --------------------------------------------------------------------------
-# 5. The pool back to Drive
+# 6. The pool back to Drive
 # --------------------------------------------------------------------------
 
 code('''

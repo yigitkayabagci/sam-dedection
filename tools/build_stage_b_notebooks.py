@@ -59,6 +59,19 @@ number of updates -- and the linear scaling rule says the step should grow with
 it. The notebook sets `--lr-scale` from the measured batch against a 16-window
 reference, capped, and prints both.
 
+## Putting a VTUAV pool's pixels back
+
+A pool holds masks, not frames, and VTUAV's frames are the most expensive to
+put back: eight parts of the tracking download unpacked whole are ~128 GiB and
+no Colab disk holds that. But a pool only ever looks up the frames its boxes
+named -- one in ten -- so the staging asks for `frames="tracked"`, which keeps
+that tenth in **both** halves. Both, because 16 and 17 harvest the short-term
+parts and 21 and 22 the long-term ones, in RGB and thermal respectively, and a
+run mixing their pools would otherwise download each 16 GiB part twice to
+unpack a different tenth of it each time. Eight parts then cost ~6 GiB on disk.
+Name them in `VTUAV_PARTS`; the download itself is still 16 GiB per part, so
+nothing here is fetched on a whim.
+
 ## What none of it measures
 
 Tracking. Every number here scores one prompted frame with the memory path
@@ -446,7 +459,7 @@ if EVAL_DRAWN:
 else:
     EVAL_ROOT = ""
 
-def unpack(archive, target, label=""):
+def unpack(archive, target, label="", frames="all"):
     """Every member the archive can still give, one at a time.
 
     `extractall` stops at the first bad member and leaves the rest on the
@@ -454,10 +467,18 @@ def unpack(archive, target, label=""):
     enough that one corrupt JPEG out of seventy thousand must not cost the
     other sixty-nine thousand. Already-extracted members are skipped, so this
     is also the resume path.
+
+    `frames` is the same choice `fetch` takes, and it is here because this is
+    the *fallback* path: a VTUAV part unpacked whole is 16 GiB of which one
+    frame in ten is ever looked up, so the retry has to keep the same tenth
+    the download would have kept or it fills the disk instead of the gap.
     """
+    from tools.fetch_datasets import tracked_members
+
     bad, taken = [], 0
     with zipfile.ZipFile(archive) as handle:
-        members = handle.namelist()
+        members = (tracked_members(handle, "both") if frames == "tracked"
+                   else handle.namelist())
         for member in members:
             landing = Path(target) / member
             if landing.exists() and (landing.is_dir() or landing.stat().st_size):
@@ -494,17 +515,21 @@ if FETCH:
         if not _recipe or (_recipe == "vtuav_track" and not _parts):
             print("not fetched:", _root, "-- no recipe, or no parts named. "
                   "SegFly is a 761-shard parquet plan, VTUAV is ~16 GiB per "
-                  "part and Kaggle sets come through kagglehub below, so none "
-                  "of them is downloaded on a whim. Stage it, name its parts "
-                  "in cell 1, or let the pool drop.")
+                  "part to download and Kaggle sets come through kagglehub "
+                  "below, so none of them is downloaded on a whim. Stage it, "
+                  "name its parts in cell 1 (16, 17, 21 and 22 harvested "
+                  "from train_ST_* and train_LT_*), or let the pool drop. "
+                  "VTUAV lands as `tracked` -- one frame in ten, both halves "
+                  "-- so eight parts cost ~6 GiB of disk rather than ~128.")
             continue
+        _frames = "tracked" if _recipe == "vtuav_track" else "all"
         if Path(_root).is_dir() and any(
                 any(Path(_root).rglob(_glob)) for _glob in ("*.jpg", "*.png")):
             print("already on disk:", _root)
             continue
         try:
             fetch(_recipe, Path(_root), tuple(sorted(_parts)) or None,
-                  stage=STAGE_DIR,
+                  frames=_frames, stage=STAGE_DIR,
                   staging=(STAGE_DIR, str(Path(DRIVE_MY) / Path(_root).name),
                            DRIVE_MY, "/content/staging"))
         except Exception as _fetch_error:
@@ -516,7 +541,7 @@ if FETCH:
                 if _copy is None:
                     continue
                 print("   retrying", _copy.name, "member by member")
-                unpack(_copy, Path(_root), _part)
+                unpack(_copy, Path(_root), _part, frames=_frames)
 
 for _pool, _slug in KAGGLE_DATASETS.items():
     if not any(_row["pool"] == _pool for _row in PLAN):

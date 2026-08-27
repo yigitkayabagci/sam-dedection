@@ -424,10 +424,51 @@ demek için yeterli değil.
 Ardışık parça almak iki kategorilik bir havuz demek. Defterlerin `ARCHIVES`
 varsayılanı bu yüzden bir **serpme**: `ST_001 + ST_005 + ST_008 + ST_011` =
 47,4 GiB → ~12 800 etiketli kare, animal/bike/bus/car/elebike/pedestrian/truck.
+LT yarısı zaten yalnız dört parça, o yüzden 21 ve 22 hepsini alıyor ve soru
+ortaya çıkmıyor.
 
 Train yarısının tamamı **214,5 GiB** (11 ST + 4 LT parça). `fetch_datasets.py`
 tarifinde (`vtuav_track`) her parça **varsayılan olarak kapalı**; id'ler ve
 gerçek boyutlar orada, ama hiçbiri kazara inmiyor.
+
+### LT ile ST arasındaki fark, bu boru hattı açısından
+
+LT = long-term, ST = short-term: ayrım **takip görevinin** türü, verinin değil.
+Aynı sensör, aynı 1920×1080 hizalı RGB-T çiftler, aynı
+`<dizi>/{rgb,ir}/` + `<dizi>/{rgb,ir}.txt` düzeni. Bu boru hattı hiçbir
+takip protokolü okumadığı için ayrım büyük ölçüde anlamsız — **iki gerçek
+sonucu** dışında:
+
+**1. LT'de hedef kadrajdan çıkıyor, ve o satırlar öyle işaretli.** Bir kutu
+satırı sıfır/negatif genişlik-yükseklik ya da NaN taşıyorsa hedef görünmüyor
+demektir. `boxes.vtuav_frames` bu satırları **düşürüyor** — sıfır alanlı ya da
+sayı-olmayan bir dikdörtgen, promptable bir öğretmene verilebilecek en
+faydasız şey. Her iki yazım da ele alınıyor: `nan <= 0` **False** olduğu için
+yalnız genişliği sınamak NaN'i öğretmene prompt olarak sızdırıyordu.
+
+**2. Adım (stride) LT'de ölçülmüş değil.** "Satır k = kare 10k" `train_ST_001`
+üzerinde doğrulandı, başka hiçbir yerde değil — ve bir eksik varsayılan adım
+gürültüyle patlamıyor, sessizce **kare 9'u kare 10'un kutusuyla** etiketleyip
+Drive'a yanlış maskeler yazıyor. Bu yüzden sayı artık her dizinin kendi kare
+ve satır sayısından türetiliyor (`boxes.annotated_stride`): `ceil(kare/adım) ==
+satır` kısıtı gerçek uzunlukta bir dizide tek bir cevap bırakıyor (2 000 kare +
+200 satır yalnız 10'u kabul eder), 10 o cevaplar arasındaysa tercih ediliyor —
+yani ST hasadı bit bit aynı kalıyor — ve **hiçbir tek cevap çıkmayan dizi
+sayıları basılarak atlanıyor**. Aynı fonksiyonu üç yer de kullanıyor: arşivi
+açan `tracked_members`, indeksleyen `vtuav_frames`, ve defterlerin 2. hücresi
+(sonda) — yani prob ne yazdırıyorsa koşu onu yapıyor.
+
+Defterlerin 2. hücresi bunun için var: 15 GiB açılmadan **önce** her arşivin
+merkezi dizinini okuyup dizi başına kare, satır, o iki sayının ima ettiği adım
+ve hedefi "yok" işaretleyen satır oranını basıyor. Merkezi dizin dosyanın
+sonunda, yani saniyeler.
+
+### Bu bölümde maske yok — hiç
+
+VTUAV'ın çizilmiş instance maskeleri **ayrı** bir yayın: VIS bölümü, 100 video.
+Takip bölümünün 500 dizisi (ST + LT) kare başına tek bir `x y w h` taşıyor ve
+başka hiçbir şey. 16/17/21/22'nin var olma sebebi tam olarak bu: kutuyu maskeye
+çeviren şey öğretmen.
 
 ## DroneVehicle — tam sayım (evet, kullanıyoruz; evet, kutu)
 

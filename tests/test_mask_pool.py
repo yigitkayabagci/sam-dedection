@@ -31,6 +31,7 @@ from src.training.boxes import (  # noqa: E402
     BIRDSAI_SPECIES,
     DRONEVEHICLE_ALIASES,
     dronevehicle_only_frames,
+    annotated_stride,
     vtuav_frames,
     dronevehicle_shared_frames,
     VISDRONE_NAMES,
@@ -711,12 +712,28 @@ class TestVtuavFrames(unittest.TestCase):
     """One target per sequence, one box every tenth frame, per modality."""
 
     def fixture(self, tmp: Path, rgb_lines: str, ir_lines: str,
-                frames: int = 31, both: bool = True) -> Path:
+                frames: int | None = None, both: bool = True,
+                keep: int | None = None) -> Path:
+        """A sequence whose two counts are the ones a stride 10 produces.
+
+        `frames` defaults to `10 * rows`, because that is what
+        `lines = ceil(frames / 10)` means and `annotated_stride` reads the
+        stride back out of exactly those two numbers. A fixture with 31 frames
+        and 3 rows is not a stride-10 sequence -- 15 is the only stride that
+        makes those counts -- so writing one would be testing a layout VTUAV
+        does not ship.
+
+        `keep` writes only every `keep`-th frame file, which is what a
+        `tracked_*` extraction leaves on disk.
+        """
         root = tmp / "VTUAV" / "bus_017"
         (root / "rgb").mkdir(parents=True)
         if both:
             (root / "ir").mkdir()
-        for index in range(frames):
+        rows = len([line for line in rgb_lines.splitlines() if line.strip()])
+        for index in range(frames if frames is not None else 10 * rows):
+            if keep is not None and index % keep:
+                continue
             (root / "rgb" / f"{index:06d}.jpg").write_bytes(b"jpg")
             if both:
                 (root / "ir" / f"{index:06d}.jpg").write_bytes(b"jpg")
@@ -769,6 +786,63 @@ class TestVtuavFrames(unittest.TestCase):
             frame, = vtuav_frames(root, modality="rgb")
             self.assertIsNone(frame.pair)
 
+    def test_a_row_whose_box_is_not_a_number_is_absent_too(self):
+        """Long-term sequences are where this bites.
+
+        The target leaves the frame and the row that says so has shipped both
+        spellings across trackers: a zero box and a NaN one. `nan <= 0` is
+        False, so testing only the extent lets a not-a-number rectangle through
+        to the teacher as a prompt.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\nNaN NaN NaN NaN\n12 22 32 42\n",
+                                "10 20 30 40\nNaN NaN NaN NaN\n12 22 32 42\n")
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000", "bus_017/000020"])
+
+    def test_the_stride_is_read_off_the_files_a_tracked_unpack_left(self):
+        """The extraction already applied the stride; the spacing is it.
+
+        Nothing is inferred here and nothing can be: the frames on disk *are*
+        the annotated ones, one per row, so their spacing is the answer even
+        when it is not the 10 measured on `train_ST_001`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                frames=45, keep=15)
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000", "bus_017/000015",
+                              "bus_017/000030"])
+
+    def test_a_sequence_whose_counts_name_no_stride_is_skipped(self):
+        """One unreadable sequence costs a sequence, never a wrong label.
+
+        7 frames against 3 rows is not `ceil(7 / s)` for any stride VTUAV has
+        used. Reading it anyway means picking a number, and every number picked
+        here files a mask under a frame that box does not describe.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                frames=7)
+            with self.assertRaises(FileNotFoundError):
+                vtuav_frames(root)
+
+    def test_a_second_sequence_survives_the_first_being_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), "10 20 30 40\n", "10 20 30 40\n")
+            odd = root / "car_003"
+            (odd / "rgb").mkdir(parents=True)
+            for index in range(7):
+                (odd / "rgb" / f"{index:06d}.jpg").write_bytes(b"jpg")
+            (odd / "rgb.txt").write_text("1 2 3 4\n5 6 7 8\n9 1 2 3\n")
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000"])
+
     def test_a_tree_extracted_for_the_other_modality_says_exactly_that(self):
         """The failure that cost a whole RGB run.
 
@@ -795,14 +869,16 @@ class TestVtuavFrames(unittest.TestCase):
 class TestTrackedMembers(unittest.TestCase):
     """Nine frames in ten carry no label; unzipping them is disk for nothing."""
 
-    def archive(self, tmp: Path) -> zipfile.ZipFile:
-        path = tmp / "part.zip"
+    def archive(self, tmp: Path, frames: int = 30, rows: int = 3,
+                name: str = "part.zip") -> zipfile.ZipFile:
+        path = tmp / name
         with zipfile.ZipFile(path, "w") as handle:
-            for index in range(25):
+            for index in range(frames):
                 handle.writestr(f"bus_017/rgb/{index:06d}.jpg", b"x")
                 handle.writestr(f"bus_017/ir/{index:06d}.jpg", b"x")
-            handle.writestr("bus_017/rgb.txt", "1 2 3 4\n5 6 7 8\n9 1 2 3\n")
-            handle.writestr("bus_017/ir.txt", "1 2 3 4\n5 6 7 8\n9 1 2 3\n")
+            lines = "".join(f"{i} 2 3 4\n" for i in range(rows))
+            handle.writestr("bus_017/rgb.txt", lines)
+            handle.writestr("bus_017/ir.txt", lines)
         return zipfile.ZipFile(path)
 
     def test_only_the_annotated_frames_of_one_modality_are_kept(self):
@@ -827,6 +903,71 @@ class TestTrackedMembers(unittest.TestCase):
             archive = self.archive(Path(tmp))
             self.assertLess(len(tracked_members(archive, "rgb")),
                             len(archive.namelist()) // 5)
+
+    def test_the_stride_comes_from_the_archives_own_counts(self):
+        """Ten is measured on one short-term part and nowhere else.
+
+        A part whose sequences are annotated every 15th frame must be unpacked
+        every 15th frame; keeping every 10th instead hands the indexer a tree
+        whose files it will pair with the wrong rows, and no gate downstream
+        can see that the mask sits on the wrong frame.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.archive(Path(tmp), frames=450, rows=30)
+            keep = sorted(n for n in tracked_members(archive, "rgb")
+                          if n.endswith(".jpg"))
+            self.assertEqual(keep, [f"bus_017/rgb/{i * 15:06d}.jpg"
+                                    for i in range(30)])
+
+    def test_both_halves_at_once_for_a_run_putting_frames_back(self):
+        """One tree serving a pool from either half.
+
+        16 and 17 unzip one modality each because they run on two runtimes and
+        prompt on their own half. A *training* run reads pools from both and
+        only needs the pixels back, so downloading the same 16 GiB part twice
+        to unpack a different tenth of it each time is the wrong trade.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = sorted(n for n in tracked_members(self.archive(Path(tmp)),
+                                                     "both")
+                          if n.endswith(".jpg"))
+            self.assertEqual(keep, [f"bus_017/{m}/{i * 10:06d}.jpg"
+                                    for m in ("ir", "rgb") for i in range(3)])
+
+    def test_an_unknown_modality_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                tracked_members(self.archive(Path(tmp)), "thermal")
+
+    def test_a_sequence_whose_counts_name_no_stride_keeps_no_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.archive(Path(tmp), frames=7, rows=3)
+            keep = tracked_members(archive, "rgb")
+            self.assertEqual([n for n in keep if n.endswith(".jpg")], [])
+            self.assertIn("bus_017/rgb.txt", keep)
+
+
+class TestAnnotatedStride(unittest.TestCase):
+    """`lines = ceil(frames / stride)`, read backwards, refusing to guess."""
+
+    def test_the_expected_stride_wins_wherever_the_counts_allow_it(self):
+        # 25 frames and 3 rows are made by a stride of 9, 10, 11 or 12 alike.
+        # Where the caller's expectation is among them it is not overruled.
+        self.assertEqual(annotated_stride(25, 3), 10)
+        self.assertEqual(annotated_stride(2000, 200), 10)
+
+    def test_a_real_sequence_pins_one_answer(self):
+        self.assertEqual(annotated_stride(450, 30), 15)
+        self.assertEqual(annotated_stride(3000, 100), 30)
+        self.assertEqual(annotated_stride(500, 500), 1)
+
+    def test_counts_no_stride_explains_are_refused(self):
+        with self.assertRaises(ValueError):
+            annotated_stride(7, 3)
+
+    def test_an_empty_sequence_falls_back_rather_than_raising(self):
+        self.assertEqual(annotated_stride(0, 0), 10)
+        self.assertEqual(annotated_stride(0, 12, default=30), 30)
 
 
 class TestLabelMany(unittest.TestCase):

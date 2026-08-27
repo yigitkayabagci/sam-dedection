@@ -112,6 +112,48 @@ class TestTeacherDispatch(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "writing the synthetic sequence needs OpenCV")
+@unittest.skipUnless(HAVE_CV2, "writing the synthetic sequence needs OpenCV")
+class TestFindSequences(unittest.TestCase):
+    """Position equals frame number, or the sequence is not read at all."""
+
+    def build(self, keep: int, frames: int = 30) -> Path:
+        import cv2
+
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        seq = root / "bus_017"
+        picture = np.full((HEIGHT, WIDTH), 40, dtype=np.uint8)
+        for index in range(frames):
+            if index % keep:
+                continue
+            for modality in ("rgb", "ir"):
+                (seq / modality).mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(seq / modality / f"{index:06d}.jpg"), picture)
+        rows = len(range(0, frames, keep))
+        (seq / "rgb.txt").write_text(
+            "".join(f"{5 + i} 10 8 8\n" for i in range(rows)))
+        return root
+
+    def tearDown(self):
+        if hasattr(self, "tmp"):
+            self.tmp.cleanup()
+
+    def test_a_contiguous_tree_is_read(self):
+        self.assertEqual([s.name for s in find_sequences(self.build(1))],
+                         ["bus_017"])
+
+    def test_a_strided_tree_is_refused_rather_than_read_off_by_ten(self):
+        """The trap `--frames tracked_rgb` sets for this module.
+
+        Files 0, 10, 20 against rows 0, 1, 2 pair perfectly by position and
+        completely wrongly by frame: the store is keyed by frame number, so
+        every mask would be filed under a frame that box does not describe,
+        and `calibrate` -- which looks masks up by the number on the drawn
+        PNG -- would score a mask against the wrong frame's truth.
+        """
+        self.assertEqual(find_sequences(self.build(10)), [])
+
+
 class TestMaskletSequence(unittest.TestCase):
     """One synthetic flight, end to end: boxes drift, the fake's masks do not."""
 

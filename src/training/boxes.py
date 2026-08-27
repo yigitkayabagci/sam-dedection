@@ -27,6 +27,7 @@ only indices, so `VISDRONE_NAMES` exists -- with its source written down -- and
 from __future__ import annotations
 
 import json
+import math
 import xml.etree.ElementTree as ElementTree
 from collections.abc import Iterable, Sequence as SequenceABC
 from dataclasses import dataclass, field, replace
@@ -536,6 +537,63 @@ def dronevehicle_frames(root: str | Path, modality: str = "thermal",
 
 VTUAV_STRIDE = 10        # verified on all 20 sequences of train_ST_001
 
+# The strides a VTUAV-shaped release has been seen to use: the tracking
+# archives annotate every 10th frame, the VIS split draws a mask every 30th,
+# and a per-frame annotation is stride 1. `annotated_stride` picks from this
+# list rather than inverting `lines = ceil(frames / stride)` arithmetically,
+# because that inversion is genuinely ambiguous -- 25 frames and 3 rows are
+# explained by a stride of 9, 10, 11 or 12 alike -- while the constraint
+# `ceil(frames / stride) == lines` is tight enough to name one answer on a
+# sequence of any real length (2 000 frames and 200 rows admit only 10).
+VTUAV_STRIDES = (1, 2, 5, 10, 15, 20, 30)
+
+
+def annotated_stride(frames: int, lines: int,
+                     default: int = VTUAV_STRIDE) -> int:
+    """Which frame annotation row `k` describes, from the two counts alone.
+
+    Written because the long-term parts are not the short-term ones. Stride 10
+    is *measured* on `train_ST_001` and nowhere else, and a stride assumed one
+    too small does not fail -- it labels frame 9 with frame 10's box and
+    harvests a pool of quietly wrong masks. So the number is derived from each
+    sequence's own frame and row counts, and `default` is preferred only where
+    it is one of the answers those counts allow.
+
+    Raises `ValueError` when nothing in `VTUAV_STRIDES` explains the counts, or
+    when several do and `default` is not among them. Callers skip that sequence
+    and print the numbers: one archive whose layout nobody has seen is worth a
+    dropped sequence, never a guess.
+    """
+    if frames <= 0 or lines <= 0:
+        return max(int(default), 1)
+    fits = [step for step in VTUAV_STRIDES if -(-frames // step) == lines]
+    if int(default) in fits:
+        return int(default)
+    if len(fits) == 1:
+        return fits[0]
+    raise ValueError(
+        f"{frames} frame(s) and {lines} annotation row(s) are explained by "
+        f"stride {fits or 'nothing'} out of {list(VTUAV_STRIDES)}, and not by "
+        f"the {default} this caller expected")
+
+
+def _sequence_stride(stems: Iterable[str], lines: int, default: int) -> int:
+    """The stride of one extracted sequence, from its files where it can be.
+
+    A `tracked_*` extraction has already applied the stride: the only frames on
+    disk are the annotated ones, so their **spacing is the answer** and nothing
+    is inferred. A full extraction is contiguous from zero, the spacing says 1,
+    and the counts are all there is -- `annotated_stride` decides, or refuses.
+    """
+    numbers = sorted(int(stem) for stem in stems if stem.isdigit())
+    if len(numbers) >= 2:
+        steps = {b - a for a, b in zip(numbers, numbers[1:])}
+        if len(steps) == 1:
+            step = steps.pop()
+            if step > 1:
+                return step
+    return annotated_stride(len(numbers), lines, default)
+
 
 def vtuav_frames(root: str | Path, modality: str = "rgb",
                  stride: int = VTUAV_STRIDE) -> list[BoxFrame]:
@@ -549,9 +607,20 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
     unlabelled. `fetch_datasets.tracked_members` is the extractor that knows
     the same thing.
 
-    Rows are `x y w h`; a row whose width or height is not positive marks the
-    target as absent and is dropped. The class is the sequence name's prefix
-    (`bus_017` -> `bus`), which is where VTUAV's object categories live.
+    **`stride` is a preference, not a promise.** It was measured on one
+    short-term part, and the long-term parts are a separate download whose
+    layout nobody in this repo has opened. Each sequence's own stride is
+    derived from its files and its row count (`_sequence_stride`); `stride`
+    wins where the counts allow it, which keeps every short-term harvest
+    byte-identical, and a sequence whose counts allow no single answer is
+    skipped with its numbers printed rather than read on a guess.
+
+    Rows are `x y w h`; a row whose width or height is not positive, or which
+    carries a NaN, marks the target as absent and is dropped. Long-term
+    sequences are the reason both spellings are handled -- the target leaves
+    the frame and comes back, and a zero-area or not-a-number prompt is the
+    least useful thing to hand a teacher. The class is the sequence name's
+    prefix (`bus_017` -> `bus`), which is where VTUAV's object categories live.
 
     **Both modalities get their own boxes, and they disagree.** Over the 3 750
     annotated rows of `train_ST_001`, only 12.2 % of `rgb.txt` and `ir.txt`
@@ -571,7 +640,8 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
     root = Path(root)
 
     frames: list[BoxFrame] = []
-    seen = empty = 0
+    strides: dict[int, int] = {}
+    seen = empty = absent = puzzling = 0
     for boxes_file in sorted(root.rglob(f"*/{modality}.txt")):
         sequence = boxes_file.parent
         images = _images_by_stem(sequence / modality)
@@ -580,7 +650,17 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
         if not images:
             empty += 1
             continue
-        for index, line in enumerate(boxes_file.read_text().splitlines()):
+        rows = [line for line in boxes_file.read_text().splitlines()
+                if line.strip()]
+        try:
+            step = _sequence_stride(images, len(rows), stride)
+        except ValueError as mismatch:
+            print(f"  {sequence.name}: {mismatch} -- skipped, "
+                  f"a guessed stride labels the wrong frame")
+            puzzling += 1
+            continue
+        strides[step] = strides.get(step, 0) + 1
+        for index, line in enumerate(rows):
             cells = line.replace(",", " ").split()
             if len(cells) < 4:
                 continue
@@ -588,9 +668,10 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
                 x, y, w, h = (float(v) for v in cells[:4])
             except ValueError:
                 continue
-            if w <= 0 or h <= 0:
-                continue                     # the target is out of view
-            stem = f"{index * stride:06d}"
+            if not all(math.isfinite(v) for v in (x, y, w, h)) or w <= 0 or h <= 0:
+                absent += 1                  # the target is out of view
+                continue
+            stem = f"{index * step:06d}"
             image = images.get(stem)
             if image is None:
                 continue
@@ -599,9 +680,15 @@ def vtuav_frames(root: str | Path, modality: str = "rgb",
                 boxes=np.asarray([[x, y, x + w, y + h]], dtype=np.float64),
                 classes=(sequence.name.rsplit("_", 1)[0],),
                 pair=twins.get(stem)))
+    if set(strides) - {stride} or puzzling:
+        counted = dict(sorted(strides.items()))
+        print(f"  stride -> sequences: {counted}, "
+              f"{puzzling} sequence(s) skipped as unreadable")
+    if absent:
+        print(f"  {absent} row(s) mark the target absent and carry no prompt")
     if not frames:
         if seen and empty == seen:
-            # `tracked_members` keeps both `.txt` files but only one modality's
+            # `tracked_members` keeps both box files but only one modality's
             # frames, so this is what a shared extraction tree looks like: the
             # box files are all there and the image folders are all empty.
             raise FileNotFoundError(
