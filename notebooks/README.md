@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty-six notebooks, meant for Colab. Everything they orchestrate lives in
+Twenty-seven notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -32,6 +32,8 @@ recipe, not the implementation.
 | 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive; SAM 3 is required, there is no fallback |
 | 25 | `25_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 24 on a second runtime |
 | 26 | `26_segfly_instance_audit.ipynb` | real SegFly thermal/RGB/label panels, `components` vs `watershed` sensitivity, JSON evidence and optional SAM disagreement audit | **nothing** — it exports a 64-row SegFly slice; SAM check needs a GPU |
+| 27 | `27_thermal_deep_rgb_aerovis.ipynb` | 22'nin aynı uzun koşusu; RGB havuzları aynı batch'lere eklenir, AeroVIS train zorunludur ve dizi-bazlı held-out kolu ayrı RGB notu verir | 22'nin termal havuzları + `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler |
+| 28 | `28_rgb_deep_aerovis.ipynb` | 22 ile aynı uzun eğitim tarifi, fakat yalnızca RGB havuzları; AeroVIS train ve dizi-bazlı held-out kolları zorunlu, VisDrone örtüşme nedeniyle dışarıda | `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler; diğer RGB havuzları varsa eklenir |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -276,6 +278,7 @@ neither.
 | 20 | `edgetam-stage-b/thermal_rgb` | `edgetam_pool_thermal_rgb_512.pt` | `configs/edgetam_512_pool.yaml`, checkpoint swapped |
 | 22 | `edgetam-stage-b/thermal_deep` | `edgetam_pool_thermal_deep_512.pt` | `configs/edgetam_512_pool_deep.yaml` |
 | 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
+| 27 | `edgetam-stage-b/thermal_deep_rgb_aerovis` | `edgetam_pool_thermal_deep_rgb_aerovis_512.pt` | the same, checkpoint swapped |
 
 Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
 repository) and the config runs it. Nothing else has to change:

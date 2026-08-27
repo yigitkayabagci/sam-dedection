@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate notebooks 19 and 20: stage B on the mask pools, and nothing else.
+"""Generate the stage-B pool notebooks, and nothing else.
 
 Two arms of one experiment, generated from one file the way 07-11 and 16/17
 are, and for the same reason: they differ in **one setting** and every other
@@ -8,6 +8,10 @@ beside each other.
 
     19_thermal_stage_b_pool.ipynb       MODALITIES = ["thermal"]
     20_thermal_stage_b_pool_rgb.ipynb   MODALITIES = ["thermal", "rgb"]
+    22_thermal_deep.ipynb               long thermal run
+    23_thermal_deep_lora.ipynb          22 with LoRA
+    27_thermal_deep_rgb_aerovis.ipynb   22 with RGB pools and AeroVIS
+    28_rgb_deep_aerovis.ipynb           RGB-only long run, AeroVIS required
 
 Both are the shape 15-18 were asked for -- **no markdown, no comments, as few
 cells as possible** -- because this is a job to run, not a decision to read.
@@ -134,6 +138,7 @@ from pathlib import Path
 INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
+         "REFERENCE_CHECKPOINT": '""',
          "EXTRA_DATASETS": "[]", "SKIP_POOLS": "[]",
          "EPOCHS": "[1, 3]", "STEPS": "400", "MIN_BOX_IOU": "0.0",
          "PATIENCE": "0"}
@@ -145,10 +150,31 @@ REQUIRED = ('{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
             '                 "hituav_thermal": 2000,\n'
             '                 "kaggle_uav_thermal": 10000}')
 
+# This arm is useful only when it is genuinely 22 plus RGB, rather than a
+# thermal rerun whose optional colour files happened not to arrive. AeroVIS is
+# required on both sides of its sequence-level split: train supplies the extra
+# supervision and heldout supplies the RGB grade. Other RGB pools stay additive
+# because not every Drive has harvested all of them.
+REQUIRED_RGB_AEROVIS = (
+    '{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
+    '                 "hituav_thermal": 2000,\n'
+    '                 "kaggle_uav_thermal": 10000,\n'
+    '                 "aerovis_train": 10000,\n'
+    '                 "aerovis_heldout": 1500}')
+
+REQUIRED_AEROVIS = ('{"aerovis_train": 10000,\n'
+                    '                 "aerovis_heldout": 1500}')
+
 # SegFly ships semantic maps, so all 15 007 of its thermal frames come out of
 # `decompose` with no teacher pass. The pool harvested from it holds 5 378 of
 # the same frames under a different target, so it goes.
 SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
+
+SOURCE_ZIPS_DEFAULT = (
+    '[\n'
+    '    ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],\n'
+    '    ["/content/drive/MyDrive/edgetam-pool/kust4k/29476610.zip", "Kust4K"],\n'
+    ']')
 
 ARMS = {
     "19_thermal_stage_b_pool.ipynb": {
@@ -190,6 +216,7 @@ ARMS = {
                           '                 "vtuav_lt_thermal": '
                           '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": '""',
     },
     # 22's third arm, and the only line that differs from it: LoRA instead of
     # a partial fine-tune. Same pools, same gate, same thinning, same rates,
@@ -217,6 +244,70 @@ ARMS = {
                           '                 "vtuav_lt_thermal": '
                           '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"lora"',
+        "REFERENCE_CHECKPOINT": '""',
+    },
+    # The direct answer to 22's next question: keep its schedule, optimiser,
+    # gates, thermal floors and drawn thermal grade, but let RGB pools into the
+    # same batches and require AeroVIS to be present. VisDrone is excluded
+    # because AeroVIS contains VisDrone frames; mixing the two would leak the
+    # release's held-out sequences into training through another annotation.
+    "27_thermal_deep_rgb_aerovis.ipynb": {
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
+        "MIN_BOX_IOU": "0.8",
+        "STEPS": "800",
+        "EXTRA_DATASETS": SEGFLY,
+        "SKIP_POOLS": '["segfly_thermal", "visdrone"]',
+        "MODALITIES": '["thermal", "rgb"]',
+        "RUN": '"thermal_deep_rgb_aerovis"',
+        "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                       'thermal_deep_rgb_aerovis"'),
+        "REQUIRE_POOLS": REQUIRED_RGB_AEROVIS,
+        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
+                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                          '                 "segfly": 0.6,\n'
+                          '                 "car": 0.7, "truck": 0.7}'),
+        "LR_HEAD": "0",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_thermal": '
+                          '"/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_rgb": '
+                          '"/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_rgb": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
+        "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                                 'thermal_deep/edgetam_pool_thermal_deep_512.pt"'),
+    },
+    # A clean RGB control for the thermal and mixed arms. AeroVIS is both the
+    # required training source and the held-out RGB grade; VisDrone stays out
+    # because AeroVIS contains it. No drawn thermal set or thermal source zip
+    # is allowed to slip through the modality filter by a separate code path.
+    "28_rgb_deep_aerovis.ipynb": {
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
+        "MIN_BOX_IOU": "0.8",
+        "STEPS": "800",
+        "EVAL_DRAWN": "None",
+        "EXTRA_DATASETS": "[]",
+        "SOURCE_ZIPS": "[]",
+        "SKIP_POOLS": '["visdrone"]',
+        "MODALITIES": '["rgb"]',
+        "RUN": '"rgb_deep_aerovis"',
+        "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                       'rgb_deep_aerovis"'),
+        "REQUIRE_POOLS": REQUIRED_AEROVIS,
+        "CLASS_WEIGHTS": '{"car": 0.7, "truck": 0.7}',
+        "LR_HEAD": "0",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_rgb": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
+        "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": '""',
     },
 }
 
@@ -237,6 +328,7 @@ code('''
 MODALITIES  = {{MODALITIES}}
 RUN         = {{RUN}}
 MIRROR_DIR  = {{MIRROR_DIR}}
+REFERENCE_CHECKPOINT = {{REFERENCE_CHECKPOINT}}
 DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"
 POOL_ROOT   = "/content/pool"
 DATA_ROOT   = "/content/data"
@@ -244,7 +336,7 @@ WORK        = "/content/work"
 STAGE_DIR   = "/content/drive/MyDrive/datasets"
 DRIVE_MY    = "/content/drive/MyDrive"
 
-EVAL_DRAWN  = "kust4k"
+EVAL_DRAWN  = {{EVAL_DRAWN}}
 EXTRA_DATASETS = {{EXTRA_DATASETS}}
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = {{SKIP_POOLS}}
@@ -274,10 +366,7 @@ KAGGLE_DATASETS = {
 
 POOL_ARCHIVES = {{POOL_ARCHIVES}}
 
-SOURCE_ZIPS = [
-    ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
-    ["/content/drive/MyDrive/edgetam-pool/kust4k/29476610.zip", "Kust4K"],
-]
+SOURCE_ZIPS = {{SOURCE_ZIPS}}
 
 IMAGES = [
     ["hituav",       "hituav",       "HIT_UAV",      []],
@@ -1150,9 +1239,21 @@ LR_SCALE = round(min(max(BATCH / LR_REFERENCE, 1.0), LR_SCALE_MAX), 3)
 print(f"batch {BATCH} x accum {ACCUM} on {VRAM} GiB | lr-scale {LR_SCALE} "
       f"(linear rule against {LR_REFERENCE} windows, capped at {LR_SCALE_MAX})")
 
-BEFORE = {p: score_to(BASE_CKPT, "stock", p) for p in SCORE_PROMPTS}
+COMPARE_CKPT = BASE_CKPT
+COMPARE_TAG = "stock"
+if REFERENCE_CHECKPOINT:
+    if Path(REFERENCE_CHECKPOINT).is_file():
+        COMPARE_CKPT = REFERENCE_CHECKPOINT
+        COMPARE_TAG = "thermal_22"
+        print("direct A/B reference:", REFERENCE_CHECKPOINT)
+    else:
+        print("!! 22 reference is not on Drive yet:", REFERENCE_CHECKPOINT)
+        print("   scoring against stock for now; after 22 finishes, rerun this "
+              "cell and the score/panel cells for a direct thermal-vs-mixed A/B")
+
+BEFORE = {p: score_to(COMPARE_CKPT, COMPARE_TAG, p) for p in SCORE_PROMPTS}
 for _prompt, _row in BEFORE.items():
-    print(f"stock  {_prompt:<6} mean {_row['mean_iou']:.4f}  "
+    print(f"{COMPARE_TAG:<10}{_prompt:<6} mean {_row['mean_iou']:.4f}  "
           f">=.5 {_row['iou_50']:.3f}  small {_row['small_mean_iou']:.4f}  "
           f"n={_row['instances']}")
 ''')
@@ -1312,7 +1413,8 @@ AFTER = {p: score_to(CHECKPOINT, TAG, p) for p in SCORE_PROMPTS}
 print(f"{'prompt':<8}{'':<10}{'mean IoU':>10}{'>=.50':>8}{'>=.75':>8}"
       f"{'small':>10}{'larger':>9}")
 for _prompt in SCORE_PROMPTS:
-    for _label, _row in (("stock", BEFORE[_prompt]), ("stage B", AFTER[_prompt])):
+    for _label, _row in ((COMPARE_TAG, BEFORE[_prompt]),
+                         ("stage B", AFTER[_prompt])):
         print(f"{_prompt:<8}{_label:<10}{_row['mean_iou']:>10.4f}"
               f"{_row['iou_50']:>8.3f}{_row['iou_75']:>8.3f}"
               f"{_row['small_mean_iou']:>10.4f}{_row['large_mean_iou']:>9.4f}")
@@ -1345,7 +1447,7 @@ for _i, _prompt in enumerate(SCORE_PROMPTS):
              label=_prompt, color=["#4c72b0", "#dd8452", "#55a868"][_i % 3])
 _ax.set_yticks(_y); _ax.set_yticklabels(_classes, fontsize=8)
 _ax.axvline(0, color="k", lw=0.8)
-_ax.set_xlabel("mean IoU after stage B, minus stock (test split)")
+_ax.set_xlabel(f"mean IoU after stage B, minus {COMPARE_TAG} (test split)")
 _ax.legend(loc="lower right")
 plt.tight_layout(); plt.show()
 ''')
@@ -1403,7 +1505,7 @@ for _sample in PANEL_POOL:
     _panel_sources[_name] = _panel_sources.get(_name, 0) + 1
 print("panel pool:", len(PANEL_POOL), "windows from", len(_panel_sources),
       "sources", dict(sorted(_panel_sources.items(), key=lambda kv: -kv[1])))
-_model = build_model(SIZE, BASE_CKPT, "cuda")
+_model = build_model(SIZE, COMPARE_CKPT, "cuda")
 _before, _ = predict(_model, PANEL_POOL, max(BATCH // 4, 1))
 del _model; torch.cuda.empty_cache()
 _model = build_model(SIZE, CHECKPOINT, "cuda")
@@ -1436,7 +1538,7 @@ assert SHOWN, "no instance was scored by both checkpoints"
 PICKED = sorted({id(c["sample"]): c["sample"] for c in SHOWN}.values(),
                 key=lambda s: s.frame.name)
 MASKS = {}
-for _tag, _path in (("before", BASE_CKPT), ("after", CHECKPOINT)):
+for _tag, _path in (("before", COMPARE_CKPT), ("after", CHECKPOINT)):
     _model = build_model(SIZE, _path, "cuda")
     _rows, _drawn = predict(_model, PICKED, 1, want_masks=True)
     for (_sample, _k, _), (_mask, _target) in zip(_rows, _drawn):
@@ -1471,7 +1573,7 @@ plt.suptitle(f"top row: stage B gained   |   bottom row: stage B lost   "
              f"(prompt: {PANEL_PROMPT})", y=1.0)
 plt.tight_layout(); plt.show()
 print("yellow = the target's outline | green = only stage B found it | "
-      "red = only stock found it | blue = both agreed")
+      f"red = only {COMPARE_TAG} found it | blue = both agreed")
 ''')
 
 
@@ -1496,6 +1598,7 @@ VERDICT = {
     "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT}
             if METHOD == "lora" else {},
     "blend": BLEND, "checkpoint": CHECKPOINT,
+    "comparison": {"tag": COMPARE_TAG, "checkpoint": COMPARE_CKPT},
     "roles": {_row["pool"]: _row["role"] for _row in PLAN},
     "modalities": {_row["pool"]: _row["modality"] for _row in PLAN},
     "limits": POOL_LIMITS,
@@ -1532,6 +1635,7 @@ if BLEND:
 print(f"  base {Path(BASE_CKPT).name}, stage A: none, " + ", ".join(_how))
 print(_line)
 print("DID IT HELP")
+print("  comparison baseline:", COMPARE_TAG, "->", COMPARE_CKPT)
 for _prompt in SCORE_PROMPTS:
     _d = AFTER[_prompt]["mean_iou"] - BEFORE[_prompt]["mean_iou"]
     _s = AFTER[_prompt]["small_mean_iou"] - BEFORE[_prompt]["small_mean_iou"]
@@ -1565,7 +1669,9 @@ def render(notebook: str) -> tuple[list[str], str]:
     from one file share most of their bytes, and a stamp that ignored the
     difference would call a swapped pair correct.
     """
-    fields = {**ARMS[notebook], "BRANCH": BRANCH, "NOTEBOOK": notebook}
+    fields = {"EVAL_DRAWN": '"kust4k"',
+              "SOURCE_ZIPS": SOURCE_ZIPS_DEFAULT,
+              **ARMS[notebook], "BRANCH": BRANCH, "NOTEBOOK": notebook}
     cells = []
     for text in CELLS:
         for key, value in fields.items():

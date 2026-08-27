@@ -42,6 +42,8 @@ BUILDERS = {
     "22_": "build_stage_b_notebooks",
     "23_": "build_stage_b_notebooks",
     "26_": "build_segfly_audit_notebook",
+    "27_": "build_stage_b_notebooks",
+    "28_": "build_stage_b_notebooks",
 }
 
 # 15-20 were all asked for the same way -- cells only, no prose, no comments --
@@ -57,6 +59,8 @@ COMMENT_FREE = {
     "21_pool_data_readiness.ipynb": 6,
     "22_thermal_deep.ipynb": 9,
     "23_thermal_deep_lora.ipynb": 9,
+    "27_thermal_deep_rgb_aerovis.ipynb": 9,
+    "28_rgb_deep_aerovis.ipynb": 9,
 }
 
 
@@ -266,6 +270,41 @@ class TestEveryNotebook(unittest.TestCase):
                 self.assertIn('"--anchor-weight", str(ANCHOR_WEIGHT)', source)
                 self.assertNotIn("pretrain_encoder", source)
                 self.assertNotIn("DISTILL", source)
+
+    def test_the_deep_rgb_arm_keeps_22s_training_recipe(self):
+        """27 is 22 with colour data, not a second optimiser experiment."""
+        thermal = settings_of(ROOT / "notebooks" / "22_thermal_deep.ipynb")
+        mixed = settings_of(
+            ROOT / "notebooks" / "27_thermal_deep_rgb_aerovis.ipynb")
+        for name in ("EPOCHS", "PATIENCE", "STEPS", "MIN_BOX_IOU",
+                     "METHOD", "LR_HEAD", "LR_NECK", "LR_TRUNK", "SEED",
+                     "SIZE", "PROMPT", "PROMPT_JITTER"):
+            self.assertEqual(thermal[name], mixed[name], name)
+        self.assertEqual(thermal["MODALITIES"], '["thermal"]')
+        self.assertEqual(mixed["MODALITIES"], '["thermal", "rgb"]')
+        self.assertIn('"visdrone"', mixed["SKIP_POOLS"])
+        source = (ROOT / "notebooks" /
+                  "27_thermal_deep_rgb_aerovis.ipynb").read_text()
+        self.assertIn('\\"aerovis_train\\": 10000', source)
+        self.assertIn('\\"aerovis_heldout\\": 1500', source)
+
+    def test_the_rgb_only_arm_contains_no_thermal_training_source(self):
+        """28 is the RGB control, with both AeroVIS sides guaranteed."""
+        thermal = settings_of(ROOT / "notebooks" / "22_thermal_deep.ipynb")
+        rgb = settings_of(ROOT / "notebooks" / "28_rgb_deep_aerovis.ipynb")
+        for name in ("EPOCHS", "PATIENCE", "STEPS", "MIN_BOX_IOU",
+                     "METHOD", "LR_HEAD", "LR_NECK", "LR_TRUNK", "SEED",
+                     "SIZE", "PROMPT", "PROMPT_JITTER"):
+            self.assertEqual(thermal[name], rgb[name], name)
+        self.assertEqual(rgb["MODALITIES"], '["rgb"]')
+        self.assertEqual(rgb["EVAL_DRAWN"], "None")
+        self.assertEqual(rgb["EXTRA_DATASETS"], "[]")
+        source = (ROOT / "notebooks" / "28_rgb_deep_aerovis.ipynb").read_text()
+        self.assertIn('\\"aerovis_train\\": 10000', source)
+        self.assertIn('\\"aerovis_heldout\\": 1500', source)
+        self.assertIn('SOURCE_ZIPS = []', source)
+        self.assertNotIn('\\"dronevehicle_thermal\\": 20000', source)
+        self.assertNotIn('\\"vtuav_thermal\\": \\"/content/drive', source)
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*
