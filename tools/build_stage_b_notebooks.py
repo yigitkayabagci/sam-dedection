@@ -76,7 +76,8 @@ from pathlib import Path
 # difference anywhere else is a bug rather than a variant.
 INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
-         "POOL_ARCHIVES": "{}", "METHOD": '"finetune"'}
+         "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
+         "EXTRA_DATASETS": "[]"}
 
 # The three thermal-only pools that must be present for 22 to mean anything,
 # with a floor rather than a flag: a pool that resolved twelve frames out of
@@ -102,6 +103,7 @@ ARMS = {
     # so they cannot outvote the rest, and the rate table inverted so the
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
+        "EXTRA_DATASETS": "[]",
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
@@ -121,6 +123,7 @@ ARMS = {
     # same seed, same split file -- so the two numbers differ by the method
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
+        "EXTRA_DATASETS": "[]",
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
@@ -160,6 +163,7 @@ STAGE_DIR   = "/content/drive/MyDrive/datasets"
 DRIVE_MY    = "/content/drive/MyDrive"
 
 EVAL_DRAWN  = "kust4k"
+EXTRA_DATASETS = {{EXTRA_DATASETS}}
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = []
 REQUIRE_POOLS = {{REQUIRE_POOLS}}
@@ -752,6 +756,32 @@ if EVAL_DRAWN:
               f"{str(_drawn_error).splitlines()[0]}")
         print("   the test split becomes the pools' own held-out slice, so "
               "its truth is the teacher's. Read the number knowing that.")
+
+for _spec in EXTRA_DATASETS:
+    _flag = _spec.format(root=DATA_ROOT, data=DATA_ROOT)
+    try:
+        _extra = build_indexes([parse(_flag, GATES)], Path(INDEX_DIR), WORKERS)
+    except Exception as _extra_error:
+        print(f"!! extra dataset {_flag} -> {type(_extra_error).__name__}: "
+              f"{str(_extra_error).splitlines()[0]}")
+        continue
+    _name = _extra[0].source.spec.name if _extra else "?"
+    _cut = 0
+    if DRAWN_HELD and _name == EVAL_DRAWN:
+        _before = len(_extra)
+        _extra = exclude_frames(_extra, DRAWN_HELD)
+        _cut = _before - len(_extra)
+    DATASET_FLAGS.append(_flag)
+    INDEX.extend(_extra)
+    print(f"extra dataset {_name:<14}{len(_extra):>7} frames "
+          f"{sum(len(e.instances) for e in _extra):>9} instances"
+          f"{f'  (-{_cut} the drawn grade holds out)' if _cut else ''}")
+    print("   these are drawn semantic maps decomposed into instances, so the "
+          "target is the decomposition's and not a teacher's. That is a "
+          "different kind of noise from a pool's, not a worse one -- but a "
+          "run holding both a pool and the dataset it was harvested from is "
+          "the same pixels twice under two targets. Put the pool in "
+          "SKIP_POOLS when you add its dataset here.")
 
 print()
 POOL_FLAGS, FAILED, CUTS = [], [], {}
