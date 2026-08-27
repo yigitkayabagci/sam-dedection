@@ -46,6 +46,16 @@ targets are darker than a threshold -- **for the RGB arm only**. It defaults to
 off rather than to a sensible-looking number because on a thermal harvest a low
 reading is a *cold* target, and dropping those is exactly backwards.
 
+**A Drive mount that is still listed is not a Drive mount that works.** A
+session that dropped while nobody was watching -- which is the normal end of a
+long staging run -- comes back with `/content/drive` present and its FUSE
+endpoint dead. `drive.mount` looks at the directory, says "Drive already
+mounted", and returns happily; the next read of an archive raises
+`OSError: [Errno 107] Transport endpoint is not connected` from inside
+`zipfile`, and again from the `finally` that tries to close the handle. So the
+mount is now *tested* with one directory read and force-remounted when that
+read fails. The same block was in 15, 18 and 21 and got the same fix.
+
 **Cell 1 installs nothing it does not have to, and stops when it does.** The
 line used to be an unconditional `pip install --upgrade transformers>=5
 accelerate huggingface_hub pillow tqdm` on every run, and the `pillow` in it
@@ -303,6 +313,11 @@ if _missing:
 try:
     from google.colab import drive as _drive
     _drive.mount("/content/drive")
+    try:
+        next(Path("/content/drive/MyDrive").iterdir(), None)
+    except OSError as _stale_mount:
+        print("stale Drive mount:", _stale_mount, "-- remounting")
+        _drive.mount("/content/drive", force_remount=True)
 except Exception as _mount_error:
     print("no Colab Drive mount:", _mount_error)
 
