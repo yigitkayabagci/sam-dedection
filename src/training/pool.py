@@ -483,11 +483,18 @@ def label_pool(
                 by_class[cls] = by_class.get(cls, 0) + 1
             else:
                 rejected[row["verdict"]] = rejected.get(row["verdict"], 0) + 1
-            record["instances"].append({
-                "i": index, "class": cls,
-                "box": [round(float(v), 1) for v in boxes[index]],
-                "teacher_iou": row["teacher_iou"],
-                "verdict": row["verdict"]})
+            # Every reading `label_many` measured, not the two this used to
+            # keep: they are what lets a stricter cut be applied by
+            # `pool_reader.index_pool(min_box_iou=...)` instead of by running
+            # the teacher again, and `gate_report` ask each gate on its own
+            # rather than repeating `reject_reason`'s first-failure order.
+            instance = {"i": index, "class": cls,
+                        "box": [round(float(v), 1) for v in boxes[index]]}
+            for name in GATE_READINGS:
+                if name in row:
+                    instance[name] = row[name]
+            instance["verdict"] = row["verdict"]
+            record["instances"].append(instance)
 
         target.mkdir(parents=True, exist_ok=True)
         (target / RECORD_FILE).write_text(json.dumps(record, indent=1) + "\n")
@@ -605,6 +612,72 @@ def summarise_pool(datasets: Mapping[str, dict]) -> str:
 GATE_READINGS = ("teacher_iou", "box_iou", "area_ratio", "component")
 
 
+def backfill_readings(out_dir: str | Path, progress=None) -> dict:
+    """Recompute a pool's missing gate readings from the masks it already has.
+
+    A pool harvested before the readings were stored carries `teacher_iou` and
+    a verdict and nothing else, so `gate_report` can say nothing about the
+    other three and `index_pool(min_box_iou=...)` has nothing to cut on. The
+    obvious fix is to harvest again, and it is the wrong one: **the numbers do
+    not need the teacher.** `box_iou`, `area_ratio` and `component` are
+    functions of an accepted mask and its box, and the mask is in the store and
+    the box is in the record. This walks both and writes them back -- CPU only,
+    no GPU, no download, minutes rather than GPU-hours.
+
+    All three are translation-invariant or scale-free, so recomputing them on
+    the stored full-frame mask gives exactly what the harvest computed on the
+    crop: `box_iou` compares two boxes, `area_ratio` is a ratio of areas, and
+    `component` is a share of the mask's own pixels.
+
+    Only **accepted** instances can be recovered. A rejected one has no mask in
+    the store, and inventing a reading for it would be worse than leaving the
+    gap -- so they are counted as `unrecoverable` and left alone. That is the
+    right side to lose: every question worth asking here ("what would a
+    stricter cut drop?") is a question about the set that was kept.
+    """
+    out_dir = Path(out_dir)
+    records = sorted(out_dir.rglob(RECORD_FILE))
+    counts = {"records": 0, "written": 0, "already": 0, "filled": 0,
+              "unrecoverable": 0, "no_store": 0}
+    stream = (progress(records, total=len(records), desc="backfill")
+              if progress else records)
+    for record_file in stream:
+        counts["records"] += 1
+        record = json.loads(record_file.read_text())
+        instances = record.get("instances", [])
+        wanted = [i for i in instances
+                  if i.get("verdict") is None and i.get("box_iou") is None]
+        counts["already"] += sum(
+            1 for i in instances if i.get("box_iou") is not None)
+        counts["unrecoverable"] += sum(
+            1 for i in instances
+            if i.get("verdict") is not None and i.get("box_iou") is None)
+        if not wanted:
+            continue
+        store_file = record_file.parent / MASK_STORE
+        if not store_file.is_file():
+            counts["no_store"] += 1
+            continue
+        store = open_masks(store_file)
+        changed = False
+        for instance in wanted:
+            mask = store.get(int(instance["i"]))
+            if mask is None:
+                counts["unrecoverable"] += 1
+                continue
+            reading = measure(mask, np.asarray(instance["box"], np.float64),
+                              float(instance.get("teacher_iou", 1.0)))
+            instance["box_iou"] = round(float(reading.box_iou), 4)
+            instance["area_ratio"] = round(float(reading.area_ratio), 4)
+            instance["component"] = round(float(reading.component), 4)
+            counts["filled"] += 1
+            changed = True
+        if changed:
+            record_file.write_text(json.dumps(record, indent=1) + "\n")
+            counts["written"] += 1
+    return counts
+
+
 def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
     """Each gate scored on its own, and what a stricter box-IoU would cost.
 
@@ -616,13 +689,18 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
     saying nothing at all about the 2 312 it stopped first.
 
     So this re-reads the stored readings and asks each gate independently, over
-    every instance. It also prints what raising the box-IoU cut would remove
+    every instance. It also reports what raising the box-IoU cut would remove
     from the accepted set, which is the number that decides whether tightening
     it is worth a thing -- `pool_reader.index_pool(min_box_iou=...)` applies it
     without touching the GPU, so the cost of the decision is this table.
 
-    A pool harvested before the readings were stored reports them as
-    `not recorded` rather than as zero.
+    **Each reading is counted separately**, because pools are not all of one
+    vintage: `teacher_iou` has been stored since the first harvest and the
+    other three only since the readings were kept, so an older pool can answer
+    for one gate and not the rest. Treating a record as all-or-nothing there
+    reported 100 % "not recorded" on a pool that could in fact answer for the
+    gate doing all the rejecting. `backfill_readings` recovers the other three
+    from the stored masks without a teacher.
     """
     out_dir = Path(out_dir)
     cuts = (0.5, 0.6, 0.7, 0.8, 0.9)
@@ -630,26 +708,32 @@ def gate_report(out_dir: str | Path, gates: Gates = Gates()) -> dict:
     for record_file in out_dir.rglob(RECORD_FILE):
         record = json.loads(record_file.read_text())
         entry = tables.setdefault(record["dataset"], {
-            "instances": 0, "accepted": 0, "not_recorded": 0,
+            "instances": 0, "accepted": 0,
             "fails": {name: 0 for name in GATE_READINGS},
+            "missing": {name: 0 for name in GATE_READINGS},
+            "accepted_scored": 0,
             "accepted_below": {cut: 0 for cut in cuts}})
         for instance in record["instances"]:
             entry["instances"] += 1
             accepted = instance.get("verdict") is None
             entry["accepted"] += int(accepted)
-            if any(instance.get(name) is None for name in GATE_READINGS):
-                entry["not_recorded"] += 1
-                continue
-            if float(instance["teacher_iou"]) < gates.teacher_iou:
-                entry["fails"]["teacher_iou"] += 1
-            if float(instance["box_iou"]) < gates.box_iou:
-                entry["fails"]["box_iou"] += 1
-            if not (gates.area[0] <= float(instance["area_ratio"])
-                    <= gates.area[1]):
-                entry["fails"]["area_ratio"] += 1
-            if float(instance["component"]) < gates.component:
-                entry["fails"]["component"] += 1
-            if accepted:
+            for name in GATE_READINGS:
+                value = instance.get(name)
+                if value is None:
+                    entry["missing"][name] += 1
+                    continue
+                value = float(value)
+                if name == "teacher_iou" and value < gates.teacher_iou:
+                    entry["fails"][name] += 1
+                elif name == "box_iou" and value < gates.box_iou:
+                    entry["fails"][name] += 1
+                elif name == "area_ratio" and not (
+                        gates.area[0] <= value <= gates.area[1]):
+                    entry["fails"][name] += 1
+                elif name == "component" and value < gates.component:
+                    entry["fails"][name] += 1
+            if accepted and instance.get("box_iou") is not None:
+                entry["accepted_scored"] += 1
                 for cut in cuts:
                     if float(instance["box_iou"]) < cut:
                         entry["accepted_below"][cut] += 1
@@ -664,20 +748,29 @@ def summarise_gates(out_dir: str | Path, gates: Gates = Gates()) -> str:
         total = max(entry["instances"], 1)
         lines += [f"**{dataset}** -- each gate asked on its own, over all "
                   f"{entry['instances']} instances",
-                  "", "| gate | would reject | share |", "|---|---:|---:|"]
+                  "", "| gate | would reject | share | not recorded |",
+                  "|---|---:|---:|---:|"]
         for name in GATE_READINGS:
             count = entry["fails"][name]
-            lines.append(f"| `{name}` | {count} | {count / total:.1%} |")
-        if entry["not_recorded"]:
-            lines.append(f"| not recorded | {entry['not_recorded']} | "
-                         f"{entry['not_recorded'] / total:.1%} |")
-        lines += ["", f"| raise box_iou to | would drop of the "
-                      f"{entry['accepted']} accepted | left |",
-                  "|---|---:|---:|"]
+            blind = entry["missing"][name]
+            scored = max(total - blind, 1)
+            lines.append(f"| `{name}` | {count} | {count / scored:.1%} | "
+                         f"{blind} |")
+        scored = entry["accepted_scored"]
+        if not scored:
+            lines += ["", f"No box-IoU reading on any of the "
+                          f"{entry['accepted']} accepted instances -- this "
+                          f"pool was harvested before they were stored. "
+                          f"`backfill_readings` recomputes them from the "
+                          f"masks already in the store; no teacher, no GPU.",
+                      ""]
+            continue
+        lines += ["", f"| raise box_iou to | would drop of the {scored} "
+                      f"scored accepted | left |", "|---|---:|---:|"]
         for cut in report["cuts"]:
             drop = entry["accepted_below"][cut]
-            lines.append(f"| {cut:g} | {drop} ({drop / max(entry['accepted'], 1):.1%}) "
-                         f"| {entry['accepted'] - drop} |")
+            lines.append(f"| {cut:g} | {drop} ({drop / scored:.1%}) "
+                         f"| {scored - drop} |")
         lines.append("")
     return "\n".join(lines).rstrip()
 

@@ -46,6 +46,16 @@ targets are darker than a threshold -- **for the RGB arm only**. It defaults to
 off rather than to a sensible-looking number because on a thermal harvest a low
 reading is a *cold* target, and dropping those is exactly backwards.
 
+**A pool that predates the readings gets them back without a teacher.**
+`box_iou`, `area_ratio` and `component` are functions of an accepted mask and
+its box -- and the mask is in the store, the box is in the record. So
+`backfill_readings` recomputes them off disk, CPU only, minutes rather than
+GPU-hours, and cell 5 runs it before the gate table so an older pool answers
+for all four gates instead of one. Only accepted instances can be recovered: a
+rejected one has no mask to measure, and inventing a number for it would be
+worse than the gap. That is the right side to lose, because every question
+worth asking here is about the set that was kept.
+
 **The reject table names one gate per instance, which is not the same as
 what the data says.** `reject_reason` returns the *first* gate an instance
 fails, in a fixed order, so a harvest reporting `teacher_iou 2312, box_iou 9`
@@ -555,8 +565,9 @@ plt.show()
 # --------------------------------------------------------------------------
 
 code('''
-from src.training.pool import (label_pool, pool_report, summarise_gates,
-                               summarise_luma, summarise_pool, write_index)
+from src.training.pool import (backfill_readings, label_pool, pool_report,
+                               summarise_gates, summarise_luma, summarise_pool,
+                               write_index)
 
 def harvest(frames, dataset):
     global BATCH, FRAME_GROUP
@@ -580,6 +591,8 @@ REPORT = harvest(FRAMES, POOL)
 print(json.dumps(REPORT, indent=1))
 write_index(POOL_ROOT)
 print(summarise_pool(pool_report(POOL_ROOT)))
+print()
+print(backfill_readings(POOL_ROOT, progress=progress))
 print()
 print(summarise_gates(POOL_ROOT, GATES))
 print()

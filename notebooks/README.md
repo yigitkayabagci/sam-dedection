@@ -146,6 +146,14 @@ is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
 
+**A pool that predates the readings gets them back without a teacher.**
+`box_iou`, `area_ratio` and `component` are functions of an accepted mask and
+its box — the mask is in the store, the box is in the record — so
+`backfill_readings` recomputes them off disk, CPU only, minutes rather than
+GPU-hours. Cell 5 runs it before the gate table. Only accepted instances come
+back: a rejected one has no mask to measure, and every question worth asking
+here is about the set that was kept anyway.
+
 **The reject table names one gate per instance, which is not what the data
 says.** `reject_reason` returns the *first* gate an instance fails, in a fixed
 order, so a harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
