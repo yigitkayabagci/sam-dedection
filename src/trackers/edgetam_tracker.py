@@ -6,6 +6,7 @@ from typing import Iterator
 
 import numpy as np
 
+from ..checkpoint_meta import warn_size_mismatch
 from ..prompts import PromptSet
 from ._hydra_overrides import image_size_overrides
 from .base import TrackingResult, VideoTracker
@@ -161,6 +162,11 @@ class EdgeTAMTracker(VideoTracker):
                 "(see scripts/setup_edgetam.sh comments). For dev machines without "
                 "CUDA, pass --config configs/edgetam_cpu.yaml."
             )
+        # A checkpoint trained at one size loads into a build of another with
+        # no error at all (see src/checkpoint_meta.py). Say so here, where the
+        # checkpoint is first read, rather than letting the run end in numbers
+        # that are quietly off their training resolution.
+        warn_size_mismatch(self.checkpoint, self.image_size)
         overrides = image_size_overrides(self.image_size)
         self._predictor = build_sam2_video_predictor(
             self.model_cfg, self.checkpoint, device=self.device,

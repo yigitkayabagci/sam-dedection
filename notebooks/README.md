@@ -224,6 +224,48 @@ on: every score is over a single prompted frame, with no memory bank in the
 loop. A better encoder is a precondition for a better tracker, never evidence
 of one. That is stage C, and it has not started.
 
+## Taking a trained checkpoint out of Colab
+
+Every stage-B notebook mirrors its run to your Drive under
+`MyDrive/edgetam-stage-b/<RUN>/` — the checkpoint, `run.json`, `verdict.json`
+and the `score_*.json` rows behind the before/after table. That folder is
+everything; the pools and the frames stay in Colab, because inference needs
+neither.
+
+| notebook | Drive folder | checkpoint | config to run it with |
+|---|---|---|---|
+| 19 | `edgetam-stage-b/thermal` | `edgetam_pool_thermal_512.pt` | `configs/edgetam_512_pool.yaml` |
+| 20 | `edgetam-stage-b/thermal_rgb` | `edgetam_pool_thermal_rgb_512.pt` | `configs/edgetam_512_pool.yaml`, checkpoint swapped |
+| 22 | `edgetam-stage-b/thermal_deep` | `edgetam_pool_thermal_deep_512.pt` | `configs/edgetam_512_pool_deep.yaml` |
+| 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
+
+Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
+repository) and the config runs it. Nothing else has to change:
+`src/training/finetune.py` writes EdgeTAM's own `{"model": state_dict}` layout,
+so `build_sam2` loads it strictly, with the same 982 keys, and the exporter and
+the engine build keep working untouched. **23's LoRA is merged before the file
+is written**, so it is that same state dict and not an adapter file.
+
+**The resolution in the config is load-bearing, and getting it wrong is
+silent.** EdgeTAM holds no resolution in any parameter, so a checkpoint trained
+at 512 loads into a 768 build with identical shapes and no error anywhere —
+the only symptom is a model that quietly scores worse than it should.
+`src/checkpoint_meta.py` reads the `meta["image_size"]` every fine-tune has
+always written and prints a warning when the two disagree; it is wired into
+`src/trackers/edgetam_tracker.py` and `tools/export_edgetam_onnx.py`, the two
+places a mismatch reaches a measurement. Take the "did the training help"
+number at the training size, against stock weights at that same size.
+`configs/edgetam_768_pool_deep.yaml` exists to run the 512 checkpoint at 768
+deliberately, and says in its own header what that does and does not measure.
+
+**On TensorRT the checkpoint is not a runtime choice.** Weights are traced into
+the ONNX graphs and baked into the engines, so a new checkpoint means a new
+export into its own directory — `models512_pool_deep/`, not `models512/`.
+`configs/edgetam_trt_512_pool_deep.yaml` and its 768 twin carry the four
+commands. `check_trt_parity.py` will not catch a wrong checkpoint or a wrong
+size: it compares the engine against the PyTorch module built the same way, so
+both are wrong together and it passes.
+
 ## Three things to know before starting
 
 **Notebook 02 runs end to end.** It fetches Anti-UAV410, labels it, fine-tunes
