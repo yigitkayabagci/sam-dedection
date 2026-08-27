@@ -117,8 +117,10 @@ ARMS = {
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
         "REQUIRE_POOLS": REQUIRED,
-        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
-                          '                 "feright_car": 0.7}'),
+        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
+                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                          '                 "segfly": 0.6,\n'
+                          '                 "car": 0.7, "truck": 0.7}'),
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
@@ -140,8 +142,10 @@ ARMS = {
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
         "REQUIRE_POOLS": REQUIRED,
-        "CLASS_WEIGHTS": ('{"car": 0.5, "truck": 0.7, "van": 0.7,\n'
-                          '                 "feright_car": 0.7}'),
+        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
+                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                          '                 "segfly": 0.6,\n'
+                          '                 "car": 0.7, "truck": 0.7}'),
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
@@ -927,11 +931,16 @@ if CLASS_WEIGHTS:
     for _name, (_was, _now) in list(_balance["by_class"].items())[:12]:
         print(f"{_name:<24}{_was:>10}{_was / _was_total:>8.1%}"
               f"{_now:>10}{_now / _now_total:>8.1%}")
+    print(f"{'source':<34}{'was':>10}{'share':>8}{'now':>10}{'share':>8}")
+    for _src, (_was, _now) in _balance["by_source"].items():
+        print(f"{_src:<34}{_was:>10}{_was / _was_total:>8.1%}"
+              f"{_now:>10}{_now / _now_total:>8.1%}")
     _matched = [_n for _n in CLASS_WEIGHTS if _n not in _balance["unmatched"]]
     assert _matched, (
-        f"CLASS_WEIGHTS names {_balance['unmatched']} and no pool here carries "
-        f"any of them, so the thinning did nothing. The names are the pools' "
-        f"own -- read the class table cell 2 printed and use those.")
+        f"CLASS_WEIGHTS names {_balance['unmatched']} and nothing here matched "
+        f"any of them, so the thinning did nothing. A key is a class name, a "
+        f"source, or `source:class` -- read the two tables above and use those "
+        f"names.")
     if _balance["unmatched"]:
         print(f"   !! no pool carries {_balance['unmatched']} -- those weights "
               f"thinned nothing. Not fatal, {_matched} did apply, but a "
