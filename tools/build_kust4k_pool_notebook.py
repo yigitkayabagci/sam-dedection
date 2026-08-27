@@ -130,6 +130,11 @@ if _missing:
 try:
     from google.colab import drive as _drive
     _drive.mount("/content/drive")
+    try:
+        next(Path("/content/drive/MyDrive").iterdir(), None)
+    except OSError as _stale_mount:
+        print("stale Drive mount:", _stale_mount, "-- remounting")
+        _drive.mount("/content/drive", force_remount=True)
 except Exception as _mount_error:
     print("no Colab Drive mount:", _mount_error)
 
