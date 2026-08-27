@@ -46,6 +46,24 @@ targets are darker than a threshold -- **for the RGB arm only**. It defaults to
 off rather than to a sensible-looking number because on a thermal harvest a low
 reading is a *cold* target, and dropping those is exactly backwards.
 
+**`BOX_IOU` is back at the library default, because 0.5 was somebody else's
+number.** These four inherited it from 15, where it is *argued*: DroneVehicle
+ships oriented boxes and the prompt is their axis-aligned envelope, which on a
+45-degree vehicle is about twice the area of the object -- so a correct mask
+scores a low box-IoU against a box that was never tight, and the gate has to be
+loosened or it rejects the good ones. VTUAV has none of that. Its boxes are
+plain per-frame `x y w h`, drawn per modality, around a target whose median
+size is 77 px. Nothing here justifies loosening the gate that
+`Gates`'s own docstring calls the load-bearing one, so it sits at the 0.6
+default and 0.7 is one edit away.
+
+Two things make that edit cheap. The harvest now writes **all four gate
+readings** into each instance's record rather than only the verdict they
+produced, and `pool_reader.index_pool(min_box_iou=...)` re-cuts on the stored
+number -- so "actually, only masks whose box agrees at 0.7" is a pass over the
+index, not another run of the teacher. Upwards only: a pool harvested at 0.6
+has no record of what 0.5 would have kept.
+
 **A Drive mount that is still listed is not a Drive mount that works.** A
 session that dropped while nobody was watching -- which is the normal end of a
 long staging run -- comes back with `/content/drive` present and its FUSE
@@ -258,7 +276,7 @@ READ_AHEAD  = 0
 UNZIP_WORKERS = 16
 MAX_BOXES   = None
 LIMIT       = None
-BOX_IOU     = 0.5
+BOX_IOU     = 0.6
 REPO_URL    = "https://github.com/yigitkayabagci/sam-dedection.git"
 BRANCH      = "claude/thermal-stage-b-training-43ktcl"
 REPO_DIR    = "/content/sam-dedection"

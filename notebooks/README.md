@@ -146,6 +146,24 @@ is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
 
+**The gate that decides is `box_iou`, and it is back at the library default.**
+Four gates stand between a teacher mask and the pool: `teacher_iou` (the
+teacher's own confidence — *measured* to be weak, +0.25 to +0.38 over-confident
+on 12–36 px targets, so it passes almost everything), `box_iou` (does the
+mask's own box agree with the annotation), `area` (mask area over box area,
+0.15–1.3, which catches a fragment and background bleed alike), and `component`
+(one object, not a mask scattered across the frame). `box_iou` is the
+load-bearing one. 16/17/24/25 had it at 0.5, inherited from 15 where that is
+argued — DroneVehicle ships oriented boxes and prompts with their axis-aligned
+envelope, about twice the object's area on a 45° vehicle, so a correct mask
+scores low against a box that was never tight. VTUAV has plain per-frame
+`x y w h` around a 77 px median target and none of that applies, so it sits at
+the 0.6 default now and 0.7 is one edit away. That edit is cheap in both
+directions: the harvest writes **all four readings** into each instance's
+record rather than only the verdict, and `index_pool(min_box_iou=…)` re-cuts on
+the stored number — upwards only, since a pool harvested at 0.6 has no record
+of what 0.5 would have kept.
+
 **Night is a question about the teacher, and it is asked with a number.** A
 promptable segmenter trained on web images reads a daylit street well and a
 frame where the target is a smear around a headlight badly — and the gates do

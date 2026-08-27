@@ -213,11 +213,18 @@ def label_many(
             plans[start:stop], local_boxes[start:stop],
             teacher.masks_for(crops[start:stop], local_boxes[start:stop]),
         ):
-            verdict = reject_reason(measure(crop_mask, local_box, teacher_iou),
-                                    gates)
+            reading = measure(crop_mask, local_box, teacher_iou)
+            verdict = reject_reason(reading, gates)
+            # The whole measurement, not just the verdict it produced. Every
+            # number here is already computed and thrown away, and keeping them
+            # is the difference between "tighten the box-IoU cut to 0.7" being
+            # a pass over the index and being a second harvest on the GPU.
             records[item_index].append({
                 "i": int(box_index),
                 "teacher_iou": round(float(teacher_iou), 4),
+                "box_iou": round(float(reading.box_iou), 4),
+                "area_ratio": round(float(reading.area_ratio), 4),
+                "component": round(float(reading.component), 4),
                 "verdict": verdict})
             if verdict is None:
                 full = np.zeros(items[item_index][0].shape[:2], dtype=bool)
@@ -239,8 +246,8 @@ def label_boxes(
 
     Returns `(masks, records)`: `masks` maps box index to a full-frame boolean
     mask for the boxes that survived, `records` carries one row per box
-    attempted -- index, teacher confidence, and either `None` or the name of
-    the gate that stopped it. The caller decides what the indices mean; this
+    attempted -- index, all four gate readings, and either `None` or the name
+    of the gate that stopped it. The caller decides what the indices mean; this
     function only promises they are the row numbers of `boxes`.
 
     One frame's case of `label_many`, kept because most callers have one frame

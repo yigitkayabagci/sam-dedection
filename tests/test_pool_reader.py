@@ -123,6 +123,58 @@ class PoolIndexTest(unittest.TestCase):
         index = index_pool(self.pool / "demo", self.images, workers=1)
         self.assertEqual([i.label for e in index for i in e.instances], [0])
 
+    def _set_box_iou(self, target: Path, values) -> None:
+        record_file = target / RECORD_FILE
+        record = json.loads(record_file.read_text())
+        for instance, value in zip(record["instances"], values):
+            instance["box_iou"] = value
+        record_file.write_text(json.dumps(record) + "\n")
+
+    def test_a_stricter_box_iou_can_be_applied_without_re_harvesting(self):
+        """The point of storing the reading and not just the verdict.
+
+        A pool of a hundred thousand frames costs GPU-days to make. Deciding
+        afterwards that only masks agreeing with the annotation at 0.7 should
+        train has to be a pass over the records, or it is not a decision anyone
+        will actually take.
+        """
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            (name, box, blob(self.shape, box)) for name, box in self.boxes])
+        self._set_box_iou(target, [0.92, 0.61])
+
+        keep_all = index_pool(self.pool / "demo", self.images, workers=1)
+        self.assertEqual([i.label for e in keep_all for i in e.instances],
+                         [0, 1])
+        strict = index_pool(self.pool / "demo", self.images, workers=1,
+                            min_box_iou=0.7)
+        self.assertEqual([i.label for e in strict for i in e.instances], [0])
+
+    def test_a_frame_the_stricter_cut_empties_is_dropped_as_no_accepted(self):
+        """And a cut that empties the whole pool says so with that count.
+
+        The alternative -- an empty index and a training run that starts on
+        nothing -- is the failure this error already exists to prevent.
+        """
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            (name, box, blob(self.shape, box)) for name, box in self.boxes])
+        self._set_box_iou(target, [0.55, 0.61])
+        with self.assertRaises(ValueError) as caught:
+            index_pool(self.pool / "demo", self.images, workers=1,
+                       min_box_iou=0.7)
+        self.assertIn("no_accepted", str(caught.exception))
+
+    def test_an_older_pool_with_no_reading_is_kept_not_silently_emptied(self):
+        """Dropping a whole pool because its records are a version behind is
+        the worse failure of the two."""
+        image = write_image(self.images / "only.png", *self.shape)
+        write_frame(self.pool, "only", image, self.shape, [
+            (name, box, blob(self.shape, box)) for name, box in self.boxes])
+        index = index_pool(self.pool / "demo", self.images, workers=1,
+                           min_box_iou=0.95)
+        self.assertEqual([i.label for e in index for i in e.instances], [0, 1])
+
     def _strip_verdicts(self, target: Path) -> None:
         """Rewrite one frame's record the way a harvest with no verdict field
         would have written it, store untouched."""
