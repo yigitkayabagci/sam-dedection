@@ -104,9 +104,28 @@ if not Path(REPO_DIR).exists():
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
 
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
-                "transformers>=5.0.0", "accelerate", "huggingface_hub",
-                "pillow", "tqdm"], check=False)
+_missing = []
+try:
+    import transformers as _transformers
+    if int(_transformers.__version__.split(".")[0]) < 5:
+        _missing.append("transformers>=5.0.0")
+except Exception:
+    _missing.append("transformers>=5.0.0")
+for _name in ("accelerate", "huggingface_hub", "tqdm"):
+    try:
+        __import__(_name)
+    except ImportError:
+        _missing.append(_name)
+if _missing:
+    print("installing", _missing)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--upgrade",
+                    *_missing], check=False)
+    raise SystemExit(
+        "installed " + ", ".join(_missing) + " into a running kernel. "
+        "Runtime > Restart session, then run this cell again. pip replaced "
+        "files this kernel has already imported, and the half-old half-new "
+        "import that follows fails somewhere unrelated -- PIL, torchvision -- "
+        "rather than here.")
 
 try:
     from google.colab import drive as _drive
