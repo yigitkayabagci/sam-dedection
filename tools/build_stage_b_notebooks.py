@@ -147,7 +147,7 @@ ARMS = {
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
         "EPOCHS": "[1, 6]",
-        "MIN_BOX_IOU": "0.7",
+        "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
         "SKIP_POOLS": '["segfly_thermal"]',
@@ -175,7 +175,7 @@ ARMS = {
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
         "EPOCHS": "[1, 6]",
-        "MIN_BOX_IOU": "0.7",
+        "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
         "SKIP_POOLS": '["segfly_thermal"]',
