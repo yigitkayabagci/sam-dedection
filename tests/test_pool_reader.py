@@ -525,16 +525,19 @@ class WhyNoImageTest(unittest.TestCase):
         self.assertIn("different part of the set", report["verdict"])
         self.assertEqual(report["extensions"], {".png": 1})
 
-    def test_the_frame_being_there_under_another_prefix_says_so(self):
-        # The same file, but under a directory chain no suffix of the recorded
-        # path ends with -- so `Relocator` misses it and an rglob finds it.
+    def test_the_frame_being_there_under_another_prefix_is_named(self):
+        # A tree that gained a level: no suffix of the recorded path matches,
+        # which is what the by-name fallback exists for. Suffix matching alone
+        # still misses it, and that is the case the report has to describe.
         moved = self.root / "moved" / "train" / "images" / "000000.png"
         write_image(moved, *self.shape)
         # The harvest runtime's own copy is gone, which is the situation this
         # runs in: at depth 0 the recorded path is absolute and joinpath keeps
         # it, so while it exists the relocator resolves to it and never misses.
         self.image.unlink()
-        self.assertIsNone(Relocator(self.root / "moved")(self.image))
+        self.assertIsNone(
+            Relocator(self.root / "moved", by_name=False)(self.image))
+        self.assertEqual(Relocator(self.root / "moved")(self.image), moved)
         report = why_no_image(self.pool / "demo", self.root / "moved")
         self.assertIn("000000.png", report["same_name_here"][0])
         self.assertIn("one level off", report["verdict"])
