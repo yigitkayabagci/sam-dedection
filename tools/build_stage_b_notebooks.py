@@ -72,11 +72,19 @@ after a branch. `Relocator` re-roots a recorded path by matching its *suffix*,
 and these two disagree on a component rather than on a depth -- `images/test/f`
 against `normal_json/test/f` -- so no suffix of one is a suffix of the other
 and every frame reports `no_image`. Pointing the root at the directory that
-holds the splits fixes it, which is what `IMAGE_ROOTS["hituav_thermal"]` now
-does with a glob. The glob resolves to the **deepest** matching directory
-because an archive that re-packs itself nests the same folder name twice, and
-the inner one is the tree with the splits in it -- which is also what made the
-by-name fallback refuse, two files of that name on disk.
+holds the splits fixes it, which is what `IMAGE_ROOTS["hituav_thermal"]` does
+with a glob. The glob resolves to the **deepest** matching directory because an
+archive that re-packs itself nests the same folder name twice, and the inner one
+is the tree with the splits in it -- which is also what made the by-name
+fallback refuse, two files of that name on disk.
+
+A glob is read where the plan is built, though, which is *before* the download
+cell has run: on a fresh runtime nothing matches it and the root stays the
+pattern. So cell 1 ends by asking the disk instead -- `resolve_images_root`
+looks one recorded file name up under the root, keeps the root in front of the
+longest tail it shares with the recorded path, and prefers the candidate that
+re-roots the most frames. It prints the re-rooting it did, or that a pool's
+frames are on no disk here, which is the same `no_image` with a different fix.
 
 ## A budget for a night, and a net under it
 
@@ -573,7 +581,8 @@ if ANCHOR_WEIGHT:
 code('''
 from src.training.pool import RECORD_FILE
 from src.training.pool_reader import (acceptance, discover_pools,
-                                      extract_frames, group_records, link_pool)
+                                      extract_frames, group_records, link_pool,
+                                      resolve_images_root)
 
 _done = Path(POOL_ROOT) / ".unpacked"
 _done.mkdir(parents=True, exist_ok=True)
@@ -883,6 +892,24 @@ for _pool, _slug in KAGGLE_DATASETS.items():
     except Exception as _kaggle_error:
         print("!! could not fetch", _slug, "--", _kaggle_error)
         print("   put its frames under", _root, "or set IMAGE_ROOTS in cell 1")
+
+print()
+for _row in PLAN:
+    _found = resolve_images_root(RAW[_row["pool"]], _row["images"])
+    if _found is None and str(Path(_row["images"]).parent) != DATA_ROOT:
+        _found = resolve_images_root(RAW[_row["pool"]], _row["images"],
+                                     search_root=DATA_ROOT)
+    if _found is None:
+        print(f"!! {_row['pool']}: not one of its recorded frames is anywhere "
+              f"under {_row['images']}, so every frame of it will read as "
+              f"`no_image`. Its download is missing or incomplete -- or its "
+              f"frames are elsewhere, which IMAGE_ROOTS in cell 1 is for.")
+    elif str(_found) != _row["images"]:
+        print(f"   {_row['pool']}: frames are under {_found}, not "
+              f"{_row['images']} -- re-rooted. Which mirror a pool was "
+              f"harvested from and how the archive unpacked here are two "
+              f"independent facts, and only the disk holds the second.")
+        _row["images"] = str(_found)
 
 subprocess.run(["df", "-h", "/content"], check=False)
 ''')

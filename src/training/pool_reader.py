@@ -38,6 +38,7 @@ across, and a four-pixel target is not a prompt anyone would give.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import threading
 import zipfile
@@ -194,6 +195,69 @@ def _shared_tail(left: SequenceABC[str], right: SequenceABC[str]) -> int:
             break
         shared += 1
     return shared
+
+
+def resolve_images_root(records: Iterable[str | Path],
+                        images_root: str | Path | None,
+                        search_root: str | Path | None = None,
+                        probes: int = 5) -> Path | None:
+    """The root a pool's recorded paths were written against, read off the disk.
+
+    `Relocator` handles a tree that gained or lost levels, one frame at a time,
+    and refuses a name that is ambiguous under the root it was given -- which is
+    the right call per frame and the wrong one for a *whole pool*: HIT-UAV's
+    archive re-packs itself, so `normal_json/train/0_01.jpg` exists twice under
+    `/content/data/HIT_UAV` and every frame of the pool ties. Naming the inner
+    tree once settles all of them, and this works that name out instead of
+    asking a settings cell to hard-code a path that depends on which mirror the
+    pool was harvested from and how the archive happened to unpack.
+
+    Each probe's file name is looked up under `search_root` (the configured root
+    by default); every hit proposes the root in front of the tail it shares with
+    the recorded path, and the proposal that re-roots the *most* probes wins --
+    which is what tells the tree holding the splits from the wrapper above it
+    that holds one stray copy. A tie goes to the deeper root, since the shallow
+    one reaches the same frames only through the deep one. `None` when no frame
+    of the pool is anywhere underneath: the missing-download case, which is a
+    fact to report rather than a path to guess at.
+    """
+    # A root can still carry the glob it was configured with, when nothing
+    # matched it -- which is what a pattern resolved before the download looks
+    # like. Its solid prefix is a real directory and the right place to search.
+    parts = Path(images_root).parts if images_root else ()
+    solid = list(itertools.takewhile(lambda part: "*" not in part, parts))
+    configured = Path(*parts) if parts and len(solid) == len(parts) else None
+    base = Path(search_root) if search_root else (
+        Path(*solid) if solid else configured)
+    if base is None or not base.is_dir():
+        return None
+
+    wanted: list[Path] = []
+    for record_path in list(records)[:max(probes, 1)]:
+        try:
+            wanted.append(Path(json.loads(
+                Path(record_path).read_text())["image"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    if not wanted:
+        return None
+
+    def resolves(root: Path) -> int:
+        relocate = Relocator(root, by_name=False)
+        return sum(1 for recorded in wanted if relocate(recorded) is not None)
+
+    if configured is not None and resolves(configured) == len(wanted):
+        return configured                    # the configured root already works
+
+    names = _index_by_name(base)
+    proposed: set[Path] = set()
+    for recorded in wanted:
+        for path in names.get(recorded.name, ()):
+            shared = max(_shared_tail(path.parts, recorded.parts), 1)
+            proposed.add(Path(*path.parts[:len(path.parts) - shared]))
+    if not proposed:
+        return None
+    return max(proposed, key=lambda root: (resolves(root), len(root.parts)))
 
 
 # --------------------------------------------------------------------------

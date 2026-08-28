@@ -35,9 +35,9 @@ from src.training.pool import RECORD_FILE  # noqa: E402
 from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
                                       index_pool, link_pool, load_pool_index,
                                       parse_pool, pool_datasets,
-                                      extract_frames, save_pool_index,
-                                      store_areas, wanted_frames,
-                                      why_no_image)
+                                      extract_frames, resolve_images_root,
+                                      save_pool_index, store_areas,
+                                      wanted_frames, why_no_image)
 
 try:
     import cv2
@@ -766,6 +766,109 @@ class RelocatorTest(unittest.TestCase):
         relocate = Relocator(self.root, by_name=False)
         self.assertIsNone(relocate("/data/HIT_UAV/train/0_01.jpg"))
         self.assertEqual(relocate.misses, 1)
+
+
+class ResolveImagesRootTest(unittest.TestCase):
+    """Naming the tree the recorded paths were written against, once per pool.
+
+    `Relocator`'s by-name fallback settles one frame at a time and refuses a
+    name that is ambiguous under its root -- correct per frame, and no answer at
+    all for a pool whose every frame is ambiguous the same way, which is what an
+    archive that unpacks a copy of itself produces. These are the three answers
+    the caller has to be able to tell apart: the configured root is right, the
+    frames are under a different prefix, or they are not on this disk.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.records = 0
+
+    def record_naming(self, image: str) -> Path:
+        self.records += 1
+        path = self.root / "pool" / str(self.records) / RECORD_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"key": str(self.records), "image": image}))
+        return path
+
+    def touch(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        return path
+
+    def test_a_wrapper_directory_the_harvest_did_not_have_is_found(self):
+        inner = (self.root / "HIT_UAV" / "HIT-UAV-Infrared-Thermal-Dataset-main"
+                 / "normal_json")
+        self.touch(inner / "train" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"
+                                    "0_01.jpg")
+        self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV"),
+                         inner.parent)
+
+    def test_the_tree_holding_the_frames_beats_the_wrapper_holding_one(self):
+        # The archive re-packs itself, so the name is ambiguous under the root
+        # and every frame of the pool ties -- the case the by-name fallback
+        # refuses. The root that resolves the *most* frames is the answer.
+        outer = self.root / "HIT_UAV" / "main" / "normal_json"
+        inner = outer / "main" / "normal_json"
+        self.touch(outer / "train" / "0_01.jpg")
+        for name in ("0_01.jpg", "0_02.jpg", "0_03.jpg"):
+            self.touch(inner / "train" / name)
+        records = [self.record_naming(f"/content/data/HIT_UAV/normal_json/train/"
+                                      f"{name}")
+                   for name in ("0_01.jpg", "0_02.jpg", "0_03.jpg")]
+        self.assertIsNone(Relocator(self.root / "HIT_UAV")(
+            "/content/data/HIT_UAV/normal_json/train/0_01.jpg"))
+        self.assertEqual(resolve_images_root(records, self.root / "HIT_UAV"),
+                         inner.parent)
+
+    def test_a_mirror_that_renamed_a_component_is_still_found(self):
+        # The pool was harvested from the kagglehub copy (`hit-uav/images/`)
+        # and the run staged the GitHub archive (`normal_json/`): the two
+        # disagree on a component, so no suffix of one is a suffix of the other.
+        frames = self.root / "HIT_UAV" / "wrapper" / "normal_json"
+        self.touch(frames / "test" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/hit-uav/images/test/"
+                                    "0_01.jpg")
+        found = resolve_images_root([record], self.root / "HIT_UAV")
+        self.assertEqual(found, frames)
+        self.assertEqual(Relocator(found, by_name=False)(
+            "/content/data/HIT_UAV/hit-uav/images/test/0_01.jpg"),
+            frames / "test" / "0_01.jpg")
+
+    def test_a_root_that_already_works_is_returned_unchanged(self):
+        self.touch(self.root / "HIT_UAV" / "normal_json" / "train" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"
+                                    "0_01.jpg")
+        self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV"),
+                         self.root / "HIT_UAV")
+
+    def test_frames_that_are_not_on_this_disk_are_not_guessed_at(self):
+        (self.root / "HIT_UAV").mkdir()
+        record = self.record_naming("/content/data/HIT_UAV/train/0_01.jpg")
+        self.assertIsNone(resolve_images_root([record], self.root / "HIT_UAV"))
+
+    def test_an_unresolved_glob_searches_the_prefix_it_is_sure_of(self):
+        # `images_for` leaves the pattern in place when nothing matched it, and
+        # nothing matches a pattern globbed before the download. The part of it
+        # in front of the first `*` is still a real directory.
+        frames = self.root / "HIT_UAV" / "wrapper" / "normal_json"
+        self.touch(frames / "train" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"
+                                    "0_01.jpg")
+        pattern = str(self.root / "HIT_UAV" / "**" / "normal_json")
+        self.assertEqual(resolve_images_root([record], pattern), frames.parent)
+
+    def test_a_wider_search_root_finds_a_sibling_of_the_configured_one(self):
+        frames = self.root / "HIT-UAV-Infrared-Thermal-Dataset-main" / "train"
+        self.touch(frames / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/train/0_01.jpg")
+        (self.root / "HIT_UAV").mkdir()
+        self.assertIsNone(resolve_images_root([record], self.root / "HIT_UAV"))
+        self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV",
+                                             search_root=self.root),
+                         frames.parent)
 
 
 class ParsePoolTest(unittest.TestCase):
