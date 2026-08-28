@@ -538,6 +538,31 @@ preprocessing saving is small. `crop512` is the only mode where the resize
 disappears completely. The summary reports the window each run actually used,
 so this is visible rather than assumed.
 
+**A second axis: `--weights`.** The modes vary the input; `--weights` varies
+the model. `stock` is EdgeTAM as shipped, `pool_deep` is
+`notebooks/22_thermal_deep.ipynb`'s checkpoint (thermal mask pools, trained at
+512). Weights are baked into an engine at export time, so each `(weights,
+size)` pair is its own directory and its own export — `--weights pool_deep`
+selects `models512_pool_deep/`, and a pair with no engines built fails
+immediately, printing the export and build commands rather than dying inside a
+model load. Results land in `<mode>_<weights>/` beside the stock run, off the
+same saved prompt, so the pair is one variable apart:
+
+```bash
+python tools/run_records.py --records frames --out frame_output \
+    --modes full512,crop512,full768 --box 700,300,830,430 --pick-only
+python tools/run_records.py --records frames --out frame_output \
+    --modes full512,crop512,full768 --weights stock
+python tools/run_records.py --records frames --out frame_output \
+    --modes full512,crop512,full768 --weights pool_deep
+```
+
+`pool_deep` has no 1024 entry on purpose, and the `full768`/`crop768` rows are
+already off its training size — the summary says so in its own header, because
+nothing else will: EdgeTAM holds no resolution in any parameter, so those
+engines build and run and the only symptom is a mask that is quietly worse.
+Read them against a `stock` run at the same size, never against the 512 rows.
+
 **Why the crop is not just a third resolution.** The deployment camera already
 centres and focuses on its target, so the outer frame is background that gets
 paid for twice — once resizing it, once running the model over it. Cropping to

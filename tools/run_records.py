@@ -33,6 +33,18 @@ than 512x512 of real detail -- on a 640x512 thermal frame it upsamples and pays
 2.25x the 512 token count for interpolated pixels. See configs/edgetam_768.yaml.
 Each mode needs its own engine set; `--modes` runs the subset you have built.
 
+`--weights` is the second axis, and it is a different question from the modes:
+they vary the *input*, it varies the *model*. `stock` is EdgeTAM as shipped;
+`pool_deep` is notebooks/22_thermal_deep.ipynb's checkpoint, trained at 512 on
+the thermal mask pools. Weights are traced into the ONNX graphs and baked into
+the engines, so this selects a different models*/ directory rather than a
+runtime setting -- each (weights, size) pair is its own export, and a pair with
+no engines built fails immediately with the two commands that build them.
+
+Results go to `<mode>_<weights>/`, so a stock run and a pool_deep one sit side
+by side off one saved prompt: same target, same frames, one variable. A plain
+stock run keeps the bare `<mode>/` name.
+
 Prompts are picked once per record, on the full frame, and reused by every
 mode (crop modes shift them automatically). They come from, in order:
 `<record>/prompts.json`, a previous pick saved under the output folder,
@@ -49,6 +61,16 @@ Usage:
     # the baseline, off the same saved prompt, so the two are comparable.
     python tools/run_records.py --records frames --out frame_output \\
         --modes full1024 --frame-skip
+
+    # The thermal stage-B checkpoint against stock, same records, same prompt.
+    # Pick once, then run the two: full512/ and full512_pool_deep/ end up side
+    # by side under each record.
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512,crop512,full768 --box 700,300,830,430 --pick-only
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512,crop512,full768 --weights stock
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512,crop512,full768 --weights pool_deep
 """
 from __future__ import annotations
 
@@ -61,20 +83,102 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.io_utils import read_first_frame_dir  # noqa: E402
-from src.prompts import BoxPrompt, PromptSet  # noqa: E402
-from src.prompts.file_source import save_prompts  # noqa: E402
+import yaml  # noqa: E402
+
 from tools.run_experiment import PY, find, run_step  # noqa: E402
 
-# mode -> (backend YAML, centre crop size or None)
+# `src.io_utils` and `src.prompts` reach cv2 and the interactive picker, which
+# only the prompt step needs. Imported there rather than here so `--help`, the
+# mode/weights tables and the engine preflight work on a machine that has not
+# installed the vision stack -- and so a missing display is an error about
+# picking a target, not an import failure before the tool has read its flags.
+
+# mode -> (model input size, centre crop size or None). A mode is an *input*
+# configuration and nothing else -- which weights run inside it is the separate
+# --weights axis below, because the whole point of the crop/full comparison is
+# that it holds everything except the input fixed.
 MODES = {
-    "full1024": ("configs/edgetam_trt.yaml", None),
-    "crop1024": ("configs/edgetam_trt.yaml", 1024),
-    "full768": ("configs/edgetam_trt_768.yaml", None),
-    "crop768": ("configs/edgetam_trt_768.yaml", 768),
-    "full512": ("configs/edgetam_trt_512.yaml", None),
-    "crop512": ("configs/edgetam_trt_512.yaml", 512),
+    "full1024": (1024, None),
+    "crop1024": (1024, 1024),
+    "full768": (768, None),
+    "crop768": (768, 768),
+    "full512": (512, None),
+    "crop512": (512, 512),
 }
+
+# --weights -> {model input size: backend YAML}. Each entry is a set of
+# engines, and engines are both shape- and weight-specific: a checkpoint is
+# traced into the ONNX graphs and baked into what trtexec builds, so every
+# (weights, size) pair is its own directory and its own export.
+WEIGHTS = {
+    "stock": {
+        1024: "configs/edgetam_trt.yaml",
+        768: "configs/edgetam_trt_768.yaml",
+        512: "configs/edgetam_trt_512.yaml",
+    },
+    # notebooks/22_thermal_deep.ipynb, trained at 512 on the thermal mask pools.
+    # There is deliberately no 1024 entry: the checkpoint would be running two
+    # doublings off its training resolution and the number would measure the
+    # resolution, not the training. 768 is already off it -- see
+    # configs/edgetam_768_pool_deep.yaml, which says so in its own header.
+    "pool_deep": {
+        768: "configs/edgetam_trt_768_pool_deep.yaml",
+        512: "configs/edgetam_trt_512_pool_deep.yaml",
+    },
+}
+
+# The size each weights set was actually trained at, for the note the summary
+# carries. None means "not one of ours" -- stock EdgeTAM was trained at 1024
+# before this repository existed and records nothing about it.
+TRAINED_AT = {"stock": 1024, "pool_deep": 512}
+
+
+def config_for(weights: str, size: int, mode: str) -> str:
+    """The YAML for one (weights, input size) pair, or a refusal that explains.
+
+    A missing pair is not an oversight to fall back from: silently running the
+    stock config here would put a row labelled `pool_deep` in the summary that
+    was measured on different weights.
+    """
+    table = WEIGHTS[weights]
+    if size in table:
+        return table[size]
+    have = ", ".join(str(k) for k in sorted(table))
+    raise SystemExit(
+        f"--weights {weights} has no {size} configuration, so mode {mode!r} "
+        f"cannot run under it (it has {have}). Drop that mode, or run it "
+        f"under --weights stock."
+    )
+
+
+def engines_missing(config: str) -> str | None:
+    """The engine directory a config expects, when it is not there yet.
+
+    Checked before anything is loaded: a missing engine set otherwise surfaces
+    after a model build and a frame index, several minutes in.
+    """
+    import yaml
+
+    body = yaml.safe_load((ROOT / config).read_text()) or {}
+    engine = body.get("image_encoder_engine")
+    if not engine or (ROOT / engine).exists():
+        return None
+    return str(Path(engine).parent)
+
+
+def folder(mode: str, args) -> str:
+    """The output folder for one run: `<mode>[_<weights>][_skipN]`.
+
+    A plain `stock` run at every frame keeps the bare `<mode>` name, so results
+    written before there was more than one axis stay where they are and a
+    re-run lands on top of them rather than beside them.
+    """
+    parts = [mode]
+    if args.weights != "stock":
+        parts.append(args.weights)
+    if args.frame_skip > 1:
+        parts.append(f"skip{args.frame_skip}")
+    return "_".join(parts)
 
 
 def resolve_prompts(record: Path, outdir: Path, args) -> Path | None:
@@ -84,6 +188,10 @@ def resolve_prompts(record: Path, outdir: Path, args) -> Path | None:
     tried first and the pick is saved -- a re-run, or a second mode, never asks
     again.
     """
+    from src.io_utils import read_first_frame_dir
+    from src.prompts import BoxPrompt, PromptSet
+    from src.prompts.file_source import save_prompts
+
     own = record / "prompts.json"
     if own.exists():
         return own
@@ -116,6 +224,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="frame_output", help="Where results go.")
     p.add_argument("--modes", default=",".join(MODES),
                    help=f"Comma-separated subset of {', '.join(MODES)}.")
+    p.add_argument("--weights", default="stock", choices=tuple(WEIGHTS),
+                   help="Which trained weights the modes run on. `stock` is "
+                        "EdgeTAM as shipped; `pool_deep` is the checkpoint from "
+                        "notebooks/22_thermal_deep.ipynb. Each is a separate set "
+                        "of engines -- weights are baked into an engine at export "
+                        "time, so this picks a different models*/ directory, not "
+                        "a different runtime setting. Results land in "
+                        "<mode>_<weights>/ so a stock run is never overwritten "
+                        "and the two share one saved prompt.")
     p.add_argument("--pattern", default="*.tif*", help="Frame glob inside a record.")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Playback fps for the output mp4 (a sequence has none).")
@@ -167,6 +284,27 @@ def main(argv: list[str] | None = None) -> int:
     for m in modes:
         if m not in MODES:
             raise SystemExit(f"Unknown mode {m!r}; pick from {', '.join(MODES)}")
+    # Resolve every config up front, so an unbuildable combination fails now
+    # rather than after the first record has been indexed and prompted for.
+    configs = {m: config_for(args.weights, MODES[m][0], m) for m in modes}
+    absent = {m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
+    if absent:
+        lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
+        sizes = sorted({MODES[m][0] for m in absent})
+        builds = []
+        for size in sizes:
+            body = yaml.safe_load((ROOT / config_for(args.weights, size, "")).read_text())
+            builds += [
+                f"  python tools/export_edgetam_onnx.py --outdir {Path(body['image_encoder_engine']).parent}/ \\",
+                f"      --image-size {size} --checkpoint {body['checkpoint']} --verify",
+                f"  python tools/build_trt_engines.py --outdir {Path(body['image_encoder_engine']).parent}/ --max-batch 4",
+            ]
+        raise SystemExit(
+            f"These modes have no engines built for --weights {args.weights}:\n"
+            + "\n".join(lines)
+            + "\n\nBuild them (engines are weight- and shape-specific, so each "
+              "pair is its own export):\n" + "\n".join(builds)
+        )
 
     out_root = Path(args.out)
     rows: dict[str, dict[str, dict]] = {}
@@ -187,11 +325,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         for mode in modes:
-            config, crop = MODES[mode]
-            # A skipped run is a different measurement of the same mode, not a
-            # replacement for it, so it gets its own folder next to the baseline.
-            outdir = out_root / record.name / (mode if args.frame_skip == 1
-                                               else f"{mode}_skip{args.frame_skip}")
+            config, crop = configs[mode], MODES[mode][1]
+            # A skipped run, and a run on other weights, are different
+            # measurements of the same mode rather than replacements for it, so
+            # each gets its own folder next to the baseline. `stock` with no
+            # skip keeps the bare `<mode>/` name earlier runs already wrote.
+            outdir = out_root / record.name / folder(mode, args)
             outdir.mkdir(parents=True, exist_ok=True)
 
             cmd = [PY, "cli.py", "--tracker", "edgetam_trt", "--config", config,
@@ -239,14 +378,27 @@ def main(argv: list[str] | None = None) -> int:
         "crop512": "| `crop512` | 512x512 | centred 512x512 window |",
     }
     skip = args.frame_skip
-    title = f"# Recorded clips — {len(records)} record(s), {len(modes)} mode(s)"
+    title = (f"# Recorded clips — {len(records)} record(s), {len(modes)} mode(s), "
+             f"weights `{args.weights}`")
+    trained = TRAINED_AT.get(args.weights)
+    off_size = sorted({MODES[m][0] for m in modes if MODES[m][0] != trained})
     lines = [
         title + (f", frame skip {skip}" if skip > 1 else ""),
+        "",
+        f"Weights: `{args.weights}` — "
+        + (f"`{WEIGHTS[args.weights][MODES[modes[0]][0]]}` and its siblings, "
+           f"trained at {trained}." if trained else "trained size unrecorded."),
         "",
         "| mode | model | input |",
         "|---|---|---|",
         *(described[m] for m in modes),
         "",
+        *(( [f"**{', '.join(str(s) for s in off_size)} is not the size these "
+             f"weights were trained at ({trained}).** They load and run at any "
+             "size -- EdgeTAM keeps no resolution in any parameter -- so nothing "
+             "errors and the only symptom is a mask that is quietly worse. Read "
+             f"those rows against a `--weights stock` run at the same size, never "
+             f"against the {trained} row below.", ""] ) if off_size and trained else ()),
         f"`{args.warmup}` warm-up frames excluded from every number below. FPS is "
         "the real-time budget: per-frame decode + resize, the model, and masks "
         "back to source resolution. Drawing the overlay and encoding the mp4 are "
@@ -285,8 +437,9 @@ def main(argv: list[str] | None = None) -> int:
                     cells.append(r["source_fps"])
                 cells += [r["stages"], f"{r['demo']} ms"]
             lines.append(f"| `{mode}` | " + " | ".join(cells) + " |")
-        suffix = "" if skip == 1 else f"_skip{skip}"
-        lines += ["", f"Videos and charts: `{name}/<mode>{suffix}/`", ""]
+        suffix = folder("", args).lstrip("_")
+        lines += ["", f"Videos and charts: `{name}/<mode>"
+                      f"{'_' + suffix if suffix else ''}/`", ""]
 
     if failed:
         lines += [f"> **Did not complete: {', '.join(failed)}** — see their `run.txt`.", ""]
