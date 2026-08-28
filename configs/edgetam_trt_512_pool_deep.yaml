@@ -13,7 +13,11 @@
 #          --image-size 512 \
 #          --checkpoint checkpoints/edgetam_pool_thermal_deep_512.pt --verify
 #   2) python tools/build_trt_engines.py   --outdir models512_pool_deep/ --max-batch 4
-#   3) python tools/check_trt_parity.py    --outdir models512_pool_deep/ --image-size 512
+#   3) python tools/check_trt_parity.py    --outdir models512_pool_deep/ \
+#          --image-size 512 --checkpoint checkpoints/edgetam_pool_thermal_deep_512.pt
+#      (--checkpoint is NOT optional here: it defaults to the stock
+#      edgetam.pt, and parity against the wrong weights fails every
+#      module for a reason that has nothing to do with TensorRT.)
 #   4) python tools/run_experiment.py --outdir results/512_pool_deep \
 #          --engines models512_pool_deep/ \
 #          --config configs/edgetam_trt_512_pool_deep.yaml \
