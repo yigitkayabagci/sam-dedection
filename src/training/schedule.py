@@ -63,6 +63,18 @@ class Schedule:
     grad_clip: float = 1.0
     ema_decay: float = 0.999
     seed: int = 0
+    # Epochs without an improvement before a stage gives up. 0 is off, and off
+    # is the default because a stage that runs its full budget is the recorded
+    # behaviour of every run before this existed.
+    #
+    # It is a safety net, not a tuning knob, and the reason is the one-cycle
+    # schedule: `total_steps` is sized from the stage's epoch budget, so the
+    # rate anneals over exactly that many steps and the best weights normally
+    # appear near the end of the descent. Stopping early leaves the rate high
+    # and the descent unfinished. So raise `epochs` to buy a longer anneal and
+    # set `patience` generously, to cut a run that has plainly stalled rather
+    # than to decide when it is done.
+    patience: int = 0
     meta: dict = field(default_factory=dict)
 
 
@@ -197,9 +209,10 @@ def run_stages(
     The EMA is rebuilt per stage on purpose: it averages the trainable
     parameters, and that set changes the moment the encoder unfreezes.
     """
-    best, history = float("inf"), []
+    best, history, stopped = float("inf"), [], []
 
     for stage, epochs, rates in schedule.stages:
+        stale = 0
         counts = freeze(model, stage)
         log(f"\n===== stage {stage!r}: {epochs} epoch(s) x "
             f"{schedule.steps_per_epoch} steps =====")
@@ -245,14 +258,23 @@ def run_stages(
                                  **schedule.meta})
             history.append({"stage": stage, "epoch": epoch, "val_loss": score,
                             "saved": improved})
+            stale = 0 if improved else stale + 1
             log(f"  epoch {epoch}: val clip loss {score:.4f}"
-                f"{'  <- saved' if improved else ''}")
+                f"{'  <- saved' if improved else f'  ({stale} without one)'}")
+            if schedule.patience and stale >= schedule.patience:
+                stopped.append({"stage": stage, "after_epoch": epoch,
+                                "of": epochs, "patience": schedule.patience})
+                log(f"  stopping {stage!r}: {stale} epoch(s) without an "
+                    f"improvement, of {epochs} budgeted. The best checkpoint "
+                    f"is already written.")
+                break
 
         del opt, sched, ema
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
     return {"best_val_loss": best, "history": history,
+            "patience": schedule.patience, "stopped_early": stopped,
             "batch": schedule.batch, "accum": schedule.accum,
             "steps_per_epoch": schedule.steps_per_epoch,
             "stages": [s[0] for s in schedule.stages], **schedule.meta}

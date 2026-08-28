@@ -188,6 +188,29 @@ def build_model(size: int, checkpoint: str, device: str):
     return model.eval()
 
 
+def _mirror(args) -> None:
+    """The checkpoint onto `--mirror`, best-effort, on every improvement.
+
+    Best-effort because a Drive copy that fails must never end a training run
+    that is otherwise fine -- the local checkpoint is still the real one. The
+    write goes to a `.part` and is renamed, so a run reclaimed mid-copy leaves
+    the previous good file rather than a truncated one.
+    """
+    if not getattr(args, "mirror", None):
+        return
+    import shutil
+
+    try:
+        target = Path(args.mirror)
+        target.mkdir(parents=True, exist_ok=True)
+        staging = target / (Path(args.out).name + ".part")
+        shutil.copy(args.out, staging)
+        staging.replace(target / Path(args.out).name)
+    except Exception as failure:             # noqa: BLE001 - never fatal
+        print(f"   !! could not mirror the checkpoint to {args.mirror}: "
+              f"{failure}")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -287,6 +310,19 @@ def main(argv: list[str] | None = None) -> int:
                         "here, and any cap or overlap filter a caller "
                         "applied to its own copy of the index is lost.")
     p.add_argument("--steps", type=int, default=400, help="Batches per epoch.")
+    p.add_argument("--patience", type=int, default=0,
+                   help="Stop a stage after this many epochs with no "
+                        "improvement in the validation loss. 0 is off. A "
+                        "safety net for a long budget, not a tuning knob: the "
+                        "one-cycle rate anneals over the stage's full epoch "
+                        "count, so stopping early leaves the descent "
+                        "unfinished.")
+    p.add_argument("--mirror", default=None,
+                   help="Copy the checkpoint here every time it improves, not "
+                        "only when the run ends. For an overnight run on a "
+                        "runtime that can be reclaimed: the best weights so "
+                        "far are on Drive rather than on a disk that goes "
+                        "away with the VM.")
     p.add_argument("--epochs", type=int, nargs=2, default=(1, 3),
                    metavar=("HEAD", "ENCODER"))
     p.add_argument("--val-batches", type=int, default=24)
@@ -379,13 +415,17 @@ def main(argv: list[str] | None = None) -> int:
                              dropout=args.lora_dropout)
         print(lora.summarise(report))
         freeze = lora.freeze
-        def save(m, extra): lora.save_merged_checkpoint(m, args.out, {**meta, **extra})
+        def save(m, extra):
+            lora.save_merged_checkpoint(m, args.out, {**meta, **extra})
+            _mirror(args)
         meta |= {"lora_r": report["r"], "lora_alpha": report["alpha"],
                  "lora_parameters": report["parameters"],
                  "adapted_layers": len(report["adapted"])}
     else:
         freeze = apply_freeze
-        def save(m, extra): save_checkpoint(m, args.out, {**meta, **extra})
+        def save(m, extra):
+            save_checkpoint(m, args.out, {**meta, **extra})
+            _mirror(args)
         meta |= {"trainable_parameters":
                  sum(apply_freeze(model, "encoder").values())}
 
@@ -422,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
                  scaled(RATES[args.method]["encoder"]))),
         batch=batch, accum=args.accum, steps_per_epoch=args.steps,
         val_batches=args.val_batches, workers=args.workers, depth=args.depth,
-        seed=args.seed, meta=meta)
+        seed=args.seed, patience=args.patience, meta=meta)
 
     started = time.time()
     result = run_stages(model, train, val, schedule, freeze=freeze, save=save,

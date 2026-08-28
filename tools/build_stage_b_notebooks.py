@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate notebooks 19 and 20: stage B on the mask pools, and nothing else.
+"""Generate the stage-B pool notebooks, and nothing else.
 
 Two arms of one experiment, generated from one file the way 07-11 and 16/17
 are, and for the same reason: they differ in **one setting** and every other
@@ -8,6 +8,10 @@ beside each other.
 
     19_thermal_stage_b_pool.ipynb       MODALITIES = ["thermal"]
     20_thermal_stage_b_pool_rgb.ipynb   MODALITIES = ["thermal", "rgb"]
+    22_thermal_deep.ipynb               long thermal run
+    23_thermal_deep_lora.ipynb          22 with LoRA
+    27_thermal_deep_rgb_aerovis.ipynb   22 with RGB pools and AeroVIS
+    28_rgb_deep_aerovis.ipynb           RGB-only long run, AeroVIS required
 
 Both are the shape 15-18 were asked for -- **no markdown, no comments, as few
 cells as possible** -- because this is a job to run, not a decision to read.
@@ -59,6 +63,63 @@ number of updates -- and the linear scaling rule says the step should grow with
 it. The notebook sets `--lr-scale` from the measured batch against a 16-window
 reference, capped, and prints both.
 
+## The two archives HIT-UAV ships as
+
+Its pool was harvested from the kagglehub copy, whose frames sit under
+`hit-uav/images/{train,val,test}/`, and the run stages the GitHub archive,
+whose frames sit under `normal_json/{train,val,test}/` inside a folder named
+after a branch. `Relocator` re-roots a recorded path by matching its *suffix*,
+and these two disagree on a component rather than on a depth -- `images/test/f`
+against `normal_json/test/f` -- so no suffix of one is a suffix of the other
+and every frame reports `no_image`. Pointing the root at the directory that
+holds the splits fixes it, which is what `IMAGE_ROOTS["hituav_thermal"]` now
+does with a glob. The glob resolves to the **deepest** matching directory
+because an archive that re-packs itself nests the same folder name twice, and
+the inner one is the tree with the splits in it -- which is also what made the
+by-name fallback refuse, two files of that name on disk.
+
+## A budget for a night, and a net under it
+
+22 and 23 run `[2, 24]` epochs of 800 steps with `PATIENCE = 4`. The budget is
+long on purpose and the patience is what makes that safe: a stage gives up
+after four epochs with no improvement in the validation loss, so the run ends
+when it has stopped learning rather than when a counter runs out.
+
+Two things follow from the one-cycle schedule and are worth saying plainly.
+`total_steps` is sized from the stage's **budget**, not from where patience
+stops it, so a longer budget is a slower anneal -- which is the point of
+raising it -- and a stage cut short never reaches the low-rate end of that
+descent. Patience is a net, not a tuner: set it loose enough that it only fires
+on a genuine plateau.
+
+And the checkpoint reaches Drive on **every improvement**, not only when the
+run finishes (`--mirror`). A Colab runtime reclaimed at 4am used to take the
+weights with it, because the only copy was on `/content`. The copy goes to a
+`.part` and is renamed, so a run killed mid-write leaves the previous good file
+rather than a truncated one.
+
+## Cutting a pool tighter than its harvest did
+
+`MIN_BOX_IOU`, and `POOL_MIN_BOX_IOU` per pool, drops instances whose stored
+box-IoU falls below it. The harvest already applied a gate; this is a
+**second, stricter** one, applied when the index is built rather than when the
+teacher ran, so trying 0.7 against 0.8 costs two indexing passes instead of two
+harvests. It only ever removes: a pool harvested at 0.5 has no record of what
+0.4 would have kept.
+
+Two things to know before raising it. `box_iou` compares the mask's own box
+with the annotation's, so it measures *extent*, not shape -- `pool.summarise_gates`
+prints mean `area_ratio` beside it, and a pool whose masks all sit near 1.0 is
+a pool of rectangles that no threshold repairs. And a threshold is a filter
+nobody chose: the same table breaks the cut down by class and by target size,
+because a few pixels of slack round a 20 px object costs far more IoU than the
+same slack round a 200 px one, and small targets are the axis this project is
+judged on. Read those two tables, then pick a number.
+
+A cached index is rebuilt whenever a cut is asked for: the file on disk was
+written under whatever cut the run before it used, and nothing in it says
+which.
+
 ## What none of it measures
 
 Tracking. Every number here scores one prompted frame with the memory path
@@ -77,8 +138,10 @@ from pathlib import Path
 INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
+         "REFERENCE_CHECKPOINT": '""',
          "EXTRA_DATASETS": "[]", "SKIP_POOLS": "[]",
-         "EPOCHS": "[1, 3]", "STEPS": "400"}
+         "EPOCHS": "[1, 3]", "STEPS": "400", "MIN_BOX_IOU": "0.0",
+         "PATIENCE": "0"}
 
 # The three thermal-only pools that must be present for 22 to mean anything,
 # with a floor rather than a flag: a pool that resolved twelve frames out of
@@ -87,10 +150,31 @@ REQUIRED = ('{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
             '                 "hituav_thermal": 2000,\n'
             '                 "kaggle_uav_thermal": 10000}')
 
+# This arm is useful only when it is genuinely 22 plus RGB, rather than a
+# thermal rerun whose optional colour files happened not to arrive. AeroVIS is
+# required on both sides of its sequence-level split: train supplies the extra
+# supervision and heldout supplies the RGB grade. Other RGB pools stay additive
+# because not every Drive has harvested all of them.
+REQUIRED_RGB_AEROVIS = (
+    '{"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
+    '                 "hituav_thermal": 2000,\n'
+    '                 "kaggle_uav_thermal": 10000,\n'
+    '                 "aerovis_train": 10000,\n'
+    '                 "aerovis_heldout": 1500}')
+
+REQUIRED_AEROVIS = ('{"aerovis_train": 10000,\n'
+                    '                 "aerovis_heldout": 1500}')
+
 # SegFly ships semantic maps, so all 15 007 of its thermal frames come out of
 # `decompose` with no teacher pass. The pool harvested from it holds 5 378 of
 # the same frames under a different target, so it goes.
 SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
+
+SOURCE_ZIPS_DEFAULT = (
+    '[\n'
+    '    ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],\n'
+    '    ["/content/drive/MyDrive/edgetam-pool/kust4k/29476610.zip", "Kust4K"],\n'
+    ']')
 
 ARMS = {
     "19_thermal_stage_b_pool.ipynb": {
@@ -109,7 +193,9 @@ ARMS = {
     # so they cannot outvote the rest, and the rate table inverted so the
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
-        "EPOCHS": "[1, 6]",
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
+        "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
         "SKIP_POOLS": '["segfly_thermal"]',
@@ -126,15 +212,20 @@ ARMS = {
         "LR_TRUNK": "1e-4",
         # VTUAV's eleven tracking archives are 154 GiB and the disk is not.
         # The pool names the ~40 000 frames it wants, so only those come out.
-        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_thermal": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": '""',
     },
     # 22's third arm, and the only line that differs from it: LoRA instead of
     # a partial fine-tune. Same pools, same gate, same thinning, same rates,
     # same seed, same split file -- so the two numbers differ by the method
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
-        "EPOCHS": "[1, 6]",
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
+        "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
         "SKIP_POOLS": '["segfly_thermal"]',
@@ -149,8 +240,74 @@ ARMS = {
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
-        "POOL_ARCHIVES": '{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}',
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_thermal": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"lora"',
+        "REFERENCE_CHECKPOINT": '""',
+    },
+    # The direct answer to 22's next question: keep its schedule, optimiser,
+    # gates, thermal floors and drawn thermal grade, but let RGB pools into the
+    # same batches and require AeroVIS to be present. VisDrone is excluded
+    # because AeroVIS contains VisDrone frames; mixing the two would leak the
+    # release's held-out sequences into training through another annotation.
+    "27_thermal_deep_rgb_aerovis.ipynb": {
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
+        "MIN_BOX_IOU": "0.8",
+        "STEPS": "800",
+        "EXTRA_DATASETS": SEGFLY,
+        "SKIP_POOLS": '["segfly_thermal", "visdrone"]',
+        "MODALITIES": '["thermal", "rgb"]',
+        "RUN": '"thermal_deep_rgb_aerovis"',
+        "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                       'thermal_deep_rgb_aerovis"'),
+        "REQUIRE_POOLS": REQUIRED_RGB_AEROVIS,
+        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
+                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                          '                 "segfly": 0.6,\n'
+                          '                 "car": 0.7, "truck": 0.7}'),
+        "LR_HEAD": "0",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_thermal": '
+                          '"/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_rgb": '
+                          '"/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_rgb": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
+        "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                                 'thermal_deep/edgetam_pool_thermal_deep_512.pt"'),
+    },
+    # A clean RGB control for the thermal and mixed arms. AeroVIS is both the
+    # required training source and the held-out RGB grade; VisDrone stays out
+    # because AeroVIS contains it. No drawn thermal set or thermal source zip
+    # is allowed to slip through the modality filter by a separate code path.
+    "28_rgb_deep_aerovis.ipynb": {
+        "EPOCHS": "[2, 24]",
+        "PATIENCE": "4",
+        "MIN_BOX_IOU": "0.8",
+        "STEPS": "800",
+        "EVAL_DRAWN": "None",
+        "EXTRA_DATASETS": "[]",
+        "SOURCE_ZIPS": "[]",
+        "SKIP_POOLS": '["visdrone"]',
+        "MODALITIES": '["rgb"]',
+        "RUN": '"rgb_deep_aerovis"',
+        "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                       'rgb_deep_aerovis"'),
+        "REQUIRE_POOLS": REQUIRED_AEROVIS,
+        "CLASS_WEIGHTS": '{"car": 0.7, "truck": 0.7}',
+        "LR_HEAD": "0",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 "vtuav_lt_rgb": '
+                          '"/content/drive/MyDrive/VTUAV"}'),
+        "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": '""',
     },
 }
 
@@ -171,6 +328,7 @@ code('''
 MODALITIES  = {{MODALITIES}}
 RUN         = {{RUN}}
 MIRROR_DIR  = {{MIRROR_DIR}}
+REFERENCE_CHECKPOINT = {{REFERENCE_CHECKPOINT}}
 DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"
 POOL_ROOT   = "/content/pool"
 DATA_ROOT   = "/content/data"
@@ -178,7 +336,7 @@ WORK        = "/content/work"
 STAGE_DIR   = "/content/drive/MyDrive/datasets"
 DRIVE_MY    = "/content/drive/MyDrive"
 
-EVAL_DRAWN  = "kust4k"
+EVAL_DRAWN  = {{EVAL_DRAWN}}
 EXTRA_DATASETS = {{EXTRA_DATASETS}}
 EVAL_SPEC   = "kust4k:{root}:thermal:components:all"
 SKIP_POOLS  = {{SKIP_POOLS}}
@@ -190,6 +348,8 @@ POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
 POOL_MODALITIES = {"aerovis_train": "rgb", "aerovis_heldout": "rgb"}
 POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
 POOL_ZIP_MAX_MB = 2048
+MIN_BOX_IOU = {{MIN_BOX_IOU}}
+POOL_MIN_BOX_IOU = {}
 
 VTUAV_PARTS = []
 VTUAV_VIS_PARTS = []
@@ -197,17 +357,16 @@ VTUAV_VIS_PARTS = []
 IMAGE_ROOTS = {"kaggle_uav_thermal": "/content/data/kaggle_uav_thermal",
                "aerovis_train": "/content/data/AeroVIS",
                "aerovis_heldout": "/content/data/AeroVIS",
-               "hituav_thermal": "/content/data/HIT_UAV/*/normal_json"}
+               "hituav_thermal": "/content/data/HIT_UAV/**/normal_json",
+               "vtuav_lt_thermal": "/content/data/VTUAV_lt_ir",
+               "vtuav_lt_rgb": "/content/data/VTUAV_lt_rgb"}
 KAGGLE_DATASETS = {
     "kaggle_uav_thermal": "umuttuygurr/aerial-uav-thermal-inferred-unified-dataset",
 }
 
 POOL_ARCHIVES = {{POOL_ARCHIVES}}
 
-SOURCE_ZIPS = [
-    ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],
-    ["/content/drive/MyDrive/edgetam-pool/kust4k/29476610.zip", "Kust4K"],
-]
+SOURCE_ZIPS = {{SOURCE_ZIPS}}
 
 IMAGES = [
     ["hituav",       "hituav",       "HIT_UAV",      []],
@@ -241,6 +400,7 @@ BLEND_ALPHAS   = []
 MAX_REGRESSION = 0.15
 EPOCHS         = {{EPOCHS}}
 STEPS          = {{STEPS}}
+PATIENCE       = {{PATIENCE}}
 VAL_BATCHES    = 24
 DEPTH          = 2
 BATCH          = 0
@@ -490,8 +650,10 @@ def images_for(pool):
         if key in lowered:
             root = IMAGE_ROOTS.get(pool) or str(Path(DATA_ROOT) / folder)
             if "*" in root:
-                _hits = sorted(Path("/").glob(root.lstrip("/")))
-                root = str(_hits[0]) if _hits else root
+                _hits = [_p for _p in Path("/").glob(root.lstrip("/"))
+                         if _p.is_dir()]
+                _hits.sort(key=lambda _p: (len(_p.parts), str(_p)))
+                root = str(_hits[-1]) if _hits else root
             return key, recipe, root, list(parts)
     return None, "", "", []
 
@@ -817,10 +979,16 @@ for _row in PLAN:
                       f"({_short}), so it is provisional -- indexing again in "
                       f"case the download it was waiting on has finished")
                 _part = None
+        _cut_at = POOL_MIN_BOX_IOU.get(_row["pool"], MIN_BOX_IOU)
+        if _part is not None and _cut_at:
+            print(f"   {_row['pool']}: re-indexing, the cached index predates "
+                  f"a min_box_iou of {_cut_at}")
+            _part = None
         if _part is None:
             _part = index_pool(_request.pool, _request.images, _request.modality,
                                _row["role"], GATES, _request.name,
-                               workers=WORKERS, progress=progress, report=print)
+                               workers=WORKERS, min_box_iou=_cut_at,
+                               progress=progress, report=print)
             save_pool_index(_cache, _part)
     except Exception as _index_error:
         FAILED.append((_row["pool"], f"{type(_index_error).__name__}: "
@@ -1071,9 +1239,21 @@ LR_SCALE = round(min(max(BATCH / LR_REFERENCE, 1.0), LR_SCALE_MAX), 3)
 print(f"batch {BATCH} x accum {ACCUM} on {VRAM} GiB | lr-scale {LR_SCALE} "
       f"(linear rule against {LR_REFERENCE} windows, capped at {LR_SCALE_MAX})")
 
-BEFORE = {p: score_to(BASE_CKPT, "stock", p) for p in SCORE_PROMPTS}
+COMPARE_CKPT = BASE_CKPT
+COMPARE_TAG = "stock"
+if REFERENCE_CHECKPOINT:
+    if Path(REFERENCE_CHECKPOINT).is_file():
+        COMPARE_CKPT = REFERENCE_CHECKPOINT
+        COMPARE_TAG = "thermal_22"
+        print("direct A/B reference:", REFERENCE_CHECKPOINT)
+    else:
+        print("!! 22 reference is not on Drive yet:", REFERENCE_CHECKPOINT)
+        print("   scoring against stock for now; after 22 finishes, rerun this "
+              "cell and the score/panel cells for a direct thermal-vs-mixed A/B")
+
+BEFORE = {p: score_to(COMPARE_CKPT, COMPARE_TAG, p) for p in SCORE_PROMPTS}
 for _prompt, _row in BEFORE.items():
-    print(f"stock  {_prompt:<6} mean {_row['mean_iou']:.4f}  "
+    print(f"{COMPARE_TAG:<10}{_prompt:<6} mean {_row['mean_iou']:.4f}  "
           f">=.5 {_row['iou_50']:.3f}  small {_row['small_mean_iou']:.4f}  "
           f"n={_row['instances']}")
 ''')
@@ -1113,6 +1293,7 @@ subprocess.run(
      "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),
      "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),
      "--epochs", str(EPOCHS[0]), str(EPOCHS[1]),
+     "--patience", str(PATIENCE), "--mirror", MIRROR_DIR,
      "--val-batches", str(VAL_BATCHES), "--workers", str(WORKERS),
      "--depth", str(DEPTH),
      "--anchor-weight", str(ANCHOR_WEIGHT), "--device", "cuda",
@@ -1232,7 +1413,8 @@ AFTER = {p: score_to(CHECKPOINT, TAG, p) for p in SCORE_PROMPTS}
 print(f"{'prompt':<8}{'':<10}{'mean IoU':>10}{'>=.50':>8}{'>=.75':>8}"
       f"{'small':>10}{'larger':>9}")
 for _prompt in SCORE_PROMPTS:
-    for _label, _row in (("stock", BEFORE[_prompt]), ("stage B", AFTER[_prompt])):
+    for _label, _row in ((COMPARE_TAG, BEFORE[_prompt]),
+                         ("stage B", AFTER[_prompt])):
         print(f"{_prompt:<8}{_label:<10}{_row['mean_iou']:>10.4f}"
               f"{_row['iou_50']:>8.3f}{_row['iou_75']:>8.3f}"
               f"{_row['small_mean_iou']:>10.4f}{_row['large_mean_iou']:>9.4f}")
@@ -1265,7 +1447,7 @@ for _i, _prompt in enumerate(SCORE_PROMPTS):
              label=_prompt, color=["#4c72b0", "#dd8452", "#55a868"][_i % 3])
 _ax.set_yticks(_y); _ax.set_yticklabels(_classes, fontsize=8)
 _ax.axvline(0, color="k", lw=0.8)
-_ax.set_xlabel("mean IoU after stage B, minus stock (test split)")
+_ax.set_xlabel(f"mean IoU after stage B, minus {COMPARE_TAG} (test split)")
 _ax.legend(loc="lower right")
 plt.tight_layout(); plt.show()
 ''')
@@ -1323,7 +1505,7 @@ for _sample in PANEL_POOL:
     _panel_sources[_name] = _panel_sources.get(_name, 0) + 1
 print("panel pool:", len(PANEL_POOL), "windows from", len(_panel_sources),
       "sources", dict(sorted(_panel_sources.items(), key=lambda kv: -kv[1])))
-_model = build_model(SIZE, BASE_CKPT, "cuda")
+_model = build_model(SIZE, COMPARE_CKPT, "cuda")
 _before, _ = predict(_model, PANEL_POOL, max(BATCH // 4, 1))
 del _model; torch.cuda.empty_cache()
 _model = build_model(SIZE, CHECKPOINT, "cuda")
@@ -1356,7 +1538,7 @@ assert SHOWN, "no instance was scored by both checkpoints"
 PICKED = sorted({id(c["sample"]): c["sample"] for c in SHOWN}.values(),
                 key=lambda s: s.frame.name)
 MASKS = {}
-for _tag, _path in (("before", BASE_CKPT), ("after", CHECKPOINT)):
+for _tag, _path in (("before", COMPARE_CKPT), ("after", CHECKPOINT)):
     _model = build_model(SIZE, _path, "cuda")
     _rows, _drawn = predict(_model, PICKED, 1, want_masks=True)
     for (_sample, _k, _), (_mask, _target) in zip(_rows, _drawn):
@@ -1391,7 +1573,7 @@ plt.suptitle(f"top row: stage B gained   |   bottom row: stage B lost   "
              f"(prompt: {PANEL_PROMPT})", y=1.0)
 plt.tight_layout(); plt.show()
 print("yellow = the target's outline | green = only stage B found it | "
-      "red = only stock found it | blue = both agreed")
+      f"red = only {COMPARE_TAG} found it | blue = both agreed")
 ''')
 
 
@@ -1412,9 +1594,11 @@ VERDICT = {
     "rates": {"head": LR_HEAD, "neck": LR_NECK, "trunk": LR_TRUNK,
               "scale": LR_SCALE},
     "class_weights": CLASS_WEIGHTS, "require_pools": REQUIRE_POOLS,
+    "min_box_iou": MIN_BOX_IOU, "pool_min_box_iou": POOL_MIN_BOX_IOU,
     "lora": {"r": LORA_R, "alpha": LORA_ALPHA, "dropout": LORA_DROPOUT}
             if METHOD == "lora" else {},
     "blend": BLEND, "checkpoint": CHECKPOINT,
+    "comparison": {"tag": COMPARE_TAG, "checkpoint": COMPARE_CKPT},
     "roles": {_row["pool"]: _row["role"] for _row in PLAN},
     "modalities": {_row["pool"]: _row["modality"] for _row in PLAN},
     "limits": POOL_LIMITS,
@@ -1451,6 +1635,7 @@ if BLEND:
 print(f"  base {Path(BASE_CKPT).name}, stage A: none, " + ", ".join(_how))
 print(_line)
 print("DID IT HELP")
+print("  comparison baseline:", COMPARE_TAG, "->", COMPARE_CKPT)
 for _prompt in SCORE_PROMPTS:
     _d = AFTER[_prompt]["mean_iou"] - BEFORE[_prompt]["mean_iou"]
     _s = AFTER[_prompt]["small_mean_iou"] - BEFORE[_prompt]["small_mean_iou"]
@@ -1484,7 +1669,9 @@ def render(notebook: str) -> tuple[list[str], str]:
     from one file share most of their bytes, and a stamp that ignored the
     difference would call a swapped pair correct.
     """
-    fields = {**ARMS[notebook], "BRANCH": BRANCH, "NOTEBOOK": notebook}
+    fields = {"EVAL_DRAWN": '"kust4k"',
+              "SOURCE_ZIPS": SOURCE_ZIPS_DEFAULT,
+              **ARMS[notebook], "BRANCH": BRANCH, "NOTEBOOK": notebook}
     cells = []
     for text in CELLS:
         for key, value in fields.items():

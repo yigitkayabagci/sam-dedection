@@ -145,6 +145,83 @@ class TestRunStages(unittest.TestCase):
                     ("encoder", 1, Rates(head=1e-3, neck=1e-3, trunk=1e-4))),
             batch=2, steps_per_epoch=3, val_batches=2, workers=2, depth=1)
 
+    def test_patience_is_off_by_default_and_every_epoch_runs(self):
+        schedule = Schedule(
+            stages=(("head", 3, Rates(head=1e-3)),),
+            batch=2, steps_per_epoch=4, val_batches=2, workers=2, depth=1)
+        result = run_stages(self.model, self.train, self.val, schedule,
+                            freeze=apply_freeze, save=lambda m, meta: None,
+                            device="cpu", log=lambda *_: None)
+        self.assertEqual(len(result["history"]), 3)
+        self.assertEqual(result["stopped_early"], [])
+
+    def test_a_stage_that_stops_improving_gives_up_after_patience(self):
+        """A safety net for a long budget, not a tuning knob.
+
+        The validation score here is scripted: one improvement, then a plateau.
+        With `patience=2` the stage has to end on the second flat epoch and
+        leave the rest of its budget unspent -- which is the whole point of
+        handing it a budget big enough to run all night.
+        """
+        from src.training import schedule as schedule_module
+
+        scores = iter([1.0, 2.0, 2.0, 2.0, 2.0, 2.0])
+        original = schedule_module.validate
+        schedule_module.validate = lambda *a, **k: next(scores, 2.0)
+        self.addCleanup(setattr, schedule_module, "validate", original)
+
+        plan = Schedule(
+            stages=(("head", 6, Rates(head=1e-3)),),
+            batch=2, steps_per_epoch=4, val_batches=2, workers=2, depth=1,
+            patience=2)
+        saved = []
+        result = run_stages(self.model, self.train, self.val, plan,
+                            freeze=apply_freeze,
+                            save=lambda m, meta: saved.append(meta),
+                            device="cpu", log=lambda *_: None)
+        self.assertEqual(len(result["history"]), 3, "one good epoch, two flat")
+        self.assertEqual(len(saved), 1, "only the improvement is written")
+        self.assertEqual(result["stopped_early"],
+                         [{"stage": "head", "after_epoch": 2, "of": 6,
+                           "patience": 2}])
+
+    def test_the_counter_resets_on_an_improvement(self):
+        from src.training import schedule as schedule_module
+
+        scores = iter([1.0, 2.0, 0.5, 2.0, 2.0])
+        original = schedule_module.validate
+        schedule_module.validate = lambda *a, **k: next(scores, 2.0)
+        self.addCleanup(setattr, schedule_module, "validate", original)
+
+        plan = Schedule(
+            stages=(("head", 6, Rates(head=1e-3)),),
+            batch=2, steps_per_epoch=4, val_batches=2, workers=2, depth=1,
+            patience=2)
+        result = run_stages(self.model, self.train, self.val, plan,
+                            freeze=apply_freeze, save=lambda m, meta: None,
+                            device="cpu", log=lambda *_: None)
+        self.assertEqual(len(result["history"]), 5,
+                         "epoch 2 improved, so the count starts again")
+
+    def test_each_stage_gets_its_own_patience_budget(self):
+        from src.training import schedule as schedule_module
+
+        scores = iter([1.0, 2.0, 2.0, 0.5, 2.0, 2.0])
+        original = schedule_module.validate
+        schedule_module.validate = lambda *a, **k: next(scores, 2.0)
+        self.addCleanup(setattr, schedule_module, "validate", original)
+
+        plan = Schedule(
+            stages=(("head", 5, Rates(head=1e-3)),
+                    ("encoder", 5, Rates(head=1e-3, trunk=1e-4))),
+            batch=2, steps_per_epoch=4, val_batches=2, workers=2, depth=1,
+            patience=2)
+        result = run_stages(self.model, self.train, self.val, plan,
+                            freeze=apply_freeze, save=lambda m, meta: None,
+                            device="cpu", log=lambda *_: None)
+        self.assertEqual([s["stage"] for s in result["stopped_early"]],
+                         ["head", "encoder"])
+
     def run_it(self, **kwargs):
         saves = []
         result = run_stages(

@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty-five notebooks, meant for Colab. Everything they orchestrate lives in
+Twenty-seven notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -31,6 +31,9 @@ recipe, not the implementation.
 | 23 | `23_thermal_deep_lora.ipynb` | 22 with `METHOD = "lora"` and nothing else changed — the A/B for the method | the same |
 | 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive; SAM 3 is required, there is no fallback |
 | 25 | `25_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 24 on a second runtime |
+| 26 | `26_segfly_instance_audit.ipynb` | real SegFly thermal/RGB/label panels, `components` vs `watershed` sensitivity, JSON evidence and optional SAM disagreement audit | **nothing** — it exports a 64-row SegFly slice; SAM check needs a GPU |
+| 27 | `27_thermal_deep_rgb_aerovis.ipynb` | 22'nin aynı uzun koşusu; RGB havuzları aynı batch'lere eklenir, AeroVIS train zorunludur ve dizi-bazlı held-out kolu ayrı RGB notu verir | 22'nin termal havuzları + `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler |
+| 28 | `28_rgb_deep_aerovis.ipynb` | 22 ile aynı uzun eğitim tarifi, fakat yalnızca RGB havuzları; AeroVIS train ve dizi-bazlı held-out kolları zorunlu, VisDrone örtüşme nedeniyle dışarıda | `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler; diğer RGB havuzları varsa eklenir |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -146,6 +149,43 @@ is a probe that prints exactly that — per archive: sequences, frames, rows,
 implied stride, absent share — from the zip's central directory, before a byte
 is extracted.
 
+**A pool that predates the readings gets them back without a teacher.**
+`box_iou`, `area_ratio` and `component` are functions of an accepted mask and
+its box — the mask is in the store, the box is in the record — so
+`backfill_readings` recomputes them off disk, CPU only, minutes rather than
+GPU-hours. Cell 5 runs it before the gate table. Only accepted instances come
+back: a rejected one has no mask to measure, and every question worth asking
+here is about the set that was kept anyway.
+
+**The reject table names one gate per instance, which is not what the data
+says.** `reject_reason` returns the *first* gate an instance fails, in a fixed
+order, so a harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
+masks sat badly on their box — it is saying nine of the ones `teacher_iou` let
+through did, and nothing about the 2 312 it stopped first. `summarise_gates`
+re-reads the stored readings and asks each gate independently over every
+instance, then says what raising the box-IoU cut would remove from the accepted
+set at 0.5–0.9. That last table is the decision itself: the cut is applied at
+read time by `index_pool(min_box_iou=…)`, so its cost is a number to look up
+rather than a harvest to repeat.
+
+**The gate that decides is `box_iou`, and it is back at the library default.**
+Four gates stand between a teacher mask and the pool: `teacher_iou` (the
+teacher's own confidence — *measured* to be weak, +0.25 to +0.38 over-confident
+on 12–36 px targets, so it passes almost everything), `box_iou` (does the
+mask's own box agree with the annotation), `area` (mask area over box area,
+0.15–1.3, which catches a fragment and background bleed alike), and `component`
+(one object, not a mask scattered across the frame). `box_iou` is the
+load-bearing one. 16/17/24/25 had it at 0.5, inherited from 15 where that is
+argued — DroneVehicle ships oriented boxes and prompts with their axis-aligned
+envelope, about twice the object's area on a 45° vehicle, so a correct mask
+scores low against a box that was never tight. VTUAV has plain per-frame
+`x y w h` around a 77 px median target and none of that applies, so it sits at
+the 0.6 default now and 0.7 is one edit away. That edit is cheap in both
+directions: the harvest writes **all four readings** into each instance's
+record rather than only the verdict, and `index_pool(min_box_iou=…)` re-cuts on
+the stored number — upwards only, since a pool harvested at 0.6 has no record
+of what 0.5 would have kept.
+
 **Night is a question about the teacher, and it is asked with a number.** A
 promptable segmenter trained on web images reads a daylit street well and a
 frame where the target is a smear around a headlight badly — and the gates do
@@ -238,6 +278,7 @@ neither.
 | 20 | `edgetam-stage-b/thermal_rgb` | `edgetam_pool_thermal_rgb_512.pt` | `configs/edgetam_512_pool.yaml`, checkpoint swapped |
 | 22 | `edgetam-stage-b/thermal_deep` | `edgetam_pool_thermal_deep_512.pt` | `configs/edgetam_512_pool_deep.yaml` |
 | 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
+| 27 | `edgetam-stage-b/thermal_deep_rgb_aerovis` | `edgetam_pool_thermal_deep_rgb_aerovis_512.pt` | the same, checkpoint swapped |
 
 Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
 repository) and the config runs it. Nothing else has to change:

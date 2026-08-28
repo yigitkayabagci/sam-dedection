@@ -65,11 +65,17 @@ from src.training.pool import (  # noqa: E402
     label_boxes,
     label_many,
     calibration_table,
+    backfill_readings,
+    SIZE_EDGES,
+    _size_bucket,
+    gate_report,
     label_pool,
     luma,
     luma_report,
     ordered_map,
     read_workers,
+    summarise_gates,
+    size_names,
     summarise_luma,
     target_luma,
     modality_agreement,
@@ -479,6 +485,227 @@ class TestProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "labelling decodes real image files")
+class TestGateReport(unittest.TestCase):
+    """`reject_reason` names one gate; the data has four opinions."""
+
+    def frames(self, tmp: Path, count: int = 3) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def rewrite(self, root: Path, rows) -> None:
+        """Put chosen readings on the first frame's instances."""
+        path = root / "pool" / "toy" / "img0" / RECORD_FILE
+        record = json.loads(path.read_text())
+        for instance, values in zip(record["instances"], rows):
+            instance.update(values)
+        path.write_text(json.dumps(record))
+
+    def test_a_fresh_harvest_writes_all_four_readings(self):
+        """The regression this class exists for.
+
+        `label_many` measured all four and `write` copied two of them into the
+        record, so every pool built so far can answer for `teacher_iou` and for
+        nothing else -- which is the one gate whose reading the same module's
+        docstring calls weak. The symptom was a gate table reading 100 % "not
+        recorded" on a pool harvested by the code that was supposed to record
+        them.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            record = json.loads(
+                (root / "pool" / "toy" / "img0" / RECORD_FILE).read_text())
+            for instance in record["instances"]:
+                for name in ("teacher_iou", "box_iou", "area_ratio",
+                             "component", "verdict"):
+                    self.assertIn(name, instance)
+
+    def test_a_gate_hidden_behind_an_earlier_one_is_still_counted(self):
+        """The reading that made this worth storing.
+
+        A harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
+        masks sat badly on their box. It is saying nine of the ones teacher_iou
+        let through did, and nothing at all about the 2 312 it stopped first.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.2, "box_iou": 0.1, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": "teacher_iou"},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None}])
+            fails = gate_report(root / "pool")["datasets"]["toy"]["fails"]
+            self.assertEqual(fails["teacher_iou"], 1)
+            self.assertEqual(fails["box_iou"], 1, "hidden behind teacher_iou")
+
+    def test_the_cut_is_broken_down_per_class(self):
+        """A threshold is a class filter nobody chose.
+
+        `box_iou` asks whether the mask covers the box's extent, and what fails
+        to is the partly-hidden target and the ragged silhouette -- neither of
+        which falls evenly across a pool that is half one class. A cut that
+        looks like "-16 %" in total can be "-45 % of pedestrians" underneath.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.99, "box_iou": 0.65, "area_ratio": 0.42,
+                 "component": 1.0, "verdict": None},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.88,
+                 "component": 1.0, "verdict": None}])
+            classes = gate_report(root / "pool")["datasets"]["toy"]["classes"]
+            self.assertEqual(classes["car"]["accepted"], 1)
+            self.assertEqual(classes["car"]["below"][0.7], 1)
+            self.assertEqual(classes["pedestrian"]["below"][0.7], 0)
+            self.assertAlmostEqual(classes["car"]["area_ratio"], 0.42, places=3)
+            table = summarise_gates(root / "pool")
+            self.assertIn("mean area_ratio", table)
+            self.assertIn("left at 0.7", table)
+
+    def test_the_cut_is_broken_down_by_target_size(self):
+        """The axis a box-IoU threshold is least neutral on.
+
+        A few pixels of slack between a 20 px object and the rectangle drawn
+        round it costs far more IoU than the same slack round a 200 px one. So
+        a cut can be class-neutral and still be a small-target filter -- and
+        small targets are the axis this project is judged on.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"box_iou": 0.95, "area_ratio": 0.7, "component": 1.0,
+                 "teacher_iou": 0.99, "verdict": None},
+                {"box_iou": 0.62, "area_ratio": 0.7, "component": 1.0,
+                 "teacher_iou": 0.99, "verdict": None}])
+            sizes = gate_report(root / "pool")["datasets"]["toy"]["sizes"]
+            # The fixture's boxes are 60x20 (sqrt 34.6) and 10x5 (sqrt 7.1).
+            small = sizes[_size_bucket(7.1)]
+            large = sizes[_size_bucket(34.6)]
+            self.assertEqual(small["accepted"], 1)
+            self.assertEqual(large["accepted"], 1)
+            self.assertEqual(small["below"][0.8], 1, "the small one is cut")
+            self.assertEqual(large["below"][0.8], 0)
+            self.assertIn("target sqrt(area) px",
+                          summarise_gates(root / "pool"))
+
+    def test_the_size_buckets_cover_every_side_they_are_given(self):
+        self.assertEqual(_size_bucket(0.0), 0)
+        self.assertEqual(_size_bucket(10 ** 6), len(SIZE_EDGES))
+        self.assertEqual(len(size_names()), len(SIZE_EDGES) + 1)
+
+    def test_it_says_what_a_stricter_cut_would_cost_the_accepted_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.99, "box_iou": 0.65, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None}])
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["accepted"], 2)
+            self.assertEqual(entry["accepted_below"][0.6], 0)
+            self.assertEqual(entry["accepted_below"][0.7], 1)
+            self.assertEqual(entry["accepted_below"][0.9], 1)
+            table = summarise_gates(root / "pool")
+            self.assertIn("box_iou", table)
+            self.assertIn("toy", table)
+
+    def strip(self, root: Path, *names: str) -> Path:
+        """A record the way a harvest of an older vintage wrote it."""
+        path = root / "pool" / "toy" / "img0" / RECORD_FILE
+        record = json.loads(path.read_text())
+        for instance in record["instances"]:
+            for name in names:
+                instance.pop(name, None)
+        path.write_text(json.dumps(record))
+        return path
+
+    def test_each_reading_is_counted_apart_from_the_others(self):
+        """Pools are not all of one vintage.
+
+        `teacher_iou` has been stored since the first harvest and the other
+        three only since the readings were kept, so an older pool can answer
+        for one gate and not the rest. Reading a record all-or-nothing reported
+        100 % "not recorded" on a pool that could in fact answer for the gate
+        doing all of the rejecting.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.2, "verdict": "teacher_iou"},
+                {"teacher_iou": 0.99, "verdict": None}])
+            self.strip(root, "box_iou", "area_ratio", "component")
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["fails"]["teacher_iou"], 1)
+            self.assertEqual(entry["missing"]["teacher_iou"], 0)
+            self.assertEqual(entry["missing"]["box_iou"], 2)
+            self.assertEqual(entry["accepted_scored"], 0)
+            self.assertIn("backfill_readings", summarise_gates(root / "pool"))
+
+    def test_the_missing_readings_come_back_off_the_stored_masks(self):
+        """No teacher, no GPU: the numbers are functions of mask and box.
+
+        Re-harvesting to recover them would be GPU-hours to recompute what is
+        already on disk -- and the stored full-frame mask gives exactly what
+        the harvest computed on the crop, because all three are either a ratio
+        of areas or a comparison of two boxes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            before = json.loads(
+                (root / "pool" / "toy" / "img0" / RECORD_FILE).read_text())
+            self.strip(root, "box_iou", "area_ratio", "component")
+
+            counts = backfill_readings(root / "pool")
+            self.assertEqual(counts["filled"], 2)
+            self.assertEqual(counts["written"], 1)
+            after = json.loads(
+                (root / "pool" / "toy" / "img0" / RECORD_FILE).read_text())
+            for old_row, new_row in zip(before["instances"],
+                                        after["instances"]):
+                for name in ("box_iou", "area_ratio", "component"):
+                    self.assertAlmostEqual(old_row[name], new_row[name],
+                                           places=3, msg=name)
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["missing"]["box_iou"], 0)
+            self.assertEqual(entry["accepted_scored"], 2)
+
+    def test_a_rejected_instance_has_no_mask_and_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1),
+                       FakeImageTeacher(shrink=50), root / "pool",
+                       dataset="toy")
+            self.strip(root, "box_iou", "area_ratio", "component")
+            counts = backfill_readings(root / "pool")
+            self.assertEqual(counts["filled"], 0)
+            self.assertEqual(counts["unrecoverable"], 2)
+
+    def test_running_it_twice_writes_nothing_the_second_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=2), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.strip(root, "box_iou", "area_ratio", "component")
+            backfill_readings(root / "pool")
+            again = backfill_readings(root / "pool")
+            self.assertEqual(again["written"], 0)
+            self.assertEqual(again["filled"], 0)
+
+
 class TestIllumination(unittest.TestCase):
     """Night RGB is where a promptable teacher quietly gets worse."""
 
