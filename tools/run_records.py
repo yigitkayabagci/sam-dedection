@@ -75,6 +75,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -164,6 +165,53 @@ def engines_missing(config: str) -> str | None:
     if not engine or (ROOT / engine).exists():
         return None
     return str(Path(engine).parent)
+
+
+def digest(path: Path) -> dict | None:
+    """A file's size and sha256, or None when it is not there.
+
+    The hash is what makes the record decisive. A path proves which config was
+    read; only the content proves which engine ran, and two engine sets built
+    from different checkpoints are otherwise indistinguishable -- same module
+    names, same shapes, same everything a log could print.
+    """
+    import hashlib
+
+    if not path.is_file():
+        return None
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            hasher.update(block)
+    return {"path": str(path), "bytes": path.stat().st_size,
+            "sha256": hasher.hexdigest()}
+
+
+def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
+    """Everything needed to answer "which weights produced this folder".
+
+    Written beside the video and the charts, because that question is asked
+    later -- when the mp4s are being compared and the terminal that ran them is
+    gone.
+    """
+    body = yaml.safe_load((ROOT / config).read_text()) or {}
+    engines = {
+        name.removesuffix("_engine"): digest(ROOT / body[name])
+        for name in ("image_encoder_engine", "memory_attention_engine",
+                     "memory_encoder_engine", "sam_head_engine")
+        if body.get(name)
+    }
+    return {
+        "weights": args.weights,
+        "trained_at": TRAINED_AT.get(args.weights),
+        "mode": mode,
+        "image_size": int(body.get("image_size", 1024)),
+        "center_crop": crop,
+        "config": config,
+        "checkpoint": digest(ROOT / body["checkpoint"]) if body.get("checkpoint") else None,
+        "engines": engines,
+        "command": [str(c) for c in cmd],
+    }
 
 
 def folder(mode: str, args) -> str:
@@ -263,6 +311,13 @@ def main(argv: list[str] | None = None) -> int:
                         "yourself, one command at a time, against one selection "
                         "-- picking separately per command would give each mode a "
                         "different box and make them incomparable.")
+    p.add_argument("--strict", action="store_true",
+                   help="Refuse a silent PyTorch fallback. Without it a missing "
+                        "or unloadable engine prints one line and the mode "
+                        "carries on in PyTorch -- the right weights on the "
+                        "wrong backend, which the summary's FPS column cannot "
+                        "distinguish from a TensorRT run. Pass this whenever "
+                        "the numbers are going into a report.")
     p.add_argument("--no-video", action="store_true",
                    help="Measure only. The overlay and the mp4 are already "
                         "outside the reported frame budget, but they still run "
@@ -341,11 +396,15 @@ def main(argv: list[str] | None = None) -> int:
                    "--fps-chart", outdir / "latency.png",
                    "--stage-chart", outdir / "stages.png"]
             cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
+            if args.strict:
+                cmd += ["--strict"]
             if crop:
                 cmd += ["--center-crop", crop]
             if args.frame_skip > 1:
                 cmd += ["--frame-skip", args.frame_skip]
 
+            (outdir / "provenance.json").write_text(
+                json.dumps(provenance(mode, config, crop, args, cmd), indent=2) + "\n")
             ok, text = run_step(f"{record.name} — {mode}", cmd, outdir / "run.txt")
             if not ok:
                 failed.append(f"{record.name}/{mode}")

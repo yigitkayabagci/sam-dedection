@@ -208,7 +208,34 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             + (", ".join(accelerated) if accelerated else "none")
             + (f" | CUDA graphs: {'on' if self.use_cuda_graph else 'off'}")
         )
+        # Which weights are actually running. The line above says how much of
+        # the model is on TensorRT; it does not say *whose* weights those
+        # engines hold, and nothing else in the run does either -- a config
+        # names a checkpoint and an engine directory, but the engines are what
+        # execute, and their weights were baked in at export time. Two engine
+        # sets built from different checkpoints are indistinguishable from
+        # their behaviour alone, so the provenance is printed rather than
+        # inferred.
+        print(f"[edgetam_trt] weights: {self._weights_summary()}")
         self._patched = True
+
+    def _weights_summary(self) -> str:
+        """Where the loaded engines came from, and the checkpoint beside them.
+
+        The checkpoint matters even when every module is on TensorRT: the
+        memory bookkeeping never left PyTorch, and any module without an engine
+        runs from it.
+        """
+        loaded = [Path(self.engine_paths[n]) for n in sorted(self._engines)]
+        parents = {p.parent for p in loaded}
+        if not loaded:
+            where = "no engines (PyTorch only)"
+        elif len(parents) == 1:
+            where = f"engines from {parents.pop()}/"
+        else:
+            where = "engines from " + ", ".join(
+                f"{p.name} <- {p.parent}/" for p in loaded)
+        return f"{where} | checkpoint {self.checkpoint}"
 
     def _patch_image_encoder(self, engine) -> None:
         predictor = self._predictor

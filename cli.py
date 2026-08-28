@@ -129,6 +129,14 @@ def main(argv: list[str] | None = None) -> int:
                         "deployment and the one to quote a frame budget from.")
     p.add_argument("--tracker", default="edgetam", help=f"Backend (one of {available_trackers()}).")
     p.add_argument("--config", default=None, help="Optional backend YAML override.")
+    p.add_argument("--strict", action="store_true",
+                   help="Refuse a silent PyTorch fallback (TensorRT backends). "
+                        "The shipped TRT configs set strict: false, so a missing "
+                        "or unloadable engine prints one line and the run "
+                        "continues on PyTorch -- correct weights, different "
+                        "backend, and a speed number that is not what it says "
+                        "it is. Pass this when the run is a measurement rather "
+                        "than a look.")
     p.add_argument("--prompt", choices=("box", "point", "file"), default="box")
     p.add_argument("--prompt-file", default=None, help="JSON prompt file (used with --prompt file).")
     p.add_argument("--multi", action="store_true",
@@ -177,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
                          "--video-mode jpg or --frames-dir.")
 
     backend_cfg = _load_backend_config(args.tracker, args.config)
+    if args.strict:
+        backend_cfg["strict"] = True
     if args.offload_video is not None:
         backend_cfg["offload_video_to_cpu"] = args.offload_video
     # Resolve filesystem paths; model_cfg is a Hydra config name, not a path.

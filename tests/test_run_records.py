@@ -29,7 +29,7 @@ if str(ROOT) not in sys.path:
 import yaml  # noqa: E402
 
 from tools.run_records import (MODES, TRAINED_AT, WEIGHTS, config_for,  # noqa: E402
-                               engines_missing, folder)
+                               digest, engines_missing, folder, provenance)
 
 
 def body(config: str) -> dict:
@@ -142,6 +142,86 @@ class Preflight(unittest.TestCase):
 
     def test_says_nothing_about_a_config_with_no_engines_at_all(self):
         self.assertIsNone(engines_missing("configs/edgetam_512.yaml"))
+
+
+class Provenance(unittest.TestCase):
+    """The record that answers "which weights produced this folder", later.
+
+    A config path proves which file was read. Only a hash proves which engine
+    ran: two sets built from different checkpoints carry the same module names
+    and the same shapes, so nothing about a run distinguishes them afterwards.
+    """
+
+    @staticmethod
+    def args(weights):
+        return Namespace(weights=weights, frame_skip=1)
+
+    def record(self, weights, size=768, mode="full768", crop=None):
+        config = config_for(weights, size, mode)
+        return provenance(mode, config, crop, self.args(weights),
+                          ["python", "cli.py", "--config", config])
+
+    def test_names_the_weights_the_size_and_the_config(self):
+        row = self.record("pool_deep")
+        self.assertEqual(row["weights"], "pool_deep")
+        self.assertEqual(row["image_size"], 768)
+        self.assertEqual(row["trained_at"], 512)
+        self.assertEqual(row["config"], WEIGHTS["pool_deep"][768])
+
+    def test_records_the_size_the_1024_config_only_implies(self):
+        """configs/edgetam_trt.yaml declares no image_size; the record still does."""
+        self.assertEqual(self.record("stock", 1024, "full1024")["image_size"], 1024)
+
+    def test_carries_the_crop_so_a_mode_is_reconstructable(self):
+        self.assertEqual(self.record("stock", 768, "crop768", 768)["center_crop"], 768)
+        self.assertIsNone(self.record("stock", 768, "full768")["center_crop"])
+
+    def test_lists_every_engine_the_config_names(self):
+        row = self.record("pool_deep")
+        self.assertEqual(sorted(row["engines"]),
+                         ["image_encoder", "memory_attention",
+                          "memory_encoder", "sam_head"])
+
+    def test_the_command_is_kept_verbatim(self):
+        row = self.record("stock")
+        self.assertIn("--config", row["command"])
+        self.assertTrue(all(isinstance(c, str) for c in row["command"]))
+
+    def test_two_weights_sets_never_record_the_same_checkpoint(self):
+        """What separates the folders is the weights, and the record says so.
+
+        Engine *content* is compared by hash, but only once they are built --
+        in a clean checkout they are gitignored and absent, which the record
+        reports as null rather than papering over. The path and config fields
+        hold either way, and that is what makes an absent engine visible as
+        absent instead of looking like a match.
+        """
+        stock, deep = self.record("stock"), self.record("pool_deep")
+        self.assertNotEqual(stock["config"], deep["config"])
+        for row in (stock, deep):
+            self.assertEqual(sorted(row["engines"]), sorted(deep["engines"]))
+        paths = {w: yaml.safe_load((ROOT / self.record(w)["config"]).read_text())
+                 ["image_encoder_engine"] for w in ("stock", "pool_deep")}
+        self.assertNotEqual(paths["stock"], paths["pool_deep"])
+
+    def test_an_engine_that_is_not_built_is_recorded_as_absent(self):
+        """Engines are gitignored; the record says so rather than inventing one."""
+        self.assertIsNone(self.record("pool_deep")["engines"]["image_encoder"])
+
+    def test_digest_hashes_content_not_the_name(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            same_a = Path(tmp) / "a.engine"
+            same_b = Path(tmp) / "b.engine"
+            other = Path(tmp) / "c.engine"
+            same_a.write_bytes(b"weights")
+            same_b.write_bytes(b"weights")
+            other.write_bytes(b"other weights")
+            self.assertEqual(digest(same_a)["sha256"], digest(same_b)["sha256"])
+            self.assertNotEqual(digest(same_a)["sha256"], digest(other)["sha256"])
+            self.assertEqual(digest(same_a)["bytes"], 7)
+            self.assertIsNone(digest(Path(tmp) / "missing.engine"))
 
 
 if __name__ == "__main__":
