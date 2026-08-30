@@ -10,6 +10,7 @@ truth being arguable.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -313,6 +314,107 @@ class ContrastTest(unittest.TestCase):
         self.assertEqual(guard._gates(strong, box).max_jump, guard.config.max_jump)
         self.assertLess(guard._gates(weak, faint_box).max_jump,
                         guard.config.max_jump)
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed for the flow and the matcher")
+class TrackerIntegrationTest(unittest.TestCase):
+    """What the tracker does with a verdict: drop the mask, keep the reason.
+
+    Built without a model on purpose -- `EdgeTAMTracker.__init__` loads nothing,
+    so the judging path can be exercised on real frames with no GPU, no
+    checkpoint and no EdgeTAM checkout.
+    """
+
+    def tracker(self, frames_dir, **guard):
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+        from src.trackers.stabiliser import FrameMotion
+
+        built = EdgeTAMTracker(model_cfg="configs/edgetam.yaml",
+                               checkpoint="none.pt",
+                               guard={"suspect_frames": 3, **guard})
+        built._motion = FrameMotion(frames_dir, reduce=1)
+        return built
+
+    def write(self, directory: Path, frames):
+        for index, frame in enumerate(frames):
+            cv2.imwrite(str(directory / f"{index:05d}.png"), frame)
+
+    def mask_of(self, box, shape=SIZE) -> np.ndarray:
+        mask = np.zeros(shape, dtype=bool)
+        x0, y0, x1, y1 = (int(v) for v in box)
+        mask[y0:y1, x0:x1] = True
+        return mask
+
+    def test_an_honest_mask_passes_through_untouched(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            frames, boxes = [], []
+            for step in range(4):
+                frame, box = with_target(ground(), (160 + 3 * step, 120))
+                frames.append(frame)
+                boxes.append(box)
+            self.write(directory, frames)
+            tracker = self.tracker(directory)
+            for index, box in enumerate(boxes):
+                mask = self.mask_of(box)
+                out = tracker._judge(index, {1: mask})
+                self.assertTrue((out[1] == mask).all())
+                self.assertEqual(tracker.verdicts[index][1].state, TRACKING)
+
+    def test_a_ballooned_mask_comes_back_empty_with_its_reason(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            frames, boxes = [], []
+            for step in range(5):
+                frame, box = with_target(ground(), (160 + 3 * step, 120))
+                frames.append(frame)
+                boxes.append(box)
+            self.write(directory, frames)
+            tracker = self.tracker(directory)
+            for index in range(4):
+                tracker._judge(index, {1: self.mask_of(boxes[index])})
+
+            balloon = self.mask_of([20, 20, 300, 220])
+            out = tracker._judge(4, {1: balloon})
+            self.assertFalse(out[1].any())
+            self.assertEqual(out[1].shape, balloon.shape)
+            verdict = tracker.verdicts[4][1]
+            self.assertFalse(verdict.accepted)
+            self.assertTrue(verdict.reason)
+
+    def test_each_object_is_judged_on_its_own_track(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            frames = [with_target(ground(), (160 + 3 * step, 120))[0]
+                      for step in range(3)]
+            self.write(directory, frames)
+            tracker = self.tracker(directory)
+            for index in range(3):
+                out = tracker._judge(index, {
+                    1: self.mask_of([150 + 3 * index, 115, 170 + 3 * index, 125]),
+                    2: self.mask_of([40, 40, 60, 52]),
+                })
+                self.assertEqual(sorted(out), [1, 2])
+            self.assertEqual(sorted(tracker._guards), [1, 2])
+            self.assertIsNot(tracker._guards[1], tracker._guards[2])
+
+    def test_a_reset_forgets_every_track_and_every_verdict(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            self.write(directory, [with_target(ground(), (160, 120))[0]])
+            tracker = self.tracker(directory)
+            tracker._judge(0, {1: self.mask_of([150, 115, 170, 125])})
+            tracker.reset()
+            self.assertEqual(tracker._guards, {})
+            self.assertEqual(tracker.verdicts, {})
+
+    def test_no_guard_block_means_no_judging_at_all(self):
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+
+        for block in (None, {}, {"enabled": False}):
+            with self.subTest(guard=block):
+                built = EdgeTAMTracker(model_cfg="c", checkpoint="k", guard=block)
+                self.assertIsNone(built.guard_config)
 
 
 class GeometryTest(unittest.TestCase):
