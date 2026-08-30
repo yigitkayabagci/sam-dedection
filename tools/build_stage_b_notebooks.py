@@ -197,13 +197,24 @@ PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
 # What the deep arms run instead. `MAX_AREA` at a quarter of the frame drops the
 # targets that fill the picture -- nothing in this deployment is one -- and
 # `MIN_SIDE`/`MIN_AREA` drop the handful of pixels below what a prompt can even
-# name. The four photometric numbers manufacture the low-contrast case out of
-# the high-contrast one these sets are almost entirely made of; `SENSOR_NOISE`
-# is not decoration, it is what makes the collapse reach the signal-to-clutter
-# ratio at all (see `src/training/photometric.py`).
+# name.
+#
+# The photometric numbers are **deliberately milder than the first version of
+# this preset**, and the reason is a measurement on real footage rather than a
+# preference. The aggressive setting (collapse 0.4 to 0.15x, noise 5) was
+# chosen on a synthetic window whose target sat at a signal-to-clutter ratio of
+# 20; HIT-UAV's real targets sit at a median of 0.91, so there was no easy end
+# to collapse and the setting moved its median only 0.85 -> 0.79 while spending
+# dynamic range everywhere. What still earns its place at any contrast is the
+# polarity flip -- white-hot and black-hot are one scene -- and the gamma.
+# `SENSOR_NOISE` stays non-zero because without it a collapse cannot move the
+# ratio at all (`src/training/photometric.py` measures that too).
+#
+# The right value is per-pool and the run now prints what it needs to choose:
+# read the per-band table in the evaluation before turning these up.
 HARDER = {"MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.25",
-          "CONTRAST_COLLAPSE": "0.4", "POLARITY_FLIP": "0.25",
-          "GAMMA_JITTER": "0.3", "SENSOR_NOISE": "5.0"}
+          "CONTRAST_COLLAPSE": "0.25", "POLARITY_FLIP": "0.25",
+          "GAMMA_JITTER": "0.25", "SENSOR_NOISE": "2.0"}
 
 INERT = {**PLAIN, "REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",

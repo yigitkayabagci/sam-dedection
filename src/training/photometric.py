@@ -1,15 +1,28 @@
 """Making the hard case out of the easy one: contrast, polarity, noise.
 
-A thermal encoder trained on aerial sets learns the shortcut those sets offer.
-Almost every annotated target in them is *hot against cold ground* -- a running
-engine on asphalt at night, a body against a field before dawn -- and a model
-can score well on all of it by answering "the bright blob". The frames where
-that shortcut fails are the ones a deployment meets constantly and a training
-set barely holds: a car that has been parked for an hour, a person on sun-warmed
-concrete, a roof at the same temperature as the vehicle on it.
-`image_loop.instance_contrast` puts a number on the difference -- the target's
-signal against the clutter of the ground beside it -- and this module
-manufactures the low end of it from the high end.
+A thermal encoder can learn a shortcut its training data offers: answer "the
+bright blob" and score well wherever the target is hot against cold ground.
+`image_loop.instance_contrast` puts a number on how far a target stands out --
+its signal against the clutter of the ground beside it -- and this module makes
+that number worse on purpose, so the shortcut stops paying.
+
+**How much of a shortcut there is to break is a property of the source, and it
+was measured rather than assumed.** On HIT-UAV -- 4 421 annotated targets over
+500 of its frames, drone at 60-130 m -- the median target sits at a
+signal-to-clutter ratio of **0.91**, 53 % of them are *below* 1, and only 15 %
+stand out at 3 or more. People are the visible ones (median 1.58); cars (0.55)
+and bicycles (0.34) are mostly inside the clutter already. That set does not
+offer the shortcut, and this module is nearly a no-op on it: the aggressive
+setting moved its median from 0.85 to 0.79 and shrank the easy tail from 15 %
+to 10 %. (Measured on boxes rather than masks, since HIT-UAV ships no masks, so
+those are a lower bound -- a mask-tight measure reads higher.)
+
+Which is the argument for the knobs rather than against them: what they are
+worth depends on the pool, so a run should read the per-band table its own
+evaluation prints instead of trusting an augmentation to have created
+difficulty. On a source whose targets really are hot against cold ground, the
+collapse has something to work on; on one like HIT-UAV, the polarity flip and
+the gamma are the terms still doing work, and they do it at any contrast.
 
 **Collapsing contrast alone does nothing.** Scaling a window's pixels toward
 their mean divides the target-to-background difference *and* the background's
