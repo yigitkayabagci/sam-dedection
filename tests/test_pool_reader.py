@@ -876,6 +876,19 @@ class ResolveImagesRootTest(unittest.TestCase):
         self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV"),
                          self.root / "HIT_UAV")
 
+    def test_a_half_downloaded_pool_keeps_the_root_it_was_given(self):
+        # Four of five probes resolve and the fifth is simply not there yet.
+        # Re-rooting one level up would "find" them all and hide the missing
+        # download behind a wider search -- and one level up is where another
+        # dataset's `04991.jpg` lives.
+        base = self.root / "DroneVehicle"
+        for index in range(4):
+            self.touch(base / "train" / "trainimgr" / f"0499{index}.jpg")
+        records = [self.record_naming(f"/content/data/DroneVehicle/train/"
+                                      f"trainimgr/0499{index}.jpg")
+                   for index in range(5)]
+        self.assertEqual(resolve_images_root(records, base), base)
+
     def test_frames_that_are_not_on_this_disk_are_not_guessed_at(self):
         (self.root / "HIT_UAV").mkdir()
         record = self.record_naming("/content/data/HIT_UAV/train/0_01.jpg")

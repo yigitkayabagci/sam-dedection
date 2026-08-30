@@ -185,9 +185,16 @@ REQUIRED_RGB_AEROVIS = (
 REQUIRED_AEROVIS = ('{"aerovis_train": 10000,\n'
                     '                 "aerovis_heldout": 1500}')
 
-# SegFly ships semantic maps, so all 15 007 of its thermal frames come out of
-# `decompose` with no teacher pass. The pool harvested from it holds 5 378 of
-# the same frames under a different target, so it goes.
+# SegFly ships semantic maps, so its thermal frames come out of `decompose`
+# with no teacher pass at all. **15 007 is the frame count, not the yield**: the
+# pool harvested from the same labels (`decompose:watershed`, these gates) says
+# 5 378 frames and 20 145 instances in its own manifest, because SegFly is
+# scenery and only two of its sixteen classes are things -- two of its eight
+# 2 000-frame shards contribute under 200 frames between them. The dataset flag
+# reads the same maps in `components` mode and lands in the same place, so a run
+# that shows ~5 400 SegFly frames is not short of anything; the staging cell
+# prints the funnel that says so. It is preferred over the pool because it is
+# the same frames under a decomposition this repo can re-run and audit.
 SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
 
 SOURCE_ZIPS_DEFAULT = (
@@ -939,22 +946,6 @@ for _row in PLAN:
               f"independent facts, and only the disk holds the second.")
         _row["images"] = str(_found)
 
-subprocess.run(["df", "-h", "/content"], check=False)
-''')
-
-
-# --------------------------------------------------------------------------
-# 3. What each source actually has on this disk, before anything indexes it
-# --------------------------------------------------------------------------
-#
-# Every "the run trained on less than I thought" question this repo has had was
-# answerable from two numbers nobody printed: how many of a pool's records find
-# their frame, and where a dataset's frames go between the disk and the index.
-# Both are cheap -- a sample of records, one glob per half, and an index build
-# the next cell reuses from cache -- and neither is a judgement, so this cell
-# only measures. It asserts nothing; cell 4 is where a run stops.
-
-code('''
 from src.training.aerial import IMAGE_SUFFIXES, InstanceGates, list_frames, rebalance
 from src.training.datasets import parse
 from src.training.pool_reader import Relocator, why_no_image
@@ -967,7 +958,7 @@ READY = {}
 
 print(f"{'pool':<28}{'records':>9}{'probed':>8}{'found':>7}   images root")
 for _row in PLAN:
-    _records = sorted(Path(_row["dir"]).rglob("record.json"))
+    _records = sorted(Path(_row["dir"]).rglob(RECORD_FILE))
     _probe = _records[::max(len(_records) // PROBES, 1)][:PROBES]
     _relocate = Relocator(_row["images"])
     _recorded, _hit = "", 0
@@ -1011,8 +1002,8 @@ for _spec, _spec_root in ([(_s, DATA_ROOT) for _s in EXTRA_DATASETS]
         continue
     _rejected = {}
     for _entry in _index:
-        for _why, _count in _entry.rejects.items():
-            _rejected[_why] = _rejected.get(_why, 0) + _count
+        for _reason, _count in _entry.rejects.items():
+            _rejected[_reason] = _rejected.get(_reason, 0) + _count
     print(f"{_dataset.name}: {len(_frames)} frames and {len(_maps)} maps on "
           f"disk -> {len(_pairs)} paired by stem -> {len(_index)} frames with "
           f"an instance ({sum(len(_e.instances) for _e in _index)} instances)")
@@ -1027,11 +1018,13 @@ for _spec, _spec_root in ([(_s, DATA_ROOT) for _s in EXTRA_DATASETS]
         _kept, _thin = rebalance(_index, CLASS_WEIGHTS, seed=SEED)
         print(f"   CLASS_WEIGHTS thins it to {len(_kept)} frames / "
               f"{_thin['instances']['after']} instances before training sees it")
+
+subprocess.run(["df", "-h", "/content"], check=False)
 ''')
 
 
 # --------------------------------------------------------------------------
-# 4. The index, the split, and the flags every later cell reuses
+# 3. The index, the split, and the flags every later cell reuses
 # --------------------------------------------------------------------------
 #
 # Built in-process and cached, so the training and scoring subprocesses below

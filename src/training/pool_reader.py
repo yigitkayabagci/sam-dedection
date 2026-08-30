@@ -61,6 +61,12 @@ from .pool import RECORD_FILE
 SKIP_REASONS = ("no_store", "no_image", "unreadable_image", "shape_mismatch",
                 "store_disagrees", "record_schema", "no_accepted")
 
+# How much of a file `_same_frames` reads before calling two copies the same.
+# Size plus the first megabyte separates a duplicate from a re-encode -- two
+# JPEGs of one scene differ in their first table -- without reading SegFly's
+# 11 MB frames end to end for a decision about a directory name.
+PREFIX_BYTES = 1 << 20
+
 PALETTE_SOURCE = (
     "the pool's own record.json -- each instance carries the class name the "
     "box reader read out of the dataset's annotation file, so there is no "
@@ -213,14 +219,28 @@ def resolve_images_root(records: Iterable[str | Path],
     asking a settings cell to hard-code a path that depends on which mirror the
     pool was harvested from and how the archive happened to unpack.
 
-    Each probe's file name is looked up under `search_root` (the configured root
-    by default); every hit proposes the root in front of the tail it shares with
-    the recorded path, and the proposal that re-roots the *most* probes wins --
-    which is what tells the tree holding the splits from the wrapper above it
-    that holds one stray copy. A tie goes to the deeper root, since the shallow
-    one reaches the same frames only through the deep one. `None` when no frame
-    of the pool is anywhere underneath: the missing-download case, which is a
-    fact to report rather than a path to guess at.
+    Probes are spread over the pool rather than taken off the front, and each
+    one's file name is looked up under `search_root` (the configured root by
+    default). Every hit proposes the root sitting in front of the tail it shares
+    with the recorded path, and the proposals are ranked by:
+
+    1. how much of the recorded path they agree with -- `normal_json/train/f`
+       shares two components with a record naming `hit-uav/images/train/f`
+       where `JPEGImages/f` shares one, and the deeper agreement is the better
+       claim, which is `Relocator`'s rule too;
+    2. how many probes they actually re-root, which tells the tree holding the
+       frames from a wrapper holding one stray copy;
+    3. depth, since a shallow root only reaches those frames through the deep
+       one.
+
+    Two answers are deliberately *not* a re-rooting. Nothing beating the
+    configured root returns that root unchanged: frames that missed under a
+    root which resolves the others are missing, not misplaced, and widening the
+    root would hide a half-finished download behind a search. And roots that
+    tie while holding *different pixels* return `None` rather than a guess --
+    four copies of one archive are one answer, DroneVehicle's two modalities
+    are not. `None` also means no frame of the pool is anywhere underneath,
+    which is the missing-download case and a fact to report.
     """
     # A root can still carry the glob it was configured with, when nothing
     # matched it -- which is what a pattern resolved before the download looks
@@ -233,8 +253,10 @@ def resolve_images_root(records: Iterable[str | Path],
     if base is None or not base.is_dir():
         return None
 
+    every = list(records)
+    spread_out = every[::max(len(every) // max(probes, 1), 1)][:max(probes, 1)]
     wanted: list[Path] = []
-    for record_path in list(records)[:max(probes, 1)]:
+    for record_path in spread_out:
         try:
             wanted.append(Path(json.loads(
                 Path(record_path).read_text())["image"]))
@@ -247,7 +269,8 @@ def resolve_images_root(records: Iterable[str | Path],
         relocate = Relocator(root, by_name=False)
         return sum(1 for recorded in wanted if relocate(recorded) is not None)
 
-    if configured is not None and resolves(configured) == len(wanted):
+    standing = resolves(configured) if configured is not None else -1
+    if standing == len(wanted):
         return configured                    # the configured root already works
 
     names = _index_by_name(base)
@@ -271,6 +294,13 @@ def resolve_images_root(records: Iterable[str | Path],
     ranked = sorted(rank, key=lambda root: (tuple(-v for v in rank[root]),
                                             str(root)))
     best = [root for root in ranked if rank[root] == rank[ranked[0]]]
+    if rank[best[0]][1] <= standing:
+        # Nothing found more frames than the root the run was configured with,
+        # so the frames that missed are missing rather than misplaced. Widening
+        # the root would hide a half-finished download behind a search, and a
+        # root one level up can match a *different* dataset's frame of the same
+        # name -- the pools are full of `000001.jpg`.
+        return configured
     if len(best) > 1 and not _same_frames(best, wanted):
         return None
     return best[0]
@@ -298,7 +328,10 @@ def _same_frames(roots: SequenceABC[Path], wanted: SequenceABC[Path]) -> bool:
             if found is None:
                 return False
             try:
-                digests.add(hashlib.md5(found.read_bytes()).hexdigest())
+                with found.open("rb") as handle:
+                    head = handle.read(PREFIX_BYTES)
+                digests.add((found.stat().st_size,
+                             hashlib.md5(head).hexdigest()))
             except OSError:
                 return False
         if len(digests) > 1:
