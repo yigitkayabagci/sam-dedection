@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 from src.training.antiuav import Clip, Sequence, SequenceLabels  # noqa: E402
 from src.training.finetune import Rates, apply_freeze  # noqa: E402
-from src.training.schedule import Schedule, Split, run_stages, validate  # noqa: E402
+from src.training.schedule import Loop, Schedule, Split, run_stages, validate  # noqa: E402
 from tests.test_clip_loop import FakeSam2  # noqa: E402
 from tools.train_encoder import scaled_rates  # noqa: E402
 
@@ -221,6 +221,30 @@ class TestRunStages(unittest.TestCase):
                             device="cpu", log=lambda *_: None)
         self.assertEqual([s["stage"] for s in result["stopped_early"]],
                          ["head", "encoder"])
+
+    def test_nonfinite_loss_stops_the_stage_before_corrupting_more_steps(self):
+        calls = []
+
+        def nonfinite(*args, **kwargs):
+            calls.append(1)
+            return torch.tensor(float("nan"), requires_grad=True), {}
+
+        def stream(*args, **kwargs):
+            yield None
+
+        plan = Schedule(
+            stages=(("head", 4, Rates(head=1e-3)),),
+            batch=2, steps_per_epoch=5, val_batches=1, workers=2, depth=1)
+        result = run_stages(self.model, self.train, self.val, plan,
+                            freeze=apply_freeze, save=lambda m, meta: None,
+                            device="cpu", log=lambda *_: None,
+                            loop=Loop(stream=stream, loss=nonfinite))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["history"], [])
+        self.assertEqual(result["stopped_early"], [{
+            "stage": "head", "after_epoch": 0, "of": 4,
+            "reason": "nonfinite_train_loss", "step": 0,
+        }])
 
     def run_it(self, **kwargs):
         saves = []

@@ -373,7 +373,7 @@ ARMS = {
     # Mixing the two modalities is the thing not to do here. 27 exists to
     # measure that question honestly; a pretrain that quietly blends them
     # produces a checkpoint neither arm can be compared against.
-    "29_pretrain_thermal_aerial.ipynb": {
+    "34_pretrain_thermal_aerial.ipynb": {
         **HARDER,
         # Long and patient: this is the run whose output everything else
         # starts from, so it gets the budget and the early stop rather than a
@@ -411,7 +411,7 @@ ARMS = {
     # arms, where it is a side dish. Here it is the meal: raise that cap in the
     # settings cell if the disk and the schedule allow, and the run prints what
     # the cap cost it.
-    "30_pretrain_rgb_aerial.ipynb": {
+    "35_pretrain_rgb_aerial.ipynb": {
         **HARDER,
         "EPOCHS": "[3, 40]",
         "PATIENCE": "5",

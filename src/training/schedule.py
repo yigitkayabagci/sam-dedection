@@ -236,6 +236,7 @@ def run_stages(
 
     for stage, epochs, rates in schedule.stages:
         stale = 0
+        failed_nonfinite = False
         counts = freeze(model, stage)
         log(f"\n===== stage {stage!r}: {epochs} epoch(s) x "
             f"{schedule.steps_per_epoch} steps =====")
@@ -261,6 +262,22 @@ def run_stages(
             for step, batch in enumerate(stream):
                 with _autocast(device):
                     loss, terms = loop.loss(model, batch)
+                if not bool(torch.isfinite(loss).all()):
+                    # A non-finite update contaminates every later recurrent
+                    # prediction.  More epochs cannot recover from NaN weights;
+                    # the best checkpoint from an earlier finite validation is
+                    # already on disk, so stop this stage immediately instead
+                    # of burning the remainder of a Colab session.
+                    opt.zero_grad(set_to_none=True)
+                    failed_nonfinite = True
+                    stopped.append({"stage": stage, "after_epoch": epoch,
+                                    "of": epochs,
+                                    "reason": "nonfinite_train_loss",
+                                    "step": step})
+                    log(f"  stopping {stage!r}: non-finite training loss at "
+                        f"epoch {epoch}, step {step}. The last finite best "
+                        f"checkpoint is unchanged.")
+                    break
                 (loss / schedule.accum).backward()
                 if (step + 1) % schedule.accum == 0:
                     torch.nn.utils.clip_grad_norm_(trainable, schedule.grad_clip)
@@ -272,8 +289,22 @@ def run_stages(
                     stream.set_postfix(loss=f"{float(loss):.3f}",
                                        **{k: f"{v:.2f}" for k, v in terms.items()})
 
+            if failed_nonfinite:
+                break
+
             with ema.applied(model):
                 score = validate(model, val, schedule, device, loop)
+                if not np.isfinite(score):
+                    history.append({"stage": stage, "epoch": epoch,
+                                    "val_loss": score, "saved": False})
+                    failed_nonfinite = True
+                    stopped.append({"stage": stage, "after_epoch": epoch,
+                                    "of": epochs,
+                                    "reason": "nonfinite_validation_loss"})
+                    log(f"  stopping {stage!r}: validation loss is not finite "
+                        f"at epoch {epoch}. The last finite best checkpoint "
+                        f"is unchanged.")
+                    break
                 improved = score < best
                 if improved:
                     best = score

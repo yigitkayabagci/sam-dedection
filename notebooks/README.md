@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty-seven notebooks, meant for Colab. Everything they orchestrate lives in
+Thirty-two notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -34,6 +34,10 @@ recipe, not the implementation.
 | 26 | `26_segfly_instance_audit.ipynb` | real SegFly thermal/RGB/label panels, `components` vs `watershed` sensitivity, JSON evidence and optional SAM disagreement audit | **nothing** — it exports a 64-row SegFly slice; SAM check needs a GPU |
 | 27 | `27_thermal_deep_rgb_aerovis.ipynb` | 22'nin aynı uzun koşusu; RGB havuzları aynı batch'lere eklenir, AeroVIS train zorunludur ve dizi-bazlı held-out kolu ayrı RGB notu verir | 22'nin termal havuzları + `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler |
 | 28 | `28_rgb_deep_aerovis.ipynb` | 22 ile aynı uzun eğitim tarifi, fakat yalnızca RGB havuzları; AeroVIS train ve dizi-bazlı held-out kolları zorunlu, VisDrone örtüşme nedeniyle dışarıda | `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler; diğer RGB havuzları varsa eklenir |
+| 29 | `29_thermal_contrast_tracking.ipynb` | 32'nin checkpoint'ini düşük-kontrast temporal kliplerle devam eğitir; stage B / temporal / temporal+SAMURAI takip A/B'si ve düşük-kontrast alt-grup raporu üretir; 32 yoksa 22'ye fallback yapar | tercihen 32'nin `edgetam_pool_aerial_thermal_stable_512.pt` çıktısı; Anti-UAV410'u kendisi indirir ve etiketler |
+| 30 | `30_tracking_before_after_demo.ipynb` | Anti-UAV410 validation dizisinde Stage B ve 29'un seçilen final kolunu senkron before/after MP4, IoU eğrisi ve dropout ölçüleriyle gösterir; en iyi düşük-kontrast kazancının yanında en kötü gerilemeyi de üretir | 29'un Drive checkpoint'i, log'u ve validation JSON'ları; aynı runtime kullanılmazsa Anti-UAV410 arşivini yeniden indirir |
+| 31 | `31_aerial_thermal_tracking.ipynb` | Stage B'yi önce düşük-kontrast video precheck'inde ölçer, sonra VTUAV ST/LT + VTUAV-VIS + BIRDSAI kimlikleriyle temporal devam eğitir; kaynak-bazlı Stage B / temporal / temporal+SAMURAI A/B'si üretir, Anti-UAV410 varsayılan kapalıdır | tercihen 32'nin checkpoint'i; `MyDrive/VTUAV` altındaki seçilen ST/LT tracking zip'leri; `MyDrive/edgetam-pool/{vtuav_thermal,vtuav_lt_thermal}`; resmî VTUAV-VIS `train_001`; BIRDSAI gerçek gece videolarını kendisi indirir |
+| 32 | `32_aerial_thermal_stage_b_stable.ipynb` | Kullanıcının sabit 22'sine dokunmadan VTUAV-LT'yi zorunlu yapar, düşük-kontrast/polarity/gamma/noise hardening ekler; üç güvenli encoder LR profilini kısa pilotta eler ve seçilen profille kararlı Stage B üretir | 22 ile aynı statik termal kaynaklar; ayrıca `vtuav_lt_thermal` pool'unda en az 5.000 kabul edilmiş instance |
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -376,6 +380,8 @@ Each is argued where it is made; this is the index.
 | a pool's inset is applied when the image is read, and nowhere else | `aerial.image_origin` | DroneVehicle's 100 px band was cut before the teacher looked, so the boxes, the masks and the frame size are all the inset frame's and only the JPEG is not |
 | a pool defaults to `role=train` | `pool_reader.parse_pool` | its masks are a teacher's guess gated four ways, so scoring on them measures the teacher — the same argument `split_index` makes for reconstructed semantic sets |
 | the batch is measured up to 512, and the rate scales with it | 19, 20, `tools/train_encoder.py` | image mode holds no clip length and no memory bank, so it fits far more than the video path; `--steps` is fixed, so a bigger batch puts more samples behind the same number of updates |
+| large-batch LR scaling is not trusted for the final thermal run | 32, `thermal_deep/run.json` | the recorded batch-128/scale-4 run improved at head-only, then encoder validation jumped from 0.2723 to 21.84 and NaN; 32 fixes scale at 1 and pilots discriminative LRs before the full cycle |
+| Stage C starts with a necessity audit | 31 | two low-contrast validation tracks per aerial source expose State Accuracy, lost-frame rate and longest dropout before expensive video training |
 
 ## Verifying without Colab
 

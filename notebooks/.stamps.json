@@ -21,6 +21,7 @@
  "26_segfly_instance_audit.ipynb": "3c121796aa",
  "27_thermal_deep_rgb_aerovis.ipynb": "de1eef48ea",
  "28_rgb_deep_aerovis.ipynb": "1e9e8b830c",
- "29_pretrain_thermal_aerial.ipynb": "af21750f5d",
- "30_pretrain_rgb_aerial.ipynb": "d2932a7fc3"
+ "32_aerial_thermal_stage_b_stable.ipynb": "583d167fdf",
+ "34_pretrain_thermal_aerial.ipynb": "0b45742dae",
+ "35_pretrain_rgb_aerial.ipynb": "a5a2f83af9"
 }
