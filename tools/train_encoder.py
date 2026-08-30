@@ -89,6 +89,7 @@ from src.training.datasets import (  # noqa: E402
 )
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
 from src.training.image_loop import TRAIN_PROMPTS  # noqa: E402
+from src.training.photometric import Photometric, augmenter  # noqa: E402
 from src.training.schedule import Schedule, images, run_stages  # noqa: E402
 
 INDEX_FILE = "instances.json"
@@ -260,6 +261,33 @@ def main(argv: list[str] | None = None) -> int:
                         "move, as a fraction of its own side. Matches "
                         "eval_instances.py's default, so a model trained "
                         "against this distribution is scored against it.")
+    p.add_argument("--contrast-collapse", type=float, default=0.0,
+                   help="Probability that a training window's contrast is "
+                        "squeezed toward its own mean, manufacturing the "
+                        "low-contrast case these sets barely hold: almost every "
+                        "annotated thermal target in them is hot against cold "
+                        "ground, so `the bright blob` scores well and a parked "
+                        "car on warm concrete does not. Needs --sensor-noise to "
+                        "do anything at all -- squeezing alone divides the "
+                        "target's signal and the ground's clutter by the same "
+                        "number and leaves the ratio where it was.")
+    p.add_argument("--contrast-floor", type=float, default=0.35,
+                   help="The weakest scale --contrast-collapse may draw.")
+    p.add_argument("--polarity-flip", type=float, default=0.0,
+                   help="Probability of inverting a *thermal* window. White-hot "
+                        "and black-hot are the same scene under a different "
+                        "sensor convention, and a model that has only seen one "
+                        "of them has learned half a rule. Masks and boxes are "
+                        "untouched; RGB windows are never flipped.")
+    p.add_argument("--gamma-jitter", type=float, default=0.0,
+                   help="Half-width of a log-uniform gamma applied to each "
+                        "window -- a different transfer curve, which moves a "
+                        "target's separation from its ground non-linearly.")
+    p.add_argument("--sensor-noise", type=float, default=0.0,
+                   help="Read noise added last, in 8-bit levels. On its own it "
+                        "lowers the signal-to-clutter ratio; with "
+                        "--contrast-collapse it is what makes the collapse "
+                        "reach the ratio at all.")
     p.add_argument("--min-area", type=int, default=48)
     p.add_argument("--min-side", type=int, default=4)
     p.add_argument("--max-area", type=float, default=0.9)
@@ -464,13 +492,26 @@ def main(argv: list[str] | None = None) -> int:
         val_batches=args.val_batches, workers=args.workers, depth=args.depth,
         seed=args.seed, patience=args.patience, meta=meta)
 
+    photometric = Photometric(collapse=args.contrast_collapse,
+                              floor=args.contrast_floor,
+                              invert=args.polarity_flip,
+                              gamma=args.gamma_jitter,
+                              noise=args.sensor_noise)
+    harden = augmenter(photometric, args.seed) if photometric.active else None
+    print(photometric.describe())
+    if photometric.collapse and not photometric.noise:
+        print("   !! a collapse with no --sensor-noise is a no-op on the "
+              "signal-to-clutter ratio: it scales the target's signal and the "
+              "ground's clutter by the same factor. Set --sensor-noise.")
+
     started = time.time()
     result = run_stages(model, train, val, schedule, freeze=freeze, save=save,
                         device=args.device, progress=_tqdm(),
                         loop=images(anchor, args.anchor_weight,
                                     prompt=args.prompt,
                                     jitter=args.prompt_jitter,
-                                    generator=prompts))
+                                    generator=prompts,
+                                    augment=harden))
     result |= {"seconds": round(time.time() - started, 1),
                "checkpoint": str(args.out),
                "peak_gib": (torch.cuda.max_memory_allocated() / 2**30

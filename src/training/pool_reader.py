@@ -50,7 +50,8 @@ from pathlib import Path
 import numpy as np
 
 from .aerial import (ROLES, DatasetSpec, Frame, FrameIndex, Instance,
-                     InstanceGates, Source, group_of, reject_reason)
+                     InstanceGates, Source, gates_tag, group_of,
+                     reject_reason)
 from .labels import MASK_STORE
 from .pool import RECORD_FILE
 
@@ -1017,8 +1018,15 @@ class PoolRequest:
 
     @property
     def cache_name(self) -> str:
-        """A filename for this pool's cached index -- unique per pool + modality."""
-        return self.label.replace(":", "_").replace("/", "_")
+        """A filename for this pool's cached index.
+
+        Unique per pool, modality **and gates**: a pool's instances are filtered
+        by the gates when the index is built and the survivors are what the
+        cache holds, so reading one back under stricter gates would train on
+        instances this run had decided to drop.
+        """
+        return (f"{self.label}:{gates_tag(self.gates)}"
+                .replace(":", "_").replace("/", "_"))
 
 
 POOL_MODALITIES = ("thermal", "rgb")

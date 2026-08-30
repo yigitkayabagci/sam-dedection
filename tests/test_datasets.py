@@ -24,6 +24,7 @@ from src.training.aerial import (  # noqa: E402
     FrameIndex,
     InstanceGates,
     Source,
+    gates_tag,
     split_index,
 )
 from src.training.datasets import describe, parse  # noqa: E402
@@ -43,7 +44,12 @@ class TestParse(unittest.TestCase):
 
         self.assertEqual(request.source.spec.name, "vtuav_vis")
         self.assertEqual(request.source.mode, "labels")
-        self.assertEqual(request.label, "vtuav_vis:thermal:labels")
+        # The gates ride on the label because they decide which components
+        # exist and `decompose` numbers only the ones it keeps -- an index
+        # cached under other gates pairs instances with their neighbour's mask.
+        self.assertTrue(request.label.startswith("vtuav_vis:thermal:labels:"))
+        self.assertEqual(request.label,
+                         f"vtuav_vis:thermal:labels:{gates_tag()}")
 
     def test_rgb_turns_the_grey_replication_off(self):
         # A thermal frame is one channel replicated to three; an RGB one is

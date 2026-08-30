@@ -955,6 +955,42 @@ class DatasetFlagTest(unittest.TestCase):
             parse("kust4k:/d/Kust4K:thermal:pool")
         self.assertIn("--pool", str(caught.exception))
 
+    def test_a_gate_change_is_a_different_index_cache(self):
+        """The gates decide which components exist, and `decompose` numbers
+        only the ones it keeps -- so an index cached under looser gates pairs
+        every instance after the first newly-rejected one with its neighbour's
+        mask. A cache key that ignores the gates makes that silent."""
+        from src.training.aerial import InstanceGates
+        from src.training.datasets import parse
+
+        loose = parse("segfly:/d/S:thermal:components", InstanceGates(min_area=8))
+        tight = parse("segfly:/d/S:thermal:components", InstanceGates(min_area=48))
+        self.assertNotEqual(loose.label, tight.label)
+        one = parse_pool("/p/hituav:/d/H:thermal:all", InstanceGates(max_area=0.9))
+        two = parse_pool("/p/hituav:/d/H:thermal:all", InstanceGates(max_area=0.25))
+        self.assertNotEqual(one.cache_name, two.cache_name)
+
+    def test_the_role_is_still_absent_from_the_cache_key(self):
+        """Re-indexing tens of thousands of frames because a pool moved from
+        train to eval would be a bill for nothing: the role picks the split, it
+        does not change a mask."""
+        from src.training.datasets import parse
+
+        self.assertEqual(parse("segfly:/d/S:thermal:components:train").label,
+                         parse("segfly:/d/S:thermal:components:all").label)
+
+    def test_a_stricter_gate_renumbers_the_components_it_keeps(self):
+        """The reason the two tests above matter, in the function itself."""
+        from src.training.aerial import SPECS, InstanceGates, decompose
+
+        semantic = np.zeros((200, 200), np.int32)
+        semantic[10:14, 10:14] = 13          # 16 px: dies under min_area 48
+        semantic[50:70, 50:80] = 13          # 600 px
+        loose = decompose(semantic, SPECS["segfly"], InstanceGates(min_area=8))[1]
+        tight = decompose(semantic, SPECS["segfly"], InstanceGates(min_area=48))[1]
+        self.assertEqual([(i.label, i.area) for i in loose], [(1, 16), (2, 600)])
+        self.assertEqual([(i.label, i.area) for i in tight], [(1, 600)])
+
     def test_decompose_refuses_the_pool_mode(self):
         from src.training.aerial import SPECS, decompose
 

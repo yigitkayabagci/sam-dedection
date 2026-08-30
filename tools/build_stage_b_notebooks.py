@@ -98,6 +98,38 @@ archive are one answer and DroneVehicle's two modalities are still a refusal.
 It prints the re-rooting it did, or that a pool's frames are on no disk here,
 which is the same `no_image` with a different fix.
 
+## The failure the deep arms are aimed at
+
+A tracker that holds a car crossing cold asphalt and drops the same car parked
+on sun-warmed concrete has not learned "vehicle". It has learned "the bright
+blob", and the training sets hand it that shortcut: almost every annotated
+thermal target in them is hot against cold ground, so a model can score well on
+all of them without ever separating a target from a background that looks like
+it.
+
+Two pieces answer it, and the first is the measurement.
+`image_loop.instance_contrast` scores each instance by its own signal over the
+clutter of the ground immediately around it -- the signal-to-clutter ratio the
+thermal literature uses -- and `eval_instances` now reports mean IoU in three
+bands of it. A model that reads targets off their brightness has a flat top
+band and a collapsed bottom one, which no aggregate mean shows.
+
+The second is `src/training/photometric.py`, which manufactures the bottom band
+out of the top one: a window's contrast is collapsed toward its own mean, its
+polarity is flipped (white-hot and black-hot are one scene under two sensor
+conventions), its transfer curve is jittered, and read noise is added. The
+noise is not decoration. Collapsing contrast alone divides the target's signal
+and the background's clutter by the same number and leaves the ratio exactly
+where it was -- measured, in `tests/test_photometric.py` -- so a collapse
+without noise after it is a no-op dressed as an augmentation. Masks, boxes and
+classes are untouched: the target stays exactly where it was and only the
+evidence for it gets worse.
+
+Training windows only. Validation keeps the plain stream (`Loop.val_stream`,
+the same argument `val_loss` makes) because that number selects which epoch's
+weights are kept, and a validation set augmented differently each epoch would
+be choosing on the draw.
+
 ## A budget for a night, and a net under it
 
 22 and 23 run `[2, 24]` epochs of 800 steps with `PATIENCE = 4`. The budget is
@@ -155,7 +187,25 @@ from pathlib import Path
 
 # Only these move between the two arms. Everything else is shared source, so a
 # difference anywhere else is a bug rather than a variant.
-INERT = {"REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
+# The gates and the photometric augmentation, off by default: 19 and 20 exist
+# to be compared with numbers taken before either knob did, and a run whose data
+# and whose windows both changed cannot be read against them.
+PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
+         "CONTRAST_COLLAPSE": "0.0", "POLARITY_FLIP": "0.0",
+         "GAMMA_JITTER": "0.0", "SENSOR_NOISE": "0.0"}
+
+# What the deep arms run instead. `MAX_AREA` at a quarter of the frame drops the
+# targets that fill the picture -- nothing in this deployment is one -- and
+# `MIN_SIDE`/`MIN_AREA` drop the handful of pixels below what a prompt can even
+# name. The four photometric numbers manufacture the low-contrast case out of
+# the high-contrast one these sets are almost entirely made of; `SENSOR_NOISE`
+# is not decoration, it is what makes the collapse reach the signal-to-clutter
+# ratio at all (see `src/training/photometric.py`).
+HARDER = {"MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.25",
+          "CONTRAST_COLLAPSE": "0.4", "POLARITY_FLIP": "0.25",
+          "GAMMA_JITTER": "0.3", "SENSOR_NOISE": "5.0"}
+
+INERT = {**PLAIN, "REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
          "REFERENCE_CHECKPOINT": '""',
@@ -197,6 +247,24 @@ REQUIRED_AEROVIS = ('{"aerovis_train": 10000,\n'
 # the same frames under a decomposition this repo can re-run and audit.
 SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
 
+# What each source is worth, per instance, to `aerial.rebalance`.
+#
+# **SegFly is not in it.** It is the one source here whose masks a human drew
+# rather than a teacher guessed, and thinning it to 0.6 threw away a quarter of
+# the most reliable supervision in the run to hold down a class balance that
+# `car`/`truck` already hold down.
+#
+# DroneVehicle stays at 0.45 and is the reason the rest of this table exists:
+# 155 000 instances, nearly all cars, from one sensor over one city. VTUAV
+# joins at 0.8 -- a tracking set is one target followed for thousands of
+# frames, so its instances are correlated in a way a detection set's are not,
+# and counting each one as a full example over-weights a handful of scenes.
+THERMAL_WEIGHTS = ('{"pool/dronevehicle_thermal": 0.45,\n'
+                   '                 "pool/dronevehicle_thermal_only": 0.7,\n'
+                   '                 "pool/vtuav_thermal": 0.8,\n'
+                   '                 "pool/vtuav_rgb": 0.8,\n'
+                   '                 "car": 0.7, "truck": 0.7}')
+
 SOURCE_ZIPS_DEFAULT = (
     '[\n'
     '    ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],\n'
@@ -220,20 +288,18 @@ ARMS = {
     # so they cannot outvote the rest, and the rate table inverted so the
     # trunk learns the modality instead of the decoder compensating for it.
     "22_thermal_deep.ipynb": {
+        **HARDER,
         "EPOCHS": "[2, 24]",
         "PATIENCE": "4",
         "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
-        "SKIP_POOLS": '["segfly_thermal"]',
+        "SKIP_POOLS": '["segfly_thermal", "vtuav_lt"]',
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
         "REQUIRE_POOLS": REQUIRED,
-        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
-                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
-                          '                 "segfly": 0.6,\n'
-                          '                 "car": 0.7, "truck": 0.7}'),
+        "CLASS_WEIGHTS": THERMAL_WEIGHTS,
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
@@ -250,20 +316,18 @@ ARMS = {
     # same seed, same split file -- so the two numbers differ by the method
     # and by nothing else, which is the only thing that makes them comparable.
     "23_thermal_deep_lora.ipynb": {
+        **HARDER,
         "EPOCHS": "[2, 24]",
         "PATIENCE": "4",
         "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
-        "SKIP_POOLS": '["segfly_thermal"]',
+        "SKIP_POOLS": '["segfly_thermal", "vtuav_lt"]',
         "MODALITIES": '["thermal"]',
         "RUN": '"thermal_deep"',
         "MIRROR_DIR": '"/content/drive/MyDrive/edgetam-stage-b/thermal_deep"',
         "REQUIRE_POOLS": REQUIRED,
-        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
-                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
-                          '                 "segfly": 0.6,\n'
-                          '                 "car": 0.7, "truck": 0.7}'),
+        "CLASS_WEIGHTS": THERMAL_WEIGHTS,
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
@@ -279,21 +343,19 @@ ARMS = {
     # because AeroVIS contains VisDrone frames; mixing the two would leak the
     # release's held-out sequences into training through another annotation.
     "27_thermal_deep_rgb_aerovis.ipynb": {
+        **HARDER,
         "EPOCHS": "[2, 24]",
         "PATIENCE": "4",
         "MIN_BOX_IOU": "0.8",
         "STEPS": "800",
         "EXTRA_DATASETS": SEGFLY,
-        "SKIP_POOLS": '["segfly_thermal", "visdrone"]',
+        "SKIP_POOLS": '["segfly_thermal", "visdrone", "vtuav_lt"]',
         "MODALITIES": '["thermal", "rgb"]',
         "RUN": '"thermal_deep_rgb_aerovis"',
         "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
                        'thermal_deep_rgb_aerovis"'),
         "REQUIRE_POOLS": REQUIRED_RGB_AEROVIS,
-        "CLASS_WEIGHTS": ('{"pool/dronevehicle_thermal": 0.45,\n'
-                          '                 "pool/dronevehicle_thermal_only": 0.7,\n'
-                          '                 "segfly": 0.6,\n'
-                          '                 "car": 0.7, "truck": 0.7}'),
+        "CLASS_WEIGHTS": THERMAL_WEIGHTS,
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
@@ -313,6 +375,7 @@ ARMS = {
     # because AeroVIS contains it. No drawn thermal set or thermal source zip
     # is allowed to slip through the modality filter by a separate code path.
     "28_rgb_deep_aerovis.ipynb": {
+        **HARDER,
         "EPOCHS": "[2, 24]",
         "PATIENCE": "4",
         "MIN_BOX_IOU": "0.8",
@@ -320,7 +383,7 @@ ARMS = {
         "EVAL_DRAWN": "None",
         "EXTRA_DATASETS": "[]",
         "SOURCE_ZIPS": "[]",
-        "SKIP_POOLS": '["visdrone"]',
+        "SKIP_POOLS": '["visdrone", "vtuav_lt"]',
         "MODALITIES": '["rgb"]',
         "RUN": '"rgb_deep_aerovis"',
         "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
@@ -411,10 +474,15 @@ IMAGES = [
 SIZE           = 512
 PER_IMAGE      = 2
 MAX_INSTANCES  = 8
-MIN_AREA       = 48
-MIN_SIDE       = 4
-MAX_AREA       = 0.9
+MIN_AREA       = {{MIN_AREA}}
+MIN_SIDE       = {{MIN_SIDE}}
+MAX_AREA       = {{MAX_AREA}}
 FILL           = 0.25
+CONTRAST_COLLAPSE = {{CONTRAST_COLLAPSE}}
+CONTRAST_FLOOR    = 0.15
+POLARITY_FLIP     = {{POLARITY_FLIP}}
+GAMMA_JITTER      = {{GAMMA_JITTER}}
+SENSOR_NOISE      = {{SENSOR_NOISE}}
 JITTER         = 32
 PROMPT         = "mix"
 PROMPT_JITTER  = 0.3
@@ -834,9 +902,15 @@ for _archive, _folder in SOURCE_ZIPS:
     if not unpack(_archive, _target, _folder):
         (_DONE / (_folder + ".zip.done")).touch()
 
+_PLANNED = {_row["pool"] for _row in PLAN}
 for _pool, _folder in POOL_ARCHIVES.items():
     if _pool not in POOLS:
         print(f"!! {_pool} is not a pool here -- known: {sorted(POOLS)}")
+        continue
+    if _pool not in _PLANNED:
+        print(f"   {_pool}: dropped by SKIP_POOLS or by the modality filter, "
+              f"so its frames stay inside the archive -- nothing in this run "
+              f"will open one of them")
         continue
     _key, _recipe, _root, _parts, _plain = images_for(_pool)
     _root = _plain
@@ -1426,6 +1500,11 @@ subprocess.run(
      "--base", BASE_CKPT, "--out", CHECKPOINT,
      "--prompt", PROMPT, "--prompt-jitter", str(PROMPT_JITTER),
      "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),
+     "--contrast-collapse", str(CONTRAST_COLLAPSE),
+     "--contrast-floor", str(CONTRAST_FLOOR),
+     "--polarity-flip", str(POLARITY_FLIP),
+     "--gamma-jitter", str(GAMMA_JITTER),
+     "--sensor-noise", str(SENSOR_NOISE),
      "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),
      "--epochs", str(EPOCHS[0]), str(EPOCHS[1]),
      "--patience", str(PATIENCE), "--mirror", MIRROR_DIR,
@@ -1556,6 +1635,21 @@ for _prompt in SCORE_PROMPTS:
     _d = AFTER[_prompt]["mean_iou"] - BEFORE[_prompt]["mean_iou"]
     _s = AFTER[_prompt]["small_mean_iou"] - BEFORE[_prompt]["small_mean_iou"]
     print(f"{_prompt:<8}{'delta':<10}{_d:>+10.4f}{'':>16}{_s:>+10.4f}\\n")
+
+print(f"\\n{'prompt':<8}{'target against its ground':<28}{'inst':>7}"
+      f"{'before':>9}{'after':>9}{'delta':>9}")
+for _prompt in SCORE_PROMPTS:
+    for _band in AFTER[_prompt].get("per_contrast", {}):
+        _b = BEFORE[_prompt]["per_contrast"][_band]
+        _a = AFTER[_prompt]["per_contrast"][_band]
+        print(f"{_prompt:<8}{_band:<28}{_a['instances']:>7}"
+              f"{_b['mean_iou']:>9.4f}{_a['mean_iou']:>9.4f}"
+              f"{_a['mean_iou'] - _b['mean_iou']:>+9.4f}")
+print("   contrast is the target's own signal over the clutter of the ground "
+      "beside it (`image_loop.instance_contrast`). The bottom band is the "
+      "case a tracker loses -- a parked car on warm concrete, a body at "
+      "ambient temperature -- and a test set is mostly the top one, which is "
+      "how a model that reads targets off their brightness keeps a good mean.")
 
 for _prompt in SCORE_PROMPTS:
     for _modality in sorted(AFTER[_prompt].get("per_modality", {})):
@@ -1738,6 +1832,9 @@ VERDICT = {
     "modalities": {_row["pool"]: _row["modality"] for _row in PLAN},
     "limits": POOL_LIMITS,
     "prompt": PROMPT, "prompt_jitter": PROMPT_JITTER,
+    "photometric": {"collapse": CONTRAST_COLLAPSE, "floor": CONTRAST_FLOOR,
+                    "invert": POLARITY_FLIP, "gamma": GAMMA_JITTER,
+                    "noise": SENSOR_NOISE},
     "epochs": EPOCHS, "steps": STEPS, "seed": SEED,
     "run_log": RUN_LOG, "before": BEFORE, "after": AFTER,
     "panel_prompt": PANEL_PROMPT,

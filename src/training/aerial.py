@@ -1024,6 +1024,21 @@ class InstanceGates:
     fill: float = 0.25
 
 
+def gates_tag(gates: InstanceGates | None = None) -> str:
+    """A short fingerprint of the gates, for an index cache's filename.
+
+    Not cosmetic. `decompose` numbers the components it *keeps*, so a gate that
+    starts rejecting one component renumbers every instance after it -- and
+    `sample_masks` decomposes again at training time with whatever gates the
+    run now holds. An index cached under looser gates therefore pairs each
+    instance with the next one's mask, silently, and the only clue is a run
+    that trains on nonsense. Keying the cache by the gates makes that a cache
+    miss and a re-index instead.
+    """
+    g = gates or InstanceGates()
+    return f"a{g.min_area:g}s{g.min_side:g}x{g.max_area:g}f{g.fill:g}"
+
+
 @dataclass(frozen=True)
 class Instance:
     """One component of one thing class, in frame coordinates.

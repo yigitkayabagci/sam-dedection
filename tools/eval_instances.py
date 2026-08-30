@@ -64,6 +64,15 @@ from src.training.datasets import (  # noqa: E402
 # hundred pixels of a 512 window, which is where a tracker starts losing things.
 SMALL_SIDE = 32.0
 
+# Where a target stops standing out from the ground around it, in units of that
+# ground's own variation (`image_loop.instance_contrast`). Under 1 the target is
+# inside the background's noise -- a grey car on a grey roof, a body at ambient
+# temperature -- and over 3 it is the case every aerial demo is filmed in. The
+# mean IoU of a mixed test set is dominated by the third bucket, which is how a
+# model that only works on obvious targets keeps looking fine.
+CONTRAST_EDGES = (1.0, 3.0)
+CONTRAST_NAMES = ("in the clutter (<1)", "similar (1-3)", "standing out (>3)")
+
 
 def score(model, split, batch: int, device: str, progress=None,
           prompt: str = "box", jitter: float = 0.0, seed: int = 0,
@@ -88,22 +97,27 @@ def score(model, split, batch: int, device: str, progress=None,
     """
     import torch
 
-    from src.training.image_loop import collate, instance_iou
+    from src.training.image_loop import collate, instance_contrast, instance_iou
     from src.training.loader import batch_clips
 
     ious: list[float] = []
     classes: list[str] = []
     sides: list[float] = []
     mods: list[str] = []
+    contrasts: list[float] = []
     rows: list[dict] = []
 
     generator = torch.Generator(device=device).manual_seed(seed)
     chunks = list(batch_clips(split.samples, batch, seed=0, drop_last=False))
     stream = progress(chunks, total=len(chunks), desc="scoring") if progress else chunks
     for chunk in stream:
-        assembled = collate(chunk, "cpu")
-        ious.extend(instance_iou(model, assembled.to(device), prompt, jitter,
+        assembled = collate(chunk, "cpu").to(device)
+        ious.extend(instance_iou(model, assembled, prompt, jitter,
                                  generator).tolist())
+        # Same flat row order the IoUs come back in, so the two align without a
+        # join: `instance_contrast` walks `valid` exactly as `propagate_image`
+        # does.
+        contrasts.extend(instance_contrast(assembled).tolist())
         for sample in chunk:
             spec = sample.source.spec if sample.source else None
             for instance in sample.instances:
@@ -133,13 +147,16 @@ def score(model, split, batch: int, device: str, progress=None,
                         "side": sides[-1], "modality": mods[-1]})
 
     if detail:
-        for row, value in zip(rows, ious):
+        for row, value, seen in zip(rows, ious, contrasts):
             row["iou"] = float(value)
+            row["contrast"] = float(seen)
     ious = np.asarray(ious, dtype=np.float64)
     classes = np.asarray(classes)
     sides = np.asarray(sides, dtype=np.float64)
     mods = np.asarray(mods)
+    contrasts = np.asarray(contrasts, dtype=np.float64)
     small = sides < SMALL_SIDE
+    stands_out = np.digitize(contrasts, CONTRAST_EDGES)
 
     def bucket(mask: np.ndarray) -> dict:
         tiny = mask & small
@@ -165,6 +182,17 @@ def score(model, split, batch: int, device: str, progress=None,
                       for c in sorted(set(classes.tolist()))},
         "per_modality": {m: bucket(mods == m)
                          for m in sorted(set(mods.tolist()))},
+        # The breakdown the mean hides: an encoder that reads a target off its
+        # brightness scores well everywhere the target is bright, and a test set
+        # is mostly that. Split by how far each target stands out from the
+        # ground beside it and the two halves of the model become visible.
+        "per_contrast": {name: {**bucket(stands_out == i),
+                                "median_contrast":
+                                    float(np.median(contrasts[stands_out == i]))
+                                    if (stands_out == i).any() else float("nan")}
+                         for i, name in enumerate(CONTRAST_NAMES)},
+        "median_contrast": (float(np.median(contrasts)) if contrasts.size
+                            else float("nan")),
     }
 
 
@@ -185,6 +213,15 @@ def report(result: dict) -> str:
                 f"  {name}: {row['instances']} instances  "
                 f"mean IoU {row['mean_iou']:.4f}  IoU>=0.5 {row['iou_50']:.3f}  "
                 f"small {row['small_instances']} at {row['small_mean_iou']:.4f}")
+    contrast = result.get("per_contrast", {})
+    if contrast:
+        lines += ["", "| target against its ground | instances | mean IoU | "
+                      ">=0.5 | small | small IoU |", "|---|---:|---:|---:|---:|---:|"]
+        for name, row in contrast.items():
+            lines.append(
+                f"| {name} | {row['instances']} | {row['mean_iou']:.4f} | "
+                f"{row['iou_50']:.3f} | {row['small_instances']} | "
+                f"{row['small_mean_iou']:.4f} |")
     lines += [
         "",
         "| dataset / class | instances | mean IoU |",

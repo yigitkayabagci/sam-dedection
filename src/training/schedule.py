@@ -99,11 +99,25 @@ class Loop:
     stream: Callable
     loss: Callable
     val_loss: Callable | None = None
+    val_stream: Callable | None = None
 
     @property
     def scoring(self) -> Callable:
         """What `validate` calls: `val_loss` if a mode set one, else `loss`."""
         return self.val_loss or self.loss
+
+    @property
+    def batches(self) -> Callable:
+        """What `validate` pulls on: `val_stream` if a mode set one, else `stream`.
+
+        The same argument `val_loss` makes, one layer out. A training stream is
+        allowed to be random -- photometric augmentation collapses a window's
+        contrast on a coin flip -- and the validation number is not: it selects
+        which epoch's weights are kept, so a run whose validation windows were
+        augmented differently each epoch would be choosing on the draw as much
+        as on the model.
+        """
+        return self.val_stream or self.stream
 
 
 def _clip_stream(split: Split, batch: int, seed: int | None, limit: int | None,
@@ -123,7 +137,8 @@ CLIPS = Loop(stream=_clip_stream, loss=_clip_loss)
 
 def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
            jitter: float = 0.0,
-           generator: "torch.Generator | None" = None) -> Loop:
+           generator: "torch.Generator | None" = None,
+           augment=None) -> Loop:
     """The image-mode `Loop`, imported lazily.
 
     `image_loop` pulls in `aerial`, which pulls in nothing heavy but does bind
@@ -142,10 +157,18 @@ def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
     number is that a change in it is the model, and a random prompt would put a
     second moving part into a number that selects checkpoints. It also keeps
     the number comparable to every run taken before this knob existed.
+
+    `augment` hardens the *training* windows only -- `photometric.augmenter`
+    builds one -- and `val_stream` is deliberately the plain stream, for the
+    reason `Loop.batches` gives.
     """
     from .image_loop import image_losses, stream
 
-    return Loop(stream=stream,
+    def training_stream(*args, **kwargs):
+        return stream(*args, augment=augment, **kwargs)
+
+    return Loop(stream=training_stream if augment is not None else stream,
+                val_stream=stream,
                 loss=lambda model, batch: image_losses(
                     model, batch, anchor=anchor, anchor_weight=anchor_weight,
                     prompt=prompt, jitter=jitter, generator=generator),
@@ -169,8 +192,8 @@ def validate(
     """
     losses = []
     with torch.no_grad():
-        for batch in loop.stream(split, schedule.batch, 1, schedule.val_batches,
-                                 device, schedule.workers, schedule.depth):
+        for batch in loop.batches(split, schedule.batch, 1, schedule.val_batches,
+                                  device, schedule.workers, schedule.depth):
             with _autocast(device):
                 losses.append(float(loop.scoring(model, batch)[0]))
     return float(np.mean(losses)) if losses else float("nan")
