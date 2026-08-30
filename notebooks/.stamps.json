@@ -11,14 +11,16 @@
  "16_vtuav_rgb_pool.ipynb": "9ccb0aa318",
  "17_vtuav_thermal_pool.ipynb": "c72d3a8366",
  "18_kust4k_mask_pool.ipynb": "106871adf9",
- "19_thermal_stage_b_pool.ipynb": "11eac08276",
- "20_thermal_stage_b_pool_rgb.ipynb": "946055c81c",
+ "19_thermal_stage_b_pool.ipynb": "9e1102d5a0",
+ "20_thermal_stage_b_pool_rgb.ipynb": "81f6b65b60",
  "21_pool_data_readiness.ipynb": "f0f63e49a4",
- "22_thermal_deep.ipynb": "2c27d07481",
- "23_thermal_deep_lora.ipynb": "ad500cc3e5",
+ "22_thermal_deep.ipynb": "8b886fcaa8",
+ "23_thermal_deep_lora.ipynb": "e02e884486",
  "24_vtuav_lt_rgb_pool.ipynb": "3424bae860",
  "25_vtuav_lt_thermal_pool.ipynb": "ab9cf7818d",
  "26_segfly_instance_audit.ipynb": "3c121796aa",
- "27_thermal_deep_rgb_aerovis.ipynb": "a2544c34ac",
- "28_rgb_deep_aerovis.ipynb": "f9b4c4770c"
+ "27_thermal_deep_rgb_aerovis.ipynb": "de1eef48ea",
+ "28_rgb_deep_aerovis.ipynb": "1e9e8b830c",
+ "29_pretrain_thermal_aerial.ipynb": "af21750f5d",
+ "30_pretrain_rgb_aerial.ipynb": "d2932a7fc3"
 }

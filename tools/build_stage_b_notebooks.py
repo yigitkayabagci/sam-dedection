@@ -190,6 +190,11 @@ from pathlib import Path
 # The gates and the photometric augmentation, off by default: 19 and 20 exist
 # to be compared with numbers taken before either knob did, and a run whose data
 # and whose windows both changed cannot be read against them.
+# How many frames a pool may contribute. AeroVIS is the only one that needs a
+# cap in a stage-B run -- 39 943 frames of it beside 2 866 of HIT-UAV is not a
+# mixture -- and the RGB pretrain, where it *is* the run, raises it.
+CAPS = {"POOL_LIMITS": '{"aerovis_train": 10000, "aerovis_heldout": 1500}'}
+
 PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
          "CONTRAST_COLLAPSE": "0.0", "POLARITY_FLIP": "0.0",
          "GAMMA_JITTER": "0.0", "SENSOR_NOISE": "0.0"}
@@ -212,11 +217,11 @@ PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
 #
 # The right value is per-pool and the run now prints what it needs to choose:
 # read the per-band table in the evaluation before turning these up.
-HARDER = {"MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.25",
+HARDER = {**CAPS, "MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.25",
           "CONTRAST_COLLAPSE": "0.25", "POLARITY_FLIP": "0.25",
           "GAMMA_JITTER": "0.25", "SENSOR_NOISE": "2.0"}
 
-INERT = {**PLAIN, "REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
+INERT = {**PLAIN, **CAPS, "REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
          "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
          "REFERENCE_CHECKPOINT": '""',
@@ -348,6 +353,104 @@ ARMS = {
         "METHOD": '"lora"',
         "REFERENCE_CHECKPOINT": '""',
     },
+    # ----------------------------------------------------------------
+    # The two pretrains: everything harvested, in the modality it belongs to.
+    # ----------------------------------------------------------------
+    #
+    # 22 and 23 are experiments -- one question each, held-out grades, floors
+    # that fail the run when a pool arrives in name only. These two are the
+    # other job: take every pool of one modality and spend a long schedule on
+    # them, to produce the checkpoint the experiments start from.
+    #
+    # **Is putting everything in sensible?** For one modality, with weights,
+    # yes; blindly, no, and the numbers say why. The thermal side spans two
+    # orders of magnitude between sources -- HIT-UAV is 2 866 frames, VTUAV is
+    # about forty thousand -- so an unweighted pool is a VTUAV model with a
+    # rounding error of HIT-UAV in it, and VTUAV is one sensor over one set of
+    # scenes. `CLASS_WEIGHTS` is what makes "all of it" mean all of it rather
+    # than the biggest of it.
+    #
+    # Mixing the two modalities is the thing not to do here. 27 exists to
+    # measure that question honestly; a pretrain that quietly blends them
+    # produces a checkpoint neither arm can be compared against.
+    "29_pretrain_thermal_aerial.ipynb": {
+        **HARDER,
+        # Long and patient: this is the run whose output everything else
+        # starts from, so it gets the budget and the early stop rather than a
+        # fixed number of epochs.
+        "EPOCHS": "[3, 40]",
+        "PATIENCE": "5",
+        "STEPS": "1000",
+        # The harvests differ in how hard their gates were, so the run re-cuts
+        # them to one standard rather than trusting six.
+        "MIN_BOX_IOU": "0.75",
+        "EXTRA_DATASETS": SEGFLY,
+        # SegFly enters as its own drawn semantic maps, not as the pool
+        # harvested from them; the VTUAV long-term pools are out by request.
+        "SKIP_POOLS": '["segfly_thermal", "vtuav_lt"]',
+        "MODALITIES": '["thermal"]',
+        "RUN": '"pretrain_thermal_aerial"',
+        "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                       'pretrain_thermal_aerial"'),
+        "REQUIRE_POOLS": REQUIRED,
+        "CLASS_WEIGHTS": THERMAL_WEIGHTS,
+        "LR_HEAD": "0",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}'),
+        "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": '""',
+    },
+    # The RGB pretrain, separate on purpose and not a variant of the one above.
+    # AeroVIS alone is 39 943 frames and 1 095 567 instances (VisDrone, UAVDT
+    # and SeaDronesSee re-labelled), held out **by sequence** -- 18 sequences
+    # and 7 978 frames that no training window can reach -- which is the one
+    # clean drawn grade in this repo that is not thermal.
+    #
+    # `POOL_LIMITS` in cell 1 caps AeroVIS at 10 000 frames for the stage-B
+    # arms, where it is a side dish. Here it is the meal: raise that cap in the
+    # settings cell if the disk and the schedule allow, and the run prints what
+    # the cap cost it.
+    "30_pretrain_rgb_aerial.ipynb": {
+        **HARDER,
+        "EPOCHS": "[3, 40]",
+        "PATIENCE": "5",
+        "STEPS": "1000",
+        "MIN_BOX_IOU": "0.75",
+        # No thermal drawn grade in an RGB run: AeroVIS's held-out sequences
+        # are the grade, and they are pool frames rather than drawn maps.
+        "EVAL_DRAWN": "None",
+        "EXTRA_DATASETS": "[]",
+        # VisDrone is inside AeroVIS; a VisDrone pool beside it would put the
+        # held-out sequences back into training through another annotation.
+        "SKIP_POOLS": '["visdrone", "vtuav_lt", "segfly_thermal"]',
+        "MODALITIES": '["rgb"]',
+        "RUN": '"pretrain_rgb_aerial"',
+        "MIRROR_DIR": ('"/content/drive/MyDrive/edgetam-stage-b/'
+                       'pretrain_rgb_aerial"'),
+        "REQUIRE_POOLS": REQUIRED_AEROVIS,
+        # The cap the stage-B arms put on AeroVIS is lifted here, which is the
+        # whole difference between a side dish and the meal: 39 943 frames and
+        # 1 095 567 instances are what the release actually holds, and 10 000
+        # of them was a number chosen to keep it from swamping a thermal run.
+        "POOL_LIMITS": '{"aerovis_train": 40000, "aerovis_heldout": 3000}',
+        # A polarity flip is a *thermal* sensor convention. `harden` already
+        # refuses to apply it to a colour window, so this is 0 for honesty
+        # rather than for effect: a config that reads 0.25 would say the run
+        # does something it cannot.
+        "POLARITY_FLIP": "0.0",
+        # Cars are 400 450 of AeroVIS's instances and `vehicle` another
+        # 307 555; without thinning them the run learns "a target is a car"
+        # before it learns anything else.
+        "CLASS_WEIGHTS": ('{"car": 0.5, "vehicle": 0.5, "truck": 0.7,\n'
+                          '                 "pool/aerovis_train": 0.9}'),
+        "LR_HEAD": "0",
+        "LR_NECK": "1e-4",
+        "LR_TRUNK": "1e-4",
+        "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV"}'),
+        "METHOD": '"finetune"',
+        "REFERENCE_CHECKPOINT": '""',
+    },
     # The direct answer to 22's next question: keep its schedule, optimiser,
     # gates, thermal floors and drawn thermal grade, but let RGB pools into the
     # same batches and require AeroVIS to be present. VisDrone is excluded
@@ -447,7 +550,7 @@ POOL_ROLE   = "all"
 POOL_ROLES  = {"kaggle_uav_thermal": "train", "aerovis_train": "train",
                "aerovis_heldout": "eval"}
 POOL_MODALITIES = {"aerovis_train": "rgb", "aerovis_heldout": "rgb"}
-POOL_LIMITS = {"aerovis_train": 10000, "aerovis_heldout": 1500}
+POOL_LIMITS = {{POOL_LIMITS}}
 POOL_ZIP_MAX_MB = 2048
 MIN_BOX_IOU = {{MIN_BOX_IOU}}
 POOL_MIN_BOX_IOU = {}
@@ -1031,6 +1134,8 @@ for _row in PLAN:
               f"independent facts, and only the disk holds the second.")
         _row["images"] = str(_found)
 
+import numpy as np
+
 from src.training.aerial import IMAGE_SUFFIXES, InstanceGates, list_frames, rebalance
 from src.training.datasets import parse
 from src.training.pool_reader import Relocator, why_no_image
@@ -1103,6 +1208,46 @@ for _spec, _spec_root in ([(_s, DATA_ROOT) for _s in EXTRA_DATASETS]
         _kept, _thin = rebalance(_index, CLASS_WEIGHTS, seed=SEED)
         print(f"   CLASS_WEIGHTS thins it to {len(_kept)} frames / "
               f"{_thin['instances']['after']} instances before training sees it")
+
+print()
+try:
+    import torch
+
+    from src.training.aerial import sample_windows
+    from src.training.image_loop import collate, instance_contrast
+    from src.training.pool_reader import index_pool, parse_pool
+
+    print(f"{'source':<28}{'windows':>8}{'median':>8}{'<1':>7}{'1-3':>7}{'>3':>7}"
+          f"   how far its targets stand out")
+    for _row in PLAN:
+        try:
+            _probe = parse_pool(f"{_row['dir']}:{_row['images']}:"
+                                f"{_row['modality']}:train", AUDIT_GATES)
+            _slice = index_pool(_probe.pool, _probe.images, _probe.modality,
+                                "train", AUDIT_GATES, _row["pool"], limit=48,
+                                workers=WORKERS)
+            _windows = sample_windows(_slice, size=SIZE, per_image=1, seed=SEED)[:24]
+            if not _windows:
+                continue
+            _scores = instance_contrast(collate(_windows, "cpu"))
+        except Exception as _contrast_error:
+            print(f"{_row['pool']:<28}   not measured: "
+                  f"{type(_contrast_error).__name__}")
+            continue
+        if not len(_scores):
+            continue
+        _bands = [float((( _scores >= _lo) & (_scores < _hi)).mean())
+                  for _lo, _hi in ((0, 1), (1, 3), (3, 1e9))]
+        print(f"{_row['pool']:<28}{len(_scores):>8}{float(np.median(_scores)):>8.2f}"
+              f"{_bands[0]:>7.0%}{_bands[1]:>7.0%}{_bands[2]:>7.0%}")
+    print("   the signal-to-clutter ratio of each pool's own targets, on a "
+          "sample of its windows. It is what decides whether the photometric "
+          "knobs in cell 1 have anything to work on: a source already sitting "
+          "under 1 has no easy end left to collapse, and one sitting above 3 "
+          "is where `the bright blob` is still a free answer. HIT-UAV measures "
+          "0.91 on its own annotations, so do not assume.")
+except Exception as _audit_error:
+    print("per-source contrast not measured:", _audit_error)
 
 subprocess.run(["df", "-h", "/content"], check=False)
 ''')

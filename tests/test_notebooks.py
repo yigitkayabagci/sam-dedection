@@ -189,6 +189,24 @@ class TestEveryNotebook(unittest.TestCase):
                 self.assertTrue((ROOT / "tools" / f"{builder}.py").is_file(),
                                 f"{name} points at tools/{builder}.py")
 
+    def test_no_generated_notebook_ships_an_unsubstituted_placeholder(self):
+        """`{{NAME}}` left in a cell is valid Python, which is the problem.
+
+        The builders template their settings cell with `{{KEY}}` and replace
+        each one per notebook. A key that no arm supplies survives into the
+        notebook -- and `X = {{KEY}}` parses fine (a set containing a set), so
+        the syntax check two tests down says nothing and the failure surfaces
+        as an unhashable-type error an hour into a Colab run.
+        """
+        import json
+
+        for path in sorted((ROOT / "notebooks").glob("*.ipynb")):
+            cells = json.loads(path.read_text())["cells"]
+            left = [line for cell in cells for line in cell["source"]
+                    if "{{" in line and "}}" in line]
+            with self.subTest(notebook=path.name):
+                self.assertEqual(left, [], f"{path.name} kept a placeholder")
+
     def test_the_comment_free_notebook_stays_comment_free(self):
         """15 was asked for as cells only -- no markdown, no comments.
 
