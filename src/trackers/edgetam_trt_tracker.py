@@ -89,6 +89,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         calibration_stride: int = 1,
         samurai: dict | None = None,
         sam2long: dict | None = None,
+        ego_motion: bool | dict | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -101,6 +102,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             image_size=image_size,
             samurai=samurai,
             sam2long=sam2long,
+            ego_motion=ego_motion,
         )
         self.engine_paths = {
             # `engine_path` is the pre-multi-engine config key for the image encoder.

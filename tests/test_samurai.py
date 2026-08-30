@@ -387,6 +387,182 @@ class TestConfig(unittest.TestCase):
         self.assertAlmostEqual(cfg.memory_iou, 0.4)
 
 
+class TestEgoMotion(unittest.TestCase):
+    """The term published SAMURAI has no place for, and a drone needs most.
+
+    Its filter lives in image coordinates. On a moving camera a target that
+    never moved appears to accelerate, a constant-velocity model learns that
+    acceleration, and the frame the camera changes what it is doing the filter
+    predicts a jump -- which is then used to *veto* candidates, so the error
+    does not stay in the filter.
+    """
+
+    @staticmethod
+    def _run(shifts, compensate: bool):
+        """A target that is still on the ground while the camera pans."""
+        kf = KalmanBoxTracker()
+        box = np.array([100.0, 100.0, 120.0, 110.0])
+        kf.initiate(box)
+        travelled = 0.0
+        for step in shifts:
+            travelled += step
+            kf.predict((step, 0.0) if compensate else None)
+            kf.update(box + np.array([travelled, 0.0, travelled, 0.0]))
+        return kf, box, travelled
+
+    def test_a_camera_that_starts_moving_is_predicted_immediately(self):
+        still = [0.0] * 5
+        panning = [-6.0] * 4
+        errors = {}
+        for compensate in (True, False):
+            kf, box, travelled = self._run(still + panning, compensate)
+            predicted = kf.predict((-6.0, 0.0) if compensate else None)
+            errors[compensate] = abs(float(predicted[0]) - (box[0] + travelled - 6.0))
+        # The compensated filter is handed the camera's motion, so it is right
+        # on the first frame of the pan. The uncompensated one has to learn it
+        # through its velocity state, and is still several pixels behind after
+        # four -- which on a 20-pixel target is a quarter of its own width, and
+        # is used to score candidates.
+        self.assertLess(errors[True], 1.0)
+        self.assertGreater(errors[False], 3 * errors[True])
+
+    def test_the_compensated_filter_is_the_closer_one_when_the_pan_stops(self):
+        """The harder half: the camera stops, and an uncompensated filter keeps
+        predicting the motion it learned."""
+        panning = [-6.0] * 8
+        errors = {}
+        for compensate in (True, False):
+            kf, box, travelled = self._run(panning, compensate)
+            predicted = kf.predict((0.0, 0.0) if compensate else None)
+            errors[compensate] = abs(float(predicted[0]) - (box[0] + travelled))
+        self.assertLess(errors[True], errors[False])
+        self.assertLess(errors[True], 1.5)
+
+    def test_no_shift_is_the_behaviour_every_earlier_run_had(self):
+        kf = KalmanBoxTracker()
+        kf.initiate(np.array([0.0, 0.0, 20.0, 20.0]))
+        kf.predict()
+        before = kf.predicted_box().copy()
+        kf.reset()
+        kf.initiate(np.array([0.0, 0.0, 20.0, 20.0]))
+        kf.predict(None)
+        np.testing.assert_allclose(kf.predicted_box(), before)
+
+    def test_a_measured_shift_widens_the_position_covariance(self):
+        """It is a measurement off pixels, not an odometer, so the filter is
+        told to trust it a little less than it trusts its own model."""
+        kf = KalmanBoxTracker()
+        kf.initiate(np.array([100.0, 100.0, 120.0, 110.0]))
+        kf.predict()
+        tight = kf.covariance[0, 0]
+        kf.reset()
+        kf.initiate(np.array([100.0, 100.0, 120.0, 110.0]))
+        kf.predict((-20.0, 0.0))
+        self.assertGreater(kf.covariance[0, 0], tight)
+
+
+class TestShiftPlumbing(unittest.TestCase):
+    """The shift arrives normalised and is used in the mask grid's pixels.
+
+    Those are two different resolutions -- a decoded 1280x720 frame and a
+    192x192 mask grid at image_size 768 -- and a fraction is the one form that
+    needs no agreement between the caller and this module about either.
+    """
+
+    def test_a_fraction_becomes_the_mask_grids_own_pixels(self):
+        import torch
+
+        samurai = Samurai(SamuraiConfig())
+        samurai.shift = (-0.02, 0.01)
+        logits = torch.zeros(1, 3, 192, 192)
+        self.assertEqual(samurai._shift_for(logits), (-3.84, 1.92))
+
+    def test_the_same_fraction_scales_with_the_resolution(self):
+        import torch
+
+        samurai = Samurai(SamuraiConfig())
+        samurai.shift = (-0.02, 0.0)
+        at_512 = samurai._shift_for(torch.zeros(1, 3, 128, 128))[0]
+        at_768 = samurai._shift_for(torch.zeros(1, 3, 192, 192))[0]
+        self.assertAlmostEqual(at_768 / at_512, 192 / 128, places=6)
+
+    def test_no_measurement_is_no_control_input(self):
+        import torch
+
+        samurai = Samurai(SamuraiConfig())
+        self.assertIsNone(samurai._shift_for(torch.zeros(1, 3, 128, 128)))
+
+    def test_a_reset_forgets_the_last_video_s_camera(self):
+        samurai = Samurai(SamuraiConfig())
+        samurai.shift = (0.5, 0.5)
+        samurai.reset()
+        self.assertIsNone(samurai.shift)
+
+
+class TestInstalledShiftSource(unittest.TestCase):
+    """`install` asks for the shift where the frame number is known.
+
+    A fake predictor, because the point under test is *when* the control input
+    reaches the filter, not what a network does with it: the memory hook is the
+    one place that runs before the SAM head on every frame, so a shift set
+    there belongs to the frame about to be scored rather than the one after it.
+    """
+
+    class FakePredictor:
+        num_maskmem = 7
+        memory_temporal_stride_for_eval = 1
+
+        def __init__(self):
+            class Decoder:
+                def forward(self, *args, **kwargs):
+                    return None, None, None, None
+            self.sam_mask_decoder = Decoder()
+            self.seen = []
+
+        def _prepare_memory_conditioned_features(self, frame_idx, *args, **kwargs):
+            self.seen.append(frame_idx)
+            return "features"
+
+    def test_the_frame_being_scored_is_the_frame_asked_about(self):
+        from src.trackers.samurai import install
+
+        predictor = self.FakePredictor()
+        asked = []
+
+        def shift_for(index):
+            asked.append(index)
+            return (0.01 * index, 0.0)
+
+        samurai = install(predictor, SamuraiConfig(), shift_for=shift_for)
+        predictor._prepare_memory_conditioned_features(
+            7, False, None, None, None, {"non_cond_frame_outputs": {}}, 10)
+        self.assertEqual(asked, [7])
+        self.assertEqual(samurai.frame_idx, 7)
+        self.assertEqual(samurai.shift, (0.07, 0.0))
+
+    def test_no_source_leaves_the_filter_uncompensated(self):
+        from src.trackers.samurai import install
+
+        predictor = self.FakePredictor()
+        samurai = install(predictor, SamuraiConfig())
+        predictor._prepare_memory_conditioned_features(
+            3, False, None, None, None, {"non_cond_frame_outputs": {}}, 10)
+        self.assertIsNone(samurai.shift)
+
+    def test_reverse_tracking_takes_no_control_input(self):
+        """The shift is measured forwards. Handing it to a filter running
+        backwards would push the prediction the wrong way."""
+        from src.trackers.samurai import install
+
+        predictor = self.FakePredictor()
+        samurai = install(predictor, SamuraiConfig(),
+                          shift_for=lambda index: (0.05, 0.0))
+        predictor._prepare_memory_conditioned_features(
+            4, False, None, None, None, {"non_cond_frame_outputs": {}}, 10,
+            track_in_reverse=True)
+        self.assertIsNone(samurai.shift)
+
+
 class TestFrameRecord(unittest.TestCase):
     def test_acceptability_is_a_conjunction(self):
         cfg = SamuraiConfig()

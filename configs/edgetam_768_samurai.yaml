@@ -1,0 +1,74 @@
+# EdgeTAM at 768x768 with SAMURAI motion-aware memory, ego-motion compensated.
+#
+# This is configs/edgetam_768.yaml plus the two inference-time policies that
+# cost no training and no engine change, aimed at one failure chain that was
+# observed on a real recording rather than at a benchmark:
+#
+#   contrast drops -> the mask degrades -> object_score_logits goes negative ->
+#   EdgeTAM writes a constant "no object" vector into the memory bank instead
+#   of an appearance -> the next seven frames read that back -> the target is
+#   lost, and the box that comes back covers a field.
+#
+# WHY 768. Read configs/edgetam_768.yaml first: 768 = 3 * 2^8, 768/16 = 48, and
+# 48 is a multiple of 16, which is what the spatial perceiver's unpadded 16x16
+# windowing requires (`_hydra_overrides.check_image_size` enforces it now, so a
+# size like 640 or 896 is refused at config-read time rather than crashing in
+# the first forward pass). 768 is for footage that carries the detail -- 720p
+# and better. On 640x512 thermal it upsamples, and src/trackers/adaptive.py is
+# the cheaper way to magnify a small target.
+#
+# WHAT SAMURAI COSTS HERE. Nothing that shows up in a profile: one
+# synchronisation per frame moving a few dozen bytes (three boxes, three IoUs
+# and an object score per row), an 8-state Kalman update in numpy, and a
+# dictionary rebuild only on the frames where the memory gate actually rejects
+# something. No engine changes shape, because everything it touches is the
+# memory bookkeeping this project deliberately left in PyTorch
+# (docs/tensorrt_fp16.md). The ONNX export path never installs it at all.
+#
+# WHAT `ego_motion` ADDS OVER PUBLISHED SAMURAI. SAMURAI's Kalman filter lives
+# in image coordinates and has no term for the camera's own motion. On a drone
+# that is the common case, not an edge case: a degree of yaw translates the
+# whole scene, a target that never moved appears to accelerate, the
+# constant-velocity model learns that acceleration, and the frame the camera
+# changes what it is doing the filter predicts a jump -- which it then uses to
+# *score* candidate masks, so the error does not stay inside the filter.
+#
+# `src/trackers/stabiliser.py` measures the background's own displacement
+# (sparse Lucas-Kanade on a grid with the target's neighbourhood excluded,
+# robust median, phase-correlation fallback, and an honest "no measurement" on
+# a frame with no texture) and hands it in as a control input. Cost: one
+# reduced-size greyscale decode and one sparse flow per frame -- around a
+# millisecond beside an encoder that takes tens.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+image_size: 768
+device: cuda
+precision: bfloat16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+samurai:
+  enabled: true
+  # How much the motion model may overrule the IoU head when choosing among the
+  # three candidate masks. Small on purpose: appearance is usually right, and
+  # the motion score is here to break ties and to veto a candidate that jumped
+  # across the frame.
+  kf_weight: 0.15
+  # The filter has to agree with the tracker for this many frames before it is
+  # trusted. One initialised on a single box has no velocity estimate.
+  stable_frames: 15
+  stable_iou: 0.3
+  # The memory gate, and the half that matters here: a frame enters the bank
+  # only if all three agree it was a good one. memory_obj_score: 0.0 is exactly
+  # the threshold at which EdgeTAM starts writing no_obj_ptr.
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0
+
+ego_motion:
+  # 4 decodes the JPEG at a quarter side directly (fewer coefficients, not a
+  # resize after the fact), which is plenty for a translation and is the
+  # difference between "free" and "a millisecond". The answer is returned as a
+  # fraction of the frame, so this number never has to agree with image_size.
+  reduce: 4

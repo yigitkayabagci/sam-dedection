@@ -363,6 +363,69 @@ def match_template(frame: np.ndarray, template: np.ndarray,
     return box, float(best)
 
 
+class FrameMotion:
+    """The camera's displacement per frame, read off a directory of frames.
+
+    One decoded frame is held at a time and each is read once, so a whole video
+    costs one extra grayscale decode per frame and one sparse flow -- around a
+    millisecond beside a network that takes tens. The decode is done at a
+    reduced size on purpose (`cv2.IMREAD_REDUCED_GRAYSCALE_*`, which decodes
+    fewer coefficients rather than resizing after the fact) and the answer is
+    returned as a **fraction of the frame**, so the reduction cancels and the
+    consumer never has to know which resolution was decoded.
+
+    Frames are asked for in order but not necessarily every one of them, and a
+    gap is not an error: a shift measured over two frames is still the camera's
+    displacement between the two frames the caller is comparing.
+    """
+
+    def __init__(self, frames_dir, reduce: int = 4,
+                 suffixes: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp")):
+        from pathlib import Path as _Path
+
+        self.paths = sorted(p for p in _Path(frames_dir).iterdir()
+                            if p.suffix.lower() in suffixes)
+        self.reduce = int(reduce)
+        self._index: int | None = None
+        self._frame: np.ndarray | None = None
+
+    def frame(self, index: int) -> np.ndarray | None:
+        """The greyscale frame at `index`, decoded small, or None if unreadable."""
+        import cv2
+
+        if not 0 <= index < len(self.paths):
+            return None
+        flag = {1: cv2.IMREAD_GRAYSCALE, 2: cv2.IMREAD_REDUCED_GRAYSCALE_2,
+                4: cv2.IMREAD_REDUCED_GRAYSCALE_4,
+                8: cv2.IMREAD_REDUCED_GRAYSCALE_8}.get(self.reduce,
+                                                       cv2.IMREAD_GRAYSCALE)
+        image = cv2.imread(str(self.paths[index]), flag)
+        return None if image is None else image
+
+    def shift(self, index: int, exclude=None) -> tuple[float, float] | None:
+        """`(dx, dy)` from the previously asked-for frame to `index`, normalised.
+
+        None for the first frame of a video, for an unreadable one, and for a
+        pair whose sizes disagree -- all three are "no measurement", which a
+        Kalman filter should be told rather than handed a zero it would treat
+        as a measured standstill.
+        """
+        current = self.frame(index)
+        if current is None:
+            return None
+        previous, before = self._frame, self._index
+        self._frame, self._index = current, index
+        if previous is None or before is None or previous.shape != current.shape:
+            return None
+        dx, dy = estimate_shift(previous, current, exclude)
+        height, width = current.shape[:2]
+        return dx / float(width), dy / float(height)
+
+    def reset(self) -> None:
+        self._index = None
+        self._frame = None
+
+
 # --------------------------------------------------------------------------
 # The guard
 # --------------------------------------------------------------------------
@@ -604,7 +667,8 @@ def _grown(box, scale: float, width: int, height: int) -> np.ndarray:
                      min(centre[1] + half_h, height)], dtype=np.float64)
 
 
-__all__ = ["Decision", "GuardConfig", "LOST", "REACQUIRED", "STATES", "SUSPECT",
+__all__ = ["Decision", "FrameMotion", "GuardConfig", "LOST", "REACQUIRED",
+           "STATES", "SUSPECT",
            "Stabiliser", "TRACKING", "area_of", "aspect_of", "box_of",
            "centre_of", "estimate_shift", "local_contrast", "match_template",
            "size_of"]

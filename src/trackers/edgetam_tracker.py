@@ -94,6 +94,7 @@ class EdgeTAMTracker(VideoTracker):
         image_size: int | None = None,
         samurai: dict | None = None,
         sam2long: dict | None = None,
+        ego_motion: bool | dict | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -130,16 +131,58 @@ class EdgeTAMTracker(VideoTracker):
         # pathway. Off unless asked for. The two compose: SAMURAI chooses
         # within a pathway, SAM2Long chooses between them.
         self.sam2long_config = _block_config(sam2long, "sam2long")
+        # Ego-motion compensation for SAMURAI's filter (`stabiliser.FrameMotion`).
+        # Published SAMURAI has no term for the camera's own motion: its filter
+        # is in image coordinates, so on a drone a target that never moved
+        # appears to accelerate and the frame the camera changes what it is
+        # doing the filter predicts a jump -- which it then uses to score
+        # candidates. Measuring the background's displacement and handing it in
+        # as a control input costs one reduced-size grayscale decode and one
+        # sparse optical flow per frame, and needs no weights.
+        #
+        # Off unless asked for, and it does nothing at all without SAMURAI:
+        # there is no filter to correct.
+        self.ego_motion = (dict(ego_motion) if isinstance(ego_motion, dict)
+                           else ({} if ego_motion else None))
+        self._motion = None
         self._samurai = None
         self._sam2long = None
         self._predictor = None
         self._state = None
+        self._logit_side: tuple[int, int] | None = None
+
+    def _shift_for(self, frame_idx: int):
+        """The camera's normalised displacement for the frame about to be scored.
+
+        Read through the tracker rather than bound at install time because the
+        frame source changes with every video while the patched predictor does
+        not: `install` is called once, `prepare` is called per sequence.
+        """
+        if self._motion is None:
+            return None
+        box = None
+        if self._samurai is not None and self._samurai.states:
+            # Excluding the target from the flow grid needs the target's box in
+            # *frame* pixels; the filter holds it in the mask grid's. Both are
+            # the same picture at different scales, so the fraction is what
+            # travels between them.
+            predicted = self._samurai.states[0].kalman.predicted_box()
+            if predicted is not None and self._logit_side:
+                frame = self._motion.frame(frame_idx)
+                if frame is not None:
+                    scale_x = frame.shape[1] / float(self._logit_side[0])
+                    scale_y = frame.shape[0] / float(self._logit_side[1])
+                    box = predicted * np.array([scale_x, scale_y, scale_x, scale_y])
+        return self._motion.shift(int(frame_idx), box)
 
     def _install_samurai(self) -> None:
         if self.samurai_config is not None and self._samurai is None:
             from .samurai import install
 
-            self._samurai = install(self._predictor, self.samurai_config)
+            self._samurai = install(self._predictor, self.samurai_config,
+                                    shift_for=(self._shift_for
+                                               if self.ego_motion is not None
+                                               else None))
         if self.sam2long_config is not None and self._sam2long is None:
             from .sam2long import install as install_sam2long
 
@@ -188,6 +231,12 @@ class EdgeTAMTracker(VideoTracker):
 
     def prepare(self, frames_dir: str | Path) -> None:
         self._ensure_predictor()
+        if self.ego_motion is not None:
+            from .stabiliser import FrameMotion
+
+            self._motion = FrameMotion(frames_dir,
+                                       **{k: v for k, v in self.ego_motion.items()
+                                          if k in ("reduce", "suffixes")})
         self._install_samurai()
         with self._inference_ctx():
             self._state = self._predictor.init_state(
@@ -247,6 +296,8 @@ class EdgeTAMTracker(VideoTracker):
             for frame_idx, obj_ids, mask_logits in self._predictor.propagate_in_video(self._state):
                 # mask_logits: [N, 1, H, W] on the model's device.
                 # .float() is important when autocast returned bf16/fp16 logits.
+                self._logit_side = (int(mask_logits.shape[-1]),
+                                    int(mask_logits.shape[-2]))
                 logits_np = mask_logits.detach().float().cpu().numpy()
                 if self._sam2long is not None:
                     masks = {
@@ -272,4 +323,7 @@ class EdgeTAMTracker(VideoTracker):
             self._samurai.reset()
         if self._sam2long is not None:
             self._sam2long.reset()
+        if self._motion is not None:
+            self._motion.reset()
+        self._logit_side = None
         self._state = None

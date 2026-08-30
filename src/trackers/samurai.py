@@ -94,13 +94,35 @@ class KalmanBoxTracker:
         self.mean = np.r_[measurement, np.zeros(4)]
         self.covariance = np.diag(np.square(self._std(measurement[3], initial=True)))
 
-    def predict(self) -> np.ndarray | None:
-        """Advance one frame and return the predicted box, or None if unstarted."""
+    def predict(self, shift: tuple[float, float] | None = None) -> np.ndarray | None:
+        """Advance one frame and return the predicted box, or None if unstarted.
+
+        `shift` is the **camera's** own displacement between the two frames, in
+        the same pixels the boxes are in, and it is the one thing published
+        SAMURAI has no term for. Its filter lives in image coordinates, so on a
+        drone -- where a degree of yaw translates the whole scene -- a target
+        that never moved appears to accelerate, the constant-velocity model
+        learns that acceleration, and the frame the camera stops it predicts a
+        jump. Feeding the background's measured motion in as a control input
+        puts the prediction back in the frame the ground sits still in, which
+        is where a constant-velocity assumption is true.
+
+        The estimate has its own error, so it also widens the position
+        covariance a little rather than being trusted as exact -- a control
+        input measured from pixels is a measurement, not an odometer.
+        """
         if self.mean is None:
             return None
         noise = np.diag(np.square(self._std(self.mean[3])))
         self.mean = self._motion @ self.mean
         self.covariance = self._motion @ self.covariance @ self._motion.T + noise
+        if shift is not None:
+            dx, dy = float(shift[0]), float(shift[1])
+            self.mean[0] += dx
+            self.mean[1] += dy
+            slack = (0.15 * (abs(dx) + abs(dy))) ** 2
+            self.covariance[0, 0] += slack
+            self.covariance[1, 1] += slack
         return self.predicted_box()
 
     def update(self, box: np.ndarray) -> None:
@@ -283,7 +305,8 @@ class MotionAwareMemory:
 
     # -- mask selection ---------------------------------------------------
 
-    def select(self, boxes: np.ndarray, ious: np.ndarray) -> "Selection":
+    def select(self, boxes: np.ndarray, ious: np.ndarray,
+               shift: tuple[float, float] | None = None) -> "Selection":
         """Pick one of the candidate boxes for this frame, and score the choice.
 
         Takes boxes rather than masks so the policy is independent of how the
@@ -298,7 +321,7 @@ class MotionAwareMemory:
         appearance = np.asarray(ious, dtype=np.float64).reshape(-1)
         boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
 
-        predicted = self.kalman.predict() if self.kalman.ready else None
+        predicted = self.kalman.predict(shift) if self.kalman.ready else None
         kf_scores = box_iou_against(boxes, predicted)
 
         warming = self.stable < cfg.stable_frames
@@ -368,6 +391,14 @@ class Samurai:
         self.states: list[MotionAwareMemory] = []
         self.frame_idx = 0
         self.rejected: set[int] = set()
+        # The camera's own displacement for the frame about to be scored, as a
+        # fraction of the frame's width and height. Normalised on purpose: the
+        # caller measures it on the pixels it has (a decoded frame, at whatever
+        # resolution it was stored) and the boxes this scores live in the mask
+        # logits' own grid, which is `image_size // 4` and a different number at
+        # 512, 768 and 1024. A fraction is the one form that needs no agreement
+        # between the two about resolution.
+        self.shift: tuple[float, float] | None = None
 
     def state(self, row: int) -> MotionAwareMemory:
         while len(self.states) <= row:
@@ -380,6 +411,15 @@ class Samurai:
         self.states.clear()
         self.frame_idx = 0
         self.rejected.clear()
+        self.shift = None
+
+    def _shift_for(self, mask_logits) -> tuple[float, float] | None:
+        """This frame's camera motion, in the mask grid's own pixels."""
+        if self.shift is None:
+            return None
+        height, width = mask_logits.shape[-2:]
+        return (float(self.shift[0]) * float(width),
+                float(self.shift[1]) * float(height))
 
     def keep(self, frame_idx: int) -> bool:
         return all(state.keep(frame_idx) for state in self.states)
@@ -413,15 +453,26 @@ class Samurai:
         """
         import torch
 
-        # One synchronisation per frame, moving 3 boxes instead of 3 masks.
-        boxes = mask_boxes(mask_logits.detach()).float().cpu().numpy()
-        ious = iou_pred.detach().float().cpu().numpy()
-        scores = object_score_logits.detach().float().cpu().numpy().reshape(-1)
+        # **One** synchronisation per frame, and one is the number that matters:
+        # every `.cpu()` on a CUDA tensor blocks until the stream drains, so
+        # three of them is three stalls whatever the bytes moved. The three
+        # small tensors are concatenated on the device and split on the host --
+        # 3 boxes, 3 IoUs and an object score per row, tens of bytes, one stop.
+        boxes_gpu = mask_boxes(mask_logits.detach()).float()
+        ious_gpu = iou_pred.detach().float()
+        scores_gpu = object_score_logits.detach().float().reshape(-1)
+        flat = torch.cat((boxes_gpu.reshape(-1), ious_gpu.reshape(-1),
+                          scores_gpu)).cpu().numpy()
+        cut = boxes_gpu.numel()
+        boxes = flat[:cut].reshape(boxes_gpu.shape)
+        ious = flat[cut:cut + ious_gpu.numel()].reshape(ious_gpu.shape)
+        scores = flat[cut + ious_gpu.numel():]
 
         out = iou_pred.clone()
         for row in range(boxes.shape[0]):
             state = self.state(row)
-            selection = state.select(boxes[row], ious[row])
+            selection = state.select(boxes[row], ious[row],
+                                     self._shift_for(mask_logits))
             out[row] = torch.as_tensor(selection.weighted, dtype=out.dtype,
                                        device=out.device)
             state.record(self.frame_idx, selection.mask_score, float(scores[row]),
@@ -472,12 +523,21 @@ def _filtered_memory(output_dict: dict, samurai: Samurai, frame_idx: int,
     return {**output_dict, "non_cond_frame_outputs": remapped}
 
 
-def install(predictor, config: SamuraiConfig | None = None) -> Samurai:
+def install(predictor, config: SamuraiConfig | None = None,
+            shift_for=None) -> Samurai:
     """Patch a built predictor. Returns the state, for inspection and reset.
 
     Patches two leaves rather than subclassing: `track_step` is one long method
     and only two of the decisions inside it change. The same idiom, and the
     same reasoning, as `edgetam_trt_tracker.py`.
+
+    `shift_for(frame_idx)` is optional and returns the camera's own
+    displacement between the previous frame and this one, as a fraction of the
+    frame's width and height (or None where it could not be measured). It is
+    asked for inside the memory hook, which is the one place that runs *before*
+    the SAM head on every frame and knows which frame is about to be scored --
+    so the control input reaches the filter for the frame it belongs to rather
+    than the one after it.
     """
     samurai = Samurai(config)
     if not samurai.config.enabled:
@@ -500,6 +560,8 @@ def install(predictor, config: SamuraiConfig | None = None) -> Samurai:
         # Runs before the SAM head on every frame, which makes it the place the
         # frame number is known; the head wrapper reads it back when recording.
         samurai.frame_idx = int(frame_idx)
+        samurai.shift = (shift_for(int(frame_idx)) if shift_for is not None
+                         and not track_in_reverse else None)
         if not is_init_cond_frame and not track_in_reverse:
             output_dict = _filtered_memory(output_dict, samurai, int(frame_idx),
                                            num_maskmem, stride)
@@ -512,5 +574,6 @@ def install(predictor, config: SamuraiConfig | None = None) -> Samurai:
     cfg = samurai.config
     print(f"[samurai] motion-aware memory on: kf_weight={cfg.kf_weight}, "
           f"warm-up {cfg.stable_frames} frames, memory gate "
-          f"iou>{cfg.memory_iou} obj>{cfg.memory_obj_score} kf>{cfg.memory_kf_score}")
+          f"iou>{cfg.memory_iou} obj>{cfg.memory_obj_score} kf>{cfg.memory_kf_score}"
+          f"{', ego-motion compensated' if shift_for is not None else ''}")
     return samurai
