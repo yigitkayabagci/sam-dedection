@@ -483,11 +483,19 @@ def main(argv: list[str] | None = None) -> int:
     # decoder settle on thermal statistics before the features under it move.
     # Slowing it would not protect the decoder; it would skip the one stage
     # that adapts it.
+    head_rates = scaled(RATES[args.method]["head"], overrides=False)
+    encoder_rates = scaled(RATES[args.method]["encoder"])
+    meta["effective_rates"] = {
+        "head_stage": {"head": head_rates.head,
+                       "neck": head_rates.neck,
+                       "trunk": head_rates.trunk},
+        "encoder_stage": {"head": encoder_rates.head,
+                          "neck": encoder_rates.neck,
+                          "trunk": encoder_rates.trunk},
+    }
     schedule = Schedule(
-        stages=(("head", args.epochs[0],
-                 scaled(RATES[args.method]["head"], overrides=False)),
-                ("encoder", args.epochs[1],
-                 scaled(RATES[args.method]["encoder"]))),
+        stages=(("head", args.epochs[0], head_rates),
+                ("encoder", args.epochs[1], encoder_rates)),
         batch=batch, accum=args.accum, steps_per_epoch=args.steps,
         val_batches=args.val_batches, workers=args.workers, depth=args.depth,
         seed=args.seed, patience=args.patience, meta=meta)
