@@ -71,20 +71,32 @@ whose frames sit under `normal_json/{train,val,test}/` inside a folder named
 after a branch. `Relocator` re-roots a recorded path by matching its *suffix*,
 and these two disagree on a component rather than on a depth -- `images/test/f`
 against `normal_json/test/f` -- so no suffix of one is a suffix of the other
-and every frame reports `no_image`. Pointing the root at the directory that
-holds the splits fixes it, which is what `IMAGE_ROOTS["hituav_thermal"]` does
-with a glob. The glob resolves to the **deepest** matching directory because an
-archive that re-packs itself nests the same folder name twice, and the inner one
-is the tree with the splits in it -- which is also what made the by-name
-fallback refuse, two files of that name on disk.
+and every frame reports `no_image`.
 
-A glob is read where the plan is built, though, which is *before* the download
-cell has run: on a fresh runtime nothing matches it and the root stays the
-pattern. So cell 1 ends by asking the disk instead -- `resolve_images_root`
-looks one recorded file name up under the root, keeps the root in front of the
-longest tail it shares with the recorded path, and prefers the candidate that
-re-roots the most frames. It prints the re-rooting it did, or that a pool's
-frames are on no disk here, which is the same `no_image` with a different fix.
+The by-name fallback cannot rescue it either, and the reason is worth writing
+down: **the archive ships every frame four times**, because its annotations
+come in four formats -- `normal_json/<split>/f`, `rotate_json/<split>/f`,
+`normal_xml/JPEGImages/f` and `rotate_xml/JPEGImages/f` (the first three are
+the same bytes; the fourth is not). Against a record naming
+`hit-uav/images/train/f`, the first two share the same two-component tail, and
+a reader that must not pick the wrong modality's copy of a name refuses a tie
+rather than guessing. Right per frame, and it costs the whole pool: 2 866
+frames, none of them indexed.
+
+Pointing the root at the tree that holds the splits settles all of them, which
+is what `IMAGE_ROOTS["hituav_thermal"]` does with a glob. But a glob is read
+where the plan is built, which is *before* the download cell has run: on a
+fresh runtime nothing matches it and the root stays the pattern -- and handing
+that pattern to `fetch` as a destination extracts the dataset into a directory
+literally named `**`. `images_for` therefore returns two roots now, the plain
+folder a download lands in and the pattern frames are read back from, and
+cell 2 ends by asking the disk which is which. `resolve_images_root` looks a
+few recorded file names up under the root and ranks the trees they land in: by
+how much of the recorded path they agree with first, then by how many frames
+they re-root; a tie is broken by comparing the bytes, so four copies of one
+archive are one answer and DroneVehicle's two modalities are still a refusal.
+It prints the re-rooting it did, or that a pool's frames are on no disk here,
+which is the same `no_image` with a different fix.
 
 ## A budget for a night, and a net under it
 
@@ -654,21 +666,35 @@ def modality_of(pool):
     return "thermal"
 
 def images_for(pool):
+    """`(key, recipe, images root, parts, the folder a download lands in)`.
+
+    The last two roots are different things, and reading them as one is what
+    put HIT-UAV's archive in a directory named `**`: IMAGE_ROOTS may hold a
+    *pattern*, because that archive nests its frames under a folder named
+    after a branch that nobody can spell in advance -- and the pattern is
+    resolved here, where the plan is built, which is before the download cell
+    has run. On a fresh runtime it matches nothing and stays a pattern, and
+    `fetch` then extracts the dataset into a folder literally called `**`.
+    A download always goes to the dataset's plain folder; a pattern only ever
+    narrows where the frames are read back from.
+    """
     lowered = pool.lower()
     for key, recipe, folder, parts in IMAGES:
         if key in lowered:
             root = IMAGE_ROOTS.get(pool) or str(Path(DATA_ROOT) / folder)
+            plain = root
             if "*" in root:
+                plain = str(Path(DATA_ROOT) / folder)
                 _hits = [_p for _p in Path("/").glob(root.lstrip("/"))
                          if _p.is_dir()]
                 _hits.sort(key=lambda _p: (len(_p.parts), str(_p)))
                 root = str(_hits[-1]) if _hits else root
-            return key, recipe, root, list(parts)
-    return None, "", "", []
+            return key, recipe, root, list(parts), plain
+    return None, "", "", [], ""
 
 PLAN, DROPPED = [], []
 for _pool in FOUND:
-    _key, _recipe, _root, _parts = images_for(_pool)
+    _key, _recipe, _root, _parts, _plain = images_for(_pool)
     _modality = modality_of(_pool)
     if any(skip in _pool.lower() for skip in SKIP_POOLS):
         DROPPED.append((_pool, "SKIP_POOLS"))
@@ -679,6 +705,7 @@ for _pool in FOUND:
     else:
         PLAN.append({"pool": _pool, "dir": str(POOLS[_pool]), "key": _key,
                      "recipe": _recipe, "images": _root, "parts": _parts,
+                     "fetch": _plain,
                      "modality": _modality,
                      "role": POOL_ROLES.get(_pool, POOL_ROLE)})
 
@@ -711,7 +738,7 @@ assert PLAN, "nothing left to train on -- read the dropped list above"
 
 _wanted = {}
 for _row in PLAN:
-    _wanted.setdefault((_row["recipe"], _row["images"]), set()).update(_row["parts"])
+    _wanted.setdefault((_row["recipe"], _row["fetch"]), set()).update(_row["parts"])
 if EVAL_DRAWN:
     _drawn = next((r for r in IMAGES if r[0] == EVAL_DRAWN), None)
     assert _drawn, f"EVAL_DRAWN={EVAL_DRAWN} has no IMAGES entry"
@@ -804,7 +831,8 @@ for _pool, _folder in POOL_ARCHIVES.items():
     if _pool not in POOLS:
         print(f"!! {_pool} is not a pool here -- known: {sorted(POOLS)}")
         continue
-    _key, _recipe, _root, _parts = images_for(_pool)
+    _key, _recipe, _root, _parts, _plain = images_for(_pool)
+    _root = _plain
     _shelf = (sorted(Path(_folder).glob("*.zip")) if Path(_folder).is_dir()
               else [Path(_folder)])
     if _parts:
@@ -916,7 +944,94 @@ subprocess.run(["df", "-h", "/content"], check=False)
 
 
 # --------------------------------------------------------------------------
-# 3. The index, the split, and the flags every later cell reuses
+# 3. What each source actually has on this disk, before anything indexes it
+# --------------------------------------------------------------------------
+#
+# Every "the run trained on less than I thought" question this repo has had was
+# answerable from two numbers nobody printed: how many of a pool's records find
+# their frame, and where a dataset's frames go between the disk and the index.
+# Both are cheap -- a sample of records, one glob per half, and an index build
+# the next cell reuses from cache -- and neither is a judgement, so this cell
+# only measures. It asserts nothing; cell 4 is where a run stops.
+
+code('''
+from src.training.aerial import IMAGE_SUFFIXES, InstanceGates, list_frames, rebalance
+from src.training.datasets import parse
+from src.training.pool_reader import Relocator, why_no_image
+from tools.train_encoder import build_indexes
+
+AUDIT_GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE,
+                            max_area=MAX_AREA, fill=FILL)
+PROBES = 200
+READY = {}
+
+print(f"{'pool':<28}{'records':>9}{'probed':>8}{'found':>7}   images root")
+for _row in PLAN:
+    _records = sorted(Path(_row["dir"]).rglob("record.json"))
+    _probe = _records[::max(len(_records) // PROBES, 1)][:PROBES]
+    _relocate = Relocator(_row["images"])
+    _recorded, _hit = "", 0
+    for _record in _probe:
+        _named = json.loads(_record.read_text()).get("image", "")
+        _recorded = _recorded or _named
+        _hit += _relocate(_named) is not None
+    READY[_row["pool"]] = {"records": len(_records), "probed": len(_probe),
+                           "found": _hit, "images": _row["images"],
+                           "recorded": _recorded}
+    print(f"{_row['pool']:<28}{len(_records):>9}{len(_probe):>8}{_hit:>7}   "
+          f"{_row['images']}")
+    if _hit < len(_probe):
+        _why = why_no_image(_row["dir"], _row["images"])
+        print(f"   recorded as {_recorded}")
+        print(f"   {_why['verdict']}")
+        for _same in _why.get("same_name_here", [])[:3]:
+            print(f"   that name is here: {_same}")
+        if _relocate.ambiguous:
+            print(f"   {_relocate.ambiguous} of the probes matched more than "
+                  f"one file by name and were refused rather than guessed. An "
+                  f"archive that ships a frame twice does that -- name the "
+                  f"tree that holds the splits in IMAGE_ROOTS.")
+
+print()
+for _spec, _spec_root in ([(_s, DATA_ROOT) for _s in EXTRA_DATASETS]
+                          + ([(EVAL_SPEC, EVAL_ROOT)] if EVAL_DRAWN else [])):
+    _flag = _spec.format(root=_spec_root, data=DATA_ROOT)
+    try:
+        _request = parse(_flag, AUDIT_GATES)
+        _dataset, _where = _request.source.spec, Path(_request.root)
+        _frames = [_p for _p in _where.glob(_dataset.glob(_request.modality))
+                   if _p.suffix.lower() in IMAGE_SUFFIXES]
+        _maps = [_p for _p in _where.glob(_dataset.mask_glob(_request.modality))
+                 if _p.suffix.lower() in IMAGE_SUFFIXES]
+        _pairs = list_frames(_where, _dataset, _request.modality)
+        _index = build_indexes([_request], Path(INDEX_DIR), WORKERS)
+    except Exception as _audit_error:
+        print(f"!! {_flag} -> {type(_audit_error).__name__}: "
+              f"{str(_audit_error).splitlines()[0]}")
+        continue
+    _rejected = {}
+    for _entry in _index:
+        for _why, _count in _entry.rejects.items():
+            _rejected[_why] = _rejected.get(_why, 0) + _count
+    print(f"{_dataset.name}: {len(_frames)} frames and {len(_maps)} maps on "
+          f"disk -> {len(_pairs)} paired by stem -> {len(_index)} frames with "
+          f"an instance ({sum(len(_e.instances) for _e in _index)} instances)")
+    print(f"   {len(_pairs) - len(_index)} paired frames carry nothing of "
+          f"{_dataset.things} that the gates kept; the gates stopped {_rejected}")
+    if len(_frames) != len(_maps):
+        print(f"   !! the two halves disagree by {abs(len(_frames) - len(_maps))} "
+              f"files, so that many frames can never pair. A half-extracted "
+              f"archive looks exactly like this -- cell 2 re-reads any archive "
+              f"the tree is short of, so re-run it before reading anything below.")
+    if CLASS_WEIGHTS:
+        _kept, _thin = rebalance(_index, CLASS_WEIGHTS, seed=SEED)
+        print(f"   CLASS_WEIGHTS thins it to {len(_kept)} frames / "
+              f"{_thin['instances']['after']} instances before training sees it")
+''')
+
+
+# --------------------------------------------------------------------------
+# 4. The index, the split, and the flags every later cell reuses
 # --------------------------------------------------------------------------
 #
 # Built in-process and cached, so the training and scoring subprocesses below

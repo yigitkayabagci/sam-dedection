@@ -38,6 +38,7 @@ across, and a four-pixel target is not a prompt anyone would give.
 """
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import threading
@@ -250,14 +251,59 @@ def resolve_images_root(records: Iterable[str | Path],
         return configured                    # the configured root already works
 
     names = _index_by_name(base)
-    proposed: set[Path] = set()
+    proposed: dict[Path, int] = {}
     for recorded in wanted:
         for path in names.get(recorded.name, ()):
             shared = max(_shared_tail(path.parts, recorded.parts), 1)
-            proposed.add(Path(*path.parts[:len(path.parts) - shared]))
+            root = Path(*path.parts[:len(path.parts) - shared])
+            proposed[root] = max(proposed.get(root, 0), shared)
     if not proposed:
         return None
-    return max(proposed, key=lambda root: (resolves(root), len(root.parts)))
+    # Agreement with the recorded path first -- `normal_json/train/f` against a
+    # record naming `hit-uav/images/train/f` shares two components where
+    # `JPEGImages/f` shares one, and the deeper agreement is the better claim,
+    # which is `Relocator`'s rule too. Then how many probes the root actually
+    # re-roots, which separates the tree holding the frames from a wrapper
+    # holding one stray copy; then the deeper root, since a shallow one only
+    # reaches those frames through it.
+    rank = {root: (shared, resolves(root), len(root.parts))
+            for root, shared in proposed.items()}
+    ranked = sorted(rank, key=lambda root: (tuple(-v for v in rank[root]),
+                                            str(root)))
+    best = [root for root in ranked if rank[root] == rank[ranked[0]]]
+    if len(best) > 1 and not _same_frames(best, wanted):
+        return None
+    return best[0]
+
+
+def _same_frames(roots: SequenceABC[Path], wanted: SequenceABC[Path]) -> bool:
+    """Whether every root re-roots the probes onto byte-identical files.
+
+    Several roots resolving the same number of frames is not by itself a
+    problem: HIT-UAV's archive ships each frame four times (`normal_json/`,
+    `rotate_json/` and two `JPEGImages/` trees) because the annotations come in
+    four formats, and three of those copies are the same bytes -- so refusing
+    the pool over the ambiguity, which is what a per-frame reader must do,
+    throws away 2 866 frames to protect nothing.
+
+    Where the copies differ, the refusal is the right answer and stays:
+    DroneVehicle keeps `trainimg/04991.jpg` beside `trainimgr/04991.jpg`, one
+    per modality, and a run that picked the wrong one would train thermal masks
+    on RGB pixels and never say so.
+    """
+    for recorded in wanted:
+        digests = set()
+        for root in roots:
+            found = Relocator(root, by_name=False)(recorded)
+            if found is None:
+                return False
+            try:
+                digests.add(hashlib.md5(found.read_bytes()).hexdigest())
+            except OSError:
+                return False
+        if len(digests) > 1:
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------

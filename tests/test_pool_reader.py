@@ -837,6 +837,38 @@ class ResolveImagesRootTest(unittest.TestCase):
             "/content/data/HIT_UAV/hit-uav/images/test/0_01.jpg"),
             frames / "test" / "0_01.jpg")
 
+    def test_four_copies_of_one_archive_are_not_an_ambiguity_to_refuse(self):
+        # HIT-UAV ships each frame under `normal_json/<split>/`,
+        # `rotate_json/<split>/` and two `JPEGImages/` trees because its
+        # annotations come in four formats. The first two tie on shared tail
+        # against a record written from the Kaggle mirror
+        # (`hit-uav/images/<split>/`), which is what makes a per-frame reader
+        # refuse every one of the 2 866 frames.
+        base = self.root / "HIT_UAV" / "HIT-UAV-Infrared-Thermal-Dataset-main"
+        pixels = b"\xff\xd8the same frame"
+        for folder in ("normal_json/train", "rotate_json/train"):
+            self.touch(base / folder / "0_100_30_0_03280.jpg").write_bytes(pixels)
+        for folder in ("normal_xml/JPEGImages", "rotate_xml/JPEGImages"):
+            self.touch(base / folder / "0_100_30_0_03280.jpg").write_bytes(pixels)
+        record = self.record_naming("/root/.cache/kagglehub/datasets/pandrii000/"
+                                    "hituav/versions/1/hit-uav/images/train/"
+                                    "0_100_30_0_03280.jpg")
+        found = resolve_images_root([record], self.root / "HIT_UAV")
+        self.assertEqual(found, base / "normal_json")
+        self.assertEqual(Relocator(found, by_name=False)(
+            json.loads(record.read_text())["image"]),
+            base / "normal_json" / "train" / "0_100_30_0_03280.jpg")
+
+    def test_two_roots_holding_different_pixels_are_still_refused(self):
+        # DroneVehicle's two modalities under one root: picking either would
+        # train one modality's masks on the other's pixels, silently.
+        base = self.root / "DroneVehicle"
+        self.touch(base / "trainimg" / "04991.jpg").write_bytes(b"rgb")
+        self.touch(base / "trainimgr" / "04991.jpg").write_bytes(b"thermal")
+        record = self.record_naming("/content/data/DroneVehicle/train/"
+                                    "04991.jpg")
+        self.assertIsNone(resolve_images_root([record], base))
+
     def test_a_root_that_already_works_is_returned_unchanged(self):
         self.touch(self.root / "HIT_UAV" / "normal_json" / "train" / "0_01.jpg")
         record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"

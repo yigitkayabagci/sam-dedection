@@ -11,14 +11,14 @@
  "16_vtuav_rgb_pool.ipynb": "9ccb0aa318",
  "17_vtuav_thermal_pool.ipynb": "c72d3a8366",
  "18_kust4k_mask_pool.ipynb": "106871adf9",
- "19_thermal_stage_b_pool.ipynb": "604e266faf",
- "20_thermal_stage_b_pool_rgb.ipynb": "1a5af17459",
+ "19_thermal_stage_b_pool.ipynb": "86b08170c8",
+ "20_thermal_stage_b_pool_rgb.ipynb": "626f39dbd2",
  "21_pool_data_readiness.ipynb": "f0f63e49a4",
- "22_thermal_deep.ipynb": "149c8d6087",
- "23_thermal_deep_lora.ipynb": "f7f1ed6951",
+ "22_thermal_deep.ipynb": "86d9cfa63c",
+ "23_thermal_deep_lora.ipynb": "659098ec0f",
  "24_vtuav_lt_rgb_pool.ipynb": "3424bae860",
  "25_vtuav_lt_thermal_pool.ipynb": "ab9cf7818d",
  "26_segfly_instance_audit.ipynb": "3c121796aa",
- "27_thermal_deep_rgb_aerovis.ipynb": "64c24159d0",
- "28_rgb_deep_aerovis.ipynb": "579fa58878"
+ "27_thermal_deep_rgb_aerovis.ipynb": "bd0a12081e",
+ "28_rgb_deep_aerovis.ipynb": "6b3ec13a51"
 }
