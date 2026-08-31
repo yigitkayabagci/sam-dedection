@@ -592,6 +592,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         self._apply_fill_hole_policy()
         self._load_engines()
         self._start_calibration()
+        self._open_frames(frames_dir)
         # Before patching: `install` wraps the mask decoder, which the sam_head
         # engine replaces. When that engine is present `_reselect` applies the
         # same policy at the engine's boundary instead; when it is not, the

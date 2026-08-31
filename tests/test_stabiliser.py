@@ -9,6 +9,7 @@ truth being arguable.
 """
 from __future__ import annotations
 
+import contextlib
 import sys
 import tempfile
 import unittest
@@ -732,6 +733,50 @@ class CanopyTest(unittest.TestCase):
                 if abs(centre[0] - truth[0]) <= 14 and abs(centre[1] - truth[1]) <= 14:
                     recovered += 1
         self.assertGreaterEqual(recovered, 5)
+
+    def test_both_backends_open_the_frames_the_guard_reads(self):
+        """A policy that is inert on one backend is worse than one that fails.
+
+        `EdgeTAMTRTTracker.prepare` overrides the base method wholesale, and it
+        was not building the `FrameMotion` both `ego_motion` and the guard read
+        from. On that backend `self._motion` stayed None, `_judge` handed every
+        mask straight back and `_shift_for` had nothing to measure -- so a
+        `--policy guard` run on engines produced a plain run under a guard's
+        name, with a folder full of artefacts that looked like evidence.
+
+        Neither layer touches an engine: both are numpy over decoded frames, so
+        there was never a reason for the backends to differ here.
+        """
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+        from src.trackers.edgetam_trt_tracker import EdgeTAMTRTTracker
+
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            for index in range(3):
+                cv2.imwrite(str(directory / f"{index:05d}.png"),
+                            np.full((32, 32), 90, np.uint8))
+            for kind in (EdgeTAMTracker, EdgeTAMTRTTracker):
+                for asked in ({"guard": {"suspect_frames": 2}},
+                              {"ego_motion": {"reduce": 2}}):
+                    with self.subTest(tracker=kind.__name__, asked=tuple(asked)):
+                        built = kind(model_cfg="configs/edgetam.yaml",
+                                     checkpoint="none.pt", **asked)
+                        # Everything `prepare` does that needs a model, stubbed
+                        # out: the point is to run the real method body, since
+                        # calling the helper directly is what let the override
+                        # skip it in the first place.
+                        for name in ("_ensure_predictor", "_apply_fill_hole_policy",
+                                     "_load_engines", "_start_calibration",
+                                     "_install_samurai", "_patch"):
+                            if hasattr(built, name):
+                                setattr(built, name, lambda *a, **k: None)
+                        built._predictor = type("P", (), {
+                            "init_state": lambda *a, **k: None})()
+                        built._inference_ctx = lambda: contextlib.nullcontext()
+                        built.prepare(directory)
+                        self.assertIsNotNone(
+                            built._motion,
+                            f"{kind.__name__}.prepare would judge nothing")
 
     def test_the_guard_works_with_no_motion_aware_memory_behind_it(self):
         """What `--policy guard_only` relies on. `EdgeTAMTracker.prepare` builds

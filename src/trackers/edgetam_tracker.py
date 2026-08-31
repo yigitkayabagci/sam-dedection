@@ -246,21 +246,37 @@ class EdgeTAMTracker(VideoTracker):
             stack.enter_context(torch.autocast(device_type=self.device, dtype=dtype))
         return stack
 
-    def prepare(self, frames_dir: str | Path) -> None:
-        self._ensure_predictor()
+    def _open_frames(self, frames_dir: str | Path) -> None:
+        """The frame source `ego_motion` and the guard both read.
+
+        Split out of `prepare` because the TensorRT subclass overrides that
+        method wholesale, and without this it was skipping the setup: on that
+        backend `self._motion` stayed None, `_judge` returned every mask
+        untouched and `_shift_for` had nothing to measure. A `guard:` policy
+        then ran, printed nothing, and produced a plain run under a guard's
+        name -- which is worse than refusing, because the folder looks like
+        evidence. Neither layer has anything to do with the engines: both are
+        numpy over decoded frames.
+        """
+        if self._motion is not None:
+            return
         if self.ego_motion is not None:
             from .stabiliser import FrameMotion
 
             self._motion = FrameMotion(frames_dir,
                                        **{k: v for k, v in self.ego_motion.items()
                                           if k in ("reduce", "suffixes")})
-        if self.guard_config is not None and self._motion is None:
+        elif self.guard_config is not None:
             from .stabiliser import FrameMotion
 
             # The guard needs the pixels too, so a run that asked only for it
             # still gets a frame source -- at the same reduced size, since a
             # template match and a flow both work fine on it.
             self._motion = FrameMotion(frames_dir)
+
+    def prepare(self, frames_dir: str | Path) -> None:
+        self._ensure_predictor()
+        self._open_frames(frames_dir)
         self._install_samurai()
         with self._inference_ctx():
             self._state = self._predictor.init_state(
