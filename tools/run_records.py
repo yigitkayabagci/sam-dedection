@@ -393,10 +393,26 @@ def engines_missing(config: str) -> str | None:
     import yaml
 
     body = yaml.safe_load((ROOT / config).read_text()) or {}
-    engine = body.get("image_encoder_engine")
-    if not engine or (ROOT / engine).exists():
+    named = [body[key] for key in ("image_encoder_engine", "memory_attention_engine",
+                                   "memory_encoder_engine", "sam_head_engine")
+             if body.get(key)]
+    if not named:
         return None
-    return str(Path(engine).parent)
+    # All four, not just the encoder. A config that names four and has one is
+    # the state a per-module rebuild leaves behind -- and `strict: false`, which
+    # every shipped TRT config sets, turns the other three into a printed line
+    # and a silent PyTorch fallback. The run then finishes and reports a speed
+    # that is not the configuration's.
+    missing = [Path(e) for e in named if not (ROOT / e).exists()]
+    if not missing:
+        return None
+    where = str(missing[0].parent)
+    if len(missing) < len(named):
+        # Naming them matters when some exist: a per-module rebuild is
+        # how a directory ends up with one of four, and "needs this
+        # directory" reads as "nothing is built" when three files are.
+        return f"{where}/ -- {', '.join(sorted(m.name for m in missing))}"
+    return where
 
 
 def digest(path: Path) -> dict | None:
@@ -642,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
     absent = {} if args.pick_only else {
         m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
     if absent:
-        lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
+        lines = [f"  {m:<10} needs {d}" for m, d in sorted(absent.items())]
         sizes = sorted({MODES[m][0] for m in absent})
         builds = []
         for size in sizes:
