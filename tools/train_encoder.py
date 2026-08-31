@@ -174,16 +174,44 @@ def build_indexes(requests: list[Request], cache_dir: Path | None,
     return index
 
 
+STOCK = "third_party/EdgeTAM/checkpoints/edgetam.pt"
+
+
 def build_model(size: int, checkpoint: str, device: str):
+    """The predictor with `checkpoint` in it, GRN restored if it has any.
+
+    A checkpoint pretrained by `tools/pretrain_fcmae.py --grn` carries Global
+    Response Normalization inside the trunk, which *renames* the layer it sits
+    behind (`expand.weight` -> `expand.0.weight`) and adds two vectors. Loading
+    it into the stock graph is a strict-load error, and that error would land
+    at the top of whichever notebook consumed the checkpoint -- after stage A
+    had already spent its epochs. So the graph is built stock, GRN is put back
+    where the checkpoint says it was, and only then are the weights loaded.
+
+    A checkpoint without GRN takes the path it always took.
+    """
+    import torch
     from sam2.build_sam import build_sam2_video_predictor
 
     from src.trackers._hydra_overrides import image_size_overrides
+    from src.training.fcmae import carries_grn, restore_grn
 
     warn_size_mismatch(checkpoint, size)
 
+    grn = carries_grn(checkpoint) if checkpoint else {"inserted": 0}
     model = build_sam2_video_predictor(
-        "configs/edgetam.yaml", checkpoint, device=device,
-        hydra_overrides_extra=image_size_overrides(size))
+        "configs/edgetam.yaml", STOCK if grn["inserted"] else checkpoint,
+        device=device, hydra_overrides_extra=image_size_overrides(size))
+    if grn["inserted"]:
+        restored = restore_grn(model.image_encoder, grn["channels"])
+        model.load_state_dict(
+            torch.load(checkpoint, map_location="cpu",
+                       weights_only=False)["model"])
+        model.to(device)
+        print(f"[build] {checkpoint} carries GRN at {grn['inserted']} site(s); "
+              f"restored {restored} before loading. The engines built for the "
+              f"stock graph do not match this checkpoint -- re-export before "
+              f"TensorRT.")
     # eval() is the policy, not an oversight: RepViT's batch-norm statistics
     # must stay frozen so the checkpoint keeps matching its exported engines.
     return model.eval()

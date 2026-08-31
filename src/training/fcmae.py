@@ -44,7 +44,9 @@ carries them and the ONNX export has to be regenerated.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -273,6 +275,71 @@ def insert_grn(model: nn.Module, ratio: float = 2.0) -> dict:
                 found[f"{name}.{child_name}".lstrip(".")] = width
     return {"inserted": len(found), "channels": found,
             "parameters": sum(2 * width for width in found.values())}
+
+
+# GRN renames the layer it sits behind -- `expand.weight` becomes
+# `expand.0.weight` -- and adds two vectors of its own. A checkpoint pretrained
+# with it therefore does NOT load into a stock EdgeTAM, and `build_sam2` loads
+# strictly, so the failure is a state-dict error at the top of whatever
+# notebook tries to use it. `carries_grn` and `restore_grn` are how the
+# downstream run finds out and prepares itself, instead of finding out after
+# stage A has already spent its epochs.
+GRN_SUFFIXES = (".gamma", ".beta")
+
+
+def carries_grn(checkpoint: str | Path) -> dict:
+    """Whether this checkpoint was pretrained with GRN, and where it sat.
+
+    Reads the meta `pretrain_fcmae` writes, and falls back to the state dict's
+    own key shapes -- a checkpoint copied without its meta is still readable,
+    and guessing wrong here would be a strict-load error either way.
+    """
+    import torch
+
+    body = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
+    meta = (body.get("meta") or {}).get("grn") or {}
+    if meta.get("channels"):
+        return dict(meta)
+    state = body.get("model", body)
+    channels = {}
+    for key, value in state.items():
+        if key.endswith(".gamma") and value.dim() == 4:
+            # `...expand.1.gamma` names the GRN; the site `restore_grn` wraps
+            # is its parent, `...expand`. Dropping the wrapper's own index is
+            # what makes the fallback agree with the meta rather than land one
+            # level deeper -- and disagreeing here is a strict-load error.
+            grn = key[: -len(".gamma")]
+            channels[grn.rsplit(".", 1)[0]] = int(value.shape[1])
+    return {"inserted": len(channels), "channels": channels,
+            "parameters": sum(2 * c for c in channels.values())}
+
+
+def restore_grn(model: nn.Module, channels: Mapping[str, int]) -> int:
+    """Put GRN back where a checkpoint says it was, by key path.
+
+    `insert_grn` finds sites by shape, which is right when creating them and
+    wrong when restoring: the checkpoint already names them, and re-discovering
+    could disagree with it on a trunk that has changed. Returns the count so a
+    caller can assert on it.
+    """
+    restored = 0
+    for path, width in channels.items():
+        # `a.b.expand.1` -- the GRN's own index inside the wrapper it lives in.
+        parent_path = path.rsplit(".", 1)[0] if "." in path else ""
+        holder = model
+        for part in parent_path.split(".") if parent_path else []:
+            holder = holder[int(part)] if part.isdigit() else getattr(holder, part)
+        name = path.rsplit(".", 1)[-1] if "." in path else path
+        target = holder[int(name)] if name.isdigit() else getattr(holder, name)
+        if isinstance(target, GRNAfter):
+            continue
+        wrapped = GRNAfter(target, width)
+        if name.isdigit():
+            holder[int(name)] = wrapped
+        else:
+            setattr(holder, name, wrapped)
+        restored += 1
+    return restored
 
 
 # --------------------------------------------------------------------------

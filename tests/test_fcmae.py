@@ -24,6 +24,7 @@ import torch.nn as nn  # noqa: E402
 
 from src.training.fcmae import (  # noqa: E402
     Decoder,
+    carries_grn,
     FCMAEConfig,
     GRN,
     ConvNeXtBlock,
@@ -34,6 +35,7 @@ from src.training.fcmae import (  # noqa: E402
     normalise_patches,
     patch_mask,
     patchify,
+    restore_grn,
 )
 
 
@@ -327,6 +329,79 @@ class RunTest(unittest.TestCase):
         base = 1.5e-4
         self.assertAlmostEqual(base * 256 / 256.0, base)
         self.assertAlmostEqual(base * 512 / 256.0, 2 * base)
+
+
+
+class HandoffTest(unittest.TestCase):
+    """A GRN checkpoint has to be loadable by whatever consumes it.
+
+    `insert_grn` renames the layer it sits behind -- `expand.weight` becomes
+    `expand.0.weight` -- and adds two vectors. `build_sam2` loads strictly, so
+    without this the stage that spent twenty epochs producing the checkpoint
+    hands the next notebook a state-dict error at its first cell.
+    """
+
+    def net(self):
+        return nn.Sequential(nn.Conv2d(3, 8, 3), nn.Conv2d(8, 32, 1),
+                             nn.GELU(), nn.Conv2d(32, 8, 1))
+
+    def saved(self, with_meta: bool):
+        import tempfile
+
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        trained = self.net()
+        report = insert_grn(trained)
+        path = Path(holder.name) / "checkpoint.pt"
+        body = {"model": trained.state_dict()}
+        if with_meta:
+            body["meta"] = {"grn": report, "stage": "fcmae"}
+        torch.save(body, path)
+        return path, report
+
+    def test_the_stock_graph_refuses_it_which_is_why_this_exists(self):
+        path, _ = self.saved(with_meta=True)
+        with self.assertRaises(RuntimeError):
+            self.net().load_state_dict(torch.load(path, weights_only=False)["model"])
+
+    def test_restoring_grn_first_makes_the_strict_load_succeed(self):
+        path, report = self.saved(with_meta=True)
+        found = carries_grn(path)
+        self.assertEqual(found["channels"], report["channels"])
+        model = self.net()
+        self.assertEqual(restore_grn(model, found["channels"]), 1)
+        model.load_state_dict(torch.load(path, weights_only=False)["model"])
+
+    def test_a_copy_that_lost_its_meta_is_still_read_correctly(self):
+        """A checkpoint copied to Drive by hand keeps its weights and may lose
+        its meta; guessing wrong here is a strict-load error either way, so the
+        fallback reads the key shapes and has to agree with the meta."""
+        with_meta, _ = self.saved(with_meta=True)
+        without, _ = self.saved(with_meta=False)
+        self.assertEqual(carries_grn(with_meta)["channels"],
+                         carries_grn(without)["channels"])
+        model = self.net()
+        restore_grn(model, carries_grn(without)["channels"])
+        model.load_state_dict(torch.load(without, weights_only=False)["model"])
+
+    def test_a_checkpoint_without_grn_says_so(self):
+        import tempfile
+
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        path = Path(holder.name) / "plain.pt"
+        torch.save({"model": self.net().state_dict(), "meta": {}}, path)
+        self.assertEqual(carries_grn(path)["inserted"], 0)
+
+    def test_restoring_twice_is_not_two_layers_deep(self):
+        """The notebook may re-run a cell; a second restore must be a no-op
+        rather than a GRN behind a GRN."""
+        path, _ = self.saved(with_meta=True)
+        channels = carries_grn(path)["channels"]
+        model = self.net()
+        self.assertEqual(restore_grn(model, channels), 1)
+        self.assertEqual(restore_grn(model, channels), 0)
+        model.load_state_dict(torch.load(path, weights_only=False)["model"])
 
 
 

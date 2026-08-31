@@ -195,12 +195,19 @@ def run(args) -> dict:
     return body
 
 
-def save(model, ema, args) -> None:
-    """The EMA weights as an ordinary EdgeTAM checkpoint, decoder discarded."""
+def save(model, ema, args, grn: dict) -> None:
+    """The EMA weights as an EdgeTAM checkpoint, decoder discarded.
+
+    `grn` travels in the meta because it changes what the checkpoint *is*: with
+    it the trunk carries two extra vectors per expansion and the layer behind
+    each one is renamed, so a loader has to put GRN back before the strict load
+    can succeed. `build_model` reads this; `fcmae.carries_grn` falls back to the
+    key shapes for a copy that lost its meta.
+    """
     from src.training.finetune import save_checkpoint
 
     with ema.applied(model):
-        save_checkpoint(model, args.out)
+        save_checkpoint(model, args.out, {"grn": grn, "stage": "fcmae"})
     if args.mirror:
         import shutil
 

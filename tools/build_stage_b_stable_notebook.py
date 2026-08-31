@@ -238,6 +238,21 @@ def main() -> None:
     # and re-index had already been paid for. `HARDEN` is added to the two
     # `train_encoder.py` calls instead, which is what
     # `tools/build_stage_b_notebooks.py` already does for the generated family.
+    # One working directory per run, decided after RUN has taken its `_from_`
+    # suffix. `/content/work` is shared by every arm, and `score_to` returns a
+    # cached `score_<tag>_<prompt>.json` if it exists -- so a second arm's
+    # "before" would silently be the first arm's baseline, measured against a
+    # different base checkpoint. With four arms (stock, 34, 36-grn, 36-plain)
+    # that is the comparison itself being wrong rather than one number.
+    replace(notebook,
+            'assert METHOD in ("finetune", "lora"), '
+            'f"METHOD is finetune or lora, not {METHOD!r}"',
+            'assert METHOD in ("finetune", "lora"), '
+            'f"METHOD is finetune or lora, not {METHOD!r}"\n'
+            'WORK = f"/content/work_{RUN}"\n'
+            'print("work dir", WORK, "-- named after the run so two arms do not "\n'
+            '      "share splits.json or the score cache; a shared score cache "\n'
+            '      "hands the second arm the first one\'s before/after.")')
     # `save_splits` records only which *frames* survived, so the per-instance
     # thinning `rebalance` did two lines earlier was undone the moment
     # train_encoder re-indexed: measured on a synthetic pool, a train split the
