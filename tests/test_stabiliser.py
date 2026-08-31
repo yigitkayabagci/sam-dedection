@@ -26,6 +26,7 @@ except ImportError:                                      # pragma: no cover
     cv2 = None
 
 from src.trackers.stabiliser import (  # noqa: E402
+    bandpass,
     LOST,
     REACQUIRED,
     SUSPECT,
@@ -442,6 +443,158 @@ class GeometryTest(unittest.TestCase):
         guard.reset()
         self.assertIsNone(guard.box)
         self.assertEqual((guard.missing, guard.state), (0, TRACKING))
+
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed for the matcher")
+class ReacquisitionTest(unittest.TestCase):
+    """What the template matcher actually matches on a faint thermal target.
+
+    The finding these lock in: a box around the target is mostly the *ground*
+    under it once the target is faint, so normalised cross-correlation finds
+    the ground -- and finds it exactly where the template was cut from, which
+    reads downstream as "not found" rather than as "matched the wrong thing".
+    """
+
+    def scene(self, seed=0, lift=5.0, size=(640, 512)):
+        """Ground with slow variation and its own texture, as terrain has --
+        not the blurred white noise the older tests use, which is the one
+        background with no low-frequency structure to separate a target from."""
+        rng = np.random.default_rng(seed)
+        width, height = size
+        yy, xx = np.mgrid[0:height, 0:width].astype(np.float32)
+        field = 45 + 90 * (yy / height)
+        for _ in range(7):
+            cy, cx = rng.uniform(0, height), rng.uniform(0, width)
+            radius = rng.uniform(50, 200)
+            field += rng.uniform(-35, 35) * np.exp(
+                -(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * radius * radius)))
+        field += cv2.GaussianBlur(
+            rng.normal(0, 14, (height, width)).astype(np.float32), (0, 0), 2.0)
+        self.field, self.lift = field, lift
+        return field
+
+    def frame_with(self, centre, box_size=(26, 18)):
+        """The field with a target `lift` levels above its own local mean."""
+        out = self.field.copy()
+        half_w, half_h = box_size[0] // 2, box_size[1] // 2
+        x0, y0 = centre[0] - half_w, centre[1] - half_h
+        x1, y1 = centre[0] + half_w, centre[1] + half_h
+        local = float(self.field[y0 - 12:y1 + 12, x0 - 12:x1 + 12].mean())
+        patch = np.full((y1 - y0, x1 - x0), local + self.lift, np.float32)
+        patch[::3, :] -= self.lift * 0.35
+        patch[:, ::4] -= self.lift * 0.20
+        out[y0:y1, x0:x1] = patch
+        noisy = out + np.random.default_rng(7).normal(0, 2.0, out.shape)
+        return (np.clip(noisy, 0, 255).astype(np.uint8),
+                np.array([x0, y0, x1, y1], float))
+
+    def hunt(self, view):
+        """Cut a template from one frame, find it in the next. `view` is the
+        transform both go through -- identity for the raw matcher."""
+        self.scene()
+        first, box = self.frame_with((300, 240))
+        later, moved = self.frame_with((340, 262))
+        size = (box[2] - box[0], box[3] - box[1])
+        template = view(first, size)[int(box[1]):int(box[3]),
+                                     int(box[0]):int(box[2])]
+        whole = (0, 0, later.shape[1], later.shape[0])
+        found, score = match_template(view(later, size), template, whole)
+        landed = (abs(found[0] - moved[0]) <= 6 and abs(found[1] - moved[1]) <= 6
+                  if found is not None else False)
+        return landed, found, moved, box, score
+
+    def test_the_raw_matcher_finds_the_ground_the_target_was_sitting_on(self):
+        """Not a near miss: the peak is at the template's own origin, forty
+        pixels from where the target went."""
+        landed, found, moved, cut, _ = self.hunt(lambda frame, size: frame)
+        self.assertFalse(landed)
+        self.assertLess(abs(found[0] - cut[0]), 6)
+        self.assertLess(abs(found[1] - cut[1]), 6)
+        self.assertGreater(abs(found[0] - moved[0]), 20)
+
+    def test_band_passing_to_the_targets_scale_finds_the_target(self):
+        """At 8 levels over its own ground -- still faint, still invisible to
+        the raw matcher -- the band-passed one finds it every time."""
+        found_raw = found_band = 0
+        for seed in range(8):
+            self.scene(seed=seed, lift=8.0)
+            first, box = self.frame_with((300, 240))
+            later, moved = self.frame_with((340, 262))
+            size = (box[2] - box[0], box[3] - box[1])
+            for view, tally in ((lambda f, s: f, "raw"),
+                                (lambda f, s: bandpass(f, s), "band")):
+                template = view(first, size)[int(box[1]):int(box[3]),
+                                             int(box[0]):int(box[2])]
+                got, _ = match_template(view(later, size), template,
+                                        (0, 0, later.shape[1], later.shape[0]))
+                hit = got is not None and abs(got[0] - moved[0]) <= 6
+                if tally == "raw":
+                    found_raw += int(hit)
+                else:
+                    found_band += int(hit)
+        self.assertEqual(found_raw, 0)
+        self.assertGreaterEqual(found_band, 7)
+
+    def test_it_helps_at_the_faintest_end_without_being_a_cure(self):
+        """Three levels over the ground is the hard end and the band-pass does
+        not rescue it -- roughly a third of those cases, against none. Written
+        down so nobody reads the claim above as "re-acquisition is solved"."""
+        found_raw = found_band = 0
+        for seed in range(9):
+            self.scene(seed=seed, lift=3.0)
+            first, box = self.frame_with((300, 240))
+            later, moved = self.frame_with((340, 262))
+            size = (box[2] - box[0], box[3] - box[1])
+            for view, raw in ((lambda f, s: f, True),
+                              (lambda f, s: bandpass(f, s), False)):
+                template = view(first, size)[int(box[1]):int(box[3]),
+                                             int(box[0]):int(box[2])]
+                got, _ = match_template(view(later, size), template,
+                                        (0, 0, later.shape[1], later.shape[0]))
+                hit = got is not None and abs(got[0] - moved[0]) <= 6
+                found_raw += int(hit and raw)
+                found_band += int(hit and not raw)
+        self.assertEqual(found_raw, 0)
+        self.assertGreater(found_band, found_raw)
+
+    def test_local_equalisation_does_not_find_it(self):
+        """CLAHE raises the signal-to-clutter ratio on ground like this, and
+        still does not move the matcher: it lifts the target and the clutter
+        beside it together, so the template stays mostly ground. Kept as a test
+        because it is the suggestion that keeps coming back."""
+        equalise = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        landed, _, _, _, _ = self.hunt(lambda frame, size: equalise.apply(frame))
+        self.assertFalse(landed)
+
+    def test_a_bright_target_was_never_the_problem_and_stays_found(self):
+        """The band-pass has to be free where the raw matcher already worked,
+        or it is a trade rather than a fix."""
+        for view in (lambda frame, size: frame,
+                     lambda frame, size: bandpass(frame, size)):
+            self.scene(lift=14.0)
+            first, box = self.frame_with((300, 240))
+            later, moved = self.frame_with((340, 262))
+            size = (box[2] - box[0], box[3] - box[1])
+            template = view(first, size)[int(box[1]):int(box[3]),
+                                         int(box[0]):int(box[2])]
+            found, _ = match_template(
+                view(later, size), template,
+                (0, 0, later.shape[1], later.shape[0]))
+            self.assertLess(abs(found[0] - moved[0]), 6)
+
+    def test_the_band_pass_keeps_the_frames_shape(self):
+        self.scene()
+        frame, box = self.frame_with((300, 240))
+        out = bandpass(frame, (26, 18))
+        self.assertEqual(out.shape, frame.shape)
+        self.assertEqual(out.dtype, np.float32)
+
+    def test_turning_it_off_leaves_the_raw_pixels_alone(self):
+        guard = Stabiliser(GuardConfig(match_bandpass=0.0))
+        self.scene()
+        frame, _ = self.frame_with((300, 240))
+        self.assertIs(guard._view(frame, (26, 18)), frame)
 
 
 class ShippedConfigTest(unittest.TestCase):

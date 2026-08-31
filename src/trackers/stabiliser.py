@@ -131,6 +131,12 @@ class GuardConfig:
     caution_below: float = 1.0
     caution_factor: float = 0.6
 
+    # Re-acquisition matches a band-passed frame rather than the raw one, cut
+    # to the target's own scale -- see `bandpass`, which measured what the raw
+    # matcher actually does on a faint target. 0 turns it off and matches the
+    # pixels as they are.
+    match_bandpass: float = 0.55
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -370,6 +376,62 @@ def local_contrast(frame: np.ndarray, box, ring: int = 9) -> float:
 # --------------------------------------------------------------------------
 
 
+def bandpass(frame: np.ndarray, size, low: float = 0.55,
+             grain: float = 1.5) -> np.ndarray:
+    """`frame` with everything coarser than the target -- and finer -- removed.
+
+    **Why re-acquisition needs this, measured rather than assumed.** The
+    template is a box around the target, so it holds the target *and* the
+    ground under it. On this footage the ground is most of what is in it: a
+    thermal target sitting 5 levels above its own surroundings, on terrain
+    whose texture runs 27 levels, puts roughly a twentieth of the template's
+    variance in the target. Normalised cross-correlation then finds the
+    *ground*, and it finds it exactly where the template was cut from -- on a
+    synthetic bench of 36 low-contrast cases the peak landed on the target 0
+    times, scoring 0.64 at the template's old position against 0.17 at the
+    target's new one. That is not an occasional wrong answer; it is what the
+    matcher does by default, and `give_up_after` was hiding it as "not found".
+
+    A difference of Gaussians cut to the target's own scale fixes it, because
+    the ground's variation and the target's are at different scales and nothing
+    else about them differs. `low` is the outer sigma as a fraction of the
+    target's longer side -- the ground goes with it; `grain` is the inner one in
+    pixels, which is the sensor's own noise. Over three background recipes and
+    twelve seeds each, counting a hit as the peak landing on the target:
+
+        lift over its own ground     3          5          8         14
+        raw                       0/36       0/36       0/35      36/36
+        band-passed              11/36      20/36      35/36      36/36
+
+    It is a real improvement and not a cure: at three levels it still misses
+    two thirds of the time. At fourteen, where the raw matcher already found
+    everything, the peak rises from 0.63 to 0.92 rather than falling -- never
+    worse is why it is on by default.
+
+    **What was tried first and did not work.** CLAHE is the usual suggestion.
+    It does raise the signal-to-clutter ratio on ground that has slow variation
+    to remove -- 1.2 to 1.4x on this bench, and nothing at all on flat ground,
+    which is the one case the earlier measurement here used -- but it does not
+    move the matcher: it lifts the target and the clutter beside it together,
+    so the template stays mostly ground. Across the same cases it went from
+    0/36 to 5/36 where the band-pass reached 35/36. A top-hat is the same
+    story. The scale separation is the mechanism; the contrast stretch is not,
+    which is also why nothing here enhances the pixels the *model* sees.
+
+    Returns float32, which `match_template` correlates directly. Quantising
+    back to 8 bits would throw away most of what the band-pass just isolated.
+    """
+    import cv2
+
+    wide = max(float(size[0]), float(size[1])) if size is not None else 8.0
+    outer = max(float(low) * wide, float(grain) * 2.0)
+    field = np.asarray(frame, dtype=np.float32)
+    if field.ndim > 2:
+        field = field.mean(axis=2)
+    return (cv2.GaussianBlur(field, (0, 0), float(grain))
+            - cv2.GaussianBlur(field, (0, 0), outer))
+
+
 def match_template(frame: np.ndarray, template: np.ndarray,
                    region) -> tuple[np.ndarray | None, float]:
     """Best normalised cross-correlation of `template` inside `region`.
@@ -392,7 +454,13 @@ def match_template(frame: np.ndarray, template: np.ndarray,
     if (patch.shape[0] < template.shape[0] or patch.shape[1] < template.shape[1]
             or template.size == 0):
         return None, float("nan")
-    if float(np.asarray(template, dtype=np.float64).std()) < 1.0:
+    # The refusal threshold is relative to the patch being searched, because a
+    # band-passed frame is not in 8-bit levels any more and a fixed `1.0` would
+    # refuse every template on one and no template on the other.
+    floor = max(float(np.asarray(patch, dtype=np.float64).std()) * 0.02, 1e-3)
+    if template.dtype == np.uint8 and patch.dtype == np.uint8:
+        floor = 1.0
+    if float(np.asarray(template, dtype=np.float64).std()) < floor:
         # A template with no variation correlates perfectly with *everything*:
         # `TM_CCOEFF_NORMED` divides by the patch's own standard deviation, and
         # OpenCV returns 1.0 across the whole search region rather than a
@@ -402,7 +470,9 @@ def match_template(frame: np.ndarray, template: np.ndarray,
         # nothing in those pixels to find the target by.
         return None, float("nan")
 
-    scores = cv2.matchTemplate(patch.astype(np.uint8), template.astype(np.uint8),
+    kind = (np.uint8 if patch.dtype == np.uint8 and template.dtype == np.uint8
+            else np.float32)
+    scores = cv2.matchTemplate(patch.astype(kind), template.astype(kind),
                                cv2.TM_CCOEFF_NORMED)
     _, best, _, position = cv2.minMaxLoc(scores)
     top_left = (x0 + position[0], y0 + position[1])
@@ -623,7 +693,7 @@ class Stabiliser:
         self.box = box
         self._areas.append(area_of(box))
         self._aspects.append(aspect_of(box))
-        self.template = _crop(frame, box)
+        self.template = _crop(self._view(frame, size_of(box)), box)
         self.missing = 0
         self.driven = False
         was = self.state
@@ -667,6 +737,12 @@ class Stabiliser:
         return Decision(box=found, state=REACQUIRED, reason=f"{reason} -> matched",
                         shift=tuple(shift), match=score)
 
+    def _view(self, frame: np.ndarray, size) -> np.ndarray:
+        """The frame the matcher sees: band-passed, or raw when turned off."""
+        if not self.config.match_bandpass:
+            return frame
+        return bandpass(frame, size, low=self.config.match_bandpass)
+
     def _search(self, frame: np.ndarray, predicted: np.ndarray
                 ) -> tuple[np.ndarray | None, float]:
         """Normalised cross-correlation in a region that grows while lost."""
@@ -676,7 +752,12 @@ class Stabiliser:
                     * self.config.search_growth ** max(self.missing - 1, 0),
                     self.config.search_max)
         region = _grown(predicted, grown, frame.shape[1], frame.shape[0])
-        found, score = match_template(frame, self.template, region)
+        # The template was cut from a band-passed frame, so the search has to
+        # run on one cut the same way -- correlating a band-passed template
+        # against raw pixels compares two different pictures.
+        shape = (self.template.shape[1], self.template.shape[0])
+        found, score = match_template(self._view(frame, shape), self.template,
+                                      region)
         if found is None or not np.isfinite(score) or score < self.config.match_threshold:
             return None, score
         return found, score
@@ -690,7 +771,7 @@ class Stabiliser:
         self.box = box
         self._areas.append(area_of(box))
         self._aspects.append(aspect_of(box))
-        self.template = _crop(frame, box)
+        self.template = _crop(self._view(frame, size_of(box)), box)
         self.state = TRACKING
         self.healthy = 1
         return Decision(box=box, state=TRACKING, shift=tuple(shift))
@@ -719,5 +800,6 @@ def _grown(box, scale: float, width: int, height: int) -> np.ndarray:
 __all__ = ["Decision", "FrameMotion", "GuardConfig", "LOST", "REACQUIRED",
            "STATES", "SUSPECT",
            "Stabiliser", "TRACKING", "area_of", "aspect_of", "box_of",
-           "centre_of", "estimate_shift", "local_contrast", "match_template",
+           "bandpass", "centre_of", "estimate_shift", "local_contrast",
+           "match_template",
            "size_of"]

@@ -92,3 +92,17 @@ guard:
   # the ratio where it was.
   caution_below: 1.0
   caution_factor: 0.6
+  # Re-acquisition correlates a band-passed frame, cut to the target's own
+  # scale, rather than the raw pixels. Measured, not assumed: a box around a
+  # faint thermal target is mostly the ground under it, so normalised
+  # cross-correlation finds the ground -- on a synthetic bench of low-contrast
+  # cases the raw matcher put the peak on the target 0 times out of 36 and
+  # scored 0.64 at the template's *old* position against 0.17 at the target's
+  # new one. Band-passing takes that to 20/36 at 5 levels of lift and 35/36 at
+  # 8, and never scores worse where the raw matcher already worked -- it is an
+  # improvement, not a cure: at 3 levels it still reaches only 11/36. CLAHE and
+  # a top-hat were tried on the same bench first and moved it 0/36 -> 5/36:
+  # they lift the target and the clutter beside it together, so the template
+  # stays mostly ground. The scale separation is the mechanism, not the
+  # contrast stretch. 0 turns it off.
+  match_bandpass: 0.55
