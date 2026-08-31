@@ -67,11 +67,13 @@ samurai:
   memory_kf_score: 0.0
 
 ego_motion:
-  # 4 decodes the JPEG at a quarter side directly (fewer coefficients, not a
-  # resize after the fact), which is plenty for a translation and is the
-  # difference between "free" and "a millisecond". The answer is returned as a
-  # fraction of the frame, so this number never has to agree with image_size.
-  reduce: 4
+  # 2, not 4, and the reason is the guard rather than the flow: the
+  # stabiliser reads its frames from the same `FrameMotion`, so this is
+  # the resolution its template match re-acquires a lost track at. At 4 a
+  # 512-pixel input is judged on a 128-pixel frame, where a 20-pixel
+  # target is 5 across -- enough for a flow field, thin for a template.
+  # A config with `samurai` but no `guard` can keep 4; this one cannot.
+  reduce: 2
 
 guard:
   # The classical layer (`src/trackers/stabiliser.py`), and the reason it is a
@@ -114,3 +116,11 @@ guard:
   search_max: 8.0
   match_threshold: 0.45
   give_up_after: 90
+  # Below this signal-to-clutter ratio the target is inside the clutter and the
+  # tracker is in the regime it is known to fail in, so the gates tighten by
+  # `caution_factor` for that frame. The gates tighten; the pixels are not
+  # touched -- CLAHE and top-hat were measured first and rejected, since both
+  # scale the target's signal and the ground's clutter together and leave the
+  # ratio where it was.
+  caution_below: 1.0
+  caution_factor: 0.6

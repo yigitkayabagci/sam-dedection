@@ -1,4 +1,4 @@
-"""The two axes run_records.py varies, and the ways they must not be confused.
+"""The three axes run_records.py varies, and the ways they must not be confused.
 
 A mode is an input configuration -- a resolution and whether the frame is
 cropped or resized into it. `--weights` is a different question entirely: which
@@ -10,7 +10,15 @@ thing and measured on another:
   * every (weights, size) pair resolves to a config that exists, declares that
     size, and takes its engines from a directory of its own;
   * a pair with no config raises instead of falling back to stock;
-  * the output folder separates weights and skip runs from the baseline.
+  * the output folder separates weights, policy and skip runs from the baseline.
+
+`--policy` is the third, and it is the one that has to be held to a stricter
+rule than the other two, because it is the only one that edits a config on the
+way past. An overlay that set a `checkpoint:` would make `--policy` a second
+way to change the weights and every `--weights` label in the summary would stop
+being true, so what is pinned is that an overlay touches runtime blocks and
+nothing else -- and that `plain` really is plain, which is only true while no
+backend config in the table carries a policy block of its own.
 
 None of it needs torch, EdgeTAM or an engine -- it is table arithmetic, which
 is why it can guard every combination rather than the one being worked on.
@@ -28,8 +36,10 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
-from tools.run_records import (MODES, TRAINED_AT, WEIGHTS, config_for,  # noqa: E402
-                               digest, engines_missing, folder, provenance)
+from tools.run_records import (MODES, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
+                               TRAINED_AT, WEIGHTS, config_for, digest,
+                               engines_missing, folder, overlay_for,
+                               provenance, staged_config)
 
 
 def body(config: str) -> dict:
@@ -113,8 +123,8 @@ class ConfigFor(unittest.TestCase):
 
 class Folder(unittest.TestCase):
     @staticmethod
-    def args(weights="stock", frame_skip=1):
-        return Namespace(weights=weights, frame_skip=frame_skip)
+    def args(weights="stock", frame_skip=1, policy="plain"):
+        return Namespace(weights=weights, frame_skip=frame_skip, policy=policy)
 
     def test_a_plain_stock_run_keeps_the_bare_name(self):
         """Runs written before there was a second axis stay where they are."""
@@ -132,6 +142,189 @@ class Folder(unittest.TestCase):
         names = {folder("full512", self.args(w, s))
                  for w in WEIGHTS for s in (1, 2)}
         self.assertEqual(len(names), 2 * len(WEIGHTS))
+
+    def test_a_policy_run_lands_beside_the_baseline_not_on_it(self):
+        """The ladder is only readable while its rungs are separate folders."""
+        self.assertEqual(folder("full512", self.args(policy="guard")),
+                         "full512_guard")
+        self.assertEqual(
+            folder("full512", self.args(weights="pool_deep", policy="ego")),
+            "full512_pool_deep_ego")
+
+    def test_all_three_axes_at_once_stay_distinct(self):
+        names = {folder("full512", self.args(w, s, p))
+                 for w in WEIGHTS for s in (1, 2) for p in POLICIES}
+        self.assertEqual(len(names), 2 * len(WEIGHTS) * len(POLICIES))
+
+
+class Policies(unittest.TestCase):
+    """The third axis, and the rule that keeps it from becoming the second one.
+
+    An overlay states runtime behaviour. The moment one of them could set a
+    `checkpoint:` or an engine path, `--policy` would be a way to change the
+    weights while the summary still printed the `--weights` it was given, and
+    every row comparing the two would be wrong in a way nothing would catch.
+    """
+
+    def test_every_named_overlay_exists(self):
+        for policy, path in POLICIES.items():
+            if path is not None:
+                self.assertTrue((ROOT / path).is_file(), policy)
+
+    def test_the_baseline_names_no_overlay(self):
+        self.assertIsNone(POLICIES["plain"])
+        self.assertEqual(overlay_for("plain"), {})
+
+    def test_an_overlay_sets_runtime_blocks_and_nothing_else(self):
+        for policy in POLICIES:
+            with self.subTest(policy=policy):
+                self.assertLessEqual(set(overlay_for(policy)), set(POLICY_KEYS))
+
+    def test_no_overlay_can_reach_the_weights(self):
+        """The rule the docstring above exists for, stated as a test."""
+        for policy in POLICIES:
+            blocks = overlay_for(policy)
+            for key in ("checkpoint", "model_cfg", "image_size",
+                        "image_encoder_engine", "sam_head_engine"):
+                self.assertNotIn(key, blocks, f"{policy} sets {key}")
+
+    def test_a_stray_key_is_refused_rather_than_merged(self):
+        import tempfile
+
+        from tools import run_records
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stray = Path(tmp) / "stray.yaml"
+            stray.write_text("guard: {enabled: true}\ncheckpoint: other.pt\n")
+            POLICIES["_stray"] = str(stray.relative_to(ROOT)) \
+                if stray.is_relative_to(ROOT) else str(stray)
+            # overlay_for reads ROOT / path, and an absolute path joins to
+            # itself, so this works from a temp dir either way.
+            try:
+                with self.assertRaises(SystemExit) as caught:
+                    run_records.overlay_for("_stray")
+                self.assertIn("checkpoint", str(caught.exception))
+            finally:
+                POLICIES.pop("_stray")
+
+    def test_ego_motion_never_ships_without_the_filter_that_consumes_it(self):
+        """A shift with no `samurai:` is a decode and a flow bought for nothing.
+
+        `EdgeTAMTracker._shift_for` is handed to `samurai.install` and has no
+        other consumer, so an ego-only overlay would cost a millisecond a frame
+        and change no output.
+        """
+        for policy in POLICIES:
+            blocks = overlay_for(policy)
+            if "ego_motion" in blocks:
+                self.assertIn("samurai", blocks, policy)
+
+    def test_the_ladder_adds_one_thing_per_rung(self):
+        rungs = ["plain", "samurai", "ego", "guard"]
+        seen = [set(overlay_for(p)) for p in rungs]
+        for lower, upper in zip(seen, seen[1:]):
+            self.assertTrue(lower < upper,
+                            "each rung is the one below it plus exactly one block")
+        self.assertEqual([len(s) for s in seen], [0, 1, 2, 3])
+
+    def test_the_guard_overlay_configures_every_field_the_guard_has(self):
+        """A half-configured guard is a setting nobody wrote.
+
+        `staged_config` merges per block, so the overlay's `guard:` is the whole
+        of it -- a field left out here silently takes the dataclass default
+        rather than the backend config's value.
+        """
+        import ast
+
+        source = (ROOT / "src/trackers/stabiliser.py").read_text()
+        fields = {
+            node.target.id
+            for cls in ast.walk(ast.parse(source))
+            if isinstance(cls, ast.ClassDef) and cls.name == "GuardConfig"
+            for node in cls.body if isinstance(node, ast.AnnAssign)
+        }
+        self.assertTrue(fields, "GuardConfig has fields to check")
+        configured = set(overlay_for("guard")["guard"]) - {"enabled"}
+        self.assertEqual(configured, fields)
+
+    def test_the_guard_reads_frames_at_the_size_it_can_match_a_template_on(self):
+        """The guard shares ego_motion's FrameMotion, so `reduce` is its resolution.
+
+        At 4 a 512-pixel input is judged on a 128-pixel frame, where a 20-pixel
+        target is 5 across -- enough for a flow field, thin for the template
+        match that re-acquires a lost track.
+        """
+        self.assertEqual(overlay_for("guard")["ego_motion"]["reduce"], 2)
+        self.assertEqual(overlay_for("ego")["ego_motion"]["reduce"], 4)
+
+    def test_every_policy_that_changes_a_run_explains_itself_in_the_summary(self):
+        for policy in POLICIES:
+            if policy != "plain":
+                self.assertIn(policy, POLICY_NOTE)
+                self.assertIn("Training-free", POLICY_NOTE[policy])
+
+    def test_the_backend_configs_carry_no_policy_of_their_own(self):
+        """Which is what makes `plain` a baseline rather than a mixture.
+
+        If one of these ever gains a `samurai:` block, a `--policy plain` row
+        stops being the no-policy row and the ladder loses its bottom rung.
+        """
+        for weights, table in WEIGHTS.items():
+            for size, config in table.items():
+                for key in POLICY_KEYS:
+                    self.assertNotIn(key, body(config),
+                                     f"{config} ({weights}/{size}) sets {key}")
+
+
+class StagedConfig(unittest.TestCase):
+    """What cli.py is actually pointed at, per run."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.outdir = Path(self.tmp.name)
+
+    def test_the_baseline_reads_the_backend_yaml_untouched(self):
+        """A plain run must read the same file it read before this axis existed."""
+        config = WEIGHTS["pool_deep"][512]
+        self.assertEqual(staged_config(config, "plain", self.outdir), config)
+        self.assertFalse((self.outdir / "config.yaml").exists())
+
+    def test_a_policy_run_writes_the_merge_beside_its_own_output(self):
+        config = WEIGHTS["pool_deep"][512]
+        staged = Path(staged_config(config, "guard", self.outdir))
+        self.assertEqual(staged, self.outdir / "config.yaml")
+        merged = yaml.safe_load(staged.read_text())
+        base = body(config)
+        # everything the backend said
+        for key in ("checkpoint", "image_size", "image_encoder_engine"):
+            self.assertEqual(merged[key], base[key], key)
+        # plus everything the policy said
+        for key in overlay_for("guard"):
+            self.assertEqual(merged[key], overlay_for("guard")[key], key)
+
+    def test_the_merge_is_per_block_not_per_key(self):
+        """Half a `guard:` from a file and half from a config is nobody's setting."""
+        config = WEIGHTS["pool_deep"][512]
+        staged = Path(staged_config(config, "guard", self.outdir))
+        self.assertEqual(yaml.safe_load(staged.read_text())["guard"],
+                         overlay_for("guard")["guard"])
+
+    def test_paths_stay_relative_so_the_copy_resolves_from_anywhere(self):
+        """cli.py resolves against the repository root, not the config's directory."""
+        staged = Path(staged_config(WEIGHTS["pool_deep"][512], "ego", self.outdir))
+        merged = yaml.safe_load(staged.read_text())
+        self.assertFalse(Path(merged["checkpoint"]).is_absolute())
+        self.assertFalse(Path(merged["image_encoder_engine"]).is_absolute())
+
+    def test_it_says_where_it_came_from(self):
+        staged = Path(staged_config(WEIGHTS["pool_deep"][512], "guard", self.outdir))
+        head = staged.read_text().splitlines()[0:3]
+        self.assertIn("run_records.py", head[0])
+        self.assertIn(WEIGHTS["pool_deep"][512], head[0])
+        self.assertIn("guard", head[1])
 
 
 class Preflight(unittest.TestCase):
@@ -153,12 +346,13 @@ class Provenance(unittest.TestCase):
     """
 
     @staticmethod
-    def args(weights):
-        return Namespace(weights=weights, frame_skip=1)
+    def args(weights, policy="plain"):
+        return Namespace(weights=weights, frame_skip=1, policy=policy)
 
-    def record(self, weights, size=768, mode="full768", crop=None):
+    def record(self, weights, size=768, mode="full768", crop=None,
+               policy="plain"):
         config = config_for(weights, size, mode)
-        return provenance(mode, config, crop, self.args(weights),
+        return provenance(mode, config, crop, self.args(weights, policy),
                           ["python", "cli.py", "--config", config])
 
     def test_names_the_weights_the_size_and_the_config(self):
@@ -181,6 +375,26 @@ class Provenance(unittest.TestCase):
         self.assertEqual(sorted(row["engines"]),
                          ["image_encoder", "memory_attention",
                           "memory_encoder", "sam_head"])
+
+    def test_it_records_the_policy_by_name_and_by_value(self):
+        """The name alone would not survive an edit to configs/policies/."""
+        row = self.record("pool_deep", policy="guard")
+        self.assertEqual(row["policy"], "guard")
+        self.assertIn("guard", row["policy_blocks"])
+        self.assertEqual(row["policy_blocks"]["guard"]["caution_below"], 1.0)
+
+    def test_a_baseline_record_says_so_rather_than_saying_nothing(self):
+        row = self.record("pool_deep")
+        self.assertEqual(row["policy"], "plain")
+        self.assertEqual(row["policy_blocks"], {})
+
+    def test_the_policy_never_moves_the_weights_the_row_is_labelled_with(self):
+        """The whole reason overlays are restricted -- checked end to end."""
+        plain = self.record("pool_deep")
+        guarded = self.record("pool_deep", policy="guard")
+        self.assertEqual(plain["checkpoint"], guarded["checkpoint"])
+        self.assertEqual(plain["engines"], guarded["engines"])
+        self.assertEqual(plain["image_size"], guarded["image_size"])
 
     def test_the_command_is_kept_verbatim(self):
         row = self.record("stock")

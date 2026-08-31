@@ -59,11 +59,13 @@ samurai:
   memory_kf_score: 0.0
 
 ego_motion:
-  # A quarter side, decoded straight out of the JPEG rather than resized after
-  # the fact. Plenty for a translation, and the difference between free and a
-  # millisecond. The answer comes back as a fraction of the frame, so this
-  # number never has to agree with image_size.
-  reduce: 4
+  # 2, not 4, and the reason is the guard rather than the flow: the
+  # stabiliser reads its frames from the same `FrameMotion`, so this is
+  # the resolution its template match re-acquires a lost track at. At 4 a
+  # 512-pixel input is judged on a 128-pixel frame, where a 20-pixel
+  # target is 5 across -- enough for a flow field, thin for a template.
+  # A config with `samurai` but no `guard` can keep 4; this one cannot.
+  reduce: 2
 
 guard:
   enabled: true

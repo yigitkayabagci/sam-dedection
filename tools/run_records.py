@@ -71,6 +71,33 @@ Usage:
         --modes full512,crop512,full768 --weights stock
     python tools/run_records.py --records frames --out frame_output \\
         --modes full512,crop512,full768 --weights pool_deep
+
+`--policy` is the third axis, and the one that needs no training and no export.
+The modes vary the input and `--weights` varies the model; a policy varies
+neither -- it layers `samurai:` / `ego_motion:` / `guard:` onto whichever
+backend YAML the pair chose (configs/policies/, merged into `config.yaml`
+beside the run). So it measures what the weights already on disk can be made to
+do, which is the one question that does not have to wait for a run to finish:
+
+    # The ladder, on one checkpoint, one prompt: each row differs from the one
+    # above it by exactly one thing.
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512 --weights pool_deep --box 700,300,830,430 --pick-only
+    for policy in plain samurai ego guard; do
+        python tools/run_records.py --records frames --out frame_output \\
+            --modes full512 --weights pool_deep --policy $policy
+    done
+    # -> full512_pool_deep/  _samurai/  _ego/  _guard/  under each record.
+
+    # Or just the two ends, if the question is only "is the stack worth it".
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512 --weights pool_deep --policy guard
+
+Read `--policy guard`'s dropout count expecting it to go **up** where the
+tracker was previously reporting a mask covering a field: the guard refuses
+those and reports an empty mask, which `accuracy.dropout_episodes` counts as
+the lost frame it always was. A guard run whose dropouts did not move is a
+guard that never fired, not a guard that helped.
 """
 from __future__ import annotations
 
@@ -133,76 +160,84 @@ WEIGHTS = {
 # before this repository existed and records nothing about it.
 TRAINED_AT = {"stock": 1024, "pool_deep": 512}
 
-# --stack -> {model input size: PyTorch backend YAML}. The third axis, and a
-# different question again from the other two: `--modes` varies the *input*,
-# `--weights` varies the *model*, and this varies the *inference-time layers*
-# wrapped around a fixed model -- none of which are trained, so a stack run
-# measures them against stock EdgeTAM without waiting for a stage B.
-#
-# `off` is the default and keeps what this tool always did: the TensorRT
-# backend on the engine configs above. A named stack switches to the PyTorch
-# backend, because that is where the memory bookkeeping these layers touch
-# lives and because it needs no engine build -- which is the point of being
-# able to try them today.
-#
-# The rungs are ordered and meant to be run in order. `samurai` changes which
-# candidate mask is picked and which frames reach the memory bank; `guard`
-# changes what the tracker *returns*, since a refused mask comes back empty.
-# Run together first, an improvement is unattributable and a regression is
-# undiagnosable. There is deliberately no guard-without-motion rung: the guard
-# measures the jump after the background's own motion is removed, so without
-# `ego_motion` it reads a drone's yaw as the target moving.
-STACKS = {
-    "plain": {768: "configs/edgetam_768.yaml",
+# --backend torch -> the plain PyTorch YAML for a size. The TensorRT tables
+# above are the default and stay the measurement of record; this exists for the
+# question asked before any engine is built, which is the only question the
+# policies can answer on their own: they are training-free *and* export-free,
+# so an engine build is a prerequisite of the tool and not of the thing being
+# measured. A shipped TRT config sets `strict: false` and would fall back to
+# PyTorch on its own, but silently and after printing a speed number that is
+# not what it says it is -- naming the backend keeps the row honest.
+TORCH = {
+    "stock": {1024: "configs/edgetam.yaml",
+              768: "configs/edgetam_768.yaml",
               512: "configs/edgetam_512.yaml"},
-    "motion": {768: "configs/edgetam_768_motion.yaml",
-               512: "configs/edgetam_512_motion.yaml"},
-    "guard": {768: "configs/edgetam_768_samurai.yaml",
-              512: "configs/edgetam_512_thermal_guard.yaml"},
+    "pool_deep": {768: "configs/edgetam_768_pool_deep.yaml",
+                  512: "configs/edgetam_512_pool_deep.yaml"},
+}
+
+# --policy -> the overlay merged onto whichever backend YAML the (weights,
+# size) pair chose, or None for the baseline. This is the third axis and it is
+# orthogonal to the other two: `--modes` varies the input, `--weights` varies
+# the model, and nothing here varies either. No engine changes shape, no
+# checkpoint is touched, nothing is re-exported -- everything in
+# configs/policies/ is inference-time bookkeeping this project deliberately
+# left in PyTorch, which is exactly why it can be measured on the weights
+# already on disk instead of waiting for a training run.
+#
+# They are overlays rather than whole configs because whole ones would be
+# sizes x weights x policies copies of the same engine paths, and the day one
+# of those paths moved most of them would be quietly stale.
+POLICIES = {
+    "plain": None,
+    "samurai": "configs/policies/samurai.yaml",
+    "ego": "configs/policies/ego.yaml",
+    "guard": "configs/policies/guard.yaml",
+}
+
+# The blocks an overlay is allowed to set. A policy states runtime behaviour;
+# a checkpoint or an engine path in one of these files would be that policy
+# quietly changing what `--weights` means, so it is refused rather than merged.
+POLICY_KEYS = ("samurai", "sam2long", "ego_motion", "guard")
+
+# What the summary says about a policy run, so a table read later explains
+# itself. Each names the rung below it, because that is the row it has to be
+# read against.
+POLICY_NOTE = {
+    "samurai": (
+        "Policy: `samurai` — motion-aware memory. A Kalman filter re-scores the "
+        "three candidate masks and a frame enters the memory bank only if IoU, "
+        "object score and motion agree it was a good one. **Training-free**: the "
+        "checkpoint and the engines are the `plain` run's. Read against `plain`."
+    ),
+    "ego": (
+        "Policy: `ego` — `samurai`, plus the background's measured displacement "
+        "handed to that filter as a control input. On HIT-UAV's real drone "
+        "footage the camera moves a median 0.9-8.6 px a frame, which on a "
+        "27-pixel target is a third of its own width of apparent motion that is "
+        "not the target's. **Training-free.** Read against the `samurai` row: "
+        "the difference is the camera term and nothing else."
+    ),
+    "guard": (
+        "Policy: `guard` — `ego`, plus the classical layer with no weights in "
+        "it: area, aspect and travel plausibility once the camera's motion is "
+        "out, hysteresis, and template re-acquisition. A refused mask is "
+        "reported **empty**, never replaced by the guard's own prediction, so "
+        "`dropout_episodes` counts a lost frame honestly instead of scoring a "
+        "mask that covers a field as a hit. Expect dropouts to go **up** where "
+        "they were being hidden. **Training-free.** Read against the `ego` row."
+    ),
 }
 
 
-def stack_config(stack: str, size: int, mode: str, checkpoint: str | None,
-                 outdir: Path) -> str:
-    """The YAML for one (stack, size), with `checkpoint` swapped in if given.
-
-    A stack run defaults to stock EdgeTAM on purpose -- the layers are
-    training-free, so stock is the honest place to measure what they are worth.
-    `--checkpoint` points the same three rungs at a stage-B output instead, and
-    it does that by writing a copy of the config beside the results rather than
-    editing the shipped one: the copy is then part of the run's own record, and
-    two runs on different weights cannot end up crediting each other.
-    """
-    import yaml as _yaml
-
-    table = STACKS[stack]
-    if size not in table:
-        have = ", ".join(str(k) for k in sorted(table))
-        raise SystemExit(
-            f"--stack {stack} has no {size} configuration, so mode {mode!r} "
-            f"cannot run under it (it has {have}).")
-    config = table[size]
-    if not checkpoint:
-        return config
-    weights = Path(checkpoint)
-    if not weights.is_file():
-        raise SystemExit(f"--checkpoint {weights} is not a file.")
-    body = _yaml.safe_load((ROOT / config).read_text()) or {}
-    body["checkpoint"] = str(weights.resolve())
-    outdir.mkdir(parents=True, exist_ok=True)
-    copy = outdir / "config.yaml"
-    copy.write_text(_yaml.safe_dump(body, sort_keys=False))
-    return str(copy)
-
-
-def config_for(weights: str, size: int, mode: str) -> str:
+def config_for(weights: str, size: int, mode: str, backend: str = "trt") -> str:
     """The YAML for one (weights, input size) pair, or a refusal that explains.
 
     A missing pair is not an oversight to fall back from: silently running the
     stock config here would put a row labelled `pool_deep` in the summary that
     was measured on different weights.
     """
-    table = WEIGHTS[weights]
+    table = (TORCH if backend == "torch" else WEIGHTS)[weights]
     if size in table:
         return table[size]
     have = ", ".join(str(k) for k in sorted(table))
@@ -211,6 +246,64 @@ def config_for(weights: str, size: int, mode: str) -> str:
         f"cannot run under it (it has {have}). Drop that mode, or run it "
         f"under --weights stock."
     )
+
+
+def overlay_for(policy: str) -> dict:
+    """The policy blocks named by `--policy`, or `{}` for the baseline.
+
+    Refuses an overlay that reaches outside `POLICY_KEYS`: a `checkpoint:` in
+    one of these files would make `--policy` a second way to change the weights,
+    and the summary's `--weights` column would stop being true.
+    """
+    import yaml
+
+    path = POLICIES[policy]
+    if path is None:
+        return {}
+    body = yaml.safe_load((ROOT / path).read_text()) or {}
+    stray = sorted(set(body) - set(POLICY_KEYS))
+    if stray:
+        raise SystemExit(
+            f"{path} sets {', '.join(stray)}, which is not a policy. An overlay "
+            f"may only set {', '.join(POLICY_KEYS)} -- anything else belongs in "
+            f"the backend config the --weights axis selects."
+        )
+    return body
+
+
+def staged_config(config: str, policy: str, outdir: Path) -> str:
+    """The config the run actually reads: the backend YAML, plus the overlay.
+
+    For the baseline this is the backend YAML itself, unchanged, so a `plain`
+    run reads exactly the file earlier runs read. With a policy the merge is
+    written to `<outdir>/config.yaml` and *that* is what cli.py is pointed at,
+    which is the decisive record: the question asked later is not "which
+    overlay was named" but "what did this folder run", and the answer then sits
+    beside the video rather than in two files that have to be re-merged.
+
+    The merge is per block, not per key. A policy is a complete statement of
+    one -- half of `guard:` from a file and half from a backend config would be
+    a setting nobody wrote.
+
+    Relative `checkpoint:`/`*_engine:` paths are left alone: cli.py resolves
+    them against the repository root, not against the config's own directory,
+    so the copy works from wherever it is written.
+    """
+    import yaml
+
+    blocks = overlay_for(policy)
+    if not blocks:
+        return config
+    body = yaml.safe_load((ROOT / config).read_text()) or {}
+    body.update(blocks)
+    staged = outdir / "config.yaml"
+    staged.write_text(
+        f"# Generated by tools/run_records.py: {config}\n"
+        f"# + configs/policies/{policy}.yaml (--policy {policy}).\n"
+        f"# Edit those two, not this -- a re-run overwrites it.\n"
+        + yaml.safe_dump(body, sort_keys=False)
+    )
+    return str(staged)
 
 
 def engines_missing(config: str) -> str | None:
@@ -255,8 +348,7 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
     later -- when the mp4s are being compared and the terminal that ran them is
     gone.
     """
-    body = yaml.safe_load(Path(config).read_text() if Path(config).is_absolute()
-                          else (ROOT / config).read_text()) or {}
+    body = yaml.safe_load((ROOT / config).read_text()) or {}
     engines = {
         name.removesuffix("_engine"): digest(ROOT / body[name])
         for name in ("image_encoder_engine", "memory_attention_engine",
@@ -264,36 +356,41 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
         if body.get(name)
     }
     return {
-        "weights": getattr(args, "checkpoint", None) or args.weights,
-        "stack": getattr(args, "stack", "off"),
-        "layers": sorted(k for k in ("samurai", "ego_motion", "guard")
-                         if body.get(k)),
+        "weights": args.weights,
         "trained_at": TRAINED_AT.get(args.weights),
+        # The policy by name and by value. The name alone would not survive an
+        # edit to configs/policies/, and this file is read months later to
+        # explain a number.
+        "policy": args.policy,
+        "policy_blocks": overlay_for(args.policy),
         "mode": mode,
         "image_size": int(body.get("image_size", 1024)),
         "center_crop": crop,
         "config": config,
-        "checkpoint": digest(Path(body["checkpoint"])
-                             if Path(body["checkpoint"]).is_absolute()
-                             else ROOT / body["checkpoint"])
-                      if body.get("checkpoint") else None,
+        "checkpoint": digest(ROOT / body["checkpoint"]) if body.get("checkpoint") else None,
         "engines": engines,
         "command": [str(c) for c in cmd],
     }
 
 
 def folder(mode: str, args) -> str:
-    """The output folder for one run: `<mode>[_<weights>][_skipN]`.
+    """The output folder for one run: `<mode>[_<weights>][_<policy>][_skipN]`.
 
     A plain `stock` run at every frame keeps the bare `<mode>` name, so results
     written before there was more than one axis stay where they are and a
-    re-run lands on top of them rather than beside them.
+    re-run lands on top of them rather than beside them. The same reasoning
+    puts the policy in the name: `full512_pool_deep` and
+    `full512_pool_deep_guard` are two measurements of one checkpoint, not a
+    result and its replacement, and the whole point of the ladder is reading
+    them side by side.
     """
     parts = [mode]
-    if getattr(args, "stack", "off") != "off":
-        parts.append(args.stack)
-    elif args.weights != "stock":
+    if getattr(args, "backend", "trt") != "trt":
+        parts.append(args.backend)
+    if args.weights != "stock":
         parts.append(args.weights)
+    if args.policy != "plain":
+        parts.append(args.policy)
     if args.frame_skip > 1:
         parts.append(f"skip{args.frame_skip}")
     return "_".join(parts)
@@ -342,6 +439,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="frame_output", help="Where results go.")
     p.add_argument("--modes", default=",".join(MODES),
                    help=f"Comma-separated subset of {', '.join(MODES)}.")
+    p.add_argument("--policy", default="plain", choices=tuple(POLICIES),
+                   help="Inference-time policy layered onto the backend config: "
+                        "samurai (motion-aware memory), ego (that filter given "
+                        "the camera's own displacement), guard (ego plus the "
+                        "classical plausibility and re-acquisition layer). None "
+                        "of them trains anything or rebuilds an engine, so each "
+                        "runs on the weights already on disk. Results land in "
+                        "<mode>_<weights>_<policy>/ beside the baseline.")
+    p.add_argument("--backend", default="trt", choices=("trt", "torch"),
+                   help="Which runtime the modes run on. `trt` (default) is "
+                        "the measurement of record and needs engines built for "
+                        "every (weights, size) pair. `torch` runs the plain "
+                        "PyTorch configs and needs no export, which is the only "
+                        "way to answer what a --policy is worth before any "
+                        "engine exists -- the policies are training-free and "
+                        "export-free, so an engine build is a prerequisite of "
+                        "this tool rather than of the thing being measured. "
+                        "Results land in <mode>[_torch]_<weights>_<policy>/, "
+                        "because a policy measured on two runtimes is two "
+                        "measurements.")
     p.add_argument("--weights", default="stock", choices=tuple(WEIGHTS),
                    help="Which trained weights the modes run on. `stock` is "
                         "EdgeTAM as shipped; `pool_deep` is the checkpoint from "
@@ -351,24 +468,6 @@ def main(argv: list[str] | None = None) -> int:
                         "a different runtime setting. Results land in "
                         "<mode>_<weights>/ so a stock run is never overwritten "
                         "and the two share one saved prompt.")
-    p.add_argument("--stack", default="off", choices=("off",) + tuple(STACKS),
-                   help="Which inference-time layers run around the model. "
-                        "`off` (default) keeps the TensorRT backend and the "
-                        "engine configs. `plain`, `motion` and `guard` are an "
-                        "ordered ablation on the PyTorch backend, needing no "
-                        "engine build: plain is nothing, motion adds SAMURAI's "
-                        "memory gate and ego-motion, guard adds the classical "
-                        "plausibility and re-acquisition layer. Run them in "
-                        "that order -- guard changes what the tracker returns, "
-                        "so running it together with motion first makes an "
-                        "improvement unattributable. Results land in "
-                        "<mode>_<stack>/.")
-    p.add_argument("--checkpoint", default=None,
-                   help="Weights for a --stack run, replacing stock EdgeTAM. "
-                        "A copy of the config with this path substituted is "
-                        "written beside the results, so the run records which "
-                        "weights produced it. This is how a stage-B output is "
-                        "used without another notebook.")
     p.add_argument("--pattern", default="*.tif*", help="Frame glob inside a record.")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Playback fps for the output mp4 (a sequence has none).")
@@ -429,28 +528,16 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"Unknown mode {m!r}; pick from {', '.join(MODES)}")
     # Resolve every config up front, so an unbuildable combination fails now
     # rather than after the first record has been indexed and prompted for.
-    if args.stack != "off":
-        # A stack run resolves per record, because --checkpoint writes its
-        # config copy into that record's output folder. Validate the pairs now
-        # so an impossible one still fails before any frame is read.
-        for m in modes:
-            stack_config(args.stack, MODES[m][0], m, None, Path(args.out))
-        configs = {}
-    else:
-        if args.checkpoint:
-            raise SystemExit(
-                "--checkpoint needs --stack: without one this tool runs the "
-                "TensorRT engines, and weights are baked into an engine at "
-                "export time rather than read at runtime. Use --weights, or "
-                "pick a stack.")
-        configs = {m: config_for(args.weights, MODES[m][0], m) for m in modes}
+    configs = {m: config_for(args.weights, MODES[m][0], m, args.backend)
+               for m in modes}
     absent = {m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
     if absent:
         lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
         sizes = sorted({MODES[m][0] for m in absent})
         builds = []
         for size in sizes:
-            body = yaml.safe_load((ROOT / config_for(args.weights, size, "")).read_text())
+            body = yaml.safe_load(
+                (ROOT / config_for(args.weights, size, "", args.backend)).read_text())
             builds += [
                 f"  python tools/export_edgetam_onnx.py --outdir {Path(body['image_encoder_engine']).parent}/ \\",
                 f"      --image-size {size} --checkpoint {body['checkpoint']} --verify",
@@ -482,13 +569,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         for mode in modes:
-            crop = MODES[mode][1]
-            if args.stack != "off":
-                config = stack_config(args.stack, MODES[mode][0], mode,
-                                      args.checkpoint,
-                                      out_root / record.name / folder(mode, args))
-            else:
-                config = configs[mode]
+            config, crop = configs[mode], MODES[mode][1]
             # A skipped run, and a run on other weights, are different
             # measurements of the same mode rather than replacements for it, so
             # each gets its own folder next to the baseline. `stock` with no
@@ -496,8 +577,13 @@ def main(argv: list[str] | None = None) -> int:
             outdir = out_root / record.name / folder(mode, args)
             outdir.mkdir(parents=True, exist_ok=True)
 
-            backend = "edgetam" if args.stack != "off" else "edgetam_trt"
-            cmd = [PY, "cli.py", "--tracker", backend, "--config", config,
+            # After mkdir: a policy run writes the merged config into the
+            # folder it is about to fill, so what ran and what it produced are
+            # never in two places.
+            run_config = staged_config(config, args.policy, outdir)
+
+            runtime = "edgetam" if args.backend == "torch" else "edgetam_trt"
+            cmd = [PY, "cli.py", "--tracker", runtime, "--config", run_config,
                    "--frames-dir", record, "--frame-pattern", args.pattern,
                    "--fps", args.fps,
                    "--prompt", "file", "--prompt-file", prompts,
@@ -558,6 +644,7 @@ def main(argv: list[str] | None = None) -> int:
         + (f"`{WEIGHTS[args.weights][MODES[modes[0]][0]]}` and its siblings, "
            f"trained at {trained}." if trained else "trained size unrecorded."),
         "",
+        *((POLICY_NOTE[args.policy], "") if args.policy != "plain" else ()),
         "| mode | model | input |",
         "|---|---|---|",
         *(described[m] for m in modes),
