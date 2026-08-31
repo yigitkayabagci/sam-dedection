@@ -481,8 +481,16 @@ ARMS = {
                           '                 "vtuav_lt_rgb": '
                           '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"finetune"',
+        # `_finetune` is not decoration: the settings cell appends METHOD to
+        # MIRROR_DIR so a fine-tune and a LoRA of the same RUN cannot overwrite
+        # each other's Drive folder, which means 22 mirrors to
+        # `thermal_deep_finetune/` and never to `thermal_deep/`. Naming the
+        # folder without it pointed this A/B at a path nothing ever writes, and
+        # cell 3 only warns -- so the run would have gone ahead scoring against
+        # stock EdgeTAM while the log said it was comparing against 22.
         "REFERENCE_CHECKPOINT": ('"/content/drive/MyDrive/edgetam-stage-b/'
-                                 'thermal_deep/edgetam_pool_thermal_deep_512.pt"'),
+                                 'thermal_deep_finetune/'
+                                 'edgetam_pool_thermal_deep_512.pt"'),
     },
     # A clean RGB control for the thermal and mixed arms. AeroVIS is both the
     # required training source and the held-out RGB grade; VisDrone stays out
