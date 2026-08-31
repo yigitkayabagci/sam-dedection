@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Thirty-two notebooks, meant for Colab. Everything they orchestrate lives in
+Thirty-four notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -38,6 +38,16 @@ recipe, not the implementation.
 | 30 | `30_tracking_before_after_demo.ipynb` | Anti-UAV410 validation dizisinde Stage B ve 29'un seçilen final kolunu senkron before/after MP4, IoU eğrisi ve dropout ölçüleriyle gösterir; en iyi düşük-kontrast kazancının yanında en kötü gerilemeyi de üretir | 29'un Drive checkpoint'i, log'u ve validation JSON'ları; aynı runtime kullanılmazsa Anti-UAV410 arşivini yeniden indirir |
 | 31 | `31_aerial_thermal_tracking.ipynb` | Stage B'yi önce düşük-kontrast video precheck'inde ölçer, sonra VTUAV ST/LT + VTUAV-VIS + BIRDSAI kimlikleriyle temporal devam eğitir; kaynak-bazlı Stage B / temporal / temporal+SAMURAI A/B'si üretir, Anti-UAV410 varsayılan kapalıdır | tercihen 32'nin checkpoint'i; `MyDrive/VTUAV` altındaki seçilen ST/LT tracking zip'leri; `MyDrive/edgetam-pool/{vtuav_thermal,vtuav_lt_thermal}`; resmî VTUAV-VIS `train_001`; BIRDSAI gerçek gece videolarını kendisi indirir |
 | 32 | `32_aerial_thermal_stage_b_stable.ipynb` | Kullanıcının sabit 22'sine dokunmadan VTUAV-LT'yi zorunlu yapar, düşük-kontrast/polarity/gamma/noise hardening ekler; üç güvenli encoder LR profilini kısa pilotta eler ve seçilen profille kararlı Stage B üretir | 22 ile aynı statik termal kaynaklar; ayrıca `vtuav_lt_thermal` pool'unda en az 5.000 kabul edilmiş instance |
+
+| 34 | `34_pretrain_thermal_aerial.ipynb` | **termal + hava pretrain**: her termal havuz `MIN_BOX_IOU 0.75` ile tek standarda yeniden kesilir, SegFly kendi çizili haritalarıyla girer, `EPOCHS [3, 40]` — 22 ve sonrasının üstüne oturacağı temel | 22'nin havuzları, `MyDrive/VTUAV` arşivleri |
+| 35 | `35_pretrain_rgb_aerial.ipynb` | **RGB pretrain**, bilerek ayrı: AeroVIS ana kaynak (`aerovis_train` 40 000 kareye kadar) ve dizi bazlı held-out tek grade; `car`/`vehicle` 0.5 ile inceltilir, VisDrone dışarıda | `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler |
+
+**34 ve 35 pretrain'dir, kol değil.** 19-32 tek bir değişkeni ölçen kollardır;
+bu ikisi eldeki her şeyi tek geniş temele toplar ve dar koşular onun
+checkpoint'inden başlar. Ayrı olmalarının sebebi hedefin ayrı olması: 34 asıl
+hedef olan **hava + termal** dünyayı, 35 onun yanındaki ikinci RGB modelini
+eğitir. Ayrıntı ve AeroVIS'in yol doğrulaması için
+`docs/son_degisiklikler_tr.md`.
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
