@@ -38,7 +38,8 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
-from tools.run_records import (MODES, ab_table, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
+from tools.run_records import (MODES, ab_table, account_flags, POLICIES,  # noqa: E402
+                               POLICY_KEYS, POLICY_NOTE,
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
@@ -436,6 +437,13 @@ class AllPointers(unittest.TestCase):
         for policy in ("samurai", "ego", "guard"):
             self.assertIsNotNone(pointers_missing(config, policy), policy)
 
+    def test_a_policy_that_does_not_re_select_needs_no_re_export(self):
+        """`memgate` leaves the mask choice to the engine, so it reads nothing
+        `--all-pointers` adds. Refusing it here would send a user to a
+        forty-minute re-export for a run that does not need one."""
+        self.assertEqual(overlay_for("memgate")["samurai"]["kf_weight"], 0.0)
+        self.assertIsNone(pointers_missing(self.config(self.ORDINARY), "memgate"))
+
     def test_an_all_pointers_export_passes(self):
         config = self.config(self.ORDINARY + ["obj_ptr_all"])
         for policy in POLICIES:
@@ -652,6 +660,50 @@ class ABTableTest(unittest.TestCase):
         self.assertEqual(ab_table("plain", "guard_lite", "full768", self.A, None), [])
         self.assertEqual(ab_table("plain", "guard_lite", "full768", None, self.B), [])
         self.assertEqual(ab_table("plain", "guard_lite", "full768", {}, {}), [])
+
+class AccountFlags(unittest.TestCase):
+    """Each layer is invisible in the mp4 in its own way, and each has one file.
+
+    The one that matters most is the memory gate's: an accepted frame's mask is
+    the baseline's own, so nothing in the video, the chart or `track.json`
+    distinguishes a run where the gate refused eleven frames from one where it
+    refused none.
+    """
+
+    def flags(self, policy):
+        return [str(f) for f in account_flags(policy, Path("OUT"))]
+
+    def test_the_baseline_is_asked_for_nothing(self):
+        self.assertEqual(self.flags("plain"), [])
+
+    def test_every_policy_that_gates_the_memory_write_writes_its_account(self):
+        for policy in POLICIES:
+            wanted = "samurai" in overlay_for(policy)
+            with self.subTest(policy=policy):
+                self.assertEqual("--memory-log" in self.flags(policy), wanted)
+
+    def test_the_guard_and_the_gate_write_different_files(self):
+        """`guard` carries both blocks, so it answers both questions: which
+        frames it refused to report, and which it refused to remember."""
+        self.assertEqual(self.flags("guard"),
+                         ["--verdicts", "OUT/verdicts.json",
+                          "--memory-log", "OUT/memory.json"])
+        self.assertEqual(self.flags("memgate"),
+                         ["--memory-log", "OUT/memory.json"])
+
+    def test_a_policy_carried_as_a_flag_still_logs(self):
+        self.assertEqual(self.flags("prefilter"),
+                         ["--prefilter", "70",
+                          "--prefilter-log", "OUT/prefilter.json"])
+
+    def test_every_flag_it_names_is_one_cli_py_takes(self):
+        source = (ROOT / "cli.py").read_text()
+        for policy in POLICIES:
+            for flag in self.flags(policy):
+                if flag.startswith("--"):
+                    self.assertIn(f'"{flag}"', source, flag)
+
+
 
 if __name__ == "__main__":
     unittest.main()

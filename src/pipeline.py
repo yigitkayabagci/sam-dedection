@@ -562,6 +562,10 @@ class PipelineConfig:
     prefilter: int = 0
     # Where to write what it did, frame by frame.
     prefilter_log: Path | None = None
+    # Where to write the memory gate's own account: which frames were kept out
+    # of the memory bank and which gate refused them. Only a run carrying a
+    # `samurai:` block judges anything, so only such a run writes one.
+    memory_log: Path | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -706,6 +710,41 @@ def _write_prefilter(cfg: PipelineConfig, rows: list) -> None:
     else:
         print(f"[prefilter] nothing stretched: no frame's span was under "
               f"{cfg.prefilter} levels. This run is the baseline. -> {path}")
+
+
+def _write_memory(cfg: PipelineConfig, tracker) -> None:
+    """The memory gate's account of the run: what it refused, and on which gate.
+
+    Written from the tracker's own state rather than collected as the run goes,
+    because the gate lives inside the model's hooks and the pipeline never sees
+    a frame it refused -- a refused frame changes what the *next* frames read
+    back, and nothing in the mask output says so.
+
+    Like `_write_prefilter`, the first line printed is whether it fired at all:
+    a gate that refused nothing means the run is the baseline under another
+    name, and that is a result worth stating rather than leaving to be inferred
+    from a file of identical rows.
+    """
+    import json
+
+    if cfg.memory_log is None:
+        return
+    samurai = getattr(tracker, "_samurai", None)
+    journal = list(getattr(samurai, "journal", []) or [])
+    if samurai is None or not journal:
+        return
+    body = {**samurai.summary(), "rows": journal}
+    path = Path(cfg.memory_log)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, indent=2) + "\n")
+    if body["refused"]:
+        gates = ", ".join(f"{gate} x{count}"
+                          for gate, count in body["by_gate"].items())
+        print(f"[memory] kept {body['refused']}/{body['judged']} frames out of "
+              f"the memory bank ({gates}) -> {path}")
+    else:
+        print(f"[memory] the gate refused nothing in {body['judged']} frames. "
+              f"This run is the baseline under another name. -> {path}")
 
 
 def _report_timing(
@@ -988,6 +1027,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
                        post_ms, encode_ms, read_ms)
         watch.write(cfg, tracker)
         _write_prefilter(cfg, prefilter_log)
+        _write_memory(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
@@ -1110,6 +1150,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
                        post_ms, encode_ms, read_ms)
         watch.write(cfg, tracker)
         _write_prefilter(cfg, prefilter_log)
+        _write_memory(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()

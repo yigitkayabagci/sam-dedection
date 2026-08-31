@@ -299,7 +299,7 @@ yok. Bu turda değişenler:
 
 ## 7. Şu anki durum
 
-* `python3 -m pytest tests/ -q` → **1009 passed, 9 skipped, 217 subtests**.
+* `python3 -m pytest tests/ -q` → **1124 passed, 9 skipped, 368 subtests**.
 * Yeni test dosyaları: `tests/test_photometric.py` (11),
   `tests/test_stabiliser.py` (27), `tests/test_pool_reader.py`'de
   `AeroVISPathsTest` (8).
@@ -313,3 +313,82 @@ yok. Bu turda değişenler:
 4. Takip kolları için **32 → 29 → 30** sırası; 31 VTUAV kimlikleri hazırsa.
 5. Her koşudan sonra `eval_instances`'ın **kontrast bandı tablosunu** oku —
    ortalama IoU, düşük kontrastta ne olduğunu saklayabilir.
+
+
+---
+
+## 8. `memgate` — maske ile memory bank arasındaki kapı
+
+**İtiraz haklıydı:** guard, `propagate_in_video` kareyi *yield ettikten sonra*
+çalışıyor. Yani kare çoktan memory bank'a yazılmış, encoder onu okumaya
+başlamış oluyor. Guard çıktının etiketini değiştirebilir; kötü bir karenin
+hedefin "hatırlanan görünümü" olmasını engelleyemez.
+
+`memgate` tam olarak o noktada duruyor:
+
+    JPEG -> [prefilter] -> image encoder -> memory attention (bank'ı okur)
+         -> mask decoder -> [memgate] -> memory'ye yazma -> yield -> [guard]
+
+### İki kapı, ikisi de sadece kutu aritmetiği
+
+| ayar | neyi reddediyor | ölçüm |
+|---|---|---|
+| `memory_jump: 2.5` | merkezi, kabul edilen son kutunun kendi uzun kenarının 2.5 katından fazla uzağa düşen maske | 26 px hedefte 90 px sıçrama: kapı yokken sonraki 16 karenin 16'sı bank'a giriyor, varken 8'i |
+| `memory_area_ratio: 3.0` | yerinde durup şişen maske (kabul edilmiş alanların koşan medyanının 3 katı) | x2, x3, x4 balon: kapısız 10/10 kare bank'a giriyor, kapılı 0/10 |
+
+Dürüst durumlarda bedeli yok, aynı ölçümlerde: gerçek manevra (16 px/kare'ye
+hızlanma) 16/16 kalıyor, gerçek 2.6x yaklaşma 40/40 kalıyor. `memory_patience:
+8` art arda sekiz reddin ardından geçmişi yeniden tohumluyor — yoksa gerçekten
+yer değiştirmiş bir hedef klibin sonuna kadar dışarıda kalırdı.
+
+### İçinde SAMURAI yok
+
+`kf_weight: 0` → maskeyi hâlâ SAM 2'nin kendi `argmax`'ı seçiyor. Bu kapının
+**kabul ettiği** bir karenin maskesi `plain`'inkiyle bit bit aynı. Kalman
+filtresini okuyan kimse kalmadığı için filtre hiç çalıştırılmıyor
+(`SamuraiConfig.uses_filter`): kare başına **33 µs**, SAMURAI'nin 144 µs'una
+karşı. Aynı nedenle `--all-pointers` ile yeniden export gerektirmiyor.
+
+### Yol boyunca bulunan gerçek hata
+
+TensorRT yolunda `_reselect`, motoru `obj_ptr_all` çıktısı olmadan gördüğünde
+**kareyi yargılamadan** erken dönüyordu. Kapı kayıt göremeyince `keep()` her
+kareye "evet" diyor — yani sıradan export edilmiş bir motor setinde memory
+kapısı sessizce hiç çalışmıyordu. `rescore` artık kontrolden önce çağrılıyor.
+`tests/test_samurai.py::AcceleratedPathTest` bunu tutuyor.
+
+### Koşu neyi yazıyor
+
+Reddedilen kare çıktıda görünmez — değişen şey, *sonraki* karelerin bank'tan ne
+okuduğudur. O yüzden kapının bir şey yapıp yapmadığının tek kanıtı
+`memory.json`:
+
+```
+[memory] frame 214 refused: jumped 6.3 sizes>2.5 (iou 0.88, obj 4.10,
+         kf 0.00, area x1.1, jump 6.3 sizes)
+[memory] kept 11/430 frames out of the memory bank (jumped x9, area x2)
+```
+
+İlk bakılacak alan `refused`. **Sıfırsa o koşu `plain`'in kendisidir** — başka
+bir isim altında.
+
+### Nasıl koşulur
+
+```bash
+python3 tools/run_records.py --records ~/Videos/records --modes crop768 \
+  --weights pool_deep --backend trt --policy plain,memgate
+```
+
+İki klasör çıkar: `<record>/crop768` ve `<record>/crop768__memgate`. İkisinde de
+`tracked.mp4`, `track.png`, `track.json`, `latency.png`; ikincisinde ayrıca
+`memory.json`. `SUMMARY.md` iki satırı yan yana koyar.
+
+Kontrastı ayrı ölçmek için ikinci komut, aynı biçimde:
+
+```bash
+python3 tools/run_records.py --records ~/Videos/records --modes crop768 \
+  --weights pool_deep --backend trt --policy plain,prefilter
+```
+
+`prefilter.json`'da ilk bakılacak alan `stretched`; 0 ise eşik bu görüntünün
+kendi aralığının altında kalmış demektir ve o koşu da `plain`'dir.

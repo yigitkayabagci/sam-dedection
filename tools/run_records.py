@@ -192,9 +192,10 @@ TORCH = {
 POLICIES = {
     "plain": None,
     "samurai": "configs/policies/samurai.yaml",
-    # `samurai` plus one line: the Kalman filter is not updated with a box it
-    # does not believe. The only difference, so the two rows isolate it.
-    "samurai_gated": "configs/policies/samurai_gated.yaml",
+    # The gate between the mask and the memory write, and nothing else: no
+    # Kalman filter, no re-scoring, so an accepted frame's mask is `plain`'s
+    # own. What differs is which frames the encoder gets to remember.
+    "memgate": "configs/policies/memgate.yaml",
     "ego": "configs/policies/ego.yaml",
     # The gates alone, reading no pixels: the part measured to refuse a jump,
     # without the decode and the optical flow measured to cost 18-27 ms a frame.
@@ -249,20 +250,24 @@ POLICY_NOTE = {
         "mask that covers a field as a hit. Expect dropouts to go **up** where "
         "they were being hidden. **Training-free.** Read against the `ego` row."
     ),
-    "samurai_gated": (
-        "Policy: `samurai_gated` — `samurai` with one line added: the Kalman "
-        "filter is not updated with a box whose IoU against its own prediction "
-        "is below 0.10, and is re-initiated after 8 consecutive refusals so a "
-        "real manoeuvre is not locked out. Without it a mask that jumps to a "
-        "look-alike drags the filter onto it and the memory gate falls silent "
-        "two frames later -- measured, 15 of the 16 frames after a jump "
-        "entered the bank; with it, 8, and a genuine acceleration still puts "
-        "in all 16. It also refuses a mask that swells in place -- x2, x3 "
-        "and x4 all put ten of ten frames into the bank without it and "
-        "none with it, while a target genuinely approaching keeps 39 of "
-        "40. **Training-free and free of time**: the arithmetic is "
-        "inside a hook that already runs. Read against the `samurai` row -- "
-        "that is the only difference."
+    "memgate": (
+        "Policy: `memgate` — the gate between the mask and the **memory "
+        "write**, which is the only place a bad frame can still be stopped: "
+        "the classical guard runs after `propagate_in_video` has yielded, so "
+        "it can relabel an output but the frame is already the target's "
+        "remembered appearance by then. Two gates, both geometry. A mask whose "
+        "centre lands more than 2.5 of the last accepted box's own lengths "
+        "away is the identity switch: 16 of the 16 frames after a 90-pixel "
+        "jump enter the bank without this, 8 with it, and a genuine "
+        "acceleration still puts in all 16. A mask that swells in place is the "
+        "balloon: x2, x3 and x4 all put ten of ten frames in without it and "
+        "none with it, while a target really approaching 2.6x keeps 40 of 40. "
+        "**No SAMURAI**: `kf_weight: 0` leaves SAM 2's own argmax to pick the "
+        "mask, so an accepted frame is bit-identical to `plain` and the filter "
+        "is not run at all — 33 us a frame. **Training-free**: the checkpoint "
+        "and the engines are the `plain` run's. Read against `plain`, and read "
+        "`memory.json` first: a gate that refused nothing means this run *is* "
+        "`plain`."
     ),
     "prefilter": (
         "Policy: `prefilter` — the only one that acts **before the encoder**. A "
@@ -342,6 +347,37 @@ def overlay_for(policy: str) -> dict:
             f"the backend config the --weights axis selects."
         )
     return body
+
+
+def account_flags(policy: str, outdir: Path) -> list:
+    """The flags that make a policy write down what it actually did.
+
+    Every layer here is invisible in the mp4 in its own way, and each has one
+    file that says whether it fired:
+
+    * `guard` refuses a mask, and `verdicts.json` names the gate that refused.
+    * `prefilter` rewrites the pixels the encoder is given; `prefilter.json`
+      says how many frames were under the floor, and a floor below the
+      footage's own span leaves every frame untouched.
+    * a `samurai:` block judges whether a frame may enter the memory bank.
+      Nothing about the *output* of an accepted frame changes -- what changes
+      is what the frames after it read back -- so `memory.json` is the only
+      evidence it did anything.
+
+    Asked for whenever the file might exist rather than whenever it will: the
+    writers say "nothing happened" rather than writing an empty file, and
+    "nothing happened" is the result that says the run was the baseline.
+    """
+    flags: list = []
+    if policy in POLICY_FLAGS:
+        flags += [*POLICY_FLAGS[policy], "--prefilter-log",
+                  outdir / "prefilter.json"]
+    overlay = overlay_for(policy)
+    if "guard" in overlay:
+        flags += ["--verdicts", outdir / "verdicts.json"]
+    if "samurai" in overlay:
+        flags += ["--memory-log", outdir / "memory.json"]
+    return flags
 
 
 def staged_config(config: str, policy: str, outdir: Path) -> str:
@@ -425,7 +461,14 @@ def pointers_missing(config: str, policy: str) -> str | None:
     """
     import yaml
 
-    if "samurai" not in overlay_for(policy):
+    from src.trackers.samurai import SamuraiConfig
+
+    block = overlay_for(policy).get("samurai")
+    # Only re-selection needs the extra output. A policy that leaves the mask
+    # choice to the engine (`kf_weight: 0`, which is `memgate`) reads nothing
+    # this export is missing, and refusing it here would send a user to a
+    # forty-minute re-export for a run that does not need one.
+    if not block or float(block.get("kf_weight", SamuraiConfig.kf_weight)) <= 0.0:
         return None
     head = (yaml.safe_load((ROOT / config).read_text()) or {}).get("sam_head_engine")
     if not head or not (ROOT / head).exists():
@@ -856,11 +899,7 @@ def main(argv: list[str] | None = None) -> int:
             # writing an empty file, so this is asked for whenever one might
             # exist: a refused frame is otherwise just a missing mask in the
             # mp4 with nothing saying which gate refused it.
-            if policy in POLICY_FLAGS:
-                cmd += [*POLICY_FLAGS[policy],
-                        "--prefilter-log", outdir / "prefilter.json"]
-            if "guard" in overlay_for(policy):
-                cmd += ["--verdicts", outdir / "verdicts.json"]
+            cmd += account_flags(policy, outdir)
             if args.strict:
                 cmd += ["--strict"]
             if crop:

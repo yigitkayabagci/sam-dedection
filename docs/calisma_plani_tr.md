@@ -240,6 +240,42 @@ SAMURAI export yoluna hiç kurulmaz — doğrulandı, dosyada yalnızca iki yoru
 satırı geçiyor. `check_image_size()` artık 640/896'yı config okunurken
 reddeder, ilk ileri geçişte çökmek yerine.
 
+### 3f. `memgate`'in gerçekten bir şey yaptığını görmek
+
+```bash
+python3 tools/run_records.py --records ~/Videos/records --modes crop768 \
+  --weights pool_deep --backend trt --policy plain,memgate
+```
+
+İki klasör: `crop768` ve `crop768__memgate`. Bakılacak sıra:
+
+1. `crop768__memgate/memory.json` → `refused`. **0 ise koşu `plain`'dir**,
+   başka bir isim altında; kapı hiçbir şeye ateş etmemiş. Eşiği düşürmeden
+   önce `rows` içindeki `jump` ve `area_ratio` dağılımına bak — gerçek görüntüde
+   sıçrama kaç "size" ediyor, onu ölç, tahmin etme.
+2. `refused > 0` ise `by_gate` hangi kapının çalıştığını söyler
+   (`jumped` / `area` / `obj`). Koşu logunda ilk 40 ret satır satır basılır:
+   hangi kare, hangi sayılarla.
+3. `track.json` iki klasörde yan yana: `jumps` ve `share_max` düşmeli,
+   `longest_gap` **artmamalı**. Artıyorsa kapı dürüst kareleri de reddediyor.
+4. `latency.png` / `SUMMARY.md`'deki ms: fark **ölçüm gürültüsü kadar**
+   olmalı. Kapı kare başına 33 µs; inference'ın yanında görünmemeli. Görünür
+   bir yavaşlama varsa sebep bu kapı değildir.
+5. `tracked.mp4`: kapının kabul ettiği karelerin maskesi `plain` ile aynıdır.
+   Videoda beklenen fark, sıçramadan **sonra** başlar — takibin yanlış hedefe
+   yapışıp kalmaması.
+
+Birim tarafı:
+
+```bash
+python3 -m pytest tests/test_samurai.py -q
+```
+
+`MemoryGateTest` sıçrama 16/16 → 8/16, balon 10/10 → 0/10, gerçek manevra
+16/16, gerçek 2.6x yaklaşma 40/40 sayılarını tutar. `AcceleratedPathTest`
+motorun `obj_ptr_all` çıktısı olmadan da karenin yargılandığını tutar — o
+kontrol erken dönüşteyken kapı TensorRT yolunda sessizce hiç çalışmıyordu.
+
 ---
 
 ## 4. Bilinen açıklar

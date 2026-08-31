@@ -248,6 +248,14 @@ def main(argv: list[str] | None = None) -> int:
                         "per frame. A floor below the footage's own span "
                         "leaves everything untouched, and that run is the "
                         "baseline under another name -- this is how to tell.")
+    p.add_argument("--memory-log", default=None,
+                   help="Where to write the memory gate's account of the run: "
+                        "which frames were kept out of the memory bank and "
+                        "which gate refused them (jump, area, motion, object "
+                        "score), with the numbers each was judged on. Only a "
+                        "config carrying a `samurai:` block judges anything. "
+                        "A gate that refused nothing means the run is the "
+                        "baseline under another name.")
     p.add_argument("--track-chart", default=None,
                    help="Save a per-frame chart of what the tracker returned "
                         "to this PNG: how much of the frame the mask covers "
@@ -324,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         prefilter=int(args.prefilter),
         prefilter_log=(Path(args.prefilter_log) if args.prefilter_log
                        else None),
+        memory_log=Path(args.memory_log) if args.memory_log else None,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")
