@@ -235,6 +235,46 @@ class SamuraiConfig:
     # reason: a target's area between two frames at video rate cannot triple.
     memory_area_ratio: float = 0.0
 
+    # The other half of the same idea, and the one the footage actually shows:
+    # the mask does not swell, it *moves* -- the box leaves the target and
+    # lands on a look-alike somewhere else in the frame. Measured against the
+    # last box that was allowed into the bank, in units of that box's own
+    # longer side, which is the same unit `stabiliser.GuardConfig.max_jump`
+    # uses and for the same reason: a target two of its own lengths from where
+    # it was is a different target. 0 is off.
+    #
+    # This is deliberately *not* the Kalman score. `kf_score` needs a warmed-up
+    # filter and a velocity estimate, and it is the thing that gets dragged
+    # onto the distractor; a displacement from the last accepted box needs
+    # neither and cannot be taught to accept the jump. The two catch different
+    # frames, so both are gates rather than one being a better version of the
+    # other.
+    memory_jump: float = 0.0
+
+    # Both geometric gates compare against a history, so both can be wrong
+    # forever: a target that really did double in size, or really is on the
+    # other side of the frame, is refused by a history that no longer describes
+    # it and the history never updates because every frame is refused. This is
+    # the same escape `kf_gate_patience` gives the filter and it is not
+    # optional. After this many consecutive geometric refusals the history is
+    # re-seeded on the current box -- the tracker is then the one more likely
+    # to be right.
+    memory_patience: int = 8
+
+    @property
+    def uses_filter(self) -> bool:
+        """Whether the Kalman filter can still change any decision here.
+
+        With `kf_weight: 0.0` the mask is chosen by SAM 2's own argmax, and
+        with `memory_kf_score` below zero no frame is refused on its motion
+        score -- so unless the gate itself is on, predicting and updating the
+        filter every frame is arithmetic nothing reads. A configuration that
+        gates on geometry alone should not pay for a motion model it does not
+        consult.
+        """
+        return (self.kf_weight > 0.0 or self.kf_gate > 0.0
+                or self.memory_kf_score >= 0.0)
+
     @property
     def permissive(self) -> bool:
         """True when nothing can be rejected, so behaviour is stock SAM 2.
@@ -246,7 +286,7 @@ class SamuraiConfig:
         return (self.kf_weight == 0.0 and self.memory_iou <= 0.0
                 and self.memory_obj_score <= float("-inf")
                 and self.memory_kf_score <= 0.0 and self.kf_gate <= 0.0
-                and self.memory_area_ratio <= 0.0)
+                and self.memory_area_ratio <= 0.0 and self.memory_jump <= 0.0)
 
 
 def boxes_from_masks(masks: np.ndarray) -> np.ndarray:
@@ -317,6 +357,7 @@ class Selection:
     mask_score: float
     weighted: np.ndarray
     area_ratio: float = 1.0
+    jump: float = 0.0
 
 
 @dataclass
@@ -329,13 +370,31 @@ class FrameRecord:
     # Area against the running median of the frames already accepted. 1.0 when
     # there is no history to compare against, which is the neutral value.
     area_ratio: float = 1.0
+    # Centre travel from the last accepted box, in units of that box's own
+    # longer side. 0.0 when there is no accepted box yet.
+    jump: float = 0.0
+
+    def refusal(self, cfg: SamuraiConfig) -> str:
+        """The first gate this frame fails, or `""` when it enters the bank.
+
+        A reason rather than a bool because the whole point of this layer is
+        that a run can be read afterwards: "frame 214 refused, jumped 6.3
+        sizes" is a finding, and a frame quietly missing from the bank is not.
+        """
+        if self.iou <= cfg.memory_iou:
+            return f"iou {self.iou:.2f}<={cfg.memory_iou:g}"
+        if self.object_score <= cfg.memory_obj_score:
+            return f"obj {self.object_score:.2f}<={cfg.memory_obj_score:g}"
+        if self.kf_score <= cfg.memory_kf_score:
+            return f"kf {self.kf_score:.2f}<={cfg.memory_kf_score:g}"
+        if cfg.memory_area_ratio > 0.0 and self.area_ratio > cfg.memory_area_ratio:
+            return f"area x{self.area_ratio:.1f}>{cfg.memory_area_ratio:g}"
+        if cfg.memory_jump > 0.0 and self.jump > cfg.memory_jump:
+            return f"jumped {self.jump:.1f} sizes>{cfg.memory_jump:g}"
+        return ""
 
     def acceptable(self, cfg: SamuraiConfig) -> bool:
-        return (self.iou > cfg.memory_iou
-                and self.object_score > cfg.memory_obj_score
-                and self.kf_score > cfg.memory_kf_score
-                and (cfg.memory_area_ratio <= 0.0
-                     or self.area_ratio <= cfg.memory_area_ratio))
+        return not self.refusal(cfg)
 
 
 class MotionAwareMemory:
@@ -354,6 +413,11 @@ class MotionAwareMemory:
         self.coasted = 0
         # Areas of the frames already accepted, for `memory_area_ratio`.
         self.areas: deque = deque(maxlen=12)
+        # The last box allowed into the bank, which is what `memory_jump`
+        # measures a leap against, and how many frames in a row the geometry
+        # has refused since.
+        self.anchor: np.ndarray | None = None
+        self.refused = 0
         self.records: dict[int, FrameRecord] = {}
 
     def reset(self) -> None:
@@ -361,6 +425,8 @@ class MotionAwareMemory:
         self.stable = 0
         self.coasted = 0
         self.areas.clear()
+        self.anchor = None
+        self.refused = 0
         self.records.clear()
 
     # -- mask selection ---------------------------------------------------
@@ -381,8 +447,11 @@ class MotionAwareMemory:
         appearance = np.asarray(ious, dtype=np.float64).reshape(-1)
         boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
 
-        predicted = self.kalman.predict(shift) if self.kalman.ready else None
-        kf_scores = box_iou_against(boxes, predicted)
+        if cfg.uses_filter:
+            predicted = self.kalman.predict(shift) if self.kalman.ready else None
+            kf_scores = box_iou_against(boxes, predicted)
+        else:
+            predicted, kf_scores = None, np.zeros(len(boxes))
 
         warming = self.stable < cfg.stable_frames
         if warming or cfg.kf_weight == 0.0:
@@ -392,7 +461,7 @@ class MotionAwareMemory:
         chosen = int(np.argmax(weighted))
 
         box = boxes[chosen]
-        if not np.isnan(box).any():
+        if not np.isnan(box).any() and cfg.uses_filter:
             if not self.kalman.ready:
                 self.kalman.initiate(box)
                 self.stable = 1
@@ -423,23 +492,47 @@ class MotionAwareMemory:
         area = float(max(box[2] - box[0], 0.0) * max(box[3] - box[1], 0.0))
         typical = float(np.median(self.areas)) if self.areas else 0.0
         ratio = area / typical if typical > 0 and area > 0 else 1.0
-        if area > 0 and (cfg.memory_area_ratio <= 0.0
-                         or ratio <= cfg.memory_area_ratio):
-            # Only an accepted area joins the history, or one balloon frame
-            # raises the median and the next one looks reasonable beside it.
+        jump = self._jump(box) if area > 0 else 0.0
+        # The two geometric gates share a history and share the decision to
+        # update it: a frame that fails either is not evidence of where the
+        # target is or how big it is, and letting it in raises the median or
+        # moves the anchor until the next bad frame looks reasonable beside it.
+        fits = (cfg.memory_area_ratio <= 0.0 or ratio <= cfg.memory_area_ratio) \
+            and (cfg.memory_jump <= 0.0 or jump <= cfg.memory_jump)
+        if area > 0 and (fits or self.refused + 1 >= max(cfg.memory_patience, 1)):
             self.areas.append(area)
+            self.anchor = np.array(box, dtype=np.float64)
+            self.refused = 0
+        elif area > 0:
+            self.refused += 1
         return Selection(index=chosen, kf_score=float(kf_scores[chosen]),
                          mask_score=float(appearance[chosen]),
                          weighted=weighted.astype(np.float32),
-                         area_ratio=float(ratio))
+                         area_ratio=float(ratio), jump=float(jump))
+
+    def _jump(self, box: np.ndarray) -> float:
+        """How far this box's centre is from the last accepted one, in sizes.
+
+        The anchor's own longer side is the unit, not this box's: a mask that
+        jumped *and* ballooned would otherwise measure its own leap against its
+        own inflated size and look like it hardly moved.
+        """
+        if self.anchor is None:
+            return 0.0
+        reach = max(float(self.anchor[2] - self.anchor[0]),
+                    float(self.anchor[3] - self.anchor[1]), 1.0)
+        moved = ((box[0] + box[2]) - (self.anchor[0] + self.anchor[2])) / 2.0, \
+            ((box[1] + box[3]) - (self.anchor[1] + self.anchor[3])) / 2.0
+        return float(np.hypot(*moved)) / reach
 
     # -- memory gate ------------------------------------------------------
 
     def record(self, frame_idx: int, iou: float, object_score: float,
-               kf_score: float, area_ratio: float = 1.0) -> None:
+               kf_score: float, area_ratio: float = 1.0,
+               jump: float = 0.0) -> None:
         self.records[int(frame_idx)] = FrameRecord(float(iou), float(object_score),
                                                    float(kf_score),
-                                                   float(area_ratio))
+                                                   float(area_ratio), float(jump))
 
     def keep(self, frame_idx: int) -> bool:
         """Whether this frame is fit to enter the memory bank.
@@ -474,6 +567,13 @@ class Samurai:
         self.states: list[MotionAwareMemory] = []
         self.frame_idx = 0
         self.rejected: set[int] = set()
+        # One row per frame the gate judged: the numbers it judged on and the
+        # gate that refused, if one did. This is the run's own account of
+        # itself -- a frame kept out of the bank is otherwise invisible, and
+        # "did it fire at all" is the first question asked of any of this.
+        self.journal: list[dict] = []
+        # Refusals printed so far, so a bad clip does not bury the run log.
+        self._printed = 0
         # The camera's own displacement for the frame about to be scored, as a
         # fraction of the frame's width and height. Normalised on purpose: the
         # caller measures it on the pixels it has (a decoded frame, at whatever
@@ -494,6 +594,8 @@ class Samurai:
         self.states.clear()
         self.frame_idx = 0
         self.rejected.clear()
+        self.journal.clear()
+        self._printed = 0
         self.shift = None
 
     def _shift_for(self, mask_logits) -> tuple[float, float] | None:
@@ -559,14 +661,65 @@ class Samurai:
             out[row] = torch.as_tensor(selection.weighted, dtype=out.dtype,
                                        device=out.device)
             state.record(self.frame_idx, selection.mask_score, float(scores[row]),
-                         selection.kf_score, selection.area_ratio)
-            if not state.keep(self.frame_idx):
+                         selection.kf_score, selection.area_ratio, selection.jump)
+            reason = state.records[self.frame_idx].refusal(self.config)
+            self.note(row, selection, float(scores[row]), reason)
+            if reason:
                 self.rejected.add(self.frame_idx)
         # A single-candidate frame -- the prompted one, in configurations that
         # do not use multimask there -- has nothing to choose between, but the
         # filter still had to see it. Returning the scores unchanged keeps this
         # a pure observation of that frame.
         return iou_pred if mask_logits.shape[1] < 2 else out
+
+
+    # -- the account of what it did ---------------------------------------
+
+    # A refused frame prints; an accepted one is a row in the journal and
+    # nothing more. Long clips would otherwise print thousands of lines saying
+    # nothing happened, and the line that matters -- "frame 214 refused,
+    # jumped 6.3 sizes" -- would be lost among them.
+    PRINT_LIMIT = 40
+
+    def note(self, row: int, selection: "Selection", object_score: float,
+             reason: str) -> None:
+        self.journal.append({
+            "frame": int(self.frame_idx),
+            "object": int(row),
+            "kept": not reason,
+            "reason": reason,
+            "iou": round(float(selection.mask_score), 4),
+            "obj": round(float(object_score), 3),
+            "kf": round(float(selection.kf_score), 4),
+            "area_ratio": round(float(selection.area_ratio), 3),
+            "jump": round(float(selection.jump), 3),
+        })
+        if not reason:
+            return
+        if self._printed < self.PRINT_LIMIT:
+            print(f"[memory] frame {self.frame_idx} refused: {reason} "
+                  f"(iou {selection.mask_score:.2f}, obj {object_score:.2f}, "
+                  f"kf {selection.kf_score:.2f}, area x{selection.area_ratio:.1f}, "
+                  f"jump {selection.jump:.1f} sizes)")
+        elif self._printed == self.PRINT_LIMIT:
+            print("[memory] further refusals not printed; all of them are in "
+                  "the memory log")
+        self._printed += 1
+
+    def summary(self) -> dict:
+        """The journal as counts, which is what a reader looks at first."""
+        refusals: dict[str, int] = {}
+        for row in self.journal:
+            if row["reason"]:
+                gate = row["reason"].split()[0]
+                refusals[gate] = refusals.get(gate, 0) + 1
+        judged = len(self.journal)
+        return {
+            "judged": judged,
+            "refused": sum(refusals.values()),
+            "by_gate": dict(sorted(refusals.items(), key=lambda kv: -kv[1])),
+            "frames_refused": sorted(self.rejected),
+        }
 
 
 def _filtered_memory(output_dict: dict, samurai: Samurai, frame_idx: int,
@@ -655,8 +808,24 @@ def install(predictor, config: SamuraiConfig | None = None,
     decoder.forward = wrapped_decoder
     predictor._prepare_memory_conditioned_features = wrapped_prepare
     cfg = samurai.config
-    print(f"[samurai] motion-aware memory on: kf_weight={cfg.kf_weight}, "
-          f"warm-up {cfg.stable_frames} frames, memory gate "
-          f"iou>{cfg.memory_iou} obj>{cfg.memory_obj_score} kf>{cfg.memory_kf_score}"
-          f"{', ego-motion compensated' if shift_for is not None else ''}")
+    # Named for what is actually switched on. `kf_weight: 0.0` leaves SAM 2's
+    # own argmax to pick the mask, so nothing about the *output* is
+    # motion-aware and only the memory write is gated -- calling that "SAMURAI"
+    # in the run log would misreport which half is being measured.
+    gates = [f"iou>{cfg.memory_iou}", f"obj>{cfg.memory_obj_score}",
+             f"kf>{cfg.memory_kf_score}"]
+    if cfg.memory_area_ratio > 0.0:
+        gates.append(f"area<x{cfg.memory_area_ratio:g}")
+    if cfg.memory_jump > 0.0:
+        gates.append(f"jump<{cfg.memory_jump:g} sizes")
+    if cfg.kf_weight > 0.0:
+        print(f"[samurai] motion-aware memory on: kf_weight={cfg.kf_weight}, "
+              f"warm-up {cfg.stable_frames} frames, memory gate "
+              f"{' '.join(gates)}"
+              f"{', ego-motion compensated' if shift_for is not None else ''}")
+    else:
+        print(f"[memory-gate] mask choice untouched (kf_weight=0); the gate "
+              f"between the mask and the memory bank is {' '.join(gates)}"
+              f"{f', filter gated at {cfg.kf_gate:g}' if cfg.kf_gate > 0 else ''}"
+              f"{', ego-motion compensated' if shift_for is not None else ''}")
     return samurai

@@ -1,0 +1,67 @@
+# --policy memgate: the gate between the mask and the memory bank. No SAMURAI.
+#
+# The complaint this answers is architectural and it was right: the classical
+# guard runs *after* `propagate_in_video` has yielded, which is after the frame
+# has already been written into the memory bank and read back by the encoder.
+# It can relabel an output; it cannot stop a bad frame becoming the target's
+# remembered appearance. This one sits in the only place that can -- the hook
+# between the mask decoder's choice and the memory write -- and it does exactly
+# two things:
+#
+#   memory_jump 2.5   the mask leaves the target and lands on a look-alike
+#                     somewhere else. Measured from the last box the gate
+#                     accepted, in units of that box's own longer side, the
+#                     same unit `stabiliser.GuardConfig.max_jump` uses.
+#   memory_area_ratio 2.5
+#                     the mask stays put and swells. Against the running median
+#                     of the areas already accepted, so a target genuinely
+#                     approaching is not a balloon. This one is an *area*
+#                     ratio, not a side ratio: 2.5 fires on a box whose sides
+#                     grow about 1.6x in one frame, and a box that doubles its
+#                     sides is 4x the area and well past it.
+#
+# The two are an OR. Either one refuses the frame on its own -- a mask that
+# jumped is refused whether or not it also grew, and one that ballooned in
+# place is refused although it did not move.
+#
+# Measured on the two synthetic cases in `tests/test_samurai.py`, a 26-pixel
+# target on a moving camera:
+#
+#   90-pixel jump      16 of the 16 following frames enter the bank without
+#                      this; 8 with it. The other 8 are `memory_patience`
+#                      giving up: after that many refusals in a row the tracker
+#                      is the one more likely to be right, so the history
+#                      re-seeds rather than locking the target out forever.
+#   x2/x3/x4 balloon   10 of 10 without, 0 of 10 with (sides doubling, so
+#                      4x, 9x and 16x the area). A 1.5x side growth -- 2.25x
+#                      the area -- is left alone; 2.0 would refuse it and that
+#                      was judged too tight for a target closing on the camera.
+#   real manoeuvre     16 of 16 either way. It costs nothing on the honest case.
+#   real 2.6x approach 40 of 40. The median follows the target.
+#
+# **No Kalman filter and no re-scoring.** `kf_weight: 0.0` leaves SAM 2's own
+# argmax to pick the mask, so the output of a frame this gate accepts is
+# bit-identical to `plain`; `memory_kf_score: -1` switches off the motion score
+# entirely, and with nothing left to consult the filter is not run at all
+# (`SamuraiConfig.uses_filter`). Measured at 33 us a frame against SAMURAI's
+# 144 -- both irrelevant beside inference, which is the point: this is a
+# comparison against `plain` where the only difference is which frames the
+# encoder remembers.
+#
+# `memory_obj_score: 0` is kept because it is free and it is the original
+# failure this hook was written for: EdgeTAM zeroes the mask when its object
+# score goes negative and writes a constant "no object" vector into the bank,
+# which the next seven frames read back.
+#
+# Read against `plain`. `memory.json` in the run's folder says which frames it
+# refused and on which gate; if it refused nothing, this run *is* `plain`.
+
+samurai:
+  enabled: true
+  kf_weight: 0.0
+  memory_iou: 0.0
+  memory_obj_score: 0.0
+  memory_kf_score: -1.0
+  memory_area_ratio: 2.5
+  memory_jump: 2.5
+  memory_patience: 8

@@ -195,11 +195,19 @@ def main() -> None:
     replace(notebook,
             'PROMPT_JITTER  = 0.3\nMETHOD',
             'PROMPT_JITTER  = 0.3\n'
-            'CONTRAST_COLLAPSE = 0.40\n'
+            # The aggressive setting -- collapse 0.40 to 0.15x, noise 5.0 --
+            # was chosen on a synthetic window whose target sat at a
+            # signal-to-clutter ratio of 20. HIT-UAV's real targets sit at a
+            # median of 0.91, where there is no easy end to collapse towards:
+            # measured, it moved the median 0.85 -> 0.79 while spending dynamic
+            # range everywhere. These are the numbers that measurement chose,
+            # and they are `HARDER`'s, so this arm and the pretrain it may be
+            # stacked on see the same augmentation rather than two strengths.
+            'CONTRAST_COLLAPSE = 0.25\n'
             'CONTRAST_FLOOR    = 0.15\n'
             'POLARITY_FLIP     = 0.25\n'
-            'GAMMA_JITTER      = 0.30\n'
-            'SENSOR_NOISE      = 5.0\n'
+            'GAMMA_JITTER      = 0.25\n'
+            'SENSOR_NOISE      = 2.0\n'
             'METHOD')
     replace(notebook, 'EPOCHS         = [2, 24]', 'EPOCHS         = [2, 12]')
     replace(notebook, 'STEPS          = 800', 'STEPS          = 500')
@@ -223,20 +231,38 @@ def main() -> None:
             'NOTEBOOK = "32_aerial_thermal_stage_b_stable.ipynb"')
     replace(notebook, 'STAMP    = "029a14dfb8"', 'STAMP    = "{{STAMP}}"')
 
+    # The hardening flags belong to the *training* call and to nothing else.
+    # `COMMON` is also spread into every `tools/eval_instances.py` invocation,
+    # which does not define them and parses strictly -- so putting them there
+    # made cell 4 die with `unrecognized arguments`, after the whole download
+    # and re-index had already been paid for. `HARDEN` is added to the two
+    # `train_encoder.py` calls instead, which is what
+    # `tools/build_stage_b_notebooks.py` already does for the generated family.
+    # `save_splits` records only which *frames* survived, so the per-instance
+    # thinning `rebalance` did two lines earlier was undone the moment
+    # train_encoder re-indexed: measured on a synthetic pool, a train split the
+    # notebook cut to 476 instances came back as 1500. Handing it the weights
+    # and the seed lets it re-apply the same decision downstream.
     replace(notebook,
-            'COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),\n'
-            '           "--per-image", str(PER_IMAGE), "--max-instances", str(MAX_INSTANCES),\n'
-            '           "--min-area", str(MIN_AREA), "--min-side", str(MIN_SIDE),\n'
-            '           "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED)]',
-            'COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),\n'
-            '           "--per-image", str(PER_IMAGE), "--max-instances", str(MAX_INSTANCES),\n'
-            '           "--min-area", str(MIN_AREA), "--min-side", str(MIN_SIDE),\n'
-            '           "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED),\n'
-            '           "--contrast-collapse", str(CONTRAST_COLLAPSE),\n'
-            '           "--contrast-floor", str(CONTRAST_FLOOR),\n'
-            '           "--polarity-flip", str(POLARITY_FLIP),\n'
-            '           "--gamma-jitter", str(GAMMA_JITTER),\n'
-            '           "--sensor-noise", str(SENSOR_NOISE)]')
+            'SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS))',
+            'SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS,\n'
+            '                             CLASS_WEIGHTS, seed=SEED))')
+    replace(notebook,
+            'COMMON += ["--splits", SPLIT_FILE]',
+            'COMMON += ["--splits", SPLIT_FILE]\n'
+            'HARDEN = ["--contrast-collapse", str(CONTRAST_COLLAPSE),\n'
+            '          "--contrast-floor", str(CONTRAST_FLOOR),\n'
+            '          "--polarity-flip", str(POLARITY_FLIP),\n'
+            '          "--gamma-jitter", str(GAMMA_JITTER),\n'
+            '          "--sensor-noise", str(SENSOR_NOISE)]')
+    # And into the long run itself. Without this the hardening this notebook
+    # exists to add would be configured, printed, and never applied.
+    replace(notebook,
+            '     "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),\n'
+            '     "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),',
+            '     "--jitter", str(JITTER), "--batch", str(BATCH), "--accum", str(ACCUM),\n'
+            '     *HARDEN,\n'
+            '     "--lr-scale", str(LR_SCALE), "--steps", str(STEPS),')
     replace(notebook,
             'LR_SCALE = round(min(max(BATCH / LR_REFERENCE, 1.0), LR_SCALE_MAX), 3)\n'
             'print(f"batch {BATCH} x accum {ACCUM} on {VRAM} GiB | lr-scale {LR_SCALE} "\n'
@@ -281,6 +307,7 @@ def main() -> None:
                      "--base", BASE_CKPT, "--out", str(_pilot_checkpoint),
                      "--prompt", PROMPT, "--prompt-jitter", str(PROMPT_JITTER),
                      "--jitter", str(JITTER), "--batch", str(BATCH),
+                     *HARDEN,
                      "--accum", str(ACCUM), "--lr-scale", str(LR_SCALE),
                      "--steps", str(LR_PILOT_STEPS), "--epochs", "1", "2",
                      "--patience", "0", "--val-batches", "12",

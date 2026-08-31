@@ -457,20 +457,31 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         Needs an engine exported with `--all-pointers`. Without it the choice
         cannot be made consistently, so it is not made at all: the memory gate
         (the half that stops a bad frame being remembered) still applies.
+
+        Which is why `rescore` is called **before** that is checked, not after.
+        It is the call that judges the frame and records the verdict the memory
+        gate later reads; returning early without it left the gate looking at
+        an empty record, and an unrecorded frame is kept. A policy that only
+        gates the memory write -- `memgate` -- would have run as `plain` on any
+        engine set exported the ordinary way, and said nothing.
         """
         import torch
         import torch.nn.functional as F
 
-        if "obj_ptr_all" not in engine.output_names:
-            self._warn("samurai:no_ptrs",
-                       "sam_head engine has no obj_ptr_all output, so SAMURAI's "
-                       "mask re-selection is off (its memory gate still applies). "
-                       "Re-export with tools/export_edgetam_onnx.py --all-pointers.")
-            return out
-
         scores = self._samurai.rescore(
             out["low_res_multimasks"], out["ious"], out["object_score_logits"]
         )
+        if "obj_ptr_all" not in engine.output_names:
+            # Only worth a warning when something was asking to re-select.
+            # `kf_weight: 0` means the engine's own choice is the wanted one.
+            if self._samurai.config.kf_weight > 0.0:
+                self._warn("samurai:no_ptrs",
+                           "sam_head engine has no obj_ptr_all output, so "
+                           "SAMURAI's mask re-selection is off (its memory "
+                           "gate still applies). Re-export with "
+                           "tools/export_edgetam_onnx.py --all-pointers.")
+            return out
+
         best = scores.argmax(dim=-1)
         if bool((best == out["ious"].argmax(dim=-1)).all()):
             return out  # same candidate the engine chose; nothing to redo

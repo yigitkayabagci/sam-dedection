@@ -38,7 +38,11 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
-from tools.run_records import (MODES, ab_table, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
+from tools.run_records import main as run_records_main  # noqa: E402
+
+from tools.run_records import (MODES, ab_table, account_flags, POLICIES,  # noqa: E402
+                               POLICY_KEYS, POLICY_NOTE, roots,
+                               suggest_pattern,
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
@@ -436,6 +440,13 @@ class AllPointers(unittest.TestCase):
         for policy in ("samurai", "ego", "guard"):
             self.assertIsNotNone(pointers_missing(config, policy), policy)
 
+    def test_a_policy_that_does_not_re_select_needs_no_re_export(self):
+        """`memgate` leaves the mask choice to the engine, so it reads nothing
+        `--all-pointers` adds. Refusing it here would send a user to a
+        forty-minute re-export for a run that does not need one."""
+        self.assertEqual(overlay_for("memgate")["samurai"]["kf_weight"], 0.0)
+        self.assertIsNone(pointers_missing(self.config(self.ORDINARY), "memgate"))
+
     def test_an_all_pointers_export_passes(self):
         config = self.config(self.ORDINARY + ["obj_ptr_all"])
         for policy in POLICIES:
@@ -652,6 +663,149 @@ class ABTableTest(unittest.TestCase):
         self.assertEqual(ab_table("plain", "guard_lite", "full768", self.A, None), [])
         self.assertEqual(ab_table("plain", "guard_lite", "full768", None, self.B), [])
         self.assertEqual(ab_table("plain", "guard_lite", "full768", {}, {}), [])
+
+class AccountFlags(unittest.TestCase):
+    """Each layer is invisible in the mp4 in its own way, and each has one file.
+
+    The one that matters most is the memory gate's: an accepted frame's mask is
+    the baseline's own, so nothing in the video, the chart or `track.json`
+    distinguishes a run where the gate refused eleven frames from one where it
+    refused none.
+    """
+
+    def flags(self, policy):
+        return [str(f) for f in account_flags(policy, Path("OUT"))]
+
+    def test_the_baseline_is_asked_for_nothing(self):
+        self.assertEqual(self.flags("plain"), [])
+
+    def test_every_policy_that_gates_the_memory_write_writes_its_account(self):
+        for policy in POLICIES:
+            wanted = "samurai" in overlay_for(policy)
+            with self.subTest(policy=policy):
+                self.assertEqual("--memory-log" in self.flags(policy), wanted)
+
+    def test_the_guard_and_the_gate_write_different_files(self):
+        """`guard` carries both blocks, so it answers both questions: which
+        frames it refused to report, and which it refused to remember."""
+        self.assertEqual(self.flags("guard"),
+                         ["--verdicts", "OUT/verdicts.json",
+                          "--memory-log", "OUT/memory.json"])
+        self.assertEqual(self.flags("memgate"),
+                         ["--memory-log", "OUT/memory.json"])
+
+    def test_a_policy_carried_as_a_flag_still_logs(self):
+        self.assertEqual(self.flags("prefilter"),
+                         ["--prefilter", "70",
+                          "--prefilter-log", "OUT/prefilter.json"])
+
+    def test_the_measurement_arm_touches_no_pixel(self):
+        """`--photometry` asks every run for the frames' own numbers without
+        also changing them -- `--prefilter` is absent, so the floor stays 0."""
+        flags = [str(f) for f in account_flags("memgate", Path("OUT"),
+                                               photometry=True)]
+        self.assertIn("--prefilter-log", flags)
+        self.assertIn("OUT/photometry.json", flags)
+        self.assertNotIn("--prefilter", flags)
+
+    def test_the_filter_s_own_log_is_not_overwritten_by_the_measurement(self):
+        """`prefilter` already writes one, and the two are different runs of
+        different pixels: one file each."""
+        flags = [str(f) for f in account_flags("prefilter", Path("OUT"),
+                                               photometry=True)]
+        self.assertIn("OUT/prefilter.json", flags)
+        self.assertNotIn("OUT/photometry.json", flags)
+
+    def test_every_flag_it_names_is_one_cli_py_takes(self):
+        source = (ROOT / "cli.py").read_text()
+        for policy in POLICIES:
+            for flag in self.flags(policy):
+                if flag.startswith("--"):
+                    self.assertIn(f'"{flag}"', source, flag)
+
+
+
+class Roots(unittest.TestCase):
+    """`--tag`: one attempt, one folder, and the counter is the user's."""
+
+    @staticmethod
+    def args(tag=None):
+        return Namespace(out="frame_output", tag=tag)
+
+    def test_without_a_tag_nothing_moves(self):
+        out, pick = roots(self.args())
+        self.assertEqual(out.name, "frame_output")
+        self.assertEqual(pick, out)
+
+    def test_a_tag_names_the_attempt(self):
+        out, _ = roots(self.args("vis3_deneme1"))
+        self.assertEqual(out.parts[-2:], ("frame_output", "vis3_deneme1"))
+
+    def test_the_paths_are_absolute(self):
+        """cli.py is launched with cwd=ROOT while --out is resolved against the
+        caller's directory, so a relative one splits the output across two
+        trees and hands cli.py a prompt file that is not there."""
+        out, pick = roots(self.args("vis3_deneme1"))
+        self.assertTrue(out.is_absolute())
+        self.assertTrue(pick.is_absolute())
+
+    def test_two_attempts_sit_beside_each_other(self):
+        first, _ = roots(self.args("vis3_deneme1"))
+        second, _ = roots(self.args("vis3_deneme2"))
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent, second.parent)
+
+    def test_the_pick_is_not_tagged(self):
+        """Or every new attempt would ask for the target again."""
+        first, pick_a = roots(self.args("vis3_deneme1"))
+        _, pick_b = roots(self.args("vis3_deneme2"))
+        self.assertEqual(pick_a, pick_b)
+        self.assertNotEqual(pick_a, first)
+
+
+
+class PatternHint(unittest.TestCase):
+    """A `--pattern` that matches nothing is the failure that looks like success.
+
+    The default is `*.tif*` because this project's records are thermal TIFFs.
+    Point it at a folder of jpgs and the old behaviour was a summary full of
+    `did not run` rows, or -- with a parent directory -- a per-record "no
+    prompts" line that reads like a display problem.
+    """
+
+    def folder(self, names):
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name in names:
+            (root / name).touch()
+        return root
+
+    def test_it_names_the_pattern_that_would_have_worked(self):
+        hint = suggest_pattern(self.folder(["a.jpg", "b.jpg"]), "*.tif*")
+        self.assertIn("--pattern '*.jpg'", hint)
+        self.assertIn("2", hint)
+
+    def test_it_says_nothing_when_there_are_no_frames_at_all(self):
+        """A guess on top of a real problem is noise."""
+        self.assertEqual(suggest_pattern(self.folder(["notes.txt"]), "*.tif*"), "")
+
+    def test_it_does_not_suggest_the_pattern_that_already_failed(self):
+        self.assertEqual(suggest_pattern(self.folder(["a.jpg"]), "*.jpg"), "")
+
+    def test_a_record_with_no_matching_frames_stops_the_run(self):
+        """Rather than reaching a summary of empty rows twenty minutes later."""
+        root = self.folder([])
+        (root / "vis3").mkdir()
+        (root / "vis3" / "frame_000000.jpg").touch()
+        with self.assertRaises(SystemExit) as caught:
+            run_records_main(["--records", str(root), "--pattern", "*.tif*",
+                              "--modes", "crop768"])
+        self.assertIn("--pattern '*.jpg'", str(caught.exception))
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -265,5 +265,93 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(seen.get("verdicts"), {3: "suspect", 4: "lost"})
 
 
+class MemoryLogTest(unittest.TestCase):
+    """`memory.json`: the only evidence the memory gate did anything.
+
+    A refused frame does not change the mask the pipeline receives -- it
+    changes what the frames *after* it read back out of the bank. So there is
+    nothing in the video, the chart or `track.json` that says the gate fired,
+    and a run where it fired on nothing is the baseline under another name.
+    That distinction is the file's whole job.
+    """
+
+    def write(self, tracker, **config):
+        import json
+        import src.pipeline as P
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memory.json"
+            P._write_memory(PipelineConfig(output_path=None, memory_log=path,
+                                          **config), tracker)
+            if not path.is_file():
+                return None
+            return json.loads(path.read_text())
+
+    def tracker(self, rows):
+        """A tracker carrying a `Samurai` that has already judged some frames."""
+        from src.trackers.samurai import Samurai, SamuraiConfig
+
+        samurai = Samurai(SamuraiConfig(memory_jump=2.5, memory_area_ratio=3.0))
+        for frame, reason in rows:
+            samurai.frame_idx = frame
+            samurai.journal.append({"frame": frame, "object": 0,
+                                    "kept": not reason, "reason": reason,
+                                    "iou": 0.9, "obj": 5.0, "kf": 0.8,
+                                    "area_ratio": 1.0, "jump": 0.1})
+            if reason:
+                samurai.rejected.add(frame)
+        return type("T", (), {"_samurai": samurai})()
+
+    def test_it_names_the_frames_and_the_gates(self):
+        body = self.write(self.tracker([(0, ""), (1, "jumped 6.3 sizes>2.5"),
+                                        (2, "area x4.0>3"), (3, "")]))
+        self.assertEqual(body["judged"], 4)
+        self.assertEqual(body["refused"], 2)
+        self.assertEqual(body["by_gate"], {"jumped": 1, "area": 1})
+        self.assertEqual(body["frames_refused"], [1, 2])
+        self.assertEqual(len(body["rows"]), 4)
+
+    def test_a_gate_that_refused_nothing_says_so(self):
+        import contextlib
+        import io
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            body = self.write(self.tracker([(0, ""), (1, ""), (2, "")]))
+        self.assertEqual(body["refused"], 0)
+        self.assertIn("baseline under another name", out.getvalue())
+
+    def test_a_run_without_the_gate_writes_nothing(self):
+        """`--memory-log` is passed whenever a policy *might* judge something,
+        so an empty journal must not leave a file claiming a gate ran."""
+        self.assertIsNone(self.write(type("T", (), {})()))
+        self.assertIsNone(self.write(self.tracker([])))
+
+    def test_the_pipeline_writes_it_for_a_real_run(self):
+        import json
+
+        import src.pipeline as P
+
+        tracker = PipelineTest._Tracker()
+        tracker._samurai = self.tracker([(0, ""), (1, "jumped 9.0 sizes>2.5")])._samurai
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for i in range(4):
+                cv2.imwrite(str(folder / f"frame_{i:06d}.tiff"),
+                            np.full((16, 16, 3), 60, dtype=np.uint8))
+            path = folder / "memory.json"
+            real = P._report_timing
+            P._report_timing = lambda *a, **k: None
+            try:
+                P.run(tracker, PromptSet(boxes=[BoxPrompt(1, 0, (1, 1, 3, 3))]),
+                      PipelineConfig(output_path=None, frames_dir=folder,
+                                     frame_pattern="*.tif*", memory_log=path))
+            finally:
+                P._report_timing = real
+            self.assertTrue(path.is_file())
+            self.assertEqual(json.loads(path.read_text())["refused"], 1)
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -435,8 +435,23 @@ ARMS = {
         "REQUIRE_POOLS": REQUIRED,
         "CLASS_WEIGHTS": THERMAL_WEIGHTS,
         "LR_HEAD": "0",
-        "LR_NECK": "1e-4",
-        "LR_TRUNK": "1e-4",
+        # 1e-4 on both is the configuration that went non-finite: the recorded
+        # run reached 0.2723 on the head stage, 21.84 the moment the encoder
+        # opened and NaN after it -- and the checkpoint left on disk was the
+        # head-only one, which the assert in cell 5 now refuses to mirror.
+        # Notebook 32's pilot swept three profiles against that failure and the
+        # survivors were (5e-5, 5e-5, 1e-5) and (5e-5, 5e-5, 2e-5). This takes
+        # the second: the trunk still leads the shipped table 2x, because a
+        # modality shift is a trunk problem, without the 10x that diverged.
+        # The other arms keep 1e-4 -- that is what their recorded runs used.
+        "LR_NECK": "5e-5",
+        "LR_TRUNK": "2e-5",
+        # The head stage is not scaled up either. The divergence was at
+        # lr_scale 4, which the linear rule reaches on any batch of 64 or more,
+        # and BATCH_CEILING here is 512. 32 pins this to 1.0, and a pretrain a
+        # stage-B run is stacked on should not train at four times the rate
+        # that run does.
+        "LR_SCALE_MAX": "1.0",
         "POOL_ARCHIVES": ('{"vtuav_thermal": "/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"finetune"',
         "REFERENCE_CHECKPOINT": '""',
@@ -482,13 +497,42 @@ ARMS = {
         # Cars are 400 450 of AeroVIS's instances and `vehicle` another
         # 307 555; without thinning them the run learns "a target is a car"
         # before it learns anything else.
+        # Keyed by source *and* class. `rebalance` resolves the most specific
+        # key and nothing compounds, so a bare "pool/aerovis_train" replaces
+        # "car" on the one pool the car weight was written for: the training
+        # half would keep 90 % of its cars while the held-out half, having no
+        # source key, lost half of them -- and the grade would stop being the
+        # same mix as the training set.
         "CLASS_WEIGHTS": ('{"car": 0.5, "vehicle": 0.5, "truck": 0.7,\n'
-                          '                 "pool/aerovis_train": 0.9}'),
+                          '                 "pool/aerovis_train:car": 0.45,\n'
+                          '                 "pool/aerovis_train:vehicle": 0.45,\n'
+                          '                 "pool/aerovis_train:truck": 0.63}'),
         "LR_HEAD": "0",
-        "LR_NECK": "1e-4",
-        "LR_TRUNK": "1e-4",
+        # 1e-4 on both is the configuration that went non-finite: the recorded
+        # run reached 0.2723 on the head stage, 21.84 the moment the encoder
+        # opened and NaN after it -- and the checkpoint left on disk was the
+        # head-only one, which the assert in cell 5 now refuses to mirror.
+        # Notebook 32's pilot swept three profiles against that failure and the
+        # survivors were (5e-5, 5e-5, 1e-5) and (5e-5, 5e-5, 2e-5). This takes
+        # the second: the trunk still leads the shipped table 2x, because a
+        # modality shift is a trunk problem, without the 10x that diverged.
+        # The other arms keep 1e-4 -- that is what their recorded runs used.
+        "LR_NECK": "5e-5",
+        "LR_TRUNK": "2e-5",
+        # The head stage is not scaled up either. The divergence was at
+        # lr_scale 4, which the linear rule reaches on any batch of 64 or more,
+        # and BATCH_CEILING here is 512. 32 pins this to 1.0, and a pretrain a
+        # stage-B run is stacked on should not train at four times the rate
+        # that run does.
+        "LR_SCALE_MAX": "1.0",
         "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV",\n'
                           '                 ' + AEROVIS_ARCHIVE + '}'),
+        # EVAL_DRAWN is None and EXTRA_DATASETS is empty here, so the
+        # thermal SegFly tree and Kust4K would be unzipped and never
+        # opened -- several GB of disk and minutes of unzip on every
+        # session. 28, the other RGB-only arm, empties this for the same
+        # reason.
+        "SOURCE_ZIPS": "[]",
         "METHOD": '"finetune"',
         "REFERENCE_CHECKPOINT": '""',
     },
@@ -667,7 +711,7 @@ BATCH          = 0
 BATCH_CEILING  = 512
 BATCH_RESERVE  = 0.12
 LR_REFERENCE   = 16
-LR_SCALE_MAX   = 4.0
+LR_SCALE_MAX   = {{LR_SCALE_MAX}}
 LR_HEAD        = {{LR_HEAD}}
 LR_NECK        = {{LR_NECK}}
 LR_TRUNK       = {{LR_TRUNK}}
@@ -800,6 +844,10 @@ if BASE_CHECKPOINT:
 assert METHOD in ("finetune", "lora"), f"METHOD is finetune or lora, not {METHOD!r}"
 if METHOD != "finetune":
     MIRROR_DIR = f"{MIRROR_DIR.rstrip('/')}_{METHOD}"
+WORK = f"/content/work_{RUN}"
+print("work dir", WORK, "-- named after the run so two arms in one runtime do "
+      "not share splits.json, run.json or the score cache; a shared score "
+      "cache would hand the second arm the first one's before/after.")
 for _dir in (POOL_ROOT, DATA_ROOT, WORK, MIRROR_DIR,
              str(Path(WORK) / "index"), str(Path(REPO_DIR) / "checkpoints")):
     Path(_dir).mkdir(parents=True, exist_ok=True)
@@ -1700,7 +1748,8 @@ if _dropped:
           "frame because one of them is graded. The drawn grade is the case "
           "that needs a stem, and `exclude_frames` above has already done it.")
 
-SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS))
+SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS,
+                             CLASS_WEIGHTS, seed=SEED))
 COMMON += ["--splits", SPLIT_FILE]
 
 def windows(name, jitter):
@@ -1847,6 +1896,13 @@ subprocess.run(
 
 RUN_LOG = json.loads((Path(WORK) / "run.json").read_text())
 assert Path(CHECKPOINT).is_file(), "training wrote no checkpoint"
+_bad_stops = [row for row in RUN_LOG.get("stopped_early", [])
+              if str(row.get("reason", "")).startswith("nonfinite")]
+assert not _bad_stops, (
+    f"training went non-finite and stopped: {_bad_stops}. The checkpoint on "
+    f"disk is the last finite one, which after a head stage and a diverged "
+    f"encoder stage is the HEAD-ONLY model -- it is not what this run set out "
+    f"to produce and must not be mirrored as one. Lower LR_TRUNK/LR_NECK.")
 shutil.copy(CHECKPOINT, Path(MIRROR_DIR) / Path(CHECKPOINT).name)
 shutil.copy(Path(WORK) / "run.json", Path(MIRROR_DIR) / "run.json")
 print(f"{RUN_LOG['best_val_loss']:.4f} best val loss, "
@@ -2235,6 +2291,10 @@ def render(notebook: str) -> tuple[list[str], str]:
     """
     fields = {"EVAL_DRAWN": '"kust4k"',
               "SOURCE_ZIPS": SOURCE_ZIPS_DEFAULT,
+              # The linear rule's cap. 4.0 is what the arms measured before
+              # this ran under; a pretrain a stage-B run is stacked on pins it
+              # to 1.0 (see 34/35), which is what notebook 32 does too.
+              "LR_SCALE_MAX": "4.0",
               **ARMS[notebook], "BRANCH": BRANCH, "NOTEBOOK": notebook}
     cells = []
     for text in CELLS:

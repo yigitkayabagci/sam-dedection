@@ -927,7 +927,9 @@ def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
 
 
 def save_splits(path: str | Path,
-                splits: Mapping[str, SequenceABC[FrameIndex]]) -> Path:
+                splits: Mapping[str, SequenceABC[FrameIndex]],
+                weights: Mapping[str, float] | None = None,
+                seed: int = 0) -> Path:
     """Which frames each split holds, as `source -> [frame key]`.
 
     A notebook that indexes a run, caps a pool, drops the frames a drawn grade
@@ -939,6 +941,21 @@ def save_splits(path: str | Path,
 
     Keyed by `Source.name` and not by frame name alone, because frame names
     collide across datasets -- `000123.png` is in most of them.
+
+    **`weights` closes the half of that promise a frame list cannot keep.**
+    `rebalance` thins per *instance*: a frame that held twelve cars and three
+    pedestrians is kept, with three of its cars. A file that records only which
+    frames survived brings back all twelve, because the consumer re-indexes and
+    this can only filter. The rebalancing was silently undone at exactly the
+    moment it mattered -- the printed by-class table described a set nothing
+    trained on, and a run whose whole argument was "all of it rather than the
+    biggest of it" trained on the biggest of it.
+
+    Recording the weights and the seed rather than the surviving instances is
+    what keeps the file small: `rebalance` decides by hashing the frame's
+    identity and the instance's own label, so re-applying it downstream on the
+    same entries reproduces the same set exactly, and a million instances cost
+    a dozen lines instead of thirty megabytes.
     """
     payload: dict[str, dict[str, list[str]]] = {}
     for name, entries in splits.items():
@@ -947,9 +964,16 @@ def save_splits(path: str | Path,
             key = entry.source.name if entry.source else "?"
             by_source.setdefault(key, []).append(entry.frame.name)
         payload[name] = by_source
+    body: dict = payload
+    if weights:
+        # A nested shape only when there is something to nest. The flat one is
+        # what every file written before this carried, and `apply_splits` still
+        # reads it.
+        body = {"frames": payload,
+                "rebalance": {"weights": dict(weights), "seed": int(seed)}}
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=1) + "\n")
+    path.write_text(json.dumps(body, indent=1) + "\n")
     return path
 
 
@@ -961,8 +985,17 @@ def apply_splits(index: SequenceABC[FrameIndex],
     index built for it, and an entry no split names is dropped -- that is how a
     cap and an overlap filter survive the trip. Refuses rather than trains on
     the wrong set if the two sides disagree about what is there.
+
+    A file that records the weights it was thinned under (see `save_splits`) is
+    also re-thinned here, because a frame list alone cannot carry a decision
+    made per instance.
     """
-    payload = json.loads(Path(path).read_text())
+    body = json.loads(Path(path).read_text())
+    # Two shapes: the flat `{split: {source: [frame]}}` every file carried
+    # before instance thinning could travel, and the nested one that also
+    # names the weights it was thinned under.
+    thinning = body.get("rebalance") if "frames" in body else None
+    payload = body["frames"] if "frames" in body else body
     wanted = {name: {source: set(keys) for source, keys in by_source.items()}
               for name, by_source in payload.items()}
     out: dict[str, list[FrameIndex]] = {name: [] for name in payload}
@@ -982,6 +1015,15 @@ def apply_splits(index: SequenceABC[FrameIndex],
             f"them. The two were built from different flags or different "
             f"pools -- re-index, or drop --splits and let the split be made "
             f"here.")
+    if thinning:
+        # The same function, the same weights, the same seed: `rebalance`'s
+        # keep decision is a hash of the frame's identity and the instance's
+        # label, so this reproduces the notebook's set rather than resembling
+        # it. Every named frame kept at least one instance there, so none is
+        # emptied here and the count above stays true.
+        out = {name: rebalance(entries, thinning["weights"],
+                               seed=int(thinning.get("seed", 0)))[0]
+               for name, entries in out.items()}
     return out
 
 

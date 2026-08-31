@@ -192,9 +192,10 @@ TORCH = {
 POLICIES = {
     "plain": None,
     "samurai": "configs/policies/samurai.yaml",
-    # `samurai` plus one line: the Kalman filter is not updated with a box it
-    # does not believe. The only difference, so the two rows isolate it.
-    "samurai_gated": "configs/policies/samurai_gated.yaml",
+    # The gate between the mask and the memory write, and nothing else: no
+    # Kalman filter, no re-scoring, so an accepted frame's mask is `plain`'s
+    # own. What differs is which frames the encoder gets to remember.
+    "memgate": "configs/policies/memgate.yaml",
     "ego": "configs/policies/ego.yaml",
     # The gates alone, reading no pixels: the part measured to refuse a jump,
     # without the decode and the optical flow measured to cost 18-27 ms a frame.
@@ -249,20 +250,24 @@ POLICY_NOTE = {
         "mask that covers a field as a hit. Expect dropouts to go **up** where "
         "they were being hidden. **Training-free.** Read against the `ego` row."
     ),
-    "samurai_gated": (
-        "Policy: `samurai_gated` — `samurai` with one line added: the Kalman "
-        "filter is not updated with a box whose IoU against its own prediction "
-        "is below 0.10, and is re-initiated after 8 consecutive refusals so a "
-        "real manoeuvre is not locked out. Without it a mask that jumps to a "
-        "look-alike drags the filter onto it and the memory gate falls silent "
-        "two frames later -- measured, 15 of the 16 frames after a jump "
-        "entered the bank; with it, 8, and a genuine acceleration still puts "
-        "in all 16. It also refuses a mask that swells in place -- x2, x3 "
-        "and x4 all put ten of ten frames into the bank without it and "
-        "none with it, while a target genuinely approaching keeps 39 of "
-        "40. **Training-free and free of time**: the arithmetic is "
-        "inside a hook that already runs. Read against the `samurai` row -- "
-        "that is the only difference."
+    "memgate": (
+        "Policy: `memgate` — the gate between the mask and the **memory "
+        "write**, which is the only place a bad frame can still be stopped: "
+        "the classical guard runs after `propagate_in_video` has yielded, so "
+        "it can relabel an output but the frame is already the target's "
+        "remembered appearance by then. Two gates, both geometry. A mask whose "
+        "centre lands more than 2.5 of the last accepted box's own lengths "
+        "away is the identity switch: 16 of the 16 frames after a 90-pixel "
+        "jump enter the bank without this, 8 with it, and a genuine "
+        "acceleration still puts in all 16. A mask that swells in place is the "
+        "balloon: x2, x3 and x4 all put ten of ten frames in without it and "
+        "none with it, while a target really approaching 2.6x keeps 40 of 40. "
+        "**No SAMURAI**: `kf_weight: 0` leaves SAM 2's own argmax to pick the "
+        "mask, so an accepted frame is bit-identical to `plain` and the filter "
+        "is not run at all — 33 us a frame. **Training-free**: the checkpoint "
+        "and the engines are the `plain` run's. Read against `plain`, and read "
+        "`memory.json` first: a gate that refused nothing means this run *is* "
+        "`plain`."
     ),
     "prefilter": (
         "Policy: `prefilter` — the only one that acts **before the encoder**. A "
@@ -342,6 +347,46 @@ def overlay_for(policy: str) -> dict:
             f"the backend config the --weights axis selects."
         )
     return body
+
+
+def account_flags(policy: str, outdir: Path, photometry: bool = False) -> list:
+    """The flags that make a policy write down what it actually did.
+
+    Every layer here is invisible in the mp4 in its own way, and each has one
+    file that says whether it fired:
+
+    * `guard` refuses a mask, and `verdicts.json` names the gate that refused.
+    * `prefilter` rewrites the pixels the encoder is given; `prefilter.json`
+      says how many frames were under the floor, and a floor below the
+      footage's own span leaves every frame untouched.
+    * `photometry` asks any run for the same measurement without the filter:
+      `--prefilter 0` touches no pixel and writes `photometry.json`, which
+      carries each frame's used span and how far it has moved from the frames
+      the memory bank is holding. That is the pair of numbers that separates
+      "the encoder cannot read this frame" from "the bank is holding another
+      exposure", and it costs 0.23 ms a frame, so it is asked for rather than
+      assumed.
+    * a `samurai:` block judges whether a frame may enter the memory bank.
+      Nothing about the *output* of an accepted frame changes -- what changes
+      is what the frames after it read back -- so `memory.json` is the only
+      evidence it did anything.
+
+    Asked for whenever the file might exist rather than whenever it will: the
+    writers say "nothing happened" rather than writing an empty file, and
+    "nothing happened" is the result that says the run was the baseline.
+    """
+    flags: list = []
+    if policy in POLICY_FLAGS:
+        flags += [*POLICY_FLAGS[policy], "--prefilter-log",
+                  outdir / "prefilter.json"]
+    overlay = overlay_for(policy)
+    if "guard" in overlay:
+        flags += ["--verdicts", outdir / "verdicts.json"]
+    if "samurai" in overlay:
+        flags += ["--memory-log", outdir / "memory.json"]
+    if photometry and policy not in POLICY_FLAGS:
+        flags += ["--prefilter-log", outdir / "photometry.json"]
+    return flags
 
 
 def staged_config(config: str, policy: str, outdir: Path) -> str:
@@ -425,7 +470,14 @@ def pointers_missing(config: str, policy: str) -> str | None:
     """
     import yaml
 
-    if "samurai" not in overlay_for(policy):
+    from src.trackers.samurai import SamuraiConfig
+
+    block = overlay_for(policy).get("samurai")
+    # Only re-selection needs the extra output. A policy that leaves the mask
+    # choice to the engine (`kf_weight: 0`, which is `memgate`) reads nothing
+    # this export is missing, and refusing it here would send a user to a
+    # forty-minute re-export for a run that does not need one.
+    if not block or float(block.get("kf_weight", SamuraiConfig.kf_weight)) <= 0.0:
         return None
     head = (yaml.safe_load((ROOT / config).read_text()) or {}).get("sam_head_engine")
     if not head or not (ROOT / head).exists():
@@ -521,6 +573,51 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd,
         "engines": engines,
         "command": [str(c) for c in cmd],
     }
+
+
+# Extensions worth naming back to someone whose --pattern found nothing. The
+# default is `*.tif*` because that is what this project's thermal records are;
+# a folder of jpgs then fails in a way that reads like an empty directory.
+KNOWN_FRAMES = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
+
+
+def suggest_pattern(folder: Path, pattern: str) -> str:
+    """The `--pattern` that would have matched this folder, as a sentence.
+
+    Empty when nothing here looks like frames, because a guess in that case
+    would be noise on top of a real problem.
+    """
+    for candidate in KNOWN_FRAMES:
+        if candidate == pattern:
+            continue
+        found = len(list(folder.glob(candidate)))
+        if found:
+            return (f" It holds {found} {candidate} file(s) -- "
+                    f"pass --pattern '{candidate}'.")
+    return ""
+
+
+def roots(args) -> tuple[Path, Path]:
+    """Where this attempt writes, and where the target selection lives.
+
+    `--tag` names an attempt: everything lands in `<out>/<tag>/`, SUMMARY.md
+    included, so a second attempt sits beside the first instead of on top of
+    it. Policies are compared *inside* one tag, attempts across tags, and the
+    counter in a name like `vis3_deneme1` is the user's to turn.
+
+    The pick is deliberately **not** tagged. Which pixels the target is in is a
+    property of the record, not of the attempt, so it stays at the untagged
+    root -- a new tag must not send someone back to the picker for a box they
+    already chose.
+    """
+    # Absolute, always. `run_step` launches cli.py with `cwd=ROOT` while these
+    # paths are resolved against whatever directory the user ran this from, so
+    # a relative `--out` puts run_records' own files (config.yaml,
+    # provenance.json, SUMMARY.md) in one tree and everything cli.py writes
+    # (the mp4, the charts, the logs) in another -- and the prompt file cli.py
+    # is handed does not exist, so every arm dies on a missing prompt.
+    root = Path(args.out).expanduser().resolve()
+    return (root / args.tag if getattr(args, "tag", None) else root), root
 
 
 def folder(mode: str, args, policy: str | None = None) -> str:
@@ -632,6 +729,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--records", default="frames",
                    help="Directory of record folders, each an image sequence.")
     p.add_argument("--out", default="frame_output", help="Where results go.")
+    p.add_argument("--photometry", action="store_true",
+                   help="Measure every frame's used grey-level span and how "
+                        "far it has moved from the frames the memory bank is "
+                        "holding, and write it beside each run as "
+                        "photometry.json. No pixel is changed. This is the "
+                        "measurement that separates a frame the encoder cannot "
+                        "read (small span) from a bank holding another "
+                        "exposure (span fine, but moved). 0.23 ms a frame.")
+    p.add_argument("--tag", default=None,
+                   help="Name this attempt. Everything lands in "
+                        "<out>/<tag>/ instead of <out>/, including SUMMARY.md, "
+                        "so a second attempt with a different --tag sits "
+                        "beside the first rather than on top of it. Compare "
+                        "policies inside one tag; compare attempts across "
+                        "tags. e.g. --tag vis3_deneme1")
     p.add_argument("--modes", default=",".join(MODES),
                    help=f"Comma-separated subset of {', '.join(MODES)}.")
     p.add_argument("--policy", default="plain",
@@ -724,7 +836,8 @@ def main(argv: list[str] | None = None) -> int:
                         "measurement with nothing else competing.")
     args = p.parse_args(argv)
 
-    root = Path(args.records)
+    # Absolute for the same reason `--out` is: cli.py runs with `cwd=ROOT`.
+    root = Path(args.records).expanduser().resolve()
     if not root.is_dir():
         raise SystemExit(f"{root} is not a directory.")
     # A folder holding frames is one record; a folder holding folders is a set
@@ -733,7 +846,18 @@ def main(argv: list[str] | None = None) -> int:
         sorted(d for d in root.iterdir() if d.is_dir())
     if not records:
         raise SystemExit(f"No frames matching {args.pattern!r} in {root}/, and no "
-                         "record folders inside it either.")
+                         "record folders inside it either."
+                         + suggest_pattern(root, args.pattern))
+    # A record whose frames are there under another extension is the failure
+    # that looks like success: the run reaches the summary and every row says
+    # "did not run", because the pattern is a *default* and the footage decided
+    # what it is years ago. Say it here, once, naming the pattern that works.
+    for record in records:
+        if not list(record.glob(args.pattern)):
+            hint = suggest_pattern(record, args.pattern)
+            raise SystemExit(f"{record}/ has no frames matching "
+                             f"{args.pattern!r}." + (hint or
+                             " Check --pattern and the record directory."))
     policies = [one.strip() for one in args.policy.split(",") if one.strip()]
     for one in policies:
         if one not in POLICIES:
@@ -805,18 +929,19 @@ def main(argv: list[str] | None = None) -> int:
               f"--policy plain, or on --backend torch, which needs no export."
         )
 
-    out_root = Path(args.out)
+    out_root, pick_root = roots(args)
     rows: dict[str, dict[str, dict]] = {}
     failed: list[str] = []
 
     for record in records:
         rows[record.name] = {}
         try:
-            prompts = resolve_prompts(record, out_root / record.name, args)
+            prompts = resolve_prompts(record, pick_root / record.name, args)
         except Exception as exc:  # no display, nothing selected, unreadable frame
             print(f"!! {record.name}: no prompts ({exc}); skipped. Pass --box to "
                   "run without a display.")
-            failed += [f"{record.name}/{m}" for m in modes]
+            failed += [f"{record.name}/{m}" + ("" if p == "plain" else f" + {p}")
+                       for m, p in itertools.product(modes, policies)]
             continue
 
         if args.pick_only:
@@ -856,11 +981,7 @@ def main(argv: list[str] | None = None) -> int:
             # writing an empty file, so this is asked for whenever one might
             # exist: a refused frame is otherwise just a missing mask in the
             # mp4 with nothing saying which gate refused it.
-            if policy in POLICY_FLAGS:
-                cmd += [*POLICY_FLAGS[policy],
-                        "--prefilter-log", outdir / "prefilter.json"]
-            if "guard" in overlay_for(policy):
-                cmd += ["--verdicts", outdir / "verdicts.json"]
+            cmd += account_flags(policy, outdir, args.photometry)
             if args.strict:
                 cmd += ["--strict"]
             if crop:
