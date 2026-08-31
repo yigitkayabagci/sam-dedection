@@ -225,9 +225,39 @@ HARDER = {**CAPS, "MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.2",
           "CONTRAST_COLLAPSE": "0.25", "POLARITY_FLIP": "0.25",
           "GAMMA_JITTER": "0.25", "SENSOR_NOISE": "2.0"}
 
+# Where AeroVIS's 12.6 GiB of frames are. Both its pools travelled to Drive
+# without them -- `write_pool` stores `image_rel` for exactly that reason -- so
+# until this named an archive, every arm that plans them indexed 47 921 records
+# against an empty `/content/data/AeroVIS` and reported both pools unusable.
+# 27, 28 and 35 `REQUIRE_POOLS` AeroVIS, so for them it was not a missing pool
+# but a failed assert.
+#
+# It is a `POOL_ARCHIVES` entry and not a `SOURCE_ZIPS` one because these pools
+# are RGB and half these arms are not. `SOURCE_ZIPS` unpacks before the plan
+# exists, so a thermal arm would spend 12.6 GiB of a mounted Drive on frames
+# nothing in it will open; `POOL_ARCHIVES` runs per *planned* pool, after the
+# modality filter, and takes only the members that pool's records name.
+#
+# Which is why it sits in `INERT` rather than on the arms that use it. Where a
+# pool's frames live is a fact about the pool, and 19 and 20 have to differ in
+# `MODALITIES` and nothing else or the gap between their numbers is not
+# attributable to the RGB windows. 19 carries the same entry and the loop says
+# so: dropped at the modality filter, archive never opened.
+#
+# The path is the archive itself rather than a folder to glob, so it works
+# whether the Drive holds the file or a shortcut to the shared release --
+# `1DMLagGZ...`, the id `aerovis_selection.json` already records as the one the
+# harvest ran against. Naming it here is also what makes the gdown-and-unzip in
+# `docs/calisma_plani_tr.md` unnecessary: the frames come out of Drive, capped
+# by what the pool asks for, instead of 13.5 GiB off the network each session.
+AEROVIS_ZIP = "/content/drive/MyDrive/edgetam-pool/AeroVIS.zip"
+AEROVIS_ARCHIVE = (f'"aerovis_train": "{AEROVIS_ZIP}",\n'
+                   f'                 "aerovis_heldout": "{AEROVIS_ZIP}"')
+
 INERT = {**PLAIN, **CAPS, "REQUIRE_POOLS": "{}", "CLASS_WEIGHTS": "{}",
          "LR_HEAD": "0", "LR_NECK": "0", "LR_TRUNK": "0",
-         "POOL_ARCHIVES": "{}", "METHOD": '"finetune"',
+         "POOL_ARCHIVES": "{" + AEROVIS_ARCHIVE + "}",
+         "METHOD": '"finetune"',
          "REFERENCE_CHECKPOINT": '""',
          "EXTRA_DATASETS": "[]", "SKIP_POOLS": "[]",
          "EPOCHS": "[1, 3]", "STEPS": "400", "MIN_BOX_IOU": "0.0",
@@ -451,7 +481,8 @@ ARMS = {
         "LR_HEAD": "0",
         "LR_NECK": "1e-4",
         "LR_TRUNK": "1e-4",
-        "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV"}'),
+        "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV",\n'
+                          '                 ' + AEROVIS_ARCHIVE + '}'),
         "METHOD": '"finetune"',
         "REFERENCE_CHECKPOINT": '""',
     },
@@ -483,7 +514,8 @@ ARMS = {
                           '                 "vtuav_rgb": '
                           '"/content/drive/MyDrive/VTUAV",\n'
                           '                 "vtuav_lt_rgb": '
-                          '"/content/drive/MyDrive/VTUAV"}'),
+                          '"/content/drive/MyDrive/VTUAV",\n'
+                          '                 ' + AEROVIS_ARCHIVE + '}'),
         "METHOD": '"finetune"',
         # `_finetune` is not decoration: the settings cell appends METHOD to
         # MIRROR_DIR so a fine-tune and a LoRA of the same RUN cannot overwrite
@@ -521,7 +553,8 @@ ARMS = {
         "LR_TRUNK": "1e-4",
         "POOL_ARCHIVES": ('{"vtuav_rgb": "/content/drive/MyDrive/VTUAV",\n'
                           '                 "vtuav_lt_rgb": '
-                          '"/content/drive/MyDrive/VTUAV"}'),
+                          '"/content/drive/MyDrive/VTUAV",\n'
+                          '                 ' + AEROVIS_ARCHIVE + '}'),
         "METHOD": '"finetune"',
         "REFERENCE_CHECKPOINT": '""',
     },

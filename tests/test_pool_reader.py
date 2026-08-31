@@ -1044,6 +1044,64 @@ class AeroVISPathsTest(unittest.TestCase):
         self.assertEqual((relocate.found_by_name, relocate.ambiguous,
                           relocate.misses), (0, 0, 0))
 
+    def release_archive(self) -> Path:
+        """`AeroVIS.zip` as the Drive holds it: everything under `AeroVIS/`."""
+        archive = self.root / "AeroVIS.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("AeroVIS/aero_vis.json", "{}")
+            for sequence in self.SEQUENCES:
+                for name in self.FRAMES:
+                    handle.write(self.sequences / sequence / name,
+                                 f"AeroVIS/sequences/{sequence}/{name}")
+        return archive
+
+    def test_the_release_archive_lands_where_the_resolver_then_names(self):
+        """`POOL_ARCHIVES` and `resolve_images_root`, joined up.
+
+        Both are already right on their own and neither is any use alone: the
+        pool travels without its 12.6 GiB, so until an archive is named there is
+        nothing under the images root for `image_rel` to join onto, and every
+        arm that plans these pools reports them unusable -- an assert, in the
+        three that require them.
+
+        `extract_frames` takes the members whose path the records end with and
+        writes them at `target / member`, so the `AeroVIS/sequences/` the
+        archive nests them under is reproduced under the configured root. That
+        is the tree `resolve_images_root` names, which is why the two compose
+        rather than needing a third thing to agree with both.
+        """
+        archive = self.release_archive()
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        records = sorted(pool.rglob(RECORD_FILE))
+        fresh = self.root / "fresh" / "AeroVIS"          # a runtime with nothing
+        fresh.mkdir(parents=True)
+        self.assertIsNone(resolve_images_root(records, fresh))
+
+        report = extract_frames(records, [archive], fresh)
+        self.assertEqual((report["taken"], report["missing"]),
+                         (len(self.SEQUENCES) * len(self.FRAMES), 0))
+        # aero_vis.json is in the archive and in no record, so it stays there.
+        self.assertFalse((fresh / "AeroVIS" / "aero_vis.json").exists())
+
+        found = resolve_images_root(records, fresh)
+        self.assertEqual(found, fresh / "AeroVIS" / "sequences")
+        index = index_pool(pool, str(found), modality="rgb")
+        self.assertEqual(len(index), len(self.SEQUENCES) * len(self.FRAMES))
+
+    def test_a_second_run_re_extracts_nothing(self):
+        """The archive is 12.6 GiB on a mounted Drive, so the resume path is
+        not a nicety -- a run that reconnects must not read it again."""
+        archive = self.release_archive()
+        records = sorted(self.write_pool(
+            "/content/data/AeroVIS/AeroVIS/sequences").rglob(RECORD_FILE))
+        fresh = self.root / "fresh" / "AeroVIS"
+        fresh.mkdir(parents=True)
+        extract_frames(records, [archive], fresh)
+        again = extract_frames(records, [archive], fresh)
+        self.assertEqual((again["taken"], again["missing"]), (0, 0))
+        self.assertEqual(again["already"],
+                         len(self.SEQUENCES) * len(self.FRAMES))
+
     def test_a_pool_that_is_not_on_this_disk_is_still_reported_as_missing(self):
         """`image_rel` must not turn a missing download into a search that
         wanders off and finds something. Nothing joins, nothing is proposed."""
