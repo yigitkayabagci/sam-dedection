@@ -29,8 +29,9 @@ It reports, per mode:
 - what a `truck` component's border is made of, which separates "a shredded
   vehicle" from "a standalone blob in the vegetation";
 - and how much of the fusion `fill` *cannot* see is still on the table -- an
-  erosion probe for the bridged case and a shape profile for the side-by-side
-  one, because a zero on `fill` alone does not answer the question.
+  erosion probe for the bridged case, and a shape profile for both merge
+  geometries, because a zero on `fill` alone does not answer the question and
+  a long-side test alone misses the side-by-side half of it.
 
     python tools/segfly_decompose_audit.py --shards 63 410 692
     python tools/segfly_decompose_audit.py --shards 475 550 50 --modes components
@@ -141,10 +142,19 @@ def fusion_probe(maps, spec, gates, name: str = "vehicle") -> dict:
     survive. Anything held together by a thin neck falls apart here, so a zero
     means `fill`'s zero is not an artefact of where the threshold sits.
 
-    `profile` -- a side-by-side merge has a signature: *one* side roughly
-    doubles while the other stays the size it was. A genuinely larger vehicle
-    grows in both. Counting the first shape is an upper bound on the merges,
-    and it is the cut worth making if one is made -- it leaves the vans alone.
+    `profile` -- a merge doubles *one* of the two dimensions, and which one
+    decides how the blob ends up looking. Nose to tail, the length doubles and
+    the blob goes long and thin. **Side by side, the width doubles, and that is
+    the case that misleads**: the long side barely moves while the short side
+    catches up to it, so the blob turns nearly square and its aspect ratio
+    *collapses toward 1* instead of growing. Reading only the first shape
+    undercounts the second badly, which is exactly the geometry `fill` is
+    blindest to. Both are counted here, against a class whose single instance
+    is long and narrow (SegFly's `vehicle` sits at 1.74).
+
+    Neither is proof. A bus seen from directly above is square and large too,
+    and no property of a mask separates it from two hatchbacks parked abreast.
+    These are upper bounds, and the square band is the looser of the two.
     """
     import cv2
 
@@ -189,20 +199,31 @@ def fusion_probe(maps, spec, gates, name: str = "vehicle") -> dict:
     if not len(area):
         return {"components": 0}
     med_a, med_l, med_s = np.median(area), np.median(long_side), np.median(short_side)
+    aspect = long_side / np.maximum(short_side, 1)
+    med_aspect = np.median(aspect)
     oversized = area > 1.6 * med_a
-    merged = oversized & (long_side > 1.6 * med_l) & (short_side < 1.4 * med_s)
-    bigger = oversized & (long_side > 1.4 * med_l) & (short_side > 1.4 * med_s)
+    # Long and thin: the length doubled, so the two sat nose to tail.
+    end_to_end = oversized & (aspect > 1.5 * med_aspect)
+    # Nearly square: the *width* doubled and caught the length up. This is the
+    # side-by-side case, and the one a long-side test never sees.
+    abreast = oversized & (aspect < 0.72 * med_aspect)
+    def share(sel):
+        return float(sel.mean())
+    def median_fill(sel):
+        return float(np.median(fill[sel])) if sel.any() else None
     return {
         "components": int(len(area)),
         "split_after_1px_erosion": split[1],
         "split_after_2px_erosion": split[2],
-        "oversized_share": float(oversized.mean()),
-        "merge_profile_share": float(merged.mean()),
-        "larger_vehicle_profile_share": float(bigger.mean()),
-        "fill_median_all": float(np.median(fill)),
-        # A merge with a gap between the two would sit *below* the population;
-        # above it is evidence against the merge reading.
-        "fill_median_merge_profile": float(np.median(fill[merged])) if merged.any() else None,
+        "median_aspect": float(med_aspect),
+        "oversized_share": share(oversized),
+        "end_to_end_profile_share": share(end_to_end),
+        "abreast_profile_share": share(abreast),
+        "merge_profile_share": share(end_to_end | abreast),
+        "larger_vehicle_profile_share": share(oversized & ~end_to_end & ~abreast),
+        "fill_median_single": median_fill(~oversized),
+        "fill_median_end_to_end": median_fill(end_to_end),
+        "fill_median_abreast": median_fill(abreast),
     }
 
 
