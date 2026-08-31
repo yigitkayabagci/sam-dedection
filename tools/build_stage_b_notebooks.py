@@ -309,10 +309,16 @@ SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
 # joins at 0.8 -- a tracking set is one target followed for thousands of
 # frames, so its instances are correlated in a way a detection set's are not,
 # and counting each one as a full example over-weights a handful of scenes.
+# `segfly:truck` is zero and not 0.7 because that class is not a truck. Its
+# components are a ninth of `vehicle`'s area with 1.8x the count, and 95 % of
+# them sit inside tree and vegetation rather than beside a car -- measured in
+# `docs/segfly_decomposition.md` §4. The key is source-scoped, so Kust4K's and
+# DroneVehicle's real trucks keep the 0.7 they had.
 THERMAL_WEIGHTS = ('{"pool/dronevehicle_thermal": 0.45,\n'
                    '                 "pool/dronevehicle_thermal_only": 0.7,\n'
                    '                 "pool/vtuav_thermal": 0.8,\n'
                    '                 "pool/vtuav_rgb": 0.8,\n'
+                   '                 "segfly:truck": 0.0,\n'
                    '                 "car": 0.7, "truck": 0.7}')
 
 SOURCE_ZIPS_DEFAULT = (
@@ -1419,7 +1425,8 @@ subprocess.run(["df", "-h", "/content"], check=False)
 code('''
 import numpy as np
 
-from src.training.aerial import (InstanceGates, rebalance, sample_windows,
+from src.training.aerial import (InstanceGates, drop_merge_profile,
+                                 rebalance, sample_windows,
                                  save_splits, split_index)
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
@@ -1606,6 +1613,21 @@ COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),
            "--per-image", str(PER_IMAGE), "--max-instances", str(MAX_INSTANCES),
            "--min-area", str(MIN_AREA), "--min-side", str(MIN_SIDE),
            "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED)]
+
+INDEX, _shape = drop_merge_profile(INDEX, sources=("segfly", "segfly_thermal",
+                                                   "segfly_rgb"))
+if _shape["by_class"]:
+    print("\\nshape cut -- the merges `fill` cannot see "
+          "(docs/segfly_decomposition.md 2b):")
+    for _name, _row in sorted(_shape["by_class"].items()):
+        print(f"   {_name:<26}{_row['before']:>7} ->{_row['after']:>7}   "
+              f"dropped {_row['dropped']} ({_row['share']:.1%}: "
+              f"{_row['abreast']} abreast, {_row['end_to_end']} end to end)")
+    print("   an upper bound, not a count of merges: a bus from overhead is "
+          "square and large too, and nothing about a mask tells it apart from "
+          "two cars parked abreast. What it buys is that no merge survives.")
+    for _name in _shape["unmeasured"]:
+        print(f"   {_name}: too few instances to take a median from, left alone")
 
 if CLASS_WEIGHTS:
     INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)

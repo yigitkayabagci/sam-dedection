@@ -54,6 +54,7 @@ from src.training.aerial import (  # noqa: E402
     save_index,
     split_frames,
     apply_splits,
+    drop_merge_profile,
     rebalance,
     save_splits,
     split_index,
@@ -759,6 +760,62 @@ class TestSplitsAreComparableAcrossRuns(unittest.TestCase):
             by_spec.setdefault(entry.source.spec.name, set()).add(
                 entry.frame.name.split("/")[0])
         self.assertNotEqual(by_spec.get("kust4k"), by_spec.get("segfly"))
+
+
+class DropMergeProfile(unittest.TestCase):
+    """The shape cut for merges `fill` cannot see."""
+
+    def index(self, boxes, spec="segfly", cls="vehicle"):
+        source = Source(SPECS[spec], InstanceGates(), role="train")
+        out = []
+        for f, box in enumerate(boxes):
+            w, h = box
+            out.append(FrameIndex(
+                frame=Frame(name=f"f/{f:06d}", image=Path("i"), mask=Path("m")),
+                instances=(Instance(label=1, class_id=SPECS[spec].classes[cls],
+                                    box=(0.0, 0.0, float(w), float(h)),
+                                    area=int(w * h)),),
+                size=(640, 512), rejects={}, source=source))
+        return out
+
+    def population(self, n=300):
+        # A single vehicle: 70x40, the pool's own median shape.
+        return self.index([(70, 40)] * n)
+
+    def test_two_abreast_go_and_the_singles_stay(self):
+        # Width doubles, so the blob turns square -- the case `fill` misses.
+        index = self.population() + self.index([(70, 80)] * 20)
+        kept, report = drop_merge_profile(index, min_sample=100)
+        row = report["by_class"]["segfly:vehicle"]
+        self.assertEqual(row["abreast"], 20)
+        self.assertEqual(row["after"], 300, "the singles must survive intact")
+
+    def test_two_nose_to_tail_go_as_well(self):
+        index = self.population() + self.index([(140, 40)] * 20)
+        _, report = drop_merge_profile(index, min_sample=100)
+        row = report["by_class"]["segfly:vehicle"]
+        self.assertEqual(row["end_to_end"], 20)
+
+    def test_a_large_vehicle_that_keeps_its_proportions_stays(self):
+        # A lorry is longer *and* wider; a merge doubles one dimension only.
+        index = self.population() + self.index([(105, 60)] * 20)
+        _, report = drop_merge_profile(index, min_sample=100)
+        row = report["by_class"]["segfly:vehicle"]
+        self.assertEqual(row["dropped"], 0,
+                         "growing in both directions is not a merge signature")
+
+    def test_a_source_not_named_is_never_touched(self):
+        index = self.population() + self.index([(70, 80)] * 20)
+        kept, report = drop_merge_profile(index, sources=("kust4k",))
+        self.assertEqual(len(kept), len(index))
+        self.assertEqual(report["by_class"], {})
+
+    def test_too_few_instances_to_estimate_a_median_are_left_alone(self):
+        index = self.index([(70, 40)] * 10 + [(70, 80)] * 4)
+        kept, report = drop_merge_profile(index, min_sample=200)
+        self.assertEqual(len(kept), len(index))
+        self.assertEqual(report["unmeasured"], ["segfly:vehicle"],
+                         "a median over a handful of boxes is not a prior")
 
 
 class TestThinningAnOverRepresentedClass(unittest.TestCase):
