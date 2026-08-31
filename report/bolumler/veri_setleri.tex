@@ -253,6 +253,197 @@ Semantik maske ve derinlik hazır, lisans MIT, ama 400×300 EdgeTAM'ın
 gerekir, bu da ölçülen maske kalitesini veri setinin kendi
 çözünürlüğüyle sınırlar.
 
+\section{SegFly Semantic Map'ten Instance Target Üretimi}
+\label{sec:segfly-instance}
+
+Burada \emph{composition} yapılmamaktadır. SegFly'ın verdiği
+\texttt{semantic map}, training sırasında ayrı \texttt{instance mask}
+adaylarına \emph{decompose} edilmektedir. Ayrım önemlidir: yeni görüntü
+üretilmez, background'a nesne yapıştırılmaz ve RGB--thermal pixel'leri
+birleştirilmez. Aynı annotation farklı bir target representation'a
+çevrilir.
+
+\subsection{Input annotation ve file layout}
+
+Hub kaydı tek logical \texttt{train} split içinde 35\,613 row taşır:
+20\,606 RGB ve 15\,007 thermal. Her row
+\texttt{image}, \texttt{label}, \texttt{RGB\_aligned},
+\texttt{scene}, \texttt{altitude}, \texttt{modality} alanlarından
+oluşur. \texttt{label}, 8-bit single-channel PNG'dir; pixel value class
+ID'dir. JPEG preview class ID kontrolünde kullanılmaz.
+
+\begin{table}[H]
+  \centering
+  \caption{SegFly annotation'ın bu projedeki karşılığı.}
+  \label{tab:segfly-annotation}
+  \small
+  \begin{tabular}{@{}p{31mm}p{43mm}p{67mm}@{}}
+    \toprule
+    Alan & SegFly & Bu proje \\
+    \midrule
+    Görüntü & 640×512 LWIR & \texttt{image}, thermal channel üç kez kopyalanır \\
+    Registered pair & 640×512 RGB & \texttt{RGB\_aligned}; SAM cross-check için opsiyonel \\
+    Annotation & semantic class ID map & \texttt{read\_mask}: \texttt{int32[H,W]} \\
+    Thing classes & \texttt{vehicle=13}, \texttt{truck=36} & yalnız bu iki ID target olabilir \\
+    Stuff / ignore & diğer semantic classes / unlabeled & instance üretmez; training target değildir \\
+    Output & instance ID yok & boolean \texttt{mask}, \texttt{xyxy box}, class ID \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Class ID'ler contiguous değildir. Projenin \texttt{DatasetSpec}'i
+yayınlanan palette'i sabitler; exporter lossless PNG yazar ve bulunan
+ID'leri bu palette'e karşı kontrol eder. Daha önce kullanılan contiguous
+varsayımı \texttt{grass}, \texttt{vegetation}, \texttt{tree} ve
+\texttt{ground\_obstacle}'ı target yapıyordu; testler bu regression'ı
+engeller.
+
+\subsection{Conversion pipeline}
+
+\begin{enumerate}
+  \item \texttt{tools/export\_hf\_dataset.py}, yalnız thermal row taşıyan
+        parquet shard'larını seçer; \texttt{images/},
+        \texttt{rgb/}, \texttt{labels/} layout'unu üretir.
+  \item \texttt{read\_mask}, annotation'ı integer map olarak açar.
+        Yalnız ID 13 ve 36 ayrı ayrı binary map olur. Per-class işlem,
+        birbirine değen farklı class'ların birleşmesini önler.
+  \item \texttt{components}, 8-connectivity ile \texttt{connected
+        components} çıkarır. \texttt{watershed}, distance transform
+        üzerindeki peak'lerden thin bridge split'i ekler. Default
+        \texttt{components}'tır; \texttt{watershed} long vehicle'ı
+        over-split edebildiği için otomatik olarak “daha doğru” sayılmaz.
+  \item Her candidate dört \texttt{InstanceGates} kontrolünden geçer:
+        \texttt{min\_area=48 px}, \texttt{min\_side=4 px},
+        \texttt{max\_area=0.9} ve \texttt{fill=0.25}. \texttt{fill},
+        mask area / box area oranıdır; düşük değer possible fusion veya
+        sliver annotation sinyalidir.
+  \item Geçen component, dense global \texttt{label}, \texttt{class\_id},
+        frame-coordinate \texttt{xyxy box} ve \texttt{area} ile
+        \texttt{Instance} olur. Reject nedeni sayılır; sessiz drop yoktur.
+  \item Bir instance etrafında 512×512 native \texttt{window} seçilir.
+        Tamamen window içinde kalan diğer instance'lar aynı sample'a eklenir.
+        Image encoder bir kez çalışır, her instance ayrı box prompt alır.
+\end{enumerate}
+
+\subsection{Data classes ve batch formatı}
+
+\begin{table}[H]
+  \centering
+  \caption{Annotation'ın training batch'e kadar taşındığı tipler.}
+  \label{tab:segfly-data-classes}
+  \footnotesize
+  \begin{tabular}{@{}p{28mm}p{52mm}p{61mm}@{}}
+    \toprule
+    Tip & Ana alanlar & Görev \\
+    \midrule
+    \texttt{DatasetSpec} & file globs, \texttt{classes}, \texttt{things},
+      \texttt{ignore} & disk layout ve palette contract \\
+    \texttt{Source} & \texttt{spec}, \texttt{gates}, \texttt{mode},
+      \texttt{gray}, \texttt{role} & sample'ın kendi decode kuralları \\
+    \texttt{Instance} & \texttt{label}, \texttt{class\_id},
+      \texttt{box}, \texttt{area} & tek prompted object \\
+    \texttt{FrameIndex} & frame, size, instance tuple, reject counts,
+      source & GPU öncesi denetlenebilir index \\
+    \texttt{Sample} & origin, source window, model size, instance tuple &
+      crop geometry + targets \\
+    \texttt{ImageBatch} & \texttt{images[B,3,S,S]},
+      \texttt{boxes[B,K,4]}, \texttt{masks[B,K,S,S]},
+      \texttt{valid[B,K]} & ragged instance count için padded container;
+      \texttt{valid} olmayan row decoder'a gönderilmez \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Index aynı semantic map'i training sırasında deterministically yeniden
+decompose eder; target, \texttt{components == instance.label} ile geri
+alınır. \texttt{save\_index} içine dataset ve mode stamp'i yazılır;
+başka mode ile açılan cache reddedilir. Böylece finite loss üretip yanlış
+instance'a training yapabilecek label-renumbering hatası fail-fast olur.
+
+\subsection{Gerçek sample: görünen failure mode}
+
+\Cref{fig:segfly-instance-conversion}, resmî parquet export'un
+\texttt{train/0212.parquet} shard'ındaki 17. thermal row'dan üretilmiştir
+(\texttt{scene\_03}, 50\,m). Görseldeki maskeler repo kodunun çıktısıdır;
+manuel instance ground truth değildir.
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/segfly-instance-conversion.png}
+  \caption{Gerçek SegFly sample'ında input thermal, registered RGB,
+    semantic map, thing filter ve iki decomposition mode. Default
+    \texttt{components}: 7 kept vehicle, 1 \texttt{fill} reject.
+    \texttt{watershed}: 8 vehicle + 1 truck kept, 1 \texttt{fill} reject.
+    Bu panel method comparison için diagnostic sample'dır; dataset-level
+    accuracy değildir. SegFly görselleri CC BY-NC-SA 4.0 lisanslıdır.}
+  \label{fig:segfly-instance-conversion}
+\end{figure}
+
+Bu row'da thing classes 30\,688 pixel, frame'in \%9,37'sidir.
+\texttt{watershed}, default moda göre iki ek target üretmiştir; fakat
+“iki ek target” doğruluk kanıtı değildir. Aynı geometry hem gerçek bir
+fusion'ı ayırmış hem tek objeyi over-split etmiş olabilir. Full-data mode
+kararı, reject table ve manually reviewed panel sample birlikte okunarak
+verilmelidir.
+
+\subsection{Ek SAM check}
+
+\texttt{tools/analyze\_segfly\_instances.py}, reconstructed instance'ın
+box'ını SAM~2.1'e iki route ile prompt edebilir: doğrudan thermal
+(\texttt{self}) ve registered RGB (\texttt{pair}). SAM mask ile
+reconstructed mask arasındaki IoU, disagreement score olarak JSON'a yazılır.
+Bu kontrol şu nedenle otomatik acceptance gate yapılmamıştır:
+
+\begin{itemize}
+  \item SAM ve SegFly iki farklı pseudo-label kaynağıdır; hiçbiri instance
+        ground truth değildir.
+  \item Yüksek agreement aynı hatada uzlaşma olabilir. Düşük agreement ise
+        hangisinin yanlış olduğunu söylemez.
+  \item Small aerial target'ta SAM'ın self-reported IoU'su over-confident
+        olabilir; review priority olarak gerçek IoU'dan daha zayıftır.
+\end{itemize}
+
+Bu yüzden SAM check'in çıktısı \emph{review queue}'dur: düşük IoU'lu
+frame'ler panel incelemesine gider, training set otomatik genişlemez. Tam
+cell akışı \texttt{notebooks/26\_segfly\_instance\_audit.ipynb}'dedir;
+\texttt{RUN\_SAM=True}, thermal ve registered-RGB route'larını aynı
+instance'larda karşılaştırır.
+
+\subsection{Güvenilirlik sınırı}
+
+\begin{table}[H]
+  \centering
+  \caption{SegFly conversion için hangi iddianın ne kadar taşınabildiği.}
+  \label{tab:segfly-guvenilirlik}
+  \small
+  \begin{tabular}{@{}p{39mm}p{23mm}p{78mm}@{}}
+    \toprule
+    İddia & Statü & Dayanak / sınır \\
+    \midrule
+    File layout ve class IDs & Güçlü & resmî schema + non-contiguous
+      palette, lossless export, palette regression tests \\
+    SegFly semantic pseudo-GT & Orta & yayın thermal için \%87,65 pixel
+      accuracy ve \%79,46 FWmIoU raporlar; yalnız 60 manual thermal image ile
+      doğrulanmıştır~\cite{segfly2026} \\
+    Connected component = object & Koşullu & isolated object'ta makul;
+      touching aynı-class object birleşir, geometry tek başına düzeltemez \\
+    Watershed split & Koşullu & thin bridge'i ayırabilir; full-edge contact'ı
+      ayıramaz, long object'ı over-split edebilir \\
+    SAM agreement & Review-only & bağımsız pseudo-label disagreement;
+      ground truth veya accuracy değildir \\
+    Model evaluation & SegFly'da yok & SegFly \texttt{role=train}; score,
+      drawn instance mask taşıyan VTUAV VIS gibi held-out setten gelir \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Sonuç: pipeline training supervision üretmek için kullanılabilir, fakat
+instance ground truth ürettiği iddia edilemez. Bu nedenle code path SegFly'ı
+\texttt{role=train} tutar. Hub tek container sunsa da SegFly'ın resmî thermal
+split'i scene 03/04/05 = train, scene 09 = val/test'tir; ileride SegFly
+benchmark number raporlanırsa bu scene split'i korunmalı, generic 80/10/10
+frame split kullanılmamalıdır.
+
 \section{Ortak Kaynaklar ve Çakışma Riski}
 \label{sec:ortak-kaynaklar}
 

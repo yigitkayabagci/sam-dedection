@@ -1,0 +1,64 @@
+# 22_thermal_deep.ipynb's checkpoint on TensorRT at 768x768. The checkpoint was
+# trained at 512 -- read configs/edgetam_768_pool_deep.yaml first, because
+# every caveat there applies here and the engine build hides one of them.
+#
+# THE MISMATCH GETS BAKED IN AT EXPORT. Step 1 below traces 512-trained weights
+# into 768-shaped graphs, and the engines that come out are indistinguishable
+# from correct ones to everything downstream: check_trt_parity.py will pass,
+# because it compares the engine against the PyTorch module built the same way,
+# and both are equally off the training resolution. Parity is a statement about
+# TensorRT, never about the weights. tools/export_edgetam_onnx.py now prints the
+# mismatch (src/checkpoint_meta.py) at step 1, which is the only place it is
+# still cheap to notice.
+#
+# Engines are shape-specific and weight-specific, so this set shares a directory
+# with nothing:
+#
+#   1) python tools/export_edgetam_onnx.py --outdir models768_pool_deep/ \
+#          --image-size 768 \
+#          --checkpoint checkpoints/edgetam_pool_thermal_deep_512.pt --verify
+#   2) python tools/build_trt_engines.py   --outdir models768_pool_deep/ --max-batch 4
+#   3) python tools/check_trt_parity.py    --outdir models768_pool_deep/ \
+#          --image-size 768 --checkpoint checkpoints/edgetam_pool_thermal_deep_512.pt
+#      (--checkpoint is NOT optional here: it defaults to the stock
+#      edgetam.pt, and parity against the wrong weights fails every
+#      module for a reason that has nothing to do with TensorRT.)
+#   4) python tools/run_experiment.py --outdir results/768_pool_deep \
+#          --engines models768_pool_deep/ \
+#          --config configs/edgetam_trt_768_pool_deep.yaml \
+#          --baseline-config configs/edgetam_768_pool_deep.yaml --image-size 768
+#
+# Step 1 is also where the resolution itself is checked, and it fails loudly:
+# `_CrossAttentionGraph.__init__` compares the memory attention's precomputed
+# query RoPE table against the actual feature map and raises when they
+# disagree. At 768 both must read 2304.
+#
+# WHICH COMPARISON ANSWERS WHAT:
+#   configs/edgetam_768_pool_deep.yaml       same weights, PyTorch, 768
+#                                            -> what TensorRT changed
+#   configs/edgetam_trt_768.yaml             stock weights, TensorRT, 768
+#                                            -> what the training changed at 768
+#   configs/edgetam_trt_512_pool_deep.yaml   same weights, TensorRT, 512
+#                                            -> what the resolution changed
+# The last one is the interesting one for this checkpoint, and it is the one
+# that says whether 768 is worth its 2.25x token count on your footage.
+image_encoder_engine:    models768_pool_deep/edgetam_image_encoder.engine
+memory_attention_engine: models768_pool_deep/edgetam_memory_attention.engine
+memory_encoder_engine:   models768_pool_deep/edgetam_memory_encoder.engine
+sam_head_engine:         models768_pool_deep/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_thermal_deep_512.pt
+image_size: 768                           # must match how the engines were exported
+device: cuda
+precision: float16                        # matches the fp16 engines
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
+
+strict: false                             # true = refuse silent PyTorch fallback
+use_cuda_graph: true                      # replay engines from a captured graph
+# null  -> keep EdgeTAM's default (8), but disable it automatically when the
+#          sam2._C extension is missing, since it would raise every frame.
+# 0     -> off. Any int -> that hole area.
+fill_hole_area: null

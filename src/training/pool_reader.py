@@ -38,7 +38,11 @@ across, and a four-pixel target is not a prompt anyone would give.
 """
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
+import threading
+import zipfile
 from collections.abc import Iterable, Sequence as SequenceABC
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,7 +50,8 @@ from pathlib import Path
 import numpy as np
 
 from .aerial import (ROLES, DatasetSpec, Frame, FrameIndex, Instance,
-                     InstanceGates, Source, group_of, reject_reason)
+                     InstanceGates, Source, gates_tag, group_of,
+                     reject_reason)
 from .labels import MASK_STORE
 from .pool import RECORD_FILE
 
@@ -56,6 +61,12 @@ from .pool import RECORD_FILE
 # the second is the gates doing their job.
 SKIP_REASONS = ("no_store", "no_image", "unreadable_image", "shape_mismatch",
                 "store_disagrees", "record_schema", "no_accepted")
+
+# How much of a file `_same_frames` reads before calling two copies the same.
+# Size plus the first megabyte separates a duplicate from a re-encode -- two
+# JPEGs of one scene differ in their first table -- without reading SegFly's
+# 11 MB frames end to end for a decision about a directory name.
+PREFIX_BYTES = 1 << 20
 
 PALETTE_SOURCE = (
     "the pool's own record.json -- each instance carries the class name the "
@@ -84,12 +95,33 @@ class Relocator:
     rather than thirty thousand searches. `misses` counts what could not be
     found at all, which is the number that tells you the images were never
     downloaded rather than that the pool is empty.
+
+    **Stripping is not enough when the tree gained a level.** Suffix matching
+    can only drop leading components, so a record written as
+    `/content/data/HIT_UAV/normal_json/train/0_01.jpg` misses every candidate
+    once the archive unpacks one folder deeper
+    (`HIT_UAV/HIT-UAV-...-main/normal_json/train/0_01.jpg`) -- and misses it
+    for all 2 866 frames, which reads exactly like a dataset that was never
+    downloaded. So a miss falls back to an index of the root by file name,
+    built once and shared by every frame after it. Where a name repeats --
+    DroneVehicle keeps `trainimg/04991.jpg` beside `trainimgr/04991.jpg`, one
+    per modality -- the candidate sharing the longest tail with the recorded
+    path wins, and a tie is left unresolved rather than guessed: picking the
+    wrong modality's frame would train thermal masks on RGB pixels.
+    `found_by_name` counts what came back this way, because a run that needed
+    it is a run whose images moved.
     """
 
-    def __init__(self, images_root: str | Path | None) -> None:
+    def __init__(self, images_root: str | Path | None,
+                 by_name: bool = True) -> None:
         self.root = Path(images_root) if images_root else None
         self.depth: int | None = None
         self.misses = 0
+        self.found_by_name = 0
+        self.ambiguous = 0
+        self._by_name = by_name
+        self._names: dict[str, list[Path]] | None = None
+        self._lock = threading.Lock()
 
     def direct(self, relative: str | Path | None) -> Path | None:
         """`root / relative`, when the record carried an archive-relative path.
@@ -123,11 +155,241 @@ class Relocator:
             if candidate.is_file():
                 self.depth = depth
                 return candidate
-        return self._miss()
+        return self._named(parts) or self._miss()
+
+    def _named(self, parts: tuple[str, ...]) -> Path | None:
+        """The file under the root that carries this name, when one does.
+
+        The index is built on the first miss rather than up front, so a pool
+        whose paths all resolve by stripping never pays for the walk.
+        """
+        if not self._by_name or self.root is None or not parts:
+            return None
+        with self._lock:
+            if self._names is None:
+                self._names = _index_by_name(self.root)
+        candidates = self._names.get(parts[-1], ())
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            ranked = sorted(candidates, key=lambda p: -_shared_tail(p.parts, parts))
+            if _shared_tail(ranked[0].parts, parts) \
+                    == _shared_tail(ranked[1].parts, parts):
+                self.ambiguous += 1
+                return None
+            candidates = ranked
+        self.found_by_name += 1
+        return candidates[0]
 
     def _miss(self) -> None:
         self.misses += 1
         return None
+
+
+def _index_by_name(root: Path) -> dict[str, list[Path]]:
+    """`{file name: paths}` for everything under `root`, walked once."""
+    names: dict[str, list[Path]] = {}
+    for path in root.rglob("*"):
+        if path.is_file():
+            names.setdefault(path.name, []).append(path)
+    return names
+
+
+def _shared_tail(left: SequenceABC[str], right: SequenceABC[str]) -> int:
+    """How many trailing components two paths have in common."""
+    shared = 0
+    for one, other in zip(reversed(left), reversed(right)):
+        if one != other:
+            break
+        shared += 1
+    return shared
+
+
+def resolve_images_root(records: Iterable[str | Path],
+                        images_root: str | Path | None,
+                        search_root: str | Path | None = None,
+                        probes: int = 5) -> Path | None:
+    """The root a pool's recorded paths were written against, read off the disk.
+
+    `Relocator` handles a tree that gained or lost levels, one frame at a time,
+    and refuses a name that is ambiguous under the root it was given -- which is
+    the right call per frame and the wrong one for a *whole pool*: HIT-UAV's
+    archive re-packs itself, so `normal_json/train/0_01.jpg` exists twice under
+    `/content/data/HIT_UAV` and every frame of the pool ties. Naming the inner
+    tree once settles all of them, and this works that name out instead of
+    asking a settings cell to hard-code a path that depends on which mirror the
+    pool was harvested from and how the archive happened to unpack.
+
+    Probes are spread over the pool rather than taken off the front, and each
+    one's file name is looked up under `search_root` (the configured root by
+    default). Every hit proposes the root sitting in front of the tail it shares
+    with the recorded path, and the proposals are ranked by:
+
+    1. how much of the recorded path they agree with -- `normal_json/train/f`
+       shares two components with a record naming `hit-uav/images/train/f`
+       where `JPEGImages/f` shares one, and the deeper agreement is the better
+       claim, which is `Relocator`'s rule too;
+    2. how many probes they actually re-root, which tells the tree holding the
+       frames from a wrapper holding one stray copy;
+    3. depth, since a shallow root only reaches those frames through the deep
+       one.
+
+    Two answers are deliberately *not* a re-rooting. Nothing beating the
+    configured root returns that root unchanged: frames that missed under a
+    root which resolves the others are missing, not misplaced, and widening the
+    root would hide a half-finished download behind a search. And roots that
+    tie while holding *different pixels* return `None` rather than a guess --
+    four copies of one archive are one answer, DroneVehicle's two modalities
+    are not. `None` also means no frame of the pool is anywhere underneath,
+    which is the missing-download case and a fact to report.
+
+    **A record carrying `image_rel` is answered before any of that**, because
+    that path is not evidence to be weighed -- it is the archive saying where
+    the frame sits inside itself, and the root that makes it land is the root,
+    exactly. AeroVIS is the case: its `aero_vis.json` names frames
+    `vd_001/0000001.jpg` relative to `AeroVIS/sequences`, while the archive
+    unpacks a level above that, so a run configured at the extract directory
+    has `direct` miss on all 47 921 frames and falls back to matching the
+    harvest's own absolute path. That fallback happens to work, and it is the
+    wrong thing to be relying on: 91 of AeroVIS's 117 sequences hold a file
+    called `0000001.jpg`, so once the recorded path stops sharing a tail with
+    the local tree -- a different mirror, an archive restaged one folder over
+    -- what is left is a name that matches 91 files, and `Relocator` refuses a
+    tie rather than guessing. Naming `.../AeroVIS/sequences` here settles every
+    frame with a join and no search at all.
+    """
+    # A root can still carry the glob it was configured with, when nothing
+    # matched it -- which is what a pattern resolved before the download looks
+    # like. Its solid prefix is a real directory and the right place to search.
+    parts = Path(images_root).parts if images_root else ()
+    solid = list(itertools.takewhile(lambda part: "*" not in part, parts))
+    configured = Path(*parts) if parts and len(solid) == len(parts) else None
+    base = Path(search_root) if search_root else (
+        Path(*solid) if solid else configured)
+    if base is None or not base.is_dir():
+        return None
+
+    every = list(records)
+    spread_out = every[::max(len(every) // max(probes, 1), 1)][:max(probes, 1)]
+    wanted: list[Path] = []
+    inside: list[Path] = []
+    for record_path in spread_out:
+        try:
+            read = json.loads(Path(record_path).read_text())
+            wanted.append(Path(read["image"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if read.get("image_rel"):
+            inside.append(Path(str(read["image_rel"])))
+    if not wanted:
+        return None
+
+    exact = _root_of_archive_paths(inside, configured, base)
+    if exact is not None:
+        return exact
+
+    def resolves(root: Path) -> int:
+        relocate = Relocator(root, by_name=False)
+        return sum(1 for recorded in wanted if relocate(recorded) is not None)
+
+    standing = resolves(configured) if configured is not None else -1
+    if standing == len(wanted):
+        return configured                    # the configured root already works
+
+    names = _index_by_name(base)
+    proposed: dict[Path, int] = {}
+    for recorded in wanted:
+        for path in names.get(recorded.name, ()):
+            shared = max(_shared_tail(path.parts, recorded.parts), 1)
+            root = Path(*path.parts[:len(path.parts) - shared])
+            proposed[root] = max(proposed.get(root, 0), shared)
+    if not proposed:
+        return None
+    # Agreement with the recorded path first -- `normal_json/train/f` against a
+    # record naming `hit-uav/images/train/f` shares two components where
+    # `JPEGImages/f` shares one, and the deeper agreement is the better claim,
+    # which is `Relocator`'s rule too. Then how many probes the root actually
+    # re-roots, which separates the tree holding the frames from a wrapper
+    # holding one stray copy; then the deeper root, since a shallow one only
+    # reaches those frames through it.
+    rank = {root: (shared, resolves(root), len(root.parts))
+            for root, shared in proposed.items()}
+    ranked = sorted(rank, key=lambda root: (tuple(-v for v in rank[root]),
+                                            str(root)))
+    best = [root for root in ranked if rank[root] == rank[ranked[0]]]
+    if rank[best[0]][1] <= standing:
+        # Nothing found more frames than the root the run was configured with,
+        # so the frames that missed are missing rather than misplaced. Widening
+        # the root would hide a half-finished download behind a search, and a
+        # root one level up can match a *different* dataset's frame of the same
+        # name -- the pools are full of `000001.jpg`.
+        return configured
+    if len(best) > 1 and not _same_frames(best, wanted):
+        return None
+    return best[0]
+
+
+def _root_of_archive_paths(inside: SequenceABC[Path], configured: Path | None,
+                           base: Path) -> Path | None:
+    """The root under which every `image_rel` lands, when there is exactly one.
+
+    `image_rel` is an archive-relative path, so a root either joins onto it or
+    does not -- there is nothing to rank. Every probe has to agree, since a
+    root that answers four frames of five is not the archive's root; and two
+    roots agreeing means the tree is staged twice, which is a tie this cannot
+    break and `None` hands back to the ranking that can.
+
+    Returns `None`, not a refusal, when the pool carries no `image_rel` at all
+    -- most harvests do not -- so the caller falls through to reading the
+    recorded absolute paths.
+    """
+    if not inside:
+        return None
+    if configured is not None and all((configured / rel).is_file()
+                                      for rel in inside):
+        return configured
+
+    first, rest = inside[0], inside[1:]
+    tail = first.parts
+    roots = [Path(*path.parts[:len(path.parts) - len(tail)])
+             for path in _index_by_name(base).get(first.name, ())
+             if path.parts[-len(tail):] == tail]
+    landed = [root for root in roots
+              if all((root / rel).is_file() for rel in rest)]
+    return landed[0] if len(landed) == 1 else None
+
+
+def _same_frames(roots: SequenceABC[Path], wanted: SequenceABC[Path]) -> bool:
+    """Whether every root re-roots the probes onto byte-identical files.
+
+    Several roots resolving the same number of frames is not by itself a
+    problem: HIT-UAV's archive ships each frame four times (`normal_json/`,
+    `rotate_json/` and two `JPEGImages/` trees) because the annotations come in
+    four formats, and three of those copies are the same bytes -- so refusing
+    the pool over the ambiguity, which is what a per-frame reader must do,
+    throws away 2 866 frames to protect nothing.
+
+    Where the copies differ, the refusal is the right answer and stays:
+    DroneVehicle keeps `trainimg/04991.jpg` beside `trainimgr/04991.jpg`, one
+    per modality, and a run that picked the wrong one would train thermal masks
+    on RGB pixels and never say so.
+    """
+    for recorded in wanted:
+        digests = set()
+        for root in roots:
+            found = Relocator(root, by_name=False)(recorded)
+            if found is None:
+                return False
+            try:
+                with found.open("rb") as handle:
+                    head = handle.read(PREFIX_BYTES)
+                digests.add((found.stat().st_size,
+                             hashlib.md5(head).hexdigest()))
+            except OSError:
+                return False
+        if len(digests) > 1:
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -440,9 +702,29 @@ class PoolFrame:
     rows: tuple[tuple[int, str, tuple[float, float, float, float], int], ...]
 
 
+def _example_image(record_path: Path) -> str:
+    """The image path one record asks for, for an error that names it."""
+    try:
+        return str(json.loads(record_path.read_text()).get("image", "?"))
+    except Exception:                        # noqa: BLE001 - diagnostics only
+        return "?"
+
+
 def _read_frame(record_path: Path, relocate: Relocator,
-                areas_of=store_areas) -> PoolFrame | str:
-    """One `record.json` + its store, or the name of what went wrong."""
+                areas_of=store_areas,
+                min_box_iou: float = 0.0) -> PoolFrame | str:
+    """One `record.json` + its store, or the name of what went wrong.
+
+    `min_box_iou` is a **second, stricter** cut on the gate the harvest already
+    applied. The harvest writes every instance's four gate readings beside its
+    verdict, so tightening the box-IoU threshold after the fact is a pass over
+    the records rather than another run of the teacher -- which on a pool of a
+    hundred thousand frames is the difference between a minute and a day. It
+    can only ever remove instances: a harvest run at 0.6 has no record of what
+    0.5 would have kept. An instance from an older harvest, written before the
+    readings were stored, is kept rather than dropped -- silently discarding a
+    pool because its records are a version behind is the worse failure.
+    """
     record = json.loads(record_path.read_text())
     store = record_path.parent / MASK_STORE
     if not store.is_file():
@@ -469,6 +751,10 @@ def _read_frame(record_path: Path, relocate: Relocator,
             key = int(instance["i"])
             if "verdict" in instance:
                 if instance["verdict"] is not None:
+                    continue
+                measured = instance.get("box_iou")
+                if (min_box_iou > 0 and measured is not None
+                        and float(measured) < min_box_iou):
                     continue
                 if key not in areas:
                     return "store_disagrees"
@@ -511,6 +797,136 @@ def pool_spec(name: str, classes: SequenceABC[str], border: int = 0) -> DatasetS
         palette_source=PALETTE_SOURCE)
 
 
+def wanted_frames(records: SequenceABC[Path]) -> dict[str, set[str]]:
+    """`{basename: {recorded path}}` over a pool's records -- what to extract.
+
+    A pool names every frame it needs and nothing else, so it is a
+    manifest. Keying by basename first makes the membership test against an
+    archive's name list one dict hit per member rather than a scan.
+    """
+    wanted: dict[str, set[str]] = {}
+    for record_path in records:
+        recorded = json.loads(record_path.read_text()).get("image")
+        if recorded:
+            posix = Path(recorded).as_posix()
+            wanted.setdefault(Path(posix).name, set()).add(posix)
+    return wanted
+
+
+def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
+                   target: str | Path, progress=None) -> dict:
+    """Only the frames `records` asks for, out of `archives`, into `target`.
+
+    VTUAV's tracking split is 214 GiB across fifteen archives and annotates
+    every tenth frame, so a pool built from it wants a few percent of what the
+    archives hold. Extracting all of it to reach that few percent is a disk
+    bill nobody has to pay: the pool *is* the manifest, and a zip's central
+    directory can be read without inflating a byte.
+
+    A member is taken when a recorded path ends with it -- exact, and it cannot
+    pick the wrong modality the way a basename match could, because the
+    recorded path carries `.../ir/000000.jpg` and so does the member. Members
+    already on disk with a non-zero size are skipped, which makes a second run
+    the resume path.
+    """
+    target = Path(target)
+    wanted = wanted_frames(records)
+    report = {"asked": sum(len(v) for v in wanted.values()), "taken": 0,
+              "already": 0, "unreadable": [], "by_archive": {}, "missing": 0}
+    still = {name: set(paths) for name, paths in wanted.items()}
+    stream = archives if progress is None else progress(
+        archives, total=len(archives), desc="archives")
+    for archive in stream:
+        took = 0
+        with zipfile.ZipFile(archive) as handle:
+            for member in handle.namelist():
+                if member.endswith("/"):
+                    continue
+                base = member.rsplit("/", 1)[-1]
+                candidates = still.get(base)
+                if not candidates:
+                    continue
+                hit = next((c for c in candidates
+                            if c.endswith("/" + member) or c == member), None)
+                if hit is None:
+                    continue
+                candidates.discard(hit)
+                landing = target / member
+                if landing.is_file() and landing.stat().st_size:
+                    report["already"] += 1
+                    took += 1
+                    continue
+                try:
+                    handle.extract(member, target)
+                    report["taken"] += 1
+                    took += 1
+                except Exception:
+                    report["unreadable"].append(member)
+        report["by_archive"][Path(archive).name] = took
+    report["missing"] = sum(len(v) for v in still.values())
+    return report
+
+
+def why_no_image(pool_dir: str | Path, images_root: str | Path | None,
+                 sample: int = 3) -> dict:
+    """Why a pool's frames could not be found, in terms of the two paths.
+
+    `no_image` on every record has three causes and they need different fixes:
+    the root is not there at all (the archive was never fetched), the root is
+    there but holds a different part of the set (a thermal export standing in
+    for an RGB one), or the frames are there under a name the recorded path
+    does not end with. Guessing between them costs a re-index each time, so
+    this reads one record and the filesystem and says which it is.
+    """
+    pool_dir = Path(pool_dir)
+    records = sorted(pool_dir.rglob(RECORD_FILE))[:max(sample, 1)]
+    report: dict = {"pool": str(pool_dir), "records": len(records),
+                    "root": str(images_root) if images_root else None,
+                    "recorded": [], "verdict": "", "root_exists": False,
+                    "files_under_root": 0, "extensions": {}}
+    if not records:
+        report["verdict"] = "no records here at all -- the pool zip is missing"
+        return report
+    for record_path in records:
+        record = json.loads(record_path.read_text())
+        report["recorded"].append({"image": record.get("image"),
+                                   "image_rel": record.get("image_rel")})
+    root = Path(images_root) if images_root else None
+    if root is None:
+        report["verdict"] = "no images root given -- pass one on the --pool flag"
+        return report
+    report["root_exists"] = root.is_dir()
+    if not report["root_exists"]:
+        report["verdict"] = (f"{root} does not exist -- the archive was never "
+                             f"fetched or went somewhere else")
+        return report
+    counted: dict[str, int] = {}
+    total = 0
+    for found in root.rglob("*"):
+        if found.is_file():
+            total += 1
+            counted[found.suffix.lower()] = counted.get(found.suffix.lower(), 0) + 1
+            if total >= 200_000:
+                break
+    report["files_under_root"] = total
+    report["extensions"] = dict(sorted(counted.items(), key=lambda kv: -kv[1])[:6])
+    if not total:
+        report["verdict"] = f"{root} is empty -- the archive unpacked nowhere"
+        return report
+    stem = Path(report["recorded"][0]["image"] or "").name
+    matches = [str(m) for m in root.rglob(stem)][:3] if stem else []
+    report["same_name_here"] = matches
+    if matches:
+        report["verdict"] = (
+            f"the frame is here as {matches[0]} but its recorded path does not "
+            f"end with the same components -- the root is one level off")
+    else:
+        report["verdict"] = (
+            f"{root} holds {total} files and none is named {stem}. This root "
+            f"is a different part of the set than the pool was harvested from")
+    return report
+
+
 def index_pool(
     pool_dir: str | Path,
     images_root: str | Path | None = None,
@@ -520,8 +936,10 @@ def index_pool(
     name: str | None = None,
     limit: int | None = None,
     workers: int = 8,
+    min_box_iou: float = 0.0,
     progress=None,
     records: SequenceABC[Path] | None = None,
+    report=None,
 ) -> list[FrameIndex]:
     """Every accepted instance in one pool, as the index stage B samples from.
 
@@ -536,6 +954,18 @@ def index_pool(
     cannot be found or read, the file on disk is a different size from the one
     the teacher saw, or every box in them was rejected at harvest. The counts
     ride on each entry's `rejects` so `summarise` prints them.
+
+    `min_box_iou` re-cuts the harvest's own box-IoU gate, upwards only. The
+    records carry every gate reading, not just the verdict they produced, so
+    "actually, only keep masks whose box agrees with the annotation at 0.7"
+    costs a pass over the index instead of a second run of the teacher. A frame
+    left with no instance under the stricter cut is dropped as `no_accepted`,
+    the same as one the harvest itself emptied.
+
+    `report` is called with one line of prose when the frames were not where
+    the records said -- a relocation that needed the by-name fallback, or one
+    that gave up. Nothing else here prints, so a caller that wants silence
+    passes nothing and reads the counts instead.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -552,7 +982,9 @@ def index_pool(
 
     relocate = Relocator(images_root)
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
-        stream = pool.map(lambda r: _read_frame(r, relocate), records)
+        stream = pool.map(
+            lambda r: _read_frame(r, relocate, min_box_iou=min_box_iou),
+            records)
         if progress is not None:
             stream = progress(stream, total=len(records), desc=pool_dir.name)
         results = list(stream)
@@ -562,12 +994,23 @@ def index_pool(
     for result in results:
         if isinstance(result, str):
             skipped[result] = skipped.get(result, 0) + 1
+    if relocate.found_by_name and report is not None:
+        report(f"   {pool_dir.name}: {relocate.found_by_name} frame(s) found by "
+               f"name under {images_root} -- the tree moved since the harvest, "
+               f"so the recorded paths no longer strip down to it.")
+    if relocate.ambiguous and report is not None:
+        report(f"   {pool_dir.name}: {relocate.ambiguous} frame(s) skipped "
+               f"because two files under {images_root} carry that name and "
+               f"nothing in the record picks one. DroneVehicle's two "
+               f"modalities do this -- point --images at one half.")
     if not frames:
         raise ValueError(
             f"{pool_dir}: {len(records)} records and not one usable frame "
             f"({skipped}). `no_image` means --images points somewhere the "
             f"frames are not; `shape_mismatch` means it points at a different "
-            f"copy of them.")
+            f"copy of them. The first record wants "
+            f"{_example_image(records[0])!r} and nothing of that name is under "
+            f"{images_root}.")
 
     borders = {f.border for f in frames}
     if len(borders) > 1:
@@ -627,8 +1070,15 @@ class PoolRequest:
 
     @property
     def cache_name(self) -> str:
-        """A filename for this pool's cached index -- unique per pool + modality."""
-        return self.label.replace(":", "_").replace("/", "_")
+        """A filename for this pool's cached index.
+
+        Unique per pool, modality **and gates**: a pool's instances are filtered
+        by the gates when the index is built and the survivors are what the
+        cache holds, so reading one back under stricter gates would train on
+        instances this run had decided to drop.
+        """
+        return (f"{self.label}:{gates_tag(self.gates)}"
+                .replace(":", "_").replace("/", "_"))
 
 
 POOL_MODALITIES = ("thermal", "rgb")
@@ -762,5 +1212,6 @@ __all__ = ["PALETTE_SOURCE", "POOL_MODALITIES", "PoolFrame", "PoolRequest",
            "discover_pools",
            "exclude_frames", "frame_keys", "group_records",
            "index_pool", "index_pools", "link_pool", "spread",
+           "extract_frames", "wanted_frames", "why_no_image",
            "load_pool_index", "parse_pool", "pool_datasets", "pool_spec",
            "save_pool_index", "store_areas"]

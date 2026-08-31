@@ -851,27 +851,69 @@ def tracked_members(archive: zipfile.ZipFile, modality: str = "rgb",
     10k** and nine frames in ten carry no label at all. Extracting everything
     spends 15.4 GB of disk to make 3 750 usable pairs.
 
-    Keeping one modality on top of that halves it again, which is what makes
-    the RGB and thermal pools runnable side by side on two ordinary runtimes:
-    each unzips only the half it prompts on. Both `.txt` files are always
-    kept -- they are a few kilobytes and the other modality's boxes are what
-    any later agreement check reads.
+    `modality` is `rgb`, `ir`, or **`both`**. One modality halves it again,
+    which is what makes the RGB and thermal pools runnable side by side on two
+    ordinary runtimes: each unzips only the half it prompts on. `both` keeps
+    that tenth in *both* halves, for staging one tree a harvest of either half
+    can read -- `--frames tracked` on the command line. (Putting a finished
+    pool's frames back is a different question with a better answer:
+    `pool_reader.extract_frames` takes exactly the members the records name,
+    and needs no stride at all.) Both `.txt` files are always kept: they are a
+    few kilobytes and the other modality's boxes are what any later agreement
+    check reads.
+
+    **The stride is read out of each sequence, not taken on faith.** That 10
+    was measured on one short-term part; the long-term parts are a separate
+    download and this function is the first thing that touches them. Getting
+    it wrong is silent -- extract every 9th frame and the harvest labels frame
+    9 with frame 10's box -- so `boxes.annotated_stride` derives it from the
+    sequence's own frame and row counts, `stride` is preferred wherever those
+    counts allow it, and a sequence whose counts allow no single answer is
+    **dropped** with its numbers printed. A dropped sequence costs a sequence;
+    a guessed stride costs the pool.
     """
+    from src.training.boxes import annotated_stride
+
+    if modality not in ("rgb", "ir", "both"):
+        raise ValueError(f"modality must be rgb, ir or both, got {modality!r}")
+    kept = ("rgb", "ir") if modality == "both" else (modality,)
+
     counts: dict[str, int] = {}
+    present: dict[str, int] = {}
     for name in archive.namelist():
         parts = name.split("/")
-        if len(parts) == 2 and parts[1] == f"{modality}.txt":
+        if len(parts) == 2 and parts[1] == f"{kept[0]}.txt":
             with archive.open(name) as handle:
                 counts[parts[0]] = sum(1 for line in handle if line.strip())
+        elif len(parts) == 3 and parts[1] == kept[0]:
+            if Path(parts[-1]).stem.isdigit():
+                present[parts[0]] = present.get(parts[0], 0) + 1
 
-    wanted = {(sequence, index * stride)
-              for sequence, lines in counts.items() for index in range(lines)}
+    wanted: set[tuple[str, int]] = set()
+    strides: dict[int, int] = {}
+    dropped = 0
+    for sequence, lines in sorted(counts.items()):
+        try:
+            step = annotated_stride(present.get(sequence, 0), lines, stride)
+        except ValueError as mismatch:
+            print(f"   {sequence}: {mismatch} -- dropped, no frame of it is "
+                  f"extracted; both .txt files are kept so the numbers can be "
+                  f"read back on disk")
+            dropped += 1
+            continue
+        strides[step] = strides.get(step, 0) + 1
+        wanted.update((sequence, index * step) for index in range(lines))
+
+    if set(strides) - {stride} or dropped:
+        print(f"   stride -> sequences: {dict(sorted(strides.items()))}, "
+              f"{dropped} dropped")
+
     keep = []
     for name in archive.namelist():
         parts = name.split("/")
         if len(parts) == 2 and parts[1].endswith(".txt"):
             keep.append(name)
-        elif len(parts) == 3 and parts[1] == modality:
+        elif len(parts) == 3 and parts[1] in kept:
             stem = Path(parts[-1]).stem
             if stem.isdigit() and (parts[0], int(stem)) in wanted:
                 keep.append(name)
@@ -879,7 +921,7 @@ def tracked_members(archive: zipfile.ZipFile, modality: str = "rgb",
 
 
 def extract(archive_path: Path, dest: Path, into: str = "",
-            frames: str = "all", quiet: bool = False) -> int:
+            frames: str = "all", quiet: bool = False, workers: int = 1) -> int:
     """Unpack into `dest/into`, returning how many files were written.
 
     Zip or tar.gz, told apart by the file itself rather than its name -- a
@@ -887,6 +929,15 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     (`r|gz`): `getmembers()` on a compressed tar decompresses the whole file
     once just to list it and a second time to extract, which on RGBT234's
     7.7 GB doubles a ten-minute step for nothing.
+
+    `workers > 1` reads a **zip** on that many threads, each with its own
+    handle on the file. It is off by default and it is not for speed on a
+    local disk -- one thread already saturates that. It is for a `frames`
+    filter over a Drive mount: `tracked_ir` keeps a twentieth of a 15.7 GiB
+    part, so the read stops being a stream and becomes a few thousand random
+    seeks, and a FUSE seek is latency, not bandwidth. Concurrency is the only
+    thing that hides latency. Inflating releases the GIL, so threads are
+    enough. A tar is a stream with no index and cannot be read this way.
     """
     target = dest / into if into else dest
     target.mkdir(parents=True, exist_ok=True)
@@ -894,13 +945,31 @@ def extract(archive_path: Path, dest: Path, into: str = "",
         with zipfile.ZipFile(archive_path) as archive:
             if frames == "masked":
                 members = masked_members(archive)
+            elif frames == "tracked":
+                members = tracked_members(archive, "both")
             elif frames.startswith("tracked_"):
                 members = tracked_members(archive, frames.split("_", 1)[1])
             else:
                 members = archive.namelist()
             if not quiet:
-                print(f"   extracting {len(members)} entries -> {target}")
-            archive.extractall(target, members=members)
+                print(f"   extracting {len(members)} entries -> {target}"
+                      + (f" on {workers} threads" if workers > 1 else ""))
+            if workers > 1:
+                return _extract_parallel(archive_path, members, target,
+                                         workers, quiet)
+            try:
+                archive.extractall(target, members=members)
+            except Exception as failure:     # noqa: BLE001 - see below
+                # `extractall` stops at the first member it cannot read and
+                # leaves every member after it on the floor. One bad CRC in a
+                # Drive copy of DroneVehicle's train.zip cost 9 859 of 13 098
+                # thermal frames that way, and the run that lost them reported
+                # only `no_image`. So a failure drops to a member-by-member
+                # pass that keeps what the archive can still give and names
+                # what it cannot.
+                if not quiet:
+                    print(f"   !! {failure} -- extracting member by member")
+                return _extract_each(archive, members, target, quiet)
         return len(members)
 
     import tarfile
@@ -921,6 +990,106 @@ def extract(archive_path: Path, dest: Path, into: str = "",
     if not quiet:
         print(f"   extracted {count} entries -> {target}")
     return count
+
+
+def _extract_parallel(archive_path: Path, members: SequenceABC[str],
+                      target: Path, workers: int, quiet: bool = False) -> int:
+    """The same members, on `workers` threads, each with its own zip handle.
+
+    A `ZipFile` holds one file position, so sharing one across threads
+    interleaves seeks and returns garbage. Opening one per thread is the whole
+    trick; the central directory is parsed per handle, which is milliseconds
+    against the seeks this exists to overlap.
+
+    A member that cannot be read is counted rather than raised, the way the
+    serial fallback does it: one bad CRC in a Drive copy must not cost the
+    other seventy thousand frames.
+
+    Every directory is made **before** the pool starts. `ZipFile.extract`
+    creates a member's parent with a `isdir` test followed by `makedirs`, and
+    two threads landing in the same folder both pass the test and one of them
+    raises -- which showed up as a single "unreadable" frame per folder, on
+    an archive with nothing wrong with it.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    local = threading.local()
+    opened: list[zipfile.ZipFile] = []
+    counts = {"taken": 0, "already": 0}
+    bad: list[str] = []
+    lock = threading.Lock()
+
+    def handle() -> zipfile.ZipFile:
+        if not hasattr(local, "zip"):
+            local.zip = zipfile.ZipFile(archive_path)
+            with lock:
+                opened.append(local.zip)
+        return local.zip
+
+    def one(member: str) -> None:
+        landing = target / member
+        if landing.is_file() and landing.stat().st_size:
+            with lock:
+                counts["already"] += 1
+            return
+        try:
+            handle().extract(member, target)
+        except Exception:                    # noqa: BLE001 - one bad member
+            with lock:
+                bad.append(member)
+            return
+        with lock:
+            counts["taken"] += 1
+
+    for folder in {(target / member).parent for member in members}:
+        folder.mkdir(parents=True, exist_ok=True)
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, members))
+    finally:
+        for opened_zip in opened:
+            opened_zip.close()
+    if not quiet:
+        print(f"   {counts['taken']} extracted, {counts['already']} already "
+              f"there, {len(bad)} unreadable")
+        if bad:
+            print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
+    if not counts["taken"] and not counts["already"]:
+        raise RuntimeError(
+            f"{target}: not one member of the archive could be read. The "
+            f"staged copy is corrupt -- delete it and let the download run.")
+    return counts["taken"] + counts["already"]
+
+
+def _extract_each(archive, members: SequenceABC[str], target: Path,
+                  quiet: bool = False) -> int:
+    """Every member the archive can still give, one at a time.
+
+    Members already on disk are skipped, so this is also the resume path: a
+    second run over a partly extracted tree writes only what is missing.
+    """
+    taken, skipped, bad = 0, 0, []
+    for member in members:
+        landing = target / member
+        if landing.exists() and (landing.is_dir() or landing.stat().st_size):
+            skipped += 1
+            continue
+        try:
+            archive.extract(member, target)
+            taken += 1
+        except Exception:                    # noqa: BLE001 - one bad member
+            bad.append(member)
+    if not quiet:
+        print(f"   {taken} extracted, {skipped} already there, "
+              f"{len(bad)} unreadable")
+        if bad:
+            print("   unreadable:", bad[:5], "..." if len(bad) > 5 else "")
+    if not taken and not skipped:
+        raise RuntimeError(
+            f"{target}: not one member of the archive could be read. The "
+            f"staged copy is corrupt -- delete it and let the download run.")
+    return taken + skipped
 
 
 def _tar_extract(archive, member, target: Path) -> None:
@@ -1204,13 +1373,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="Which archives to fetch. Without it, the defaults: "
                         "Kust4K thermal+labels, VTUAV train_001.")
     p.add_argument("--frames",
-                   choices=("all", "masked", "tracked_rgb", "tracked_ir"),
+                   choices=("all", "masked", "tracked", "tracked_rgb",
+                            "tracked_ir"),
                    default="all",
                    help="`masked` keeps only annotated frames and their twins "
                         "-- a twentieth of the disk, and too few pairs for "
-                        "stage-A distillation. `tracked_rgb` / `tracked_ir` "
-                        "are the same idea for VTUAV's tracking archives: one "
-                        "modality, and only the frames its box file names.")
+                        "stage-A distillation. `tracked` / `tracked_rgb` / "
+                        "`tracked_ir` are the same idea for VTUAV's tracking "
+                        "archives, in both halves or one -- only the frames "
+                        "the box file names, at the stride each sequence's own "
+                        "counts imply.")
     p.add_argument("--limit", type=int, default=None,
                    help="Hub datasets only: stop after N rows.")
     p.add_argument("--keep", action="store_true",

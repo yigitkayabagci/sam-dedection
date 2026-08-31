@@ -31,7 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .aerial import MODES, ROLES, SPECS, InstanceGates, Source
+from .aerial import (MODES, ROLES, SPECS, InstanceGates, Source,
+                     gates_tag)
 # Re-exported so one import gives an entry point both flags: `--dataset` reads
 # a dataset's own annotation, `--pool` reads a teacher's, and after parsing the
 # two produce the same `FrameIndex` list and mix in the same batches.
@@ -56,8 +57,15 @@ class Request:
         `role` is deliberately absent: it decides which split a frame lands in,
         not how its mask is read, so changing it must not invalidate an index
         that took a full pass over the dataset to build.
+
+        The **gates are present**, for the opposite reason: they decide which
+        components exist, `decompose` numbers only the ones it keeps, and
+        `sample_masks` decomposes again at training time. Reusing an index
+        built under other gates hands every instance the next one's mask and
+        says nothing -- see `gates_tag`.
         """
-        return f"{self.source.spec.name}:{self.modality}:{self.source.mode}"
+        return (f"{self.source.spec.name}:{self.modality}:{self.source.mode}"
+                f":{gates_tag(self.source.gates)}")
 
 
 def parse(argument: str, gates: InstanceGates | None = None) -> Request:

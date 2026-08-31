@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +54,7 @@ from src.training.aerial import (  # noqa: E402
     save_index,
     split_frames,
     apply_splits,
+    rebalance,
     save_splits,
     split_index,
     summarise,
@@ -757,6 +759,104 @@ class TestSplitsAreComparableAcrossRuns(unittest.TestCase):
             by_spec.setdefault(entry.source.spec.name, set()).add(
                 entry.frame.name.split("/")[0])
         self.assertNotEqual(by_spec.get("kust4k"), by_spec.get("segfly"))
+
+
+class TestThinningAnOverRepresentedClass(unittest.TestCase):
+    """A vehicle-heavy pool teaches "a target is a car" as surely as it teaches
+    thermal, and the classes that make the set general are outvoted."""
+
+    def index(self, per_frame, frames=40):
+        gates = InstanceGates()
+        source = Source(SPECS["kust4k"], gates, role="train")
+        spec = source.spec
+        out = []
+        for f in range(frames):
+            instances = tuple(
+                Instance(label=i, class_id=spec.classes[name],
+                         box=(0.0, 0.0, 8.0, 8.0), area=64)
+                for i, name in enumerate(per_frame))
+            out.append(FrameIndex(
+                frame=Frame(name=f"seq/{f:06d}", image=Path("i"), mask=Path("m")),
+                instances=instances, size=(64, 64), rejects={}, source=source))
+        return out
+
+    def names(self):
+        return list(SPECS["kust4k"].classes)[:2]
+
+    def test_a_weight_below_one_thins_that_class_and_leaves_the_rest(self):
+        common, rare = self.names()
+        index = self.index([common] * 8 + [rare])
+        kept, report = rebalance(index, {common: 0.5}, seed=0)
+        was, now = report["by_class"][common]
+        self.assertEqual(was, 320)
+        self.assertLess(now, was)
+        self.assertGreater(now, was // 4)         # thinned, not deleted
+        self.assertEqual(report["by_class"][rare], (40, 40))
+
+    def test_the_same_weights_give_the_same_set_every_time(self):
+        common, _ = self.names()
+        index = self.index([common] * 4)
+        first, _ = rebalance(index, {common: 0.5}, seed=0)
+        second, _ = rebalance(list(reversed(index)), {common: 0.5}, seed=0)
+        self.assertEqual(
+            sorted((e.frame.name, i.label) for e in first for i in e.instances),
+            sorted((e.frame.name, i.label) for e in second for i in e.instances),
+            "the keep decision must not depend on order")
+
+    def test_a_frame_left_with_nothing_is_dropped(self):
+        common, _ = self.names()
+        index = self.index([common])
+        kept, report = rebalance(index, {common: 0.0}, seed=0)
+        self.assertEqual(kept, [])
+        self.assertEqual(report["frames"]["after"], 0)
+
+    def test_a_frame_keeps_its_rare_instance_when_its_common_ones_go(self):
+        common, rare = self.names()
+        index = self.index([common] * 6 + [rare])
+        kept, _ = rebalance(index, {common: 0.0}, seed=0)
+        self.assertEqual(len(kept), len(index),
+                         "dropping the frame would throw the rare class away too")
+        spec = kept[0].source.spec
+        self.assertEqual({spec.name_of(i.class_id)
+                          for e in kept for i in e.instances}, {rare})
+
+    def test_a_source_weight_thins_only_that_source(self):
+        common, _ = self.names()
+        gates = InstanceGates()
+        other = Source(SPECS["segfly"], gates, role="train")
+        mine = self.index([common] * 4)
+        theirs = [replace(e, source=other) for e in self.index([common] * 4)]
+        kept, report = rebalance(mine + theirs, {"kust4k": 0.0}, seed=0)
+        left = {e.source.spec.name for e in kept}
+        self.assertEqual(left, {"segfly"},
+                         "a source weight must not reach another source")
+        self.assertEqual(report["by_source"]["kust4k"][1], 0)
+        self.assertEqual(*report["by_source"]["segfly"])
+
+    def test_a_source_scoped_class_beats_the_bare_class(self):
+        common, rare = self.names()
+        kept, report = rebalance(self.index([common, rare]),
+                                 {common: 0.0, f"kust4k:{common}": 1.0}, seed=0)
+        self.assertEqual(report["by_class"][common][1],
+                         report["by_class"][common][0],
+                         "the specific weight wins, and nothing compounds")
+
+    def test_the_report_counts_instances_per_source(self):
+        common, _ = self.names()
+        _, report = rebalance(self.index([common] * 3, frames=10), {}, seed=0)
+        self.assertEqual(report["by_source"], {"kust4k": (30, 30)})
+
+    def test_a_weight_naming_no_class_here_is_reported(self):
+        common, _ = self.names()
+        _, report = rebalance(self.index([common]), {"unicorn": 0.5}, seed=0)
+        self.assertEqual(report["unmatched"], ["unicorn"])
+
+    def test_no_weights_changes_nothing(self):
+        index = self.index(self.names())
+        kept, report = rebalance(index, {}, seed=0)
+        self.assertEqual(len(kept), len(index))
+        self.assertEqual(report["instances"]["before"],
+                         report["instances"]["after"])
 
 
 class TestASavedSplitIsTheSplitTheRunUses(unittest.TestCase):

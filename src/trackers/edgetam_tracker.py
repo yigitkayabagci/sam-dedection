@@ -6,6 +6,7 @@ from typing import Iterator
 
 import numpy as np
 
+from ..checkpoint_meta import warn_size_mismatch
 from ..prompts import PromptSet
 from ._hydra_overrides import image_size_overrides
 from .base import TrackingResult, VideoTracker
@@ -93,6 +94,8 @@ class EdgeTAMTracker(VideoTracker):
         image_size: int | None = None,
         samurai: dict | None = None,
         sam2long: dict | None = None,
+        ego_motion: bool | dict | None = None,
+        guard: dict | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.checkpoint = checkpoint
@@ -129,16 +132,74 @@ class EdgeTAMTracker(VideoTracker):
         # pathway. Off unless asked for. The two compose: SAMURAI chooses
         # within a pathway, SAM2Long chooses between them.
         self.sam2long_config = _block_config(sam2long, "sam2long")
+        # Ego-motion compensation for SAMURAI's filter (`stabiliser.FrameMotion`).
+        # Published SAMURAI has no term for the camera's own motion: its filter
+        # is in image coordinates, so on a drone a target that never moved
+        # appears to accelerate and the frame the camera changes what it is
+        # doing the filter predicts a jump -- which it then uses to score
+        # candidates. Measuring the background's displacement and handing it in
+        # as a control input costs one reduced-size grayscale decode and one
+        # sparse optical flow per frame, and needs no weights.
+        #
+        # Off unless asked for, and it does nothing at all without SAMURAI:
+        # there is no filter to correct.
+        self.ego_motion = (dict(ego_motion) if isinstance(ego_motion, dict)
+                           else ({} if ego_motion else None))
+        self._motion = None
+        # The classical guard (`stabiliser.py`): area, aspect and how far a
+        # centre may travel once the camera's motion is out, then normalised
+        # cross-correlation to find the target again. Off unless asked for, and
+        # deliberately *not* implied by `ego_motion`: measuring the camera is a
+        # correction to a filter and changes no output, while this decides
+        # whether a frame's mask is reported at all.
+        self.guard_config = None
+        if guard and guard.get("enabled", True):
+            from .stabiliser import GuardConfig
+
+            fields = {k: v for k, v in guard.items() if k != "enabled"}
+            self.guard_config = GuardConfig(**fields)
+        self._guards: dict[int, "object"] = {}
+        # `{frame_idx: {obj_id: Decision}}` for the frames the guard judged --
+        # the record a caller reads to know *why* a mask came back empty.
+        self.verdicts: dict[int, dict] = {}
         self._samurai = None
         self._sam2long = None
         self._predictor = None
         self._state = None
+        self._logit_side: tuple[int, int] | None = None
+
+    def _shift_for(self, frame_idx: int):
+        """The camera's normalised displacement for the frame about to be scored.
+
+        Read through the tracker rather than bound at install time because the
+        frame source changes with every video while the patched predictor does
+        not: `install` is called once, `prepare` is called per sequence.
+        """
+        if self._motion is None:
+            return None
+        box = None
+        if self._samurai is not None and self._samurai.states:
+            # Excluding the target from the flow grid needs the target's box in
+            # *frame* pixels; the filter holds it in the mask grid's. Both are
+            # the same picture at different scales, so the fraction is what
+            # travels between them.
+            predicted = self._samurai.states[0].kalman.predicted_box()
+            if predicted is not None and self._logit_side:
+                frame = self._motion.frame(frame_idx)
+                if frame is not None:
+                    scale_x = frame.shape[1] / float(self._logit_side[0])
+                    scale_y = frame.shape[0] / float(self._logit_side[1])
+                    box = predicted * np.array([scale_x, scale_y, scale_x, scale_y])
+        return self._motion.shift(int(frame_idx), box)
 
     def _install_samurai(self) -> None:
         if self.samurai_config is not None and self._samurai is None:
             from .samurai import install
 
-            self._samurai = install(self._predictor, self.samurai_config)
+            self._samurai = install(self._predictor, self.samurai_config,
+                                    shift_for=(self._shift_for
+                                               if self.ego_motion is not None
+                                               else None))
         if self.sam2long_config is not None and self._sam2long is None:
             from .sam2long import install as install_sam2long
 
@@ -161,6 +222,11 @@ class EdgeTAMTracker(VideoTracker):
                 "(see scripts/setup_edgetam.sh comments). For dev machines without "
                 "CUDA, pass --config configs/edgetam_cpu.yaml."
             )
+        # A checkpoint trained at one size loads into a build of another with
+        # no error at all (see src/checkpoint_meta.py). Say so here, where the
+        # checkpoint is first read, rather than letting the run end in numbers
+        # that are quietly off their training resolution.
+        warn_size_mismatch(self.checkpoint, self.image_size)
         overrides = image_size_overrides(self.image_size)
         self._predictor = build_sam2_video_predictor(
             self.model_cfg, self.checkpoint, device=self.device,
@@ -180,8 +246,37 @@ class EdgeTAMTracker(VideoTracker):
             stack.enter_context(torch.autocast(device_type=self.device, dtype=dtype))
         return stack
 
+    def _open_frames(self, frames_dir: str | Path) -> None:
+        """The frame source `ego_motion` and the guard both read.
+
+        Split out of `prepare` because the TensorRT subclass overrides that
+        method wholesale, and without this it was skipping the setup: on that
+        backend `self._motion` stayed None, `_judge` returned every mask
+        untouched and `_shift_for` had nothing to measure. A `guard:` policy
+        then ran, printed nothing, and produced a plain run under a guard's
+        name -- which is worse than refusing, because the folder looks like
+        evidence. Neither layer has anything to do with the engines: both are
+        numpy over decoded frames.
+        """
+        if self._motion is not None:
+            return
+        if self.ego_motion is not None:
+            from .stabiliser import FrameMotion
+
+            self._motion = FrameMotion(frames_dir,
+                                       **{k: v for k, v in self.ego_motion.items()
+                                          if k in ("reduce", "suffixes")})
+        elif self.guard_config is not None:
+            from .stabiliser import FrameMotion
+
+            # The guard needs the pixels too, so a run that asked only for it
+            # still gets a frame source -- at the same reduced size, since a
+            # template match and a flow both work fine on it.
+            self._motion = FrameMotion(frames_dir)
+
     def prepare(self, frames_dir: str | Path) -> None:
         self._ensure_predictor()
+        self._open_frames(frames_dir)
         self._install_samurai()
         with self._inference_ctx():
             self._state = self._predictor.init_state(
@@ -241,6 +336,8 @@ class EdgeTAMTracker(VideoTracker):
             for frame_idx, obj_ids, mask_logits in self._predictor.propagate_in_video(self._state):
                 # mask_logits: [N, 1, H, W] on the model's device.
                 # .float() is important when autocast returned bf16/fp16 logits.
+                self._logit_side = (int(mask_logits.shape[-1]),
+                                    int(mask_logits.shape[-2]))
                 logits_np = mask_logits.detach().float().cpu().numpy()
                 if self._sam2long is not None:
                     masks = {
@@ -252,7 +349,49 @@ class EdgeTAMTracker(VideoTracker):
                         int(obj_id): logits_np[i, 0] > self.mask_threshold
                         for i, obj_id in enumerate(obj_ids)
                     }
+                if self.guard_config is not None:
+                    masks = self._judge(int(frame_idx), masks)
                 yield TrackingResult(frame_idx=int(frame_idx), masks=masks)
+
+    def _judge(self, frame_idx: int, masks: dict) -> dict:
+        """Run each object's guard, and drop the masks it refuses.
+
+        A refused mask is reported **empty** rather than replaced by the
+        prediction: the guard knows where the target should be, not what it
+        looks like, and painting a rectangle there would be inventing pixels
+        the model never produced. Empty is also what EdgeTAM itself emits when
+        its object score goes negative, so nothing downstream meets a case it
+        has not already had to handle -- and `accuracy.dropout_episodes` counts
+        it honestly as a frame the tracker lost, which a mask covering a field
+        would not have been.
+
+        The decision, the reason and the box the guard would have used are kept
+        in `verdicts[frame_idx][obj_id]` for a caller that wants to draw them.
+        """
+        from .stabiliser import Stabiliser, box_of
+
+        frame = self._motion.frame(frame_idx) if self._motion is not None else None
+        if frame is None:
+            return masks
+        scale_x = scale_y = 1.0
+        judged, record = {}, {}
+        for obj_id, mask in masks.items():
+            box = box_of(mask)
+            if box is not None:
+                # The masks are at the model's own resolution and the frame was
+                # decoded small; the guard works in the decoded frame's pixels
+                # so that its template match and its flow agree with each other.
+                scale_x = frame.shape[1] / float(mask.shape[1])
+                scale_y = frame.shape[0] / float(mask.shape[0])
+                box = box * np.array([scale_x, scale_y, scale_x, scale_y])
+            guard = self._guards.get(obj_id)
+            if guard is None:
+                guard = self._guards[obj_id] = Stabiliser(self.guard_config)
+            decision = guard.update(frame, box)
+            record[obj_id] = decision
+            judged[obj_id] = mask if decision.accepted else np.zeros_like(mask)
+        self.verdicts[frame_idx] = record
+        return judged
 
     def reset(self) -> None:
         if self._predictor is not None and self._state is not None:
@@ -266,4 +405,9 @@ class EdgeTAMTracker(VideoTracker):
             self._samurai.reset()
         if self._sam2long is not None:
             self._sam2long.reset()
+        if self._motion is not None:
+            self._motion.reset()
+        self._guards.clear()
+        self.verdicts.clear()
+        self._logit_side = None
         self._state = None

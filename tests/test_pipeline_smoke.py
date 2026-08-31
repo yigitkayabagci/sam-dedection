@@ -551,3 +551,63 @@ class TestFrameSkip(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StagedFrameCache(unittest.TestCase):
+    """A `--frames-cache` outlives its run, and `init_state` indexes the directory.
+
+    The temp directory the pipeline used before could not hold a previous run's
+    frames. A real one can, and the failure is silent *and* specifically ruins
+    the measurement: `_install_realtime_preprocess` refuses on a length
+    mismatch and returns False without raising, so the lazy per-frame decode is
+    never installed, `init_state`'s bulk load has already paid it before the
+    timer starts, and the run prints an FPS with the preprocessing cost missing
+    from it -- higher than the configuration can sustain, and shaped like a
+    result.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache = Path(self.tmp.name)
+
+    def stage(self, count):
+        for i in range(count):
+            (self.cache / f"{i:05d}.jpg").touch()
+
+    def staged(self):
+        """Only what the staging pass writes -- `f"{idx:05d}.jpg"`, and nothing
+        else the directory happens to hold. Counting every digit-named jpg here
+        made `test_it_touches_only_what_the_staging_pass_writes` assert that
+        the two files it had just asked to be *kept* were gone."""
+        return sorted(p.stem for p in self.cache.glob("*.jpg")
+                      if len(p.stem) == 5 and p.stem.isdigit())
+
+    def test_a_shorter_run_leaves_no_tail_of_the_longer_one(self):
+        from src.pipeline import _clear_staged
+
+        self.stage(1000)
+        self.assertEqual(_clear_staged(self.cache), 1000)
+        self.stage(300)
+        self.assertEqual(len(self.staged()), 300)
+
+    def test_it_touches_only_what_the_staging_pass_writes(self):
+        """The directory is a cache, not ours to empty."""
+        from src.pipeline import _clear_staged
+
+        self.stage(5)
+        keep = [self.cache / "prompts.json", self.cache / "reference.jpg",
+                self.cache / "0001.jpg", self.cache / "000001.jpg"]
+        for path in keep:
+            path.touch()
+        _clear_staged(self.cache)
+        self.assertEqual(self.staged(), [])
+        for path in keep:
+            self.assertTrue(path.exists(), path.name)
+
+    def test_an_empty_cache_is_not_an_error(self):
+        from src.pipeline import _clear_staged
+
+        self.assertEqual(_clear_staged(self.cache), 0)

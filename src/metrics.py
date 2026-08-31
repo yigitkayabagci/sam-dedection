@@ -317,3 +317,117 @@ def write_stage_chart(
     fig.savefig(out_path, facecolor=_SURFACE)
     plt.close(fig)
     return out_path.resolve()
+
+
+# --------------------------------------------------------------------------
+# Track geometry: the chart for footage with no ground truth
+# --------------------------------------------------------------------------
+
+# What a verdict is drawn as. `tracking` gets no band -- an unshaded chart is
+# a clean run, and shading the normal case would make every chart look busy.
+_VERDICT_COLOUR = {"suspect": _ORANGE, "lost": _VIOLET, "reacquired": _AQUA}
+
+
+def track_geometry(masks) -> tuple[float, tuple[float, float] | None]:
+    """One frame's `(share of the frame, centre)` over every object's mask.
+
+    Union rather than per object: the failure being watched for is one mask
+    swelling over a field, and a union that jumps is a union that jumped
+    whichever object did it. `None` for the centre when nothing was returned,
+    which is what a refused mask looks like from here.
+    """
+    import numpy as np
+
+    total = None
+    for mask in (masks or {}).values():
+        array = np.asarray(mask)
+        if array.ndim > 2:
+            array = array.reshape(-1, *array.shape[-2:]).any(axis=0)
+        total = array.astype(bool) if total is None else (total | array.astype(bool))
+    if total is None or not total.any():
+        return 0.0, None
+    rows, columns = np.nonzero(total)
+    return (float(total.sum()) / float(total.size),
+            (float(columns.mean()), float(rows.mean())))
+
+
+def write_track_chart(shares, centres, out_path, verdicts=None,
+                      note: str | None = None, label: str | None = None):
+    """How big the target got and how far it moved, frame by frame.
+
+    The chart for real footage, which has no ground truth: an IoU curve needs
+    a drawn answer to compare against and a recording off a drone does not have
+    one. These two curves need nothing but the tracker's own output, and they
+    are where the two failures this project set out to fix are *visible*:
+
+      share    the balloon. A target covering a growing fraction of the frame
+               is the mask leaking into the ground around it. Measured on
+               AeroVIS, the largest car ever annotated covers 6.0 % of its
+               frame and the largest truck 13.6 %, so a curve climbing through
+               20 % is not a target any more whatever the overlay looks like.
+      jump     the skip. Centre travel between frames, in fractions of the
+               frame's diagonal, so it does not depend on resolution. A spike
+               is the mask moving somewhere the target could not have gone.
+
+    `verdicts` -- `{frame: state}` from `EdgeTAMTracker.verdicts` -- is shaded
+    behind both, so a run with the guard on shows whether the refusals landed
+    on the spikes. Without the guard the chart still draws; the spikes are then
+    what nothing stopped.
+    """
+    plt = _matplotlib()
+    if plt is None:
+        return None
+    shares, centres = list(shares), list(centres)
+    if not shares:
+        return None
+
+    jumps = [0.0]
+    for before, after in zip(centres, centres[1:]):
+        if before is None or after is None:
+            jumps.append(float("nan"))
+            continue
+        jumps.append(((after[0] - before[0]) ** 2
+                      + (after[1] - before[1]) ** 2) ** 0.5)
+    reach = max((j for j in jumps if j == j), default=0.0) or 1.0
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+    fig.patch.set_facecolor(_SURFACE)
+    frames = list(range(len(shares)))
+    for axis in axes:
+        _style_axes(axis)
+        for frame, state in sorted((verdicts or {}).items()):
+            colour = _VERDICT_COLOUR.get(str(state))
+            if colour and 0 <= frame < len(shares):
+                axis.axvspan(frame - 0.5, frame + 0.5, color=colour,
+                             alpha=0.22, linewidth=0, zorder=1)
+
+    axes[0].plot(frames, [s * 100 for s in shares], color=_BLUE, linewidth=1.4,
+                 zorder=3)
+    axes[0].axhline(13.6, color=_ORANGE, linewidth=1.0, linestyle="--", zorder=2)
+    axes[0].text(0.0, 1.02, "dashed: 13.6 %, the largest target AeroVIS ever "
+                 "annotated (a truck)", transform=axes[0].transAxes, ha="left",
+                 va="bottom", fontsize=8, color=_INK_MUTED, clip_on=False)
+    axes[0].set_ylabel("share of frame (%)", color=_INK_MUTED, fontsize=9)
+    axes[0].set_title("what the tracker returned, frame by frame", fontsize=10.5,
+                      color=_INK_PRIMARY, loc="left", pad=22)
+
+    axes[1].plot(frames, [j / reach for j in jumps], color=_VIOLET,
+                 linewidth=1.4, zorder=3)
+    axes[1].set_ylabel("centre jump (of its own max)", color=_INK_MUTED, fontsize=9)
+    axes[1].set_xlabel("frame", color=_INK_MUTED, fontsize=9)
+
+    drawn = {str(s) for s in (verdicts or {}).values()} & set(_VERDICT_COLOUR)
+    legend = "  ".join(f"{state}" for state in sorted(drawn))
+    caption = " | ".join(filter(None, [
+        label, f"shaded: {legend}" if legend else
+        ("guard on, nothing refused" if verdicts is not None else "guard off"),
+        note]))
+    if caption:
+        fig.text(0.01, 0.005, caption, fontsize=7.5, color=_INK_MUTED,
+                 ha="left", va="bottom")
+    fig.tight_layout(rect=(0, 0.04, 1, 0.94))
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, facecolor=_SURFACE)
+    plt.close(fig)
+    return out_path.resolve()

@@ -16,8 +16,10 @@ silently disagree rather than the ways either can crash:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -29,12 +31,16 @@ if str(ROOT) not in sys.path:
 
 from src.training.aerial import (InstanceGates, Sample, pool_masks,  # noqa: E402
                                  image_origin, sample_masks)
-from src.training.labels import MASK_STORE, save_masks  # noqa: E402
+from src.training.labels import (MASK_STORE, load_masks,  # noqa: E402
+                                 save_masks)
 from src.training.pool import RECORD_FILE  # noqa: E402
-from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
+from src.training.pool_reader import (Relocator,  # noqa: E402
+                                      _root_of_archive_paths, group_records,
                                       index_pool, link_pool, load_pool_index,
                                       parse_pool, pool_datasets,
-                                      save_pool_index, store_areas)
+                                      extract_frames, resolve_images_root,
+                                      save_pool_index, store_areas,
+                                      wanted_frames, why_no_image)
 
 try:
     import cv2
@@ -119,6 +125,58 @@ class PoolIndexTest(unittest.TestCase):
             ("truck", self.boxes[1][1], None)])
         index = index_pool(self.pool / "demo", self.images, workers=1)
         self.assertEqual([i.label for e in index for i in e.instances], [0])
+
+    def _set_box_iou(self, target: Path, values) -> None:
+        record_file = target / RECORD_FILE
+        record = json.loads(record_file.read_text())
+        for instance, value in zip(record["instances"], values):
+            instance["box_iou"] = value
+        record_file.write_text(json.dumps(record) + "\n")
+
+    def test_a_stricter_box_iou_can_be_applied_without_re_harvesting(self):
+        """The point of storing the reading and not just the verdict.
+
+        A pool of a hundred thousand frames costs GPU-days to make. Deciding
+        afterwards that only masks agreeing with the annotation at 0.7 should
+        train has to be a pass over the records, or it is not a decision anyone
+        will actually take.
+        """
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            (name, box, blob(self.shape, box)) for name, box in self.boxes])
+        self._set_box_iou(target, [0.92, 0.61])
+
+        keep_all = index_pool(self.pool / "demo", self.images, workers=1)
+        self.assertEqual([i.label for e in keep_all for i in e.instances],
+                         [0, 1])
+        strict = index_pool(self.pool / "demo", self.images, workers=1,
+                            min_box_iou=0.7)
+        self.assertEqual([i.label for e in strict for i in e.instances], [0])
+
+    def test_a_frame_the_stricter_cut_empties_is_dropped_as_no_accepted(self):
+        """And a cut that empties the whole pool says so with that count.
+
+        The alternative -- an empty index and a training run that starts on
+        nothing -- is the failure this error already exists to prevent.
+        """
+        image = write_image(self.images / "only.png", *self.shape)
+        target = write_frame(self.pool, "only", image, self.shape, [
+            (name, box, blob(self.shape, box)) for name, box in self.boxes])
+        self._set_box_iou(target, [0.55, 0.61])
+        with self.assertRaises(ValueError) as caught:
+            index_pool(self.pool / "demo", self.images, workers=1,
+                       min_box_iou=0.7)
+        self.assertIn("no_accepted", str(caught.exception))
+
+    def test_an_older_pool_with_no_reading_is_kept_not_silently_emptied(self):
+        """Dropping a whole pool because its records are a version behind is
+        the worse failure of the two."""
+        image = write_image(self.images / "only.png", *self.shape)
+        write_frame(self.pool, "only", image, self.shape, [
+            (name, box, blob(self.shape, box)) for name, box in self.boxes])
+        index = index_pool(self.pool / "demo", self.images, workers=1,
+                           min_box_iou=0.95)
+        self.assertEqual([i.label for e in index for i in e.instances], [0, 1])
 
     def _strip_verdicts(self, target: Path) -> None:
         """Rewrite one frame's record the way a harvest with no verdict field
@@ -494,6 +552,136 @@ class PoolIndexTest(unittest.TestCase):
         self.assertIn("demo", str(caught.exception))
 
 
+@unittest.skipIf(cv2 is None, "OpenCV is needed to write the frames")
+class WhyNoImageTest(unittest.TestCase):
+    """`no_image` on every record has three different fixes, and the report has
+    to say which one rather than leaving a re-index to find out."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "pool"
+        self.shape = (40, 60)
+        self.image = write_image(self.root / "elsewhere" / "seq" / "000000.png",
+                                 *self.shape)
+        write_frame(self.pool, "seq/000000", self.image, self.shape,
+                    [("car", (2, 2, 20, 20), blob(self.shape, (2, 2, 20, 20)))])
+
+    def test_a_root_that_is_not_there_says_so(self):
+        report = why_no_image(self.pool / "demo", self.root / "never_fetched")
+        self.assertFalse(report["root_exists"])
+        self.assertIn("never fetched", report["verdict"])
+
+    def test_a_root_holding_a_different_part_of_the_set_says_so(self):
+        other = self.root / "other"
+        write_image(other / "seq" / "999999.png", *self.shape)
+        report = why_no_image(self.pool / "demo", other)
+        self.assertTrue(report["root_exists"])
+        self.assertEqual(report["files_under_root"], 1)
+        self.assertIn("different part of the set", report["verdict"])
+        self.assertEqual(report["extensions"], {".png": 1})
+
+    def test_the_frame_being_there_under_another_prefix_is_named(self):
+        # A tree that gained a level: no suffix of the recorded path matches,
+        # which is what the by-name fallback exists for. Suffix matching alone
+        # still misses it, and that is the case the report has to describe.
+        moved = self.root / "moved" / "train" / "images" / "000000.png"
+        write_image(moved, *self.shape)
+        # The harvest runtime's own copy is gone, which is the situation this
+        # runs in: at depth 0 the recorded path is absolute and joinpath keeps
+        # it, so while it exists the relocator resolves to it and never misses.
+        self.image.unlink()
+        self.assertIsNone(
+            Relocator(self.root / "moved", by_name=False)(self.image))
+        self.assertEqual(Relocator(self.root / "moved")(self.image), moved)
+        report = why_no_image(self.pool / "demo", self.root / "moved")
+        self.assertIn("000000.png", report["same_name_here"][0])
+        self.assertIn("one level off", report["verdict"])
+
+    def test_a_pool_with_no_records_is_named_as_that(self):
+        report = why_no_image(self.root / "empty", self.root)
+        self.assertEqual(report["records"], 0)
+        self.assertIn("pool zip is missing", report["verdict"])
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed to write the frames")
+class ExtractFramesTest(unittest.TestCase):
+    """A pool is a manifest: 214 GiB of archives to reach a few percent of it
+    is a bill nobody has to pay."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.pool = self.root / "pool"
+        self.shape = (24, 32)
+        self.box = (2, 2, 12, 12)
+        # Two modalities keeping the same frame name, which is what makes a
+        # basename match unsafe and a tail match necessary.
+        self.wanted = ["/content/data/VTUAV/train_ST_008/car_01/ir/000000.jpg",
+                       "/content/data/VTUAV/train_ST_008/car_01/ir/000010.jpg"]
+        for index, recorded in enumerate(self.wanted):
+            write_frame(self.pool, f"car_01/{index:06d}", Path(recorded),
+                        self.shape,
+                        [("car", self.box, blob(self.shape, self.box))])
+
+    def archive(self, name, members):
+        path = self.root / name
+        with zipfile.ZipFile(path, "w") as handle:
+            for member in members:
+                handle.writestr(member, b"x" * 16)
+        return path
+
+    def records(self):
+        return sorted((self.pool / "demo").rglob(RECORD_FILE))
+
+    def test_only_the_frames_the_pool_names_come_out(self):
+        archive = self.archive("train_ST_008.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg",
+            "train_ST_008/car_01/ir/000020.jpg",     # not in the pool
+            "train_ST_008/car_01/rgb/000000.jpg",    # other modality, same name
+        ])
+        out = self.root / "out"
+        report = extract_frames(self.records(), [archive], out)
+        self.assertEqual(report["asked"], 2)
+        self.assertEqual(report["taken"], 2)
+        self.assertEqual(report["missing"], 0)
+        taken = sorted(p.relative_to(out).as_posix()
+                       for p in out.rglob("*") if p.is_file())
+        self.assertEqual(taken, ["train_ST_008/car_01/ir/000000.jpg",
+                                 "train_ST_008/car_01/ir/000010.jpg"])
+
+    def test_a_frame_no_archive_holds_is_counted_as_missing(self):
+        archive = self.archive("part.zip", ["train_ST_008/car_01/ir/000000.jpg"])
+        report = extract_frames(self.records(), [archive], self.root / "out")
+        self.assertEqual(report["taken"], 1)
+        self.assertEqual(report["missing"], 1)
+
+    def test_a_second_run_takes_nothing_and_loses_nothing(self):
+        archive = self.archive("part.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg"])
+        out = self.root / "out"
+        extract_frames(self.records(), [archive], out)
+        again = extract_frames(self.records(), [archive], out)
+        self.assertEqual(again["taken"], 0)
+        self.assertEqual(again["already"], 2)
+        self.assertEqual(again["missing"], 0)
+
+    def test_the_report_says_which_archive_carried_what(self):
+        first = self.archive("a.zip", ["train_ST_008/car_01/ir/000000.jpg"])
+        second = self.archive("b.zip", ["train_ST_008/car_01/ir/000010.jpg"])
+        report = extract_frames(self.records(), [first, second], self.root / "out")
+        self.assertEqual(report["by_archive"], {"a.zip": 1, "b.zip": 1})
+
+    def test_wanted_frames_keys_by_basename(self):
+        wanted = wanted_frames(self.records())
+        self.assertEqual(sorted(wanted), ["000000.jpg", "000010.jpg"])
+        self.assertEqual(wanted["000000.jpg"], {self.wanted[0]})
+
+
 class StoreAreasTest(unittest.TestCase):
     def test_areas_match_a_decoded_mask(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,6 +733,420 @@ class RelocatorTest(unittest.TestCase):
         here.write_bytes(b"")
         self.assertEqual(Relocator(None)(here), here)
 
+    def test_a_tree_that_gained_a_level_is_found_by_name(self):
+        # HIT-UAV's archive nests under a branch-named folder; a pool
+        # harvested from a copy without it records the shallower path, and
+        # stripping leading components can never put the level back.
+        local = self.root / "HIT-UAV-main" / "normal_json" / "train"
+        local.mkdir(parents=True)
+        (local / "0_01.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        found = relocate("/content/data/HIT_UAV/normal_json/train/0_01.jpg")
+        self.assertEqual(found, local / "0_01.jpg")
+        self.assertEqual((relocate.found_by_name, relocate.misses), (1, 0))
+
+    def test_the_longest_matching_tail_picks_between_two_of_a_name(self):
+        # DroneVehicle keeps one file name per frame in each modality.
+        for folder in ("trainimg", "trainimgr"):
+            (self.root / "train" / folder).mkdir(parents=True)
+            (self.root / "train" / folder / "04991.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        found = relocate("/data/DroneVehicle/train/trainimgr/04991.jpg")
+        self.assertEqual(found, self.root / "train" / "trainimgr" / "04991.jpg")
+
+    def test_a_name_two_files_share_equally_is_refused_not_guessed(self):
+        for folder in ("a", "b"):
+            (self.root / folder).mkdir(parents=True)
+            (self.root / folder / "0.jpg").write_bytes(b"")
+        relocate = Relocator(self.root)
+        self.assertIsNone(relocate("/data/somewhere/else/0.jpg"))
+        self.assertEqual((relocate.ambiguous, relocate.misses), (1, 1))
+
+    def test_the_fallback_can_be_turned_off(self):
+        deep = self.root / "wrapper" / "train"
+        deep.mkdir(parents=True)
+        (deep / "0_01.jpg").write_bytes(b"")
+        relocate = Relocator(self.root, by_name=False)
+        self.assertIsNone(relocate("/data/HIT_UAV/train/0_01.jpg"))
+        self.assertEqual(relocate.misses, 1)
+
+
+class ResolveImagesRootTest(unittest.TestCase):
+    """Naming the tree the recorded paths were written against, once per pool.
+
+    `Relocator`'s by-name fallback settles one frame at a time and refuses a
+    name that is ambiguous under its root -- correct per frame, and no answer at
+    all for a pool whose every frame is ambiguous the same way, which is what an
+    archive that unpacks a copy of itself produces. These are the three answers
+    the caller has to be able to tell apart: the configured root is right, the
+    frames are under a different prefix, or they are not on this disk.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.records = 0
+
+    def record_naming(self, image: str) -> Path:
+        self.records += 1
+        path = self.root / "pool" / str(self.records) / RECORD_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"key": str(self.records), "image": image}))
+        return path
+
+    def touch(self, path: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"")
+        return path
+
+    def test_a_wrapper_directory_the_harvest_did_not_have_is_found(self):
+        inner = (self.root / "HIT_UAV" / "HIT-UAV-Infrared-Thermal-Dataset-main"
+                 / "normal_json")
+        self.touch(inner / "train" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"
+                                    "0_01.jpg")
+        self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV"),
+                         inner.parent)
+
+    def test_the_tree_holding_the_frames_beats_the_wrapper_holding_one(self):
+        # The archive re-packs itself, so the name is ambiguous under the root
+        # and every frame of the pool ties -- the case the by-name fallback
+        # refuses. The root that resolves the *most* frames is the answer.
+        outer = self.root / "HIT_UAV" / "main" / "normal_json"
+        inner = outer / "main" / "normal_json"
+        self.touch(outer / "train" / "0_01.jpg")
+        for name in ("0_01.jpg", "0_02.jpg", "0_03.jpg"):
+            self.touch(inner / "train" / name)
+        records = [self.record_naming(f"/content/data/HIT_UAV/normal_json/train/"
+                                      f"{name}")
+                   for name in ("0_01.jpg", "0_02.jpg", "0_03.jpg")]
+        self.assertIsNone(Relocator(self.root / "HIT_UAV")(
+            "/content/data/HIT_UAV/normal_json/train/0_01.jpg"))
+        self.assertEqual(resolve_images_root(records, self.root / "HIT_UAV"),
+                         inner.parent)
+
+    def test_a_mirror_that_renamed_a_component_is_still_found(self):
+        # The pool was harvested from the kagglehub copy (`hit-uav/images/`)
+        # and the run staged the GitHub archive (`normal_json/`): the two
+        # disagree on a component, so no suffix of one is a suffix of the other.
+        frames = self.root / "HIT_UAV" / "wrapper" / "normal_json"
+        self.touch(frames / "test" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/hit-uav/images/test/"
+                                    "0_01.jpg")
+        found = resolve_images_root([record], self.root / "HIT_UAV")
+        self.assertEqual(found, frames)
+        self.assertEqual(Relocator(found, by_name=False)(
+            "/content/data/HIT_UAV/hit-uav/images/test/0_01.jpg"),
+            frames / "test" / "0_01.jpg")
+
+    def test_four_copies_of_one_archive_are_not_an_ambiguity_to_refuse(self):
+        # HIT-UAV ships each frame under `normal_json/<split>/`,
+        # `rotate_json/<split>/` and two `JPEGImages/` trees because its
+        # annotations come in four formats. The first two tie on shared tail
+        # against a record written from the Kaggle mirror
+        # (`hit-uav/images/<split>/`), which is what makes a per-frame reader
+        # refuse every one of the 2 866 frames.
+        base = self.root / "HIT_UAV" / "HIT-UAV-Infrared-Thermal-Dataset-main"
+        pixels = b"\xff\xd8the same frame"
+        for folder in ("normal_json/train", "rotate_json/train"):
+            self.touch(base / folder / "0_100_30_0_03280.jpg").write_bytes(pixels)
+        for folder in ("normal_xml/JPEGImages", "rotate_xml/JPEGImages"):
+            self.touch(base / folder / "0_100_30_0_03280.jpg").write_bytes(pixels)
+        record = self.record_naming("/root/.cache/kagglehub/datasets/pandrii000/"
+                                    "hituav/versions/1/hit-uav/images/train/"
+                                    "0_100_30_0_03280.jpg")
+        found = resolve_images_root([record], self.root / "HIT_UAV")
+        self.assertEqual(found, base / "normal_json")
+        self.assertEqual(Relocator(found, by_name=False)(
+            json.loads(record.read_text())["image"]),
+            base / "normal_json" / "train" / "0_100_30_0_03280.jpg")
+
+    def test_two_roots_holding_different_pixels_are_still_refused(self):
+        # DroneVehicle's two modalities under one root: picking either would
+        # train one modality's masks on the other's pixels, silently.
+        base = self.root / "DroneVehicle"
+        self.touch(base / "trainimg" / "04991.jpg").write_bytes(b"rgb")
+        self.touch(base / "trainimgr" / "04991.jpg").write_bytes(b"thermal")
+        record = self.record_naming("/content/data/DroneVehicle/train/"
+                                    "04991.jpg")
+        self.assertIsNone(resolve_images_root([record], base))
+
+    def test_a_root_that_already_works_is_returned_unchanged(self):
+        self.touch(self.root / "HIT_UAV" / "normal_json" / "train" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"
+                                    "0_01.jpg")
+        self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV"),
+                         self.root / "HIT_UAV")
+
+    def test_a_half_downloaded_pool_keeps_the_root_it_was_given(self):
+        # Four of five probes resolve and the fifth is simply not there yet.
+        # Re-rooting one level up would "find" them all and hide the missing
+        # download behind a wider search -- and one level up is where another
+        # dataset's `04991.jpg` lives.
+        base = self.root / "DroneVehicle"
+        for index in range(4):
+            self.touch(base / "train" / "trainimgr" / f"0499{index}.jpg")
+        records = [self.record_naming(f"/content/data/DroneVehicle/train/"
+                                      f"trainimgr/0499{index}.jpg")
+                   for index in range(5)]
+        self.assertEqual(resolve_images_root(records, base), base)
+
+    def test_frames_that_are_not_on_this_disk_are_not_guessed_at(self):
+        (self.root / "HIT_UAV").mkdir()
+        record = self.record_naming("/content/data/HIT_UAV/train/0_01.jpg")
+        self.assertIsNone(resolve_images_root([record], self.root / "HIT_UAV"))
+
+    def test_an_unresolved_glob_searches_the_prefix_it_is_sure_of(self):
+        # `images_for` leaves the pattern in place when nothing matched it, and
+        # nothing matches a pattern globbed before the download. The part of it
+        # in front of the first `*` is still a real directory.
+        frames = self.root / "HIT_UAV" / "wrapper" / "normal_json"
+        self.touch(frames / "train" / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/normal_json/train/"
+                                    "0_01.jpg")
+        pattern = str(self.root / "HIT_UAV" / "**" / "normal_json")
+        self.assertEqual(resolve_images_root([record], pattern), frames.parent)
+
+    def test_a_wider_search_root_finds_a_sibling_of_the_configured_one(self):
+        frames = self.root / "HIT-UAV-Infrared-Thermal-Dataset-main" / "train"
+        self.touch(frames / "0_01.jpg")
+        record = self.record_naming("/content/data/HIT_UAV/train/0_01.jpg")
+        (self.root / "HIT_UAV").mkdir()
+        self.assertIsNone(resolve_images_root([record], self.root / "HIT_UAV"))
+        self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV",
+                                             search_root=self.root),
+                         frames.parent)
+
+
+
+class AeroVISPathsTest(unittest.TestCase):
+    """AeroVIS end to end: the frame it names and the store beside its record.
+
+    The layout here is not invented. It was read out of `AeroVIS.zip` on the
+    Drive this project trains from, by range-requesting the archive's central
+    directory rather than the 13.5 GiB in front of it:
+
+        AeroVIS/aero_vis.json
+        AeroVIS/data.md
+        AeroVIS/sequences/{sd_001..vd_052}/{frame}.jpg   117 dirs, 49 204 files
+
+    and `aero_vis.json` opens `"videos": [{"id": 1, "name": "vd_001",
+    "file_names": ["vd_001/0000001.jpg", ...`. So `file_names` -- which is what
+    `aerovis.write_pool` stores as `image_rel` -- is relative to
+    **`AeroVIS/sequences`**, one level below the `AeroVIS` directory the
+    archive unpacks as and two below the `IMAGE_ROOTS` entry pointing at the
+    extract. Frame names are per-source and repeat: `0000001.jpg` exists in 91
+    of the 117 sequences, which is what makes the by-name fallback the wrong
+    thing to be leaning on here.
+    """
+
+    SEQUENCES = ("vd_001", "vd_002", "ud_001")
+    FRAMES = ("0000001.jpg", "0000002.jpg")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # What `IMAGE_ROOTS` names, and where the archive really lands under it.
+        self.configured = self.root / "data" / "AeroVIS"
+        self.sequences = self.configured / "AeroVIS" / "sequences"
+        for order, sequence in enumerate(self.SEQUENCES):
+            for number, name in enumerate(self.FRAMES):
+                frame = self.sequences / sequence / name
+                frame.parent.mkdir(parents=True, exist_ok=True)
+                # Distinct pixels per frame: a reader that resolved the right
+                # name in the wrong sequence has to be able to fail.
+                shade = 20 + 40 * order + 7 * number
+                cv2.imwrite(str(frame), np.full((64, 64, 3), shade, np.uint8))
+
+    def write_pool(self, harvest: str) -> Path:
+        """The pool `aerovis.write_pool` writes, with `harvest` as its root."""
+        pool = self.root / "pool" / "aerovis_train"
+        for sequence in self.SEQUENCES:
+            for name in self.FRAMES:
+                relative = f"{sequence}/{name}"
+                key = relative[:-len(".jpg")]
+                target = pool.joinpath(*Path(key).parts)
+                target.mkdir(parents=True, exist_ok=True)
+                mask = np.zeros((64, 64), bool)
+                mask[20:32, 20:34] = True
+                (target / RECORD_FILE).write_text(json.dumps({
+                    "key": key, "dataset": "aerovis_train", "prompt": "dataset",
+                    "image": f"{harvest}/{relative}", "image_rel": relative,
+                    "shape": [64, 64], "teacher": "aerovis:ytvis",
+                    "source": "visdrone", "video_id": 1,
+                    "instances": [{"i": 0, "class": "car", "track_id": 1,
+                                   "box": [20.0, 20.0, 34.0, 32.0],
+                                   "area": int(mask.sum()),
+                                   "teacher_iou": None, "verdict": None}]}))
+                save_masks(target / MASK_STORE, (64, 64), {0: mask})
+        return pool
+
+    def test_a_frame_name_that_repeats_across_sequences_is_the_whole_problem(self):
+        """The premise, checked rather than asserted in a comment."""
+        self.assertEqual(len(list(self.sequences.rglob("0000001.jpg"))),
+                         len(self.SEQUENCES))
+
+    def test_the_sequences_directory_is_named_from_the_archive_relative_path(self):
+        """`image_rel` joins onto exactly one root, and that root is the answer.
+
+        The configured root is two levels above it and resolves nothing by
+        joining -- which is the state a run is in on a fresh runtime.
+        """
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        records = sorted(pool.rglob(RECORD_FILE))
+        self.assertIsNone(Relocator(self.configured).direct("vd_001/0000001.jpg"))
+        self.assertEqual(resolve_images_root(records, self.configured),
+                         self.sequences)
+
+    def test_it_is_named_the_same_way_when_the_harvest_staged_it_elsewhere(self):
+        """`image_rel` is the archive's own statement, so where the harvest
+        happened to put the frames does not enter into it. This is the case the
+        absolute path cannot answer: a recorded root sharing no component with
+        the local tree leaves the file name, and the file name matches every
+        sequence."""
+        pool = self.write_pool("/kaggle/input/aerovis/frames")
+        self.assertEqual(resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                             self.configured),
+                         self.sequences)
+
+    def test_both_paths_resolve_and_the_masks_belong_to_the_frames(self):
+        """The two halves together: every record finds its frame *and* the
+        store written beside it, and no frame is answered with another
+        sequence's copy of the same file name."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        found = resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                    self.configured)
+        index = index_pool(pool, str(found), modality="rgb")
+        self.assertEqual(len(index), len(self.SEQUENCES) * len(self.FRAMES))
+        for entry in index:
+            sequence, name = entry.frame.name.split("/")
+            self.assertEqual(entry.frame.image,
+                             self.sequences / sequence / f"{name}.jpg")
+            shape, masks = load_masks(entry.frame.mask)
+            self.assertEqual(shape, (64, 64))
+            self.assertEqual(set(masks), {0})
+            self.assertEqual(int(masks[0].sum()), 12 * 14)
+
+    def test_resolving_the_root_means_no_frame_is_matched_by_name(self):
+        """A join is not a search. Under the root `image_rel` names, `direct`
+        answers every frame and the by-name index -- the part that would have
+        to refuse 91 candidates -- is never built."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        found = resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                    self.configured)
+        relocate = Relocator(str(found))
+        for sequence in self.SEQUENCES:
+            for name in self.FRAMES:
+                self.assertEqual(relocate.direct(f"{sequence}/{name}"),
+                                 self.sequences / sequence / name)
+        self.assertEqual((relocate.found_by_name, relocate.ambiguous,
+                          relocate.misses), (0, 0, 0))
+
+    def release_archive(self) -> Path:
+        """`AeroVIS.zip` as the Drive holds it: everything under `AeroVIS/`."""
+        archive = self.root / "AeroVIS.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("AeroVIS/aero_vis.json", "{}")
+            for sequence in self.SEQUENCES:
+                for name in self.FRAMES:
+                    handle.write(self.sequences / sequence / name,
+                                 f"AeroVIS/sequences/{sequence}/{name}")
+        return archive
+
+    def test_the_release_archive_lands_where_the_resolver_then_names(self):
+        """`POOL_ARCHIVES` and `resolve_images_root`, joined up.
+
+        Both are already right on their own and neither is any use alone: the
+        pool travels without its 12.6 GiB, so until an archive is named there is
+        nothing under the images root for `image_rel` to join onto, and every
+        arm that plans these pools reports them unusable -- an assert, in the
+        three that require them.
+
+        `extract_frames` takes the members whose path the records end with and
+        writes them at `target / member`, so the `AeroVIS/sequences/` the
+        archive nests them under is reproduced under the configured root. That
+        is the tree `resolve_images_root` names, which is why the two compose
+        rather than needing a third thing to agree with both.
+        """
+        archive = self.release_archive()
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        records = sorted(pool.rglob(RECORD_FILE))
+        fresh = self.root / "fresh" / "AeroVIS"          # a runtime with nothing
+        fresh.mkdir(parents=True)
+        self.assertIsNone(resolve_images_root(records, fresh))
+
+        report = extract_frames(records, [archive], fresh)
+        self.assertEqual((report["taken"], report["missing"]),
+                         (len(self.SEQUENCES) * len(self.FRAMES), 0))
+        # aero_vis.json is in the archive and in no record, so it stays there.
+        self.assertFalse((fresh / "AeroVIS" / "aero_vis.json").exists())
+
+        found = resolve_images_root(records, fresh)
+        self.assertEqual(found, fresh / "AeroVIS" / "sequences")
+        index = index_pool(pool, str(found), modality="rgb")
+        self.assertEqual(len(index), len(self.SEQUENCES) * len(self.FRAMES))
+
+    def test_a_second_run_re_extracts_nothing(self):
+        """The archive is 12.6 GiB on a mounted Drive, so the resume path is
+        not a nicety -- a run that reconnects must not read it again."""
+        archive = self.release_archive()
+        records = sorted(self.write_pool(
+            "/content/data/AeroVIS/AeroVIS/sequences").rglob(RECORD_FILE))
+        fresh = self.root / "fresh" / "AeroVIS"
+        fresh.mkdir(parents=True)
+        extract_frames(records, [archive], fresh)
+        again = extract_frames(records, [archive], fresh)
+        self.assertEqual((again["taken"], again["missing"]), (0, 0))
+        self.assertEqual(again["already"],
+                         len(self.SEQUENCES) * len(self.FRAMES))
+
+    def test_a_pool_that_is_not_on_this_disk_is_still_reported_as_missing(self):
+        """`image_rel` must not turn a missing download into a search that
+        wanders off and finds something. Nothing joins, nothing is proposed."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        empty = self.root / "data" / "nothing"
+        empty.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                              empty))
+
+    def test_two_copies_of_the_tree_hand_the_question_back(self):
+        """A second extraction under the same root joins onto `image_rel` just
+        as well as the first, and there is nothing in an archive-relative path
+        to tell them apart -- so the exact pass declines and the recorded
+        absolute paths, which *can* tell them apart, decide. The frames still
+        come from the tree the harvest saw and never from the copy."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        twin = self.configured / "copy" / "sequences"
+        for sequence in self.SEQUENCES:
+            for name in self.FRAMES:
+                target = twin / sequence / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(self.sequences / sequence / name, target)
+        records = sorted(pool.rglob(RECORD_FILE))
+        self.assertIsNone(_root_of_archive_paths(
+            [Path(f"{s}/{self.FRAMES[0]}") for s in self.SEQUENCES],
+            self.configured, self.configured))
+        found = resolve_images_root(records, self.configured)
+        self.assertEqual(found, self.configured)
+        for entry in index_pool(pool, str(found), modality="rgb"):
+            sequence, name = entry.frame.name.split("/")
+            self.assertEqual(entry.frame.image,
+                             self.sequences / sequence / f"{name}.jpg")
+
+    def test_a_pool_without_image_rel_still_reads_the_recorded_paths(self):
+        """Most harvests write no `image_rel`. The exact pass has to stand
+        aside for them rather than answer `None`."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        for record in pool.rglob(RECORD_FILE):
+            body = json.loads(record.read_text())
+            body.pop("image_rel")
+            record.write_text(json.dumps(body))
+        self.assertEqual(resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                             self.configured),
+                         self.configured)
+
 
 class ParsePoolTest(unittest.TestCase):
     def test_the_pool_alone_is_enough(self):
@@ -584,6 +1186,42 @@ class DatasetFlagTest(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             parse("kust4k:/d/Kust4K:thermal:pool")
         self.assertIn("--pool", str(caught.exception))
+
+    def test_a_gate_change_is_a_different_index_cache(self):
+        """The gates decide which components exist, and `decompose` numbers
+        only the ones it keeps -- so an index cached under looser gates pairs
+        every instance after the first newly-rejected one with its neighbour's
+        mask. A cache key that ignores the gates makes that silent."""
+        from src.training.aerial import InstanceGates
+        from src.training.datasets import parse
+
+        loose = parse("segfly:/d/S:thermal:components", InstanceGates(min_area=8))
+        tight = parse("segfly:/d/S:thermal:components", InstanceGates(min_area=48))
+        self.assertNotEqual(loose.label, tight.label)
+        one = parse_pool("/p/hituav:/d/H:thermal:all", InstanceGates(max_area=0.9))
+        two = parse_pool("/p/hituav:/d/H:thermal:all", InstanceGates(max_area=0.25))
+        self.assertNotEqual(one.cache_name, two.cache_name)
+
+    def test_the_role_is_still_absent_from_the_cache_key(self):
+        """Re-indexing tens of thousands of frames because a pool moved from
+        train to eval would be a bill for nothing: the role picks the split, it
+        does not change a mask."""
+        from src.training.datasets import parse
+
+        self.assertEqual(parse("segfly:/d/S:thermal:components:train").label,
+                         parse("segfly:/d/S:thermal:components:all").label)
+
+    def test_a_stricter_gate_renumbers_the_components_it_keeps(self):
+        """The reason the two tests above matter, in the function itself."""
+        from src.training.aerial import SPECS, InstanceGates, decompose
+
+        semantic = np.zeros((200, 200), np.int32)
+        semantic[10:14, 10:14] = 13          # 16 px: dies under min_area 48
+        semantic[50:70, 50:80] = 13          # 600 px
+        loose = decompose(semantic, SPECS["segfly"], InstanceGates(min_area=8))[1]
+        tight = decompose(semantic, SPECS["segfly"], InstanceGates(min_area=48))[1]
+        self.assertEqual([(i.label, i.area) for i in loose], [(1, 16), (2, 600)])
+        self.assertEqual([(i.label, i.area) for i in tight], [(1, 600)])
 
     def test_decompose_refuses_the_pool_mode(self):
         from src.training.aerial import SPECS, decompose

@@ -63,6 +63,18 @@ class Schedule:
     grad_clip: float = 1.0
     ema_decay: float = 0.999
     seed: int = 0
+    # Epochs without an improvement before a stage gives up. 0 is off, and off
+    # is the default because a stage that runs its full budget is the recorded
+    # behaviour of every run before this existed.
+    #
+    # It is a safety net, not a tuning knob, and the reason is the one-cycle
+    # schedule: `total_steps` is sized from the stage's epoch budget, so the
+    # rate anneals over exactly that many steps and the best weights normally
+    # appear near the end of the descent. Stopping early leaves the rate high
+    # and the descent unfinished. So raise `epochs` to buy a longer anneal and
+    # set `patience` generously, to cut a run that has plainly stalled rather
+    # than to decide when it is done.
+    patience: int = 0
     meta: dict = field(default_factory=dict)
 
 
@@ -87,11 +99,25 @@ class Loop:
     stream: Callable
     loss: Callable
     val_loss: Callable | None = None
+    val_stream: Callable | None = None
 
     @property
     def scoring(self) -> Callable:
         """What `validate` calls: `val_loss` if a mode set one, else `loss`."""
         return self.val_loss or self.loss
+
+    @property
+    def batches(self) -> Callable:
+        """What `validate` pulls on: `val_stream` if a mode set one, else `stream`.
+
+        The same argument `val_loss` makes, one layer out. A training stream is
+        allowed to be random -- photometric augmentation collapses a window's
+        contrast on a coin flip -- and the validation number is not: it selects
+        which epoch's weights are kept, so a run whose validation windows were
+        augmented differently each epoch would be choosing on the draw as much
+        as on the model.
+        """
+        return self.val_stream or self.stream
 
 
 def _clip_stream(split: Split, batch: int, seed: int | None, limit: int | None,
@@ -111,7 +137,8 @@ CLIPS = Loop(stream=_clip_stream, loss=_clip_loss)
 
 def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
            jitter: float = 0.0,
-           generator: "torch.Generator | None" = None) -> Loop:
+           generator: "torch.Generator | None" = None,
+           augment=None) -> Loop:
     """The image-mode `Loop`, imported lazily.
 
     `image_loop` pulls in `aerial`, which pulls in nothing heavy but does bind
@@ -130,10 +157,18 @@ def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
     number is that a change in it is the model, and a random prompt would put a
     second moving part into a number that selects checkpoints. It also keeps
     the number comparable to every run taken before this knob existed.
+
+    `augment` hardens the *training* windows only -- `photometric.augmenter`
+    builds one -- and `val_stream` is deliberately the plain stream, for the
+    reason `Loop.batches` gives.
     """
     from .image_loop import image_losses, stream
 
-    return Loop(stream=stream,
+    def training_stream(*args, **kwargs):
+        return stream(*args, augment=augment, **kwargs)
+
+    return Loop(stream=training_stream if augment is not None else stream,
+                val_stream=stream,
                 loss=lambda model, batch: image_losses(
                     model, batch, anchor=anchor, anchor_weight=anchor_weight,
                     prompt=prompt, jitter=jitter, generator=generator),
@@ -157,8 +192,8 @@ def validate(
     """
     losses = []
     with torch.no_grad():
-        for batch in loop.stream(split, schedule.batch, 1, schedule.val_batches,
-                                 device, schedule.workers, schedule.depth):
+        for batch in loop.batches(split, schedule.batch, 1, schedule.val_batches,
+                                  device, schedule.workers, schedule.depth):
             with _autocast(device):
                 losses.append(float(loop.scoring(model, batch)[0]))
     return float(np.mean(losses)) if losses else float("nan")
@@ -197,9 +232,11 @@ def run_stages(
     The EMA is rebuilt per stage on purpose: it averages the trainable
     parameters, and that set changes the moment the encoder unfreezes.
     """
-    best, history = float("inf"), []
+    best, history, stopped = float("inf"), [], []
 
     for stage, epochs, rates in schedule.stages:
+        stale = 0
+        failed_nonfinite = False
         counts = freeze(model, stage)
         log(f"\n===== stage {stage!r}: {epochs} epoch(s) x "
             f"{schedule.steps_per_epoch} steps =====")
@@ -225,6 +262,22 @@ def run_stages(
             for step, batch in enumerate(stream):
                 with _autocast(device):
                     loss, terms = loop.loss(model, batch)
+                if not bool(torch.isfinite(loss).all()):
+                    # A non-finite update contaminates every later recurrent
+                    # prediction.  More epochs cannot recover from NaN weights;
+                    # the best checkpoint from an earlier finite validation is
+                    # already on disk, so stop this stage immediately instead
+                    # of burning the remainder of a Colab session.
+                    opt.zero_grad(set_to_none=True)
+                    failed_nonfinite = True
+                    stopped.append({"stage": stage, "after_epoch": epoch,
+                                    "of": epochs,
+                                    "reason": "nonfinite_train_loss",
+                                    "step": step})
+                    log(f"  stopping {stage!r}: non-finite training loss at "
+                        f"epoch {epoch}, step {step}. The last finite best "
+                        f"checkpoint is unchanged.")
+                    break
                 (loss / schedule.accum).backward()
                 if (step + 1) % schedule.accum == 0:
                     torch.nn.utils.clip_grad_norm_(trainable, schedule.grad_clip)
@@ -236,8 +289,22 @@ def run_stages(
                     stream.set_postfix(loss=f"{float(loss):.3f}",
                                        **{k: f"{v:.2f}" for k, v in terms.items()})
 
+            if failed_nonfinite:
+                break
+
             with ema.applied(model):
                 score = validate(model, val, schedule, device, loop)
+                if not np.isfinite(score):
+                    history.append({"stage": stage, "epoch": epoch,
+                                    "val_loss": score, "saved": False})
+                    failed_nonfinite = True
+                    stopped.append({"stage": stage, "after_epoch": epoch,
+                                    "of": epochs,
+                                    "reason": "nonfinite_validation_loss"})
+                    log(f"  stopping {stage!r}: validation loss is not finite "
+                        f"at epoch {epoch}. The last finite best checkpoint "
+                        f"is unchanged.")
+                    break
                 improved = score < best
                 if improved:
                     best = score
@@ -245,14 +312,23 @@ def run_stages(
                                  **schedule.meta})
             history.append({"stage": stage, "epoch": epoch, "val_loss": score,
                             "saved": improved})
+            stale = 0 if improved else stale + 1
             log(f"  epoch {epoch}: val clip loss {score:.4f}"
-                f"{'  <- saved' if improved else ''}")
+                f"{'  <- saved' if improved else f'  ({stale} without one)'}")
+            if schedule.patience and stale >= schedule.patience:
+                stopped.append({"stage": stage, "after_epoch": epoch,
+                                "of": epochs, "patience": schedule.patience})
+                log(f"  stopping {stage!r}: {stale} epoch(s) without an "
+                    f"improvement, of {epochs} budgeted. The best checkpoint "
+                    f"is already written.")
+                break
 
         del opt, sched, ema
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
 
     return {"best_val_loss": best, "history": history,
+            "patience": schedule.patience, "stopped_early": stopped,
             "batch": schedule.batch, "accum": schedule.accum,
             "steps_per_epoch": schedule.steps_per_epoch,
             "stages": [s[0] for s in schedule.stages], **schedule.meta}

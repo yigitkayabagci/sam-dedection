@@ -1,6 +1,6 @@
 # Notebooks: specialising EdgeTAM for thermal drone footage
 
-Twenty notebooks, meant for Colab. Everything they orchestrate lives in
+Thirty-four notebooks, meant for Colab. Everything they orchestrate lives in
 `src/` and `tools/` and is unit-tested without a GPU — the notebooks are the
 recipe, not the implementation.
 
@@ -21,11 +21,33 @@ recipe, not the implementation.
 | 13 | `13_rgb_mask_pool.ipynb` | an aerial-RGB mask pool: VisDrone boxes → gated teacher masks, on your Drive | **nothing** — it downloads VisDrone and Kust4K's RGB half itself; SAM 3 wants an HF token |
 | 14 | `14_thermal_mask_pool.ipynb` | the **thermal** mask pool: HIT-UAV + DroneVehicle boxes and RGBT234 masklets, with the thermal-vs-RGB-prompt route *measured* first | **nothing** — it downloads all four sets itself; SAM 3 wants an HF token |
 | 15 | `15_dronevehicle_shared_pool.ipynb` | all of DroneVehicle in four pools: the 53 % of boxes both halves annotate identically (one RGB pass, mirrored onto thermal), plus the 33 383 thermal-only and 3 797 rgb-only targets, each prompted on the half that can see them | a copy of DroneVehicle's `train.zip` in your own Drive (set `DRIVE_DIR` in cell 1); SAM 3 wants an HF token |
-| 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17 |
+| 16 | `16_vtuav_rgb_pool.ipynb` | VTUAV's **RGB** half: one box every tenth frame, prompted on the visible frame | VTUAV **RGB-T** archives in your own Drive (set `DRIVE_DIR`); runs beside 17; SAM 3 is required, there is no fallback |
 | 17 | `17_vtuav_thermal_pool.ipynb` | VTUAV's **thermal** half, on `ir.txt`'s own boxes — the two halves agree on only 12 % of rows, so neither mask serves the other | the same archives; runs beside 16 on a second runtime |
 | 18 | `18_kust4k_mask_pool.ipynb` | Kust4K's **drawn maps** turned into prompts: one SAM 3 pass on the RGB half mirrored onto thermal for the 71 % of frames both halves survive, then the 29 % the dataset marks broken — one modality corrupted, the manifests never say which — measured per frame and harvested on whichever half is still the scene | your own Kust4K upload under `MyDrive/datasets/kust4k` (zips or folders); SAM 3 is required, there is no fallback |
 | 19 | `19_thermal_stage_b_pool.ipynb` | stage B trained on the **thermal** mask pools 13-18 produced, from stock EdgeTAM with no stage A — plus a stock-vs-trained score and a before/after panel | the pools staged under `MyDrive/edgetam-pool`, and the frames they were harvested from (a pool holds masks, not pixels) |
 | 20 | `20_thermal_stage_b_pool_rgb.ipynb` | the same run with the **RGB** pools mixed into the same batches — the one variable | the same, plus the RGB pools' frames |
+| 21 | `21_pool_data_readiness.ipynb` | no training: what every pool recorded, which of its frames are on disk, why the rest are not, and the exact `--pool` flags a run would take | the pools under `MyDrive/edgetam-pool`; it fetches only what `FETCH` names |
+| 22 | `22_thermal_deep.ipynb` | thermal only, every thermal pool required to be present before a step is taken, the vehicle classes thinned, and the rate table inverted so the trunk learns the modality | the pools, plus VTUAV's archives in `MyDrive/VTUAV` (only the frames the pool names come out of them) |
+| 23 | `23_thermal_deep_lora.ipynb` | 22 with `METHOD = "lora"` and nothing else changed — the A/B for the method | the same |
+| 24 | `24_vtuav_lt_rgb_pool.ipynb` | VTUAV's **long-term** parts, RGB half, into a pool of their own (`vtuav_lt_rgb`) | the four `train_LT_*` RGB-T archives in your own Drive; SAM 3 is required, there is no fallback |
+| 25 | `25_vtuav_lt_thermal_pool.ipynb` | the same for the **thermal** half (`vtuav_lt_thermal`) — this is the one to run first if thermal masks are what you want | the same archives; runs beside 24 on a second runtime |
+| 26 | `26_segfly_instance_audit.ipynb` | real SegFly thermal/RGB/label panels, `components` vs `watershed` sensitivity, JSON evidence and optional SAM disagreement audit | **nothing** — it exports a 64-row SegFly slice; SAM check needs a GPU |
+| 27 | `27_thermal_deep_rgb_aerovis.ipynb` | 22'nin aynı uzun koşusu; RGB havuzları aynı batch'lere eklenir, AeroVIS train zorunludur ve dizi-bazlı held-out kolu ayrı RGB notu verir | 22'nin termal havuzları + `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler |
+| 28 | `28_rgb_deep_aerovis.ipynb` | 22 ile aynı uzun eğitim tarifi, fakat yalnızca RGB havuzları; AeroVIS train ve dizi-bazlı held-out kolları zorunlu, VisDrone örtüşme nedeniyle dışarıda | `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler; diğer RGB havuzları varsa eklenir |
+| 29 | `29_thermal_contrast_tracking.ipynb` | 32'nin checkpoint'ini düşük-kontrast temporal kliplerle devam eğitir; stage B / temporal / temporal+SAMURAI takip A/B'si ve düşük-kontrast alt-grup raporu üretir; 32 yoksa 22'ye fallback yapar | tercihen 32'nin `edgetam_pool_aerial_thermal_stable_512.pt` çıktısı; Anti-UAV410'u kendisi indirir ve etiketler |
+| 30 | `30_tracking_before_after_demo.ipynb` | Anti-UAV410 validation dizisinde Stage B ve 29'un seçilen final kolunu senkron before/after MP4, IoU eğrisi ve dropout ölçüleriyle gösterir; en iyi düşük-kontrast kazancının yanında en kötü gerilemeyi de üretir | 29'un Drive checkpoint'i, log'u ve validation JSON'ları; aynı runtime kullanılmazsa Anti-UAV410 arşivini yeniden indirir |
+| 31 | `31_aerial_thermal_tracking.ipynb` | Stage B'yi önce düşük-kontrast video precheck'inde ölçer, sonra VTUAV ST/LT + VTUAV-VIS + BIRDSAI kimlikleriyle temporal devam eğitir; kaynak-bazlı Stage B / temporal / temporal+SAMURAI A/B'si üretir, Anti-UAV410 varsayılan kapalıdır | tercihen 32'nin checkpoint'i; `MyDrive/VTUAV` altındaki seçilen ST/LT tracking zip'leri; `MyDrive/edgetam-pool/{vtuav_thermal,vtuav_lt_thermal}`; resmî VTUAV-VIS `train_001`; BIRDSAI gerçek gece videolarını kendisi indirir |
+| 32 | `32_aerial_thermal_stage_b_stable.ipynb` | Kullanıcının sabit 22'sine dokunmadan VTUAV-LT'yi zorunlu yapar, düşük-kontrast/polarity/gamma/noise hardening ekler; üç güvenli encoder LR profilini kısa pilotta eler ve seçilen profille kararlı Stage B üretir | 22 ile aynı statik termal kaynaklar; ayrıca `vtuav_lt_thermal` pool'unda en az 5.000 kabul edilmiş instance |
+
+| 34 | `34_pretrain_thermal_aerial.ipynb` | **termal + hava pretrain**: her termal havuz `MIN_BOX_IOU 0.75` ile tek standarda yeniden kesilir, SegFly kendi çizili haritalarıyla girer, `EPOCHS [3, 40]` — 22 ve sonrasının üstüne oturacağı temel | 22'nin havuzları, `MyDrive/VTUAV` arşivleri |
+| 35 | `35_pretrain_rgb_aerial.ipynb` | **RGB pretrain**, bilerek ayrı: AeroVIS ana kaynak (`aerovis_train` 40 000 kareye kadar) ve dizi bazlı held-out tek grade; `car`/`vehicle` 0.5 ile inceltilir, VisDrone dışarıda | `aerovis_train` / `aerovis_heldout` havuzları ve `/content/data/AeroVIS` altındaki resmî kareler |
+
+**34 ve 35 pretrain'dir, kol değil.** 19-32 tek bir değişkeni ölçen kollardır;
+bu ikisi eldeki her şeyi tek geniş temele toplar ve dar koşular onun
+checkpoint'inden başlar. Ayrı olmalarının sebebi hedefin ayrı olması: 34 asıl
+hedef olan **hava + termal** dünyayı, 35 onun yanındaki ikinci RGB modelini
+eğitir. Ayrıntı ve AeroVIS'in yol doğrulaması için
+`docs/son_degisiklikler_tr.md`.
 
 **07 to 11 are one experiment, not five notebooks.** All five are generated
 from the same source (`tools/build_notebooks.py`) and differ in a handful of
@@ -110,6 +132,113 @@ sequences** — which is what makes the scores comparable at all. 07 is the one
 to trust if you only run one: an encoder is a general feature extractor, and 14
 sequences of one campus is a narrow view of the world.
 
+**16, 17, 24 and 25 are one generator and two splits.** All four come out of
+`tools/build_vtuav_pool_notebooks.py`. 16/17 take the short-term parts, 24/25
+the long-term ones, and each writes a pool of its own — `vtuav_rgb`,
+`vtuav_thermal`, `vtuav_lt_rgb`, `vtuav_lt_thermal`. Separate pools rather than
+four archives in one list, for three reasons: a short-term pool already
+mirrored to Drive stays valid and the long-term harvest is purely additive
+(`pool_reader.discover_pools` is how 19 and 20 find their food, and it picks a
+new folder up with no edit anywhere); `aerial.split_index` stratifies per
+dataset, so the long-term sequences get their own held-out slice instead of
+being diluted into the short-term split; and the long-term parts are the ones
+with real disappearances, so a pool that keeps them apart can be weighed apart.
+
+**LT and ST are the same data.** Long-term versus short-term is about the
+*tracking task*: same sensor, same 1920×1080 registered RGB-T pairs, same
+`<sequence>/{rgb,ir}/` + `{rgb,ir}.txt` layout. Nothing in this pipeline reads
+a tracking protocol, so the split barely matters — with two exceptions it does
+have to handle. The target really leaves the frame in a long-term sequence and
+those rows are marked absent, as a zero-extent box or a NaN one, and both are
+dropped rather than handed to the teacher (`nan <= 0` is False, so testing only
+the extent used to let a not-a-number rectangle through as a prompt). And the
+stride — line k is frame 10k — was measured on `train_ST_001` and nowhere
+else; a stride assumed one too small does not fail, it labels frame 9 with
+frame 10's box and mirrors a pool of quietly wrong masks to Drive. So it is
+derived per sequence from that sequence's own frame and row counts
+(`boxes.annotated_stride`), 10 wins wherever those counts allow it (which keeps
+every short-term harvest byte-identical), and a sequence whose counts allow no
+single answer is skipped with its numbers printed. Cell 2 of all four notebooks
+is a probe that prints exactly that — per archive: sequences, frames, rows,
+implied stride, absent share — from the zip's central directory, before a byte
+is extracted.
+
+**A pool that predates the readings gets them back without a teacher.**
+`box_iou`, `area_ratio` and `component` are functions of an accepted mask and
+its box — the mask is in the store, the box is in the record — so
+`backfill_readings` recomputes them off disk, CPU only, minutes rather than
+GPU-hours. Cell 5 runs it before the gate table. Only accepted instances come
+back: a rejected one has no mask to measure, and every question worth asking
+here is about the set that was kept anyway.
+
+**The reject table names one gate per instance, which is not what the data
+says.** `reject_reason` returns the *first* gate an instance fails, in a fixed
+order, so a harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
+masks sat badly on their box — it is saying nine of the ones `teacher_iou` let
+through did, and nothing about the 2 312 it stopped first. `summarise_gates`
+re-reads the stored readings and asks each gate independently over every
+instance, then says what raising the box-IoU cut would remove from the accepted
+set at 0.5–0.9. That last table is the decision itself: the cut is applied at
+read time by `index_pool(min_box_iou=…)`, so its cost is a number to look up
+rather than a harvest to repeat.
+
+**The gate that decides is `box_iou`, and it is back at the library default.**
+Four gates stand between a teacher mask and the pool: `teacher_iou` (the
+teacher's own confidence — *measured* to be weak, +0.25 to +0.38 over-confident
+on 12–36 px targets, so it passes almost everything), `box_iou` (does the
+mask's own box agree with the annotation), `area` (mask area over box area,
+0.15–1.3, which catches a fragment and background bleed alike), and `component`
+(one object, not a mask scattered across the frame). `box_iou` is the
+load-bearing one. 16/17/24/25 had it at 0.5, inherited from 15 where that is
+argued — DroneVehicle ships oriented boxes and prompts with their axis-aligned
+envelope, about twice the object's area on a 45° vehicle, so a correct mask
+scores low against a box that was never tight. VTUAV has plain per-frame
+`x y w h` around a 77 px median target and none of that applies, so it sits at
+the 0.6 default now and 0.7 is one edit away. That edit is cheap in both
+directions: the harvest writes **all four readings** into each instance's
+record rather than only the verdict, and `index_pool(min_box_iou=…)` re-cuts on
+the stored number — upwards only, since a pool harvested at 0.6 has no record
+of what 0.5 would have kept.
+
+**Night is a question about the teacher, and it is asked with a number.** A
+promptable segmenter trained on web images reads a daylit street well and a
+frame where the target is a smear around a headlight badly — and the gates do
+not save you there: they catch a mask that has drifted off its box, not a
+plausible one drawn around glare. The structural answer is why these are pairs
+at all: each modality is prompted on **its own** pixels, so a night frame's
+thermal half is 25's business and its RGB half is 24's, and no night RGB mask
+is ever mirrored onto thermal. Every record now carries `luma` (the frame) and
+`target_luma` (inside the boxes — an aerial night frame is mostly black with
+the annotated thing under a lamp, so the frame's own mean files a well-lit
+target under "night"), and cell 5 prints acceptance bucketed by the second.
+`MIN_LUMA` drops frames whose targets fall below a threshold, **for the RGB arm
+only**: on a thermal harvest a low reading is a *cold* target, so it defaults
+to off rather than to a sensible-looking number.
+
+**Neither stage leaves the other idle.** The harvest is two costs that used to
+take turns. Unzipping is not bandwidth but seeks — `tracked_ir` keeps a
+twentieth of a 15.7 GiB part, so the read is a few thousand random seeks over a
+Drive mount, and `UNZIP_WORKERS` reads on that many threads with one zip handle
+each. Decoding used to run on the thread that then waited for the teacher: a
+1920×1080 JPEG is ~20 ms and a VTUAV frame carries **one box**, so a group of 32
+put ~0.6 s of decode in front of every batch with the card doing nothing.
+`label_pool(readers=…, read_ahead=…)` decodes ahead on its own threads — cv2
+releases the GIL, so it is real parallelism — and the bound is in frames
+because a decoded one is 6.2 MB. On a synthetic 1080p pool it takes the harvest
+from 3.07 s to 1.18 s for identical output.
+
+**No fallback teacher, in any of the four.** The load used to catch a failure
+and quietly continue on `facebook/sam2.1-hiera-large`. Those four pools are
+meant to be mixed into one training set, so a pool whose masks came from a
+different teacher than its neighbour's is a variable nobody chose and the run
+cannot see. `build_image_teacher` already fails with the gated-repo
+instructions, so an unset `HF_TOKEN` says so up front instead of costing a
+harvest that has to be thrown away.
+
+**Neither split ships a mask.** VTUAV's drawn instance masks are the separate
+VIS release, 100 sequences; the tracking download's 500 carry one `x y w h` per
+annotated frame and nothing else. That is the whole reason these four exist.
+
 **19 and 20 are the pools' first training run, and one experiment.** They are
 generated from `tools/build_stage_b_notebooks.py`, are the comment-free shape
 15–18 are, and differ in exactly one setting: 19 trains on the thermal pools,
@@ -148,6 +277,49 @@ None of them measures **tracking**, which is the metric this project is judged
 on: every score is over a single prompted frame, with no memory bank in the
 loop. A better encoder is a precondition for a better tracker, never evidence
 of one. That is stage C, and it has not started.
+
+## Taking a trained checkpoint out of Colab
+
+Every stage-B notebook mirrors its run to your Drive under
+`MyDrive/edgetam-stage-b/<RUN>/` — the checkpoint, `run.json`, `verdict.json`
+and the `score_*.json` rows behind the before/after table. That folder is
+everything; the pools and the frames stay in Colab, because inference needs
+neither.
+
+| notebook | Drive folder | checkpoint | config to run it with |
+|---|---|---|---|
+| 19 | `edgetam-stage-b/thermal` | `edgetam_pool_thermal_512.pt` | `configs/edgetam_512_pool.yaml` |
+| 20 | `edgetam-stage-b/thermal_rgb` | `edgetam_pool_thermal_rgb_512.pt` | `configs/edgetam_512_pool.yaml`, checkpoint swapped |
+| 22 | `edgetam-stage-b/thermal_deep` | `edgetam_pool_thermal_deep_512.pt` | `configs/edgetam_512_pool_deep.yaml` |
+| 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
+| 27 | `edgetam-stage-b/thermal_deep_rgb_aerovis` | `edgetam_pool_thermal_deep_rgb_aerovis_512.pt` | the same, checkpoint swapped |
+
+Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
+repository) and the config runs it. Nothing else has to change:
+`src/training/finetune.py` writes EdgeTAM's own `{"model": state_dict}` layout,
+so `build_sam2` loads it strictly, with the same 982 keys, and the exporter and
+the engine build keep working untouched. **23's LoRA is merged before the file
+is written**, so it is that same state dict and not an adapter file.
+
+**The resolution in the config is load-bearing, and getting it wrong is
+silent.** EdgeTAM holds no resolution in any parameter, so a checkpoint trained
+at 512 loads into a 768 build with identical shapes and no error anywhere —
+the only symptom is a model that quietly scores worse than it should.
+`src/checkpoint_meta.py` reads the `meta["image_size"]` every fine-tune has
+always written and prints a warning when the two disagree; it is wired into
+`src/trackers/edgetam_tracker.py` and `tools/export_edgetam_onnx.py`, the two
+places a mismatch reaches a measurement. Take the "did the training help"
+number at the training size, against stock weights at that same size.
+`configs/edgetam_768_pool_deep.yaml` exists to run the 512 checkpoint at 768
+deliberately, and says in its own header what that does and does not measure.
+
+**On TensorRT the checkpoint is not a runtime choice.** Weights are traced into
+the ONNX graphs and baked into the engines, so a new checkpoint means a new
+export into its own directory — `models512_pool_deep/`, not `models512/`.
+`configs/edgetam_trt_512_pool_deep.yaml` and its 768 twin carry the four
+commands. `check_trt_parity.py` will not catch a wrong checkpoint or a wrong
+size: it compares the engine against the PyTorch module built the same way, so
+both are wrong together and it passes.
 
 ## Three things to know before starting
 
@@ -218,6 +390,8 @@ Each is argued where it is made; this is the index.
 | a pool's inset is applied when the image is read, and nowhere else | `aerial.image_origin` | DroneVehicle's 100 px band was cut before the teacher looked, so the boxes, the masks and the frame size are all the inset frame's and only the JPEG is not |
 | a pool defaults to `role=train` | `pool_reader.parse_pool` | its masks are a teacher's guess gated four ways, so scoring on them measures the teacher — the same argument `split_index` makes for reconstructed semantic sets |
 | the batch is measured up to 512, and the rate scales with it | 19, 20, `tools/train_encoder.py` | image mode holds no clip length and no memory bank, so it fits far more than the video path; `--steps` is fixed, so a bigger batch puts more samples behind the same number of updates |
+| large-batch LR scaling is not trusted for the final thermal run | 32, `thermal_deep/run.json` | the recorded batch-128/scale-4 run improved at head-only, then encoder validation jumped from 0.2723 to 21.84 and NaN; 32 fixes scale at 1 and pilots discriminative LRs before the full cycle |
+| Stage C starts with a necessity audit | 31 | two low-contrast validation tracks per aerial source expose State Accuracy, lost-frame rate and longest dropout before expensive video training |
 
 ## Verifying without Colab
 

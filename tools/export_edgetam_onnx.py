@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.checkpoint_meta import warn_size_mismatch  # noqa: E402
 from src.trackers._hydra_overrides import image_size_overrides  # noqa: E402
 from tools.edgetam_graphs import (  # noqa: E402
     ImageEncoderGraph,
@@ -407,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
 
     size_note = f" at image_size={args.image_size}" if args.image_size else ""
     print(f">> Building EdgeTAM from {checkpoint or '<random weights>'}{size_note}")
+    # This is the point of no return for a resolution mismatch: whatever the
+    # checkpoint holds is traced into the ONNX graphs here and baked into the
+    # engines built from them, so a 512-trained checkpoint exported at 768
+    # produces engines nothing downstream can tell apart from correct ones.
+    warn_size_mismatch(checkpoint, args.image_size)
     model = build_model(checkpoint, args.model_cfg, image_size=args.image_size)
     layout = MemoryLayout.from_model(model, ptr_tokens=args.max_ptr_tokens)
     print(f">> Memory layout: {layout}")

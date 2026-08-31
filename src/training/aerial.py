@@ -749,6 +749,87 @@ def _allocate(total: int, fractions: SequenceABC[float]) -> list[int]:
     return counts
 
 
+def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
+              seed: int = 0) -> tuple[list[FrameIndex], dict]:
+    """`index` with over-represented classes thinned, and what that cost.
+
+    A pool built from vehicle datasets is mostly vehicles: DroneVehicle alone
+    contributes 155 000 instances and nearly all of them are cars. An encoder
+    trained on that learns "a target is a car" as surely as it learns thermal,
+    and the classes that make the set *general* -- pedestrians, bicycles,
+    animals -- are outvoted before the first step.
+
+    Thinning is per instance rather than per frame, because dropping a frame
+    that holds one pedestrian beside six cars would throw the pedestrian away
+    too. A frame left with nothing is dropped; every other frame keeps its
+    remaining instances and its window budget, so a thinned set still teaches
+    the same scenes.
+
+    The keep decision is a hash of the frame's identity and the instance's own
+    label rather than a draw from a stream, so it does not depend on order, on
+    how many workers built the index, or on anything else being rebalanced
+    first -- the same weights give the same set every time.
+
+    A weight is keyed by class name, by source, or by both -- `"car"`,
+    `"pool/dronevehicle_thermal"` (or just `"dronevehicle_thermal"`), or
+    `"pool/dronevehicle_thermal:car"`. Class alone is the wrong handle when
+    one dataset supplies most of a class: DroneVehicle carries twelve vehicles
+    a frame and Kaggle's thermal set carries a few, and thinning `car`
+    everywhere to reach the first also empties the second. Most specific wins
+    and nothing compounds, so each entry is one statement rather than a factor
+    in a product.
+    """
+    import hashlib
+
+    kept: list[FrameIndex] = []
+    before: dict[str, int] = {}
+    after: dict[str, int] = {}
+    by_source: dict[str, tuple[int, int]] = {}
+    used: set[str] = set()
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        source = spec.name if spec is not None else "?"
+        short = source.split("/", 1)[1] if source.startswith("pool/") else source
+        survivors = []
+        for instance in entry.instances:
+            name = (spec.name_of(instance.class_id) if spec is not None
+                    else str(instance.class_id))
+            before[name] = before.get(name, 0) + 1
+            # Most specific wins, and nothing compounds: a source weight
+            # *replaces* a class weight for that source rather than
+            # multiplying it, so two entries can be reasoned about one at a
+            # time instead of as a product.
+            key = next((k for k in (f"{source}:{name}", f"{short}:{name}",
+                                    source, short, name) if k in weights), None)
+            weight = 1.0 if key is None else float(weights[key])
+            if key is not None:
+                used.add(key)
+            if weight < 1.0:
+                digest = hashlib.blake2b(
+                    f"{entry.source.name if entry.source else ''}"
+                    f"|{entry.frame.name}|{instance.label}|{seed}".encode(),
+                    digest_size=8).digest()
+                if int.from_bytes(digest, "big") / 2 ** 64 >= weight:
+                    continue
+            survivors.append(instance)
+            after[name] = after.get(name, 0) + 1
+        was, now = by_source.get(source, (0, 0))
+        by_source[source] = (was + len(entry.instances), now + len(survivors))
+        if survivors:
+            kept.append(replace(entry, instances=tuple(survivors)))
+    report = {
+        "frames": {"before": len(index), "after": len(kept)},
+        "instances": {"before": sum(before.values()),
+                      "after": sum(after.values())},
+        "by_class": {name: (count, after.get(name, 0))
+                     for name, count in sorted(before.items(),
+                                               key=lambda kv: -kv[1])},
+        "by_source": dict(sorted(by_source.items(), key=lambda kv: -kv[1][0])),
+        "unmatched": sorted(set(weights) - used),
+    }
+    return kept, report
+
+
 def save_splits(path: str | Path,
                 splits: Mapping[str, SequenceABC[FrameIndex]]) -> Path:
     """Which frames each split holds, as `source -> [frame key]`.
@@ -941,6 +1022,21 @@ class InstanceGates:
     min_side: int = 4
     max_area: float = 0.9
     fill: float = 0.25
+
+
+def gates_tag(gates: InstanceGates | None = None) -> str:
+    """A short fingerprint of the gates, for an index cache's filename.
+
+    Not cosmetic. `decompose` numbers the components it *keeps*, so a gate that
+    starts rejecting one component renumbers every instance after it -- and
+    `sample_masks` decomposes again at training time with whatever gates the
+    run now holds. An index cached under looser gates therefore pairs each
+    instance with the next one's mask, silently, and the only clue is a run
+    that trains on nonsense. Keying the cache by the gates makes that a cache
+    miss and a re-index instead.
+    """
+    g = gates or InstanceGates()
+    return f"a{g.min_area:g}s{g.min_side:g}x{g.max_area:g}f{g.fill:g}"
 
 
 @dataclass(frozen=True)
@@ -1625,6 +1721,6 @@ __all__ = [
     "list_frames", "list_pairs", "split_bridges", "image_origin", "pool_masks",
     "load_image", "load_index", "normalise", "probe_classes", "read_mask",
     "reject_reason", "replace", "sample_masks", "sample_windows", "save_index",
-    "apply_splits", "save_splits",
+    "apply_splits", "rebalance", "save_splits",
     "split_frames", "split_index", "summarise", "windows_for",
 ]

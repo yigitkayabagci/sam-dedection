@@ -1,0 +1,122 @@
+# Thermal at native size, with every inference-time layer this repo added on.
+#
+# This is the config to point at 640x512 thermal footage. `edgetam_768_samurai`
+# carries the same three layers but at 768, and its own header says why that is
+# the wrong choice here: 768 is for footage that carries the detail -- 720p and
+# better -- and on a 640x512 sensor it spends the whole encoder budget
+# upsampling pixels the camera never measured. 512 is native, and
+# `src/trackers/adaptive.py` is the cheaper way to magnify a small target when
+# one is needed.
+#
+# WHAT IS ON HERE, AND WHICH FAILURE EACH ONE ANSWERS. All three are
+# training-free: they change nothing about the checkpoint and can be measured
+# against stock EdgeTAM today.
+#
+#   samurai      the target is lost after a low-contrast frame and never comes
+#                back. EdgeTAM's memory bank is the mechanism: when
+#                `object_score_logits` goes negative it writes a constant "no
+#                object" vector instead of an appearance, the next frames read
+#                that back, and the box that returns covers a field. The memory
+#                gate refuses to write a frame all three signals call bad.
+#
+#   ego_motion   the camera slides with the track. SAMURAI's Kalman filter
+#                lives in image coordinates with no term for the camera's own
+#                motion, so on a drone a degree of yaw reads as the target
+#                accelerating -- and the filter then *scores* candidate masks
+#                with that error, so it does not stay inside the filter. This
+#                measures the background's displacement and hands it in as a
+#                control input.
+#
+#   guard        the box balloons over a field, or jumps. Plausibility gates on
+#                area, aspect and distance travelled -- distance measured after
+#                the background's motion is removed, which is why `ego_motion`
+#                is on above -- plus hysteresis so one blurred frame is not a
+#                loss, and template re-acquisition around where the target went
+#                missing.
+#
+# `checkpoint` is stock EdgeTAM on purpose: point it at a stage-B output when
+# you have one, and the same three layers apply unchanged. Nothing here is
+# trained, so the before/after of this config against `edgetam_512.yaml` is a
+# clean measurement of what the classical layers alone are worth.
+model_cfg: configs/edgetam.yaml
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+image_size: 512
+device: cuda
+precision: bfloat16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+samurai:
+  enabled: true
+  kf_weight: 0.15
+  stable_frames: 15
+  stable_iou: 0.3
+  # memory_obj_score: 0.0 is exactly the threshold at which EdgeTAM starts
+  # writing no_obj_ptr, which is the failure above.
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0
+
+ego_motion:
+  # 2, not 4, and the reason is the guard rather than the flow: the
+  # stabiliser reads its frames from the same `FrameMotion`, so this is
+  # the resolution its template match re-acquires a lost track at. At 4 a
+  # 512-pixel input is judged on a 128-pixel frame, where a 20-pixel
+  # target is 5 across -- enough for a flow field, thin for a template.
+  # A config with `samurai` but no `guard` can keep 4; this one cannot.
+  reduce: 2
+
+guard:
+  enabled: true
+  max_area_ratio: 3.0
+  min_area_ratio: 0.3
+  max_aspect_ratio: 2.5
+  max_jump: 2.5
+  max_frame_share: 0.25
+  suspect_frames: 3
+  recover_frames: 2
+  history: 12
+  search_scale: 2.0
+  search_growth: 1.4
+  search_max: 8.0
+  match_threshold: 0.45
+  give_up_after: 90
+  # Thermal is where this earns its place. HIT-UAV's own annotations put the
+  # median target at a signal-to-clutter ratio of 0.91 -- 53 % of its targets
+  # sit *below* 1 -- so on this footage the tracker is in the regime it is
+  # known to fail in most of the time, not occasionally. Below this ratio the
+  # gates tighten by `caution_factor` for that frame. The gates tighten; the
+  # pixels are not touched. CLAHE and top-hat were measured first and rejected:
+  # both scale the target's signal and the ground's clutter together and leave
+  # the ratio where it was.
+  caution_below: 1.0
+  caution_factor: 0.6
+  # Re-acquisition correlates a band-passed frame, cut to the target's own
+  # scale, rather than the raw pixels. Measured, not assumed: a box around a
+  # faint thermal target is mostly the ground under it, so normalised
+  # cross-correlation finds the ground -- on a synthetic bench of low-contrast
+  # cases the raw matcher put the peak on the target 0 times out of 36 and
+  # scored 0.64 at the template's *old* position against 0.17 at the target's
+  # new one. Band-passing takes that to 20/36 at 5 levels of lift and 35/36 at
+  # 8, and never scores worse where the raw matcher already worked -- it is an
+  # improvement, not a cure: at 3 levels it still reaches only 11/36. CLAHE and
+  # a top-hat were tried on the same bench first and moved it 0/36 -> 5/36:
+  # they lift the target and the clutter beside it together, so the template
+  # stays mostly ground. The scale separation is the mechanism, not the
+  # contrast stretch. 0 turns it off.
+  match_bandpass: 0.55
+  # A target crossing a canopy is the same brightness as the canopy, and its
+  # clutter is tree crowns at its own size -- so nothing separates it by
+  # brightness or by scale. What still differs is that the canopy does not move
+  # and it does. Compensating the camera's own displacement and differencing
+  # three frames finds it: on a canopy bench with the target 2 grey levels off
+  # the trees, raw correlation re-acquired 1/16, CLAHE 0/16, band-passed 4/16,
+  # a two-frame difference 8/16 (it cannot tell the place the target left from
+  # the place it arrived) and three frames 15/16. Where the target does stand
+  # out, appearance is 16/16 and this ties, so it is asked first only below
+  # `caution_below` -- the frames appearance is known to fail on.
+  reacquire_motion: true
+  # How far a residual peak must stand over its own search region, as a ratio,
+  # before it is believed.
+  motion_threshold: 0.6

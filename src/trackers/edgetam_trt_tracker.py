@@ -89,6 +89,8 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         calibration_stride: int = 1,
         samurai: dict | None = None,
         sam2long: dict | None = None,
+        ego_motion: bool | dict | None = None,
+        guard: dict | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -101,6 +103,13 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             image_size=image_size,
             samurai=samurai,
             sam2long=sam2long,
+            ego_motion=ego_motion,
+            # The guard is pure numpy over the decoded frames and never touches
+            # an engine, so it applies here exactly as it does in PyTorch --
+            # `propagate` is inherited and is where it runs. Without this the
+            # base class would still support it and a `guard:` block in a TRT
+            # config would be a TypeError at construction.
+            guard=guard,
         )
         self.engine_paths = {
             # `engine_path` is the pre-multi-engine config key for the image encoder.
@@ -208,7 +217,34 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             + (", ".join(accelerated) if accelerated else "none")
             + (f" | CUDA graphs: {'on' if self.use_cuda_graph else 'off'}")
         )
+        # Which weights are actually running. The line above says how much of
+        # the model is on TensorRT; it does not say *whose* weights those
+        # engines hold, and nothing else in the run does either -- a config
+        # names a checkpoint and an engine directory, but the engines are what
+        # execute, and their weights were baked in at export time. Two engine
+        # sets built from different checkpoints are indistinguishable from
+        # their behaviour alone, so the provenance is printed rather than
+        # inferred.
+        print(f"[edgetam_trt] weights: {self._weights_summary()}")
         self._patched = True
+
+    def _weights_summary(self) -> str:
+        """Where the loaded engines came from, and the checkpoint beside them.
+
+        The checkpoint matters even when every module is on TensorRT: the
+        memory bookkeeping never left PyTorch, and any module without an engine
+        runs from it.
+        """
+        loaded = [Path(self.engine_paths[n]) for n in sorted(self._engines)]
+        parents = {p.parent for p in loaded}
+        if not loaded:
+            where = "no engines (PyTorch only)"
+        elif len(parents) == 1:
+            where = f"engines from {parents.pop()}/"
+        else:
+            where = "engines from " + ", ".join(
+                f"{p.name} <- {p.parent}/" for p in loaded)
+        return f"{where} | checkpoint {self.checkpoint}"
 
     def _patch_image_encoder(self, engine) -> None:
         predictor = self._predictor
@@ -556,6 +592,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         self._apply_fill_hole_policy()
         self._load_engines()
         self._start_calibration()
+        self._open_frames(frames_dir)
         # Before patching: `install` wraps the mask decoder, which the sam_head
         # engine replaces. When that engine is present `_reselect` applies the
         # same policy at the engine's boundary instead; when it is not, the

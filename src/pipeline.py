@@ -23,7 +23,9 @@ from .io_utils import (
     read_first_frame_dir,
 )
 from .io_utils.video import read_metadata
-from .metrics import format_benchmark_note, fps_summary, write_latency_chart, write_stage_chart
+from .metrics import (format_benchmark_note, fps_summary, track_geometry,
+                      write_latency_chart, write_stage_chart,
+                      write_track_chart)
 from .prompts import PromptSet
 from .trackers import VideoTracker
 from .visualize import overlay_masks
@@ -113,6 +115,34 @@ def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None,
         return False
     state["images"] = _LazyFrames(paths, predictor.image_size, timer, view, read_timer)
     return True
+
+
+def _require_realtime_preprocess(tracker, paths, timer, view=None,
+                                 read_timer=None) -> bool:
+    """Install the lazy per-frame decode, and say so loudly when it did not.
+
+    The two callers on the frame path used to discard this answer. A False is
+    not a fallback: `init_state`'s bulk load has then already paid the decode
+    for every frame *before* the timer starts, so the run still finishes and
+    still prints an FPS -- one with the per-frame preprocessing cost missing
+    from it, which is higher than the configuration can sustain and looks like
+    a result rather than a fault.
+
+    The cause is always the same shape: the directory the tracker indexed and
+    the list this holds are different lengths. `_clear_staged` removes the one
+    way a reusable `--frames-cache` causes that; this catches whatever else
+    does, instead of letting it through as a number.
+    """
+    if _install_realtime_preprocess(tracker, paths, timer, view, read_timer):
+        return True
+    state = getattr(tracker, "_state", None) or {}
+    indexed = len(state.get("images", ()))
+    print(f"!! per-frame preprocessing not installed: the tracker indexed "
+          f"{indexed} frame(s) and this run holds {len(list(paths))}. Every "
+          f"decode happened up front in init_state, so the FPS below EXCLUDES "
+          f"it and is not comparable with other runs. Do not record this "
+          f"number; find the mismatch first.")
+    return False
 
 
 class _LazyVideoFrames:
@@ -362,6 +392,32 @@ def _source_frame_count(per_frame_dt: list[float], stride: int, meta) -> int:
     return n * stride
 
 
+def _clear_staged(cache_root: Path) -> int:
+    """Remove frames a previous run staged here, and say how many there were.
+
+    `init_state` indexes **the directory**, not the list the caller is holding,
+    so a cache that outlives one run has to be emptied before the next stages
+    into it. A temp directory made per run could not have stale frames in it;
+    a `--frames-cache` on a real disk can, and the way it goes wrong is silent
+    and specifically ruins the measurement:
+
+    `_install_realtime_preprocess` refuses when `len(paths) != len(images)` and
+    returns False without raising. The lazy per-frame decode is then never
+    installed, `init_state`'s bulk load has already done that work up front,
+    and the per-frame preprocessing cost disappears from the timed region. The
+    run reports a *higher* FPS than the configuration can really sustain --
+    a number that looks like a result.
+
+    So this is not tidiness. Only the exact staging pattern is touched, never
+    anything else the directory happens to hold.
+    """
+    stale = [p for p in cache_root.glob("*.jpg")
+             if len(p.stem) == 5 and p.stem.isdigit()]
+    for path in stale:
+        path.unlink()
+    return len(stale)
+
+
 def _tracked_cache(cache_root: Path, keep: list[Path]) -> Path:
     """A directory holding just `keep`, renumbered 00000.jpg, 00001.jpg, ...
 
@@ -448,6 +504,11 @@ class PipelineConfig:
     # Per-frame breakdown: preprocess (decode + resize to model input), model
     # inference, postprocess (masks back to source resolution).
     stage_chart: Path | None = None
+    # What the tracker returned, frame by frame: how much of the frame the mask
+    # covers and how far its centre moved. The chart for footage with no ground
+    # truth -- which is every real recording -- and where the balloon and the
+    # skip are visible without one.
+    track_chart: Path | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -460,6 +521,100 @@ def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
         model_size=model_size,
         batch=objects,
     )
+
+
+class _TrackWatch:
+    """Per-frame mask geometry, collected as the loop runs.
+
+    Cheap on purpose: one boolean OR and one `nonzero` over masks that are
+    already in memory, and nothing at all when no chart was asked for -- this
+    sits inside the timed region, so it must not show up in a frame budget.
+    """
+
+    def __init__(self, wanted: bool) -> None:
+        self.wanted = wanted
+        self.shares: list[float] = []
+        self.centres: list[tuple[float, float] | None] = []
+
+    def see(self, result) -> None:
+        if not self.wanted:
+            return
+        share, centre = track_geometry(getattr(result, "masks", None))
+        self.shares.append(share)
+        self.centres.append(centre)
+
+    def write(self, cfg: PipelineConfig, tracker) -> None:
+        if not self.wanted or cfg.track_chart is None:
+            return
+        verdicts = getattr(tracker, "verdicts", None)
+        states = None
+        if verdicts:
+            states = {int(frame): getattr(next(iter(per_object.values())), "state",
+                                          None)
+                      for frame, per_object in verdicts.items() if per_object}
+        elif getattr(tracker, "guard_config", None) is not None:
+            states = {}
+        out = write_track_chart(self.shares, self.centres, cfg.track_chart,
+                                verdicts=states,
+                                label=getattr(tracker, "name", None))
+        if out:
+            print(f"[pipeline] wrote track chart -> {out}")
+        self.summarise(cfg)
+
+    def summarise(self, cfg: PipelineConfig) -> None:
+        """The same two curves as four numbers, beside the chart.
+
+        Footage off a drone has no drawn answer, so there is no IoU to report
+        and no way to rank two runs automatically -- which leaves a reader with
+        several folders of video and nothing to compare. These are what can be
+        computed from the tracker's own output alone, and they are the two
+        failures this project is about:
+
+            held / lost   frames the tracker returned a mask for, and the
+                          longest unbroken run of frames it returned nothing.
+                          A guard reports a refusal as an empty mask, so this
+                          counts refusals as lost on purpose: a mask covering a
+                          field is not a frame held.
+            share         how much of the frame the mask covered. The median is
+                          the target; the maximum is the balloon.
+            jumps         frames whose centre moved more than a target's own
+                          width, which is the skip.
+
+        None of it says a run was *right*. It says which runs behaved like a
+        tracker holding one small object and which did not, which is the
+        question three policies beside each other are there to answer.
+        """
+        import json
+
+        if not self.wanted or cfg.track_chart is None or not self.shares:
+            return
+        shares = np.asarray(self.shares, dtype=float)
+        held = shares > 0.0
+        longest, run = 0, 0
+        for value in held:
+            run = 0 if value else run + 1
+            longest = max(longest, run)
+        jumps = 0
+        for before, after in zip(self.centres, self.centres[1:]):
+            if before is None or after is None:
+                continue
+            step = ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5
+            # A target's own width is the natural unit, and the mask's area is
+            # the only measure of it here.
+            width = max(float(np.sqrt(shares[shares > 0].mean())) * 100.0, 1.0)
+            jumps += int(step > width)
+        path = Path(cfg.track_chart).with_suffix(".json")
+        path.write_text(json.dumps({
+            "frames": int(shares.size),
+            "held": int(held.sum()),
+            "lost": int((~held).sum()),
+            "longest_gap": int(longest),
+            "share_median": round(float(np.median(shares[held])) if held.any() else 0.0, 5),
+            "share_max": round(float(shares.max()), 5),
+            "jumps": int(jumps),
+        }, indent=2) + "\n")
+        print(f"[pipeline] held {int(held.sum())}/{shares.size} frames, "
+              f"longest gap {longest}, max share {shares.max():.1%} -> {path}")
 
 
 def _report_timing(
@@ -684,6 +839,11 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
 
     cache_root = Path(cfg.frames_cache) if cfg.frames_cache else Path(tempfile.mkdtemp(prefix="frames_"))
     cache_root.mkdir(parents=True, exist_ok=True)
+    if cfg.frames_cache:
+        dropped = _clear_staged(cache_root)
+        if dropped:
+            print(f"[pipeline] cleared {dropped} frame(s) staged by an earlier "
+                  f"run in {cache_root}")
     try:
         for idx, src in enumerate(tqdm(tracked, desc="transcoding", unit="frame")):
             rgb = view(load_frame_rgb8(src))
@@ -703,13 +863,15 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
-        _install_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
+        _require_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
 
+        watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [frames]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
+                watch.see(result)
                 per_frame_dt.append(_split_frame(
                     t1 - t0, preprocess_s, post_s, read_s,
                     pre_ms, infer_ms, post_ms, read_ms))
@@ -731,6 +893,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
+        watch.write(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
@@ -762,12 +925,14 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
               "for mp4 mode -- decode+resize cost will be folded into 'inference' "
               "rather than reported as 'pre'. Total frame time is still correct.")
     cursor = 0
+    watch = _TrackWatch(cfg.track_chart is not None)
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
+                watch.see(result)
                 per_frame_dt.append(_split_frame(
                     t1 - t0, preprocess_s, post_s, read_s,
                     pre_ms, infer_ms, post_ms, read_ms))
@@ -793,7 +958,8 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
         tracker.reset()
 
     _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
-                       post_ms, encode_ms, read_ms)
+                   post_ms, encode_ms, read_ms)
+    watch.write(cfg, tracker)
     return Path(cfg.output_path).resolve() if cfg.output_path else None
 
 
@@ -819,13 +985,15 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
-        _install_realtime_preprocess(tracker, tracked, preprocess_s,
+        _require_realtime_preprocess(tracker, tracked, preprocess_s,
                                      read_timer=read_s)
+        watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [jpg]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
+                watch.see(result)
                 per_frame_dt.append(_split_frame(
                     t1 - t0, preprocess_s, post_s, read_s,
                     pre_ms, infer_ms, post_ms, read_ms))
@@ -844,6 +1012,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
+        watch.write(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()

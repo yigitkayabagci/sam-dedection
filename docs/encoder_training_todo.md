@@ -243,6 +243,14 @@ bir arabaya değen bir insan böylece iki örnek kalıyor.
   iki kaynağı tek arayüzden okuyor. Harcamadan önce ölçü var: `--calibrate`,
   VIS bölümünün **çizilmiş** maskelerine karşı masklet IoU'sunu basıyor.
   Ayrıntı `docs/encoder_mimari.md` sonu ve `docs/encoder_arastirma.md` §8.
+  **Arşivi bütün açmak şart** (`--frames all`): `masklets.find_sequences`
+  konum ile kare numarasını bir tutuyor (depo kare numarasıyla anahtarlanıyor,
+  `calibrate` de çizilmiş PNG'nin adındaki sayıyla arıyor), o yüzden `tracked_*`
+  ya da `masked` ile açılmış — kareleri 10'ar/30'ar atlayan — bir ağacı artık
+  **okumayı reddediyor**. Havuz defterlerinin (16/17/24/25) `tracked_*`
+  çıkarımı masklet'e yaramaz; bu ikisi ayrı çıkarım istiyor. Aşama C'nin
+  gerçek işi burada: konum ile kare numarasını `VideoSequence` içinde ayırmak,
+  ki 1/10 örneklenmiş bir ağaç da masklet üretebilsin.
 - `clip_loop.py` hazır: teacher forcing yok, model kendi yazdığı hafızayı
   okuyor — düzeltilmek istenen hata modunun tam olarak ortaya çıkacağı
   kurulum.

@@ -31,6 +31,7 @@ from src.training.boxes import (  # noqa: E402
     BIRDSAI_SPECIES,
     DRONEVEHICLE_ALIASES,
     dronevehicle_only_frames,
+    annotated_stride,
     vtuav_frames,
     dronevehicle_shared_frames,
     VISDRONE_NAMES,
@@ -64,7 +65,19 @@ from src.training.pool import (  # noqa: E402
     label_boxes,
     label_many,
     calibration_table,
+    backfill_readings,
+    SIZE_EDGES,
+    _size_bucket,
+    gate_report,
     label_pool,
+    luma,
+    luma_report,
+    ordered_map,
+    read_workers,
+    summarise_gates,
+    size_names,
+    summarise_luma,
+    target_luma,
     modality_agreement,
     pool_report,
     summarise_pool,
@@ -72,6 +85,7 @@ from src.training.pool import (  # noqa: E402
 )
 from tools.fetch_datasets import (  # noqa: E402
     RECIPES,
+    extract,
     staged,
     stream_extract,
     tracked_members,
@@ -471,6 +485,417 @@ class TestProbes(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_CV2, "labelling decodes real image files")
+class TestGateReport(unittest.TestCase):
+    """`reject_reason` names one gate; the data has four opinions."""
+
+    def frames(self, tmp: Path, count: int = 3) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def rewrite(self, root: Path, rows) -> None:
+        """Put chosen readings on the first frame's instances."""
+        path = root / "pool" / "toy" / "img0" / RECORD_FILE
+        record = json.loads(path.read_text())
+        for instance, values in zip(record["instances"], rows):
+            instance.update(values)
+        path.write_text(json.dumps(record))
+
+    def test_a_fresh_harvest_writes_all_four_readings(self):
+        """The regression this class exists for.
+
+        `label_many` measured all four and `write` copied two of them into the
+        record, so every pool built so far can answer for `teacher_iou` and for
+        nothing else -- which is the one gate whose reading the same module's
+        docstring calls weak. The symptom was a gate table reading 100 % "not
+        recorded" on a pool harvested by the code that was supposed to record
+        them.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            record = json.loads(
+                (root / "pool" / "toy" / "img0" / RECORD_FILE).read_text())
+            for instance in record["instances"]:
+                for name in ("teacher_iou", "box_iou", "area_ratio",
+                             "component", "verdict"):
+                    self.assertIn(name, instance)
+
+    def test_a_gate_hidden_behind_an_earlier_one_is_still_counted(self):
+        """The reading that made this worth storing.
+
+        A harvest reporting `teacher_iou 2312, box_iou 9` is not saying nine
+        masks sat badly on their box. It is saying nine of the ones teacher_iou
+        let through did, and nothing at all about the 2 312 it stopped first.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.2, "box_iou": 0.1, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": "teacher_iou"},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None}])
+            fails = gate_report(root / "pool")["datasets"]["toy"]["fails"]
+            self.assertEqual(fails["teacher_iou"], 1)
+            self.assertEqual(fails["box_iou"], 1, "hidden behind teacher_iou")
+
+    def test_the_cut_is_broken_down_per_class(self):
+        """A threshold is a class filter nobody chose.
+
+        `box_iou` asks whether the mask covers the box's extent, and what fails
+        to is the partly-hidden target and the ragged silhouette -- neither of
+        which falls evenly across a pool that is half one class. A cut that
+        looks like "-16 %" in total can be "-45 % of pedestrians" underneath.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.99, "box_iou": 0.65, "area_ratio": 0.42,
+                 "component": 1.0, "verdict": None},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.88,
+                 "component": 1.0, "verdict": None}])
+            classes = gate_report(root / "pool")["datasets"]["toy"]["classes"]
+            self.assertEqual(classes["car"]["accepted"], 1)
+            self.assertEqual(classes["car"]["below"][0.7], 1)
+            self.assertEqual(classes["pedestrian"]["below"][0.7], 0)
+            self.assertAlmostEqual(classes["car"]["area_ratio"], 0.42, places=3)
+            table = summarise_gates(root / "pool")
+            self.assertIn("mean area_ratio", table)
+            self.assertIn("left at 0.7", table)
+
+    def test_the_cut_is_broken_down_by_target_size(self):
+        """The axis a box-IoU threshold is least neutral on.
+
+        A few pixels of slack between a 20 px object and the rectangle drawn
+        round it costs far more IoU than the same slack round a 200 px one. So
+        a cut can be class-neutral and still be a small-target filter -- and
+        small targets are the axis this project is judged on.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"box_iou": 0.95, "area_ratio": 0.7, "component": 1.0,
+                 "teacher_iou": 0.99, "verdict": None},
+                {"box_iou": 0.62, "area_ratio": 0.7, "component": 1.0,
+                 "teacher_iou": 0.99, "verdict": None}])
+            sizes = gate_report(root / "pool")["datasets"]["toy"]["sizes"]
+            # The fixture's boxes are 60x20 (sqrt 34.6) and 10x5 (sqrt 7.1).
+            small = sizes[_size_bucket(7.1)]
+            large = sizes[_size_bucket(34.6)]
+            self.assertEqual(small["accepted"], 1)
+            self.assertEqual(large["accepted"], 1)
+            self.assertEqual(small["below"][0.8], 1, "the small one is cut")
+            self.assertEqual(large["below"][0.8], 0)
+            self.assertIn("target sqrt(area) px",
+                          summarise_gates(root / "pool"))
+
+    def test_the_size_buckets_cover_every_side_they_are_given(self):
+        self.assertEqual(_size_bucket(0.0), 0)
+        self.assertEqual(_size_bucket(10 ** 6), len(SIZE_EDGES))
+        self.assertEqual(len(size_names()), len(SIZE_EDGES) + 1)
+
+    def test_it_says_what_a_stricter_cut_would_cost_the_accepted_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.99, "box_iou": 0.65, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None},
+                {"teacher_iou": 0.99, "box_iou": 0.95, "area_ratio": 0.5,
+                 "component": 1.0, "verdict": None}])
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["accepted"], 2)
+            self.assertEqual(entry["accepted_below"][0.6], 0)
+            self.assertEqual(entry["accepted_below"][0.7], 1)
+            self.assertEqual(entry["accepted_below"][0.9], 1)
+            table = summarise_gates(root / "pool")
+            self.assertIn("box_iou", table)
+            self.assertIn("toy", table)
+
+    def strip(self, root: Path, *names: str) -> Path:
+        """A record the way a harvest of an older vintage wrote it."""
+        path = root / "pool" / "toy" / "img0" / RECORD_FILE
+        record = json.loads(path.read_text())
+        for instance in record["instances"]:
+            for name in names:
+                instance.pop(name, None)
+        path.write_text(json.dumps(record))
+        return path
+
+    def test_each_reading_is_counted_apart_from_the_others(self):
+        """Pools are not all of one vintage.
+
+        `teacher_iou` has been stored since the first harvest and the other
+        three only since the readings were kept, so an older pool can answer
+        for one gate and not the rest. Reading a record all-or-nothing reported
+        100 % "not recorded" on a pool that could in fact answer for the gate
+        doing all of the rejecting.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.rewrite(root, [
+                {"teacher_iou": 0.2, "verdict": "teacher_iou"},
+                {"teacher_iou": 0.99, "verdict": None}])
+            self.strip(root, "box_iou", "area_ratio", "component")
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["fails"]["teacher_iou"], 1)
+            self.assertEqual(entry["missing"]["teacher_iou"], 0)
+            self.assertEqual(entry["missing"]["box_iou"], 2)
+            self.assertEqual(entry["accepted_scored"], 0)
+            self.assertIn("backfill_readings", summarise_gates(root / "pool"))
+
+    def test_the_missing_readings_come_back_off_the_stored_masks(self):
+        """No teacher, no GPU: the numbers are functions of mask and box.
+
+        Re-harvesting to recover them would be GPU-hours to recompute what is
+        already on disk -- and the stored full-frame mask gives exactly what
+        the harvest computed on the crop, because all three are either a ratio
+        of areas or a comparison of two boxes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            before = json.loads(
+                (root / "pool" / "toy" / "img0" / RECORD_FILE).read_text())
+            self.strip(root, "box_iou", "area_ratio", "component")
+
+            counts = backfill_readings(root / "pool")
+            self.assertEqual(counts["filled"], 2)
+            self.assertEqual(counts["written"], 1)
+            after = json.loads(
+                (root / "pool" / "toy" / "img0" / RECORD_FILE).read_text())
+            for old_row, new_row in zip(before["instances"],
+                                        after["instances"]):
+                for name in ("box_iou", "area_ratio", "component"):
+                    self.assertAlmostEqual(old_row[name], new_row[name],
+                                           places=3, msg=name)
+            entry = gate_report(root / "pool")["datasets"]["toy"]
+            self.assertEqual(entry["missing"]["box_iou"], 0)
+            self.assertEqual(entry["accepted_scored"], 2)
+
+    def test_a_rejected_instance_has_no_mask_and_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1),
+                       FakeImageTeacher(shrink=50), root / "pool",
+                       dataset="toy")
+            self.strip(root, "box_iou", "area_ratio", "component")
+            counts = backfill_readings(root / "pool")
+            self.assertEqual(counts["filled"], 0)
+            self.assertEqual(counts["unrecoverable"], 2)
+
+    def test_running_it_twice_writes_nothing_the_second_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=2), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            self.strip(root, "box_iou", "area_ratio", "component")
+            backfill_readings(root / "pool")
+            again = backfill_readings(root / "pool")
+            self.assertEqual(again["written"], 0)
+            self.assertEqual(again["filled"], 0)
+
+
+class TestIllumination(unittest.TestCase):
+    """Night RGB is where a promptable teacher quietly gets worse."""
+
+    def frames(self, tmp: Path, count: int = 4) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def darken(self, frame, scale: float) -> None:
+        import cv2
+
+        pixels = cv2.imread(str(frame.image))
+        cv2.imwrite(str(frame.image), (pixels * scale).astype(np.uint8))
+
+    def test_a_dark_frame_and_a_dark_target_are_different_numbers(self):
+        """The distinction the whole knob rests on.
+
+        An aerial night frame is mostly black with the annotated thing under a
+        lamp. Bucketing that by the frame's brightness files a well-lit target
+        under "night" and reads the teacher's failure off the wrong rows.
+        """
+        pixels = np.full((40, 60, 3), 10, dtype=np.uint8)
+        pixels[10:20, 20:30] = 200
+        boxes = np.array([[20.0, 10.0, 30.0, 20.0]])
+        self.assertLess(luma(pixels), 40)
+        self.assertGreater(target_luma(pixels, boxes, [0]), 150)
+
+    def test_every_record_carries_both_readings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                                root / "pool", dataset="toy")
+            self.assertEqual(report["too_dark"], 0)
+            record = json.loads((root / "pool" / "toy" / "img0"
+                                 / RECORD_FILE).read_text())
+            self.assertIn("luma", record)
+            self.assertIn("target_luma", record)
+
+    def test_min_luma_drops_the_frames_it_says_it_drops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=4)
+            for frame in frames[:2]:
+                self.darken(frame, 0.05)
+            report = label_pool(frames, FakeImageTeacher(), root / "pool",
+                                dataset="toy", min_luma=40.0)
+            self.assertEqual(report["too_dark"], 2)
+            self.assertEqual(report["images"], 2)
+            self.assertFalse((root / "pool" / "toy" / "img0").exists())
+
+    def test_off_by_default_so_a_thermal_harvest_keeps_its_cold_targets(self):
+        """A low reading on thermal pixels is a cold object, not night.
+
+        Raising this on the thermal arm would drop exactly the targets the
+        project exists to segment, so the default has to be off rather than a
+        sensible-looking number.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=2)
+            for frame in frames:
+                self.darken(frame, 0.02)
+            report = label_pool(frames, FakeImageTeacher(), root / "pool",
+                                dataset="toy")
+            self.assertEqual(report["too_dark"], 0)
+            self.assertEqual(report["images"], 2)
+
+    def test_the_table_splits_acceptance_by_how_lit_the_targets_were(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=4)
+            for frame in frames[:2]:
+                self.darken(frame, 0.05)
+            label_pool(frames, FakeImageTeacher(), root / "pool",
+                       dataset="toy")
+            report = luma_report(root / "pool")
+            rows = report["datasets"]["toy"]
+            self.assertEqual(sum(r["images"] for r in rows), 4)
+            self.assertEqual(rows[0]["images"], 2, "the darkened pair")
+            table = summarise_luma(root / "pool")
+            self.assertIn("toy", table)
+            self.assertIn("target luma", table)
+
+    def test_a_record_written_before_this_existed_is_counted_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            label_pool(self.frames(root, count=1), FakeImageTeacher(),
+                       root / "pool", dataset="toy")
+            path = root / "pool" / "toy" / "img0" / RECORD_FILE
+            old = json.loads(path.read_text())
+            del old["target_luma"]
+            path.write_text(json.dumps(old))
+            report = luma_report(root / "pool")
+            self.assertEqual(report["unknown"]["toy"]["images"], 1)
+            self.assertIn("not recorded", summarise_luma(root / "pool"))
+
+
+class TestOrderedMap(unittest.TestCase):
+    """Threads for the decode, but the order and the bound are the contract."""
+
+    def test_results_keep_their_order_however_the_work_finishes(self):
+        import time
+
+        def slow(value):
+            time.sleep(0.02 if value % 2 == 0 else 0.0)
+            return value
+
+        self.assertEqual(list(ordered_map(slow, range(12), 4, 8)),
+                         list(range(12)))
+
+    def test_no_more_than_the_depth_is_in_flight_at_once(self):
+        """A decoded 1920x1080 frame is 6.2 MB; an unbounded queue is the bug.
+
+        The consumer here never pulls a second item, so everything the pool
+        chose to start is still started -- which is exactly what a queue tied
+        to the worker count rather than a depth would run away with.
+        """
+        import threading
+
+        started = []
+        lock = threading.Lock()
+        gate = threading.Event()
+
+        def blocking(value):
+            with lock:
+                started.append(value)
+            gate.wait(2.0)
+            return value
+
+        stream = ordered_map(blocking, range(200), 4, 6)
+        try:
+            next(stream)                      # unblocks nothing until `gate`
+        finally:
+            gate.set()
+        self.assertLessEqual(len(started), 8,
+                             "the lookahead is not bounded by depth")
+
+    def test_one_worker_is_the_serial_path_unchanged(self):
+        self.assertEqual(list(ordered_map(lambda v: v * 2, range(4), 1, 8)),
+                         [0, 2, 4, 6])
+
+    def test_the_worker_count_asks_the_machine_when_it_is_zero(self):
+        self.assertGreaterEqual(read_workers(0), 1)
+        self.assertLessEqual(read_workers(0), 16)
+        self.assertEqual(read_workers(3), 3)
+
+
+class TestLabelPoolThreading(unittest.TestCase):
+    """Decoding ahead of the teacher must change the clock and nothing else."""
+
+    def frames(self, tmp: Path, count: int = 6) -> list:
+        write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
+        return yolo_frames(tmp / "y")
+
+    def strip(self, report: dict) -> dict:
+        return {k: v for k, v in report.items()
+                if k not in ("readers", "read_ahead")}
+
+    def test_threaded_and_serial_runs_agree_on_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root)
+            serial = label_pool(frames, FakeImageTeacher(), root / "a",
+                                dataset="toy", frame_group=2, readers=1)
+            threaded = label_pool(frames, FakeImageTeacher(), root / "b",
+                                  dataset="toy", frame_group=2, readers=4)
+            self.assertEqual(self.strip(threaded), self.strip(serial))
+            for stem in (f"img{i}" for i in range(6)):
+                self.assertEqual(
+                    sorted(open_masks(root / "a" / "toy" / stem / MASK_STORE)),
+                    sorted(open_masks(root / "b" / "toy" / stem / MASK_STORE)))
+
+    def test_an_unreadable_frame_is_counted_on_the_calling_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frames = self.frames(root, count=3)
+            frames[1].image.unlink()
+            report = label_pool(frames, FakeImageTeacher(), root / "pool",
+                                dataset="toy", readers=4)
+            self.assertEqual(report["unreadable"], 1)
+            self.assertEqual(report["images"], 2)
+
+    def test_the_report_says_what_the_run_actually_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = label_pool(self.frames(Path(tmp), count=2),
+                                FakeImageTeacher(), Path(tmp) / "pool",
+                                dataset="toy", frame_group=8, readers=2)
+            self.assertEqual(report["readers"], 2)
+            self.assertEqual(report["read_ahead"], 16)
+
+
 class TestLabelPool(unittest.TestCase):
     def frames(self, tmp: Path, count: int = 2) -> list:
         write_yolo(tmp / "y", stems=tuple(f"img{i}" for i in range(count)))
@@ -711,12 +1136,28 @@ class TestVtuavFrames(unittest.TestCase):
     """One target per sequence, one box every tenth frame, per modality."""
 
     def fixture(self, tmp: Path, rgb_lines: str, ir_lines: str,
-                frames: int = 31, both: bool = True) -> Path:
+                frames: int | None = None, both: bool = True,
+                keep: int | None = None) -> Path:
+        """A sequence whose two counts are the ones a stride 10 produces.
+
+        `frames` defaults to `10 * rows`, because that is what
+        `lines = ceil(frames / 10)` means and `annotated_stride` reads the
+        stride back out of exactly those two numbers. A fixture with 31 frames
+        and 3 rows is not a stride-10 sequence -- 15 is the only stride that
+        makes those counts -- so writing one would be testing a layout VTUAV
+        does not ship.
+
+        `keep` writes only every `keep`-th frame file, which is what a
+        `tracked_*` extraction leaves on disk.
+        """
         root = tmp / "VTUAV" / "bus_017"
         (root / "rgb").mkdir(parents=True)
         if both:
             (root / "ir").mkdir()
-        for index in range(frames):
+        rows = len([line for line in rgb_lines.splitlines() if line.strip()])
+        for index in range(frames if frames is not None else 10 * rows):
+            if keep is not None and index % keep:
+                continue
             (root / "rgb" / f"{index:06d}.jpg").write_bytes(b"jpg")
             if both:
                 (root / "ir" / f"{index:06d}.jpg").write_bytes(b"jpg")
@@ -769,6 +1210,63 @@ class TestVtuavFrames(unittest.TestCase):
             frame, = vtuav_frames(root, modality="rgb")
             self.assertIsNone(frame.pair)
 
+    def test_a_row_whose_box_is_not_a_number_is_absent_too(self):
+        """Long-term sequences are where this bites.
+
+        The target leaves the frame and the row that says so has shipped both
+        spellings across trackers: a zero box and a NaN one. `nan <= 0` is
+        False, so testing only the extent lets a not-a-number rectangle through
+        to the teacher as a prompt.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\nNaN NaN NaN NaN\n12 22 32 42\n",
+                                "10 20 30 40\nNaN NaN NaN NaN\n12 22 32 42\n")
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000", "bus_017/000020"])
+
+    def test_the_stride_is_read_off_the_files_a_tracked_unpack_left(self):
+        """The extraction already applied the stride; the spacing is it.
+
+        Nothing is inferred here and nothing can be: the frames on disk *are*
+        the annotated ones, one per row, so their spacing is the answer even
+        when it is not the 10 measured on `train_ST_001`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                frames=45, keep=15)
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000", "bus_017/000015",
+                              "bus_017/000030"])
+
+    def test_a_sequence_whose_counts_name_no_stride_is_skipped(self):
+        """One unreadable sequence costs a sequence, never a wrong label.
+
+        7 frames against 3 rows is not `ceil(7 / s)` for any stride VTUAV has
+        used. Reading it anyway means picking a number, and every number picked
+        here files a mask under a frame that box does not describe.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp),
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                "10 20 30 40\n11 21 31 41\n12 22 32 42\n",
+                                frames=7)
+            with self.assertRaises(FileNotFoundError):
+                vtuav_frames(root)
+
+    def test_a_second_sequence_survives_the_first_being_unreadable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.fixture(Path(tmp), "10 20 30 40\n", "10 20 30 40\n")
+            odd = root / "car_003"
+            (odd / "rgb").mkdir(parents=True)
+            for index in range(7):
+                (odd / "rgb" / f"{index:06d}.jpg").write_bytes(b"jpg")
+            (odd / "rgb.txt").write_text("1 2 3 4\n5 6 7 8\n9 1 2 3\n")
+            self.assertEqual([f.key for f in vtuav_frames(root)],
+                             ["bus_017/000000"])
+
     def test_a_tree_extracted_for_the_other_modality_says_exactly_that(self):
         """The failure that cost a whole RGB run.
 
@@ -795,14 +1293,16 @@ class TestVtuavFrames(unittest.TestCase):
 class TestTrackedMembers(unittest.TestCase):
     """Nine frames in ten carry no label; unzipping them is disk for nothing."""
 
-    def archive(self, tmp: Path) -> zipfile.ZipFile:
-        path = tmp / "part.zip"
+    def archive(self, tmp: Path, frames: int = 30, rows: int = 3,
+                name: str = "part.zip") -> zipfile.ZipFile:
+        path = tmp / name
         with zipfile.ZipFile(path, "w") as handle:
-            for index in range(25):
+            for index in range(frames):
                 handle.writestr(f"bus_017/rgb/{index:06d}.jpg", b"x")
                 handle.writestr(f"bus_017/ir/{index:06d}.jpg", b"x")
-            handle.writestr("bus_017/rgb.txt", "1 2 3 4\n5 6 7 8\n9 1 2 3\n")
-            handle.writestr("bus_017/ir.txt", "1 2 3 4\n5 6 7 8\n9 1 2 3\n")
+            lines = "".join(f"{i} 2 3 4\n" for i in range(rows))
+            handle.writestr("bus_017/rgb.txt", lines)
+            handle.writestr("bus_017/ir.txt", lines)
         return zipfile.ZipFile(path)
 
     def test_only_the_annotated_frames_of_one_modality_are_kept(self):
@@ -827,6 +1327,117 @@ class TestTrackedMembers(unittest.TestCase):
             archive = self.archive(Path(tmp))
             self.assertLess(len(tracked_members(archive, "rgb")),
                             len(archive.namelist()) // 5)
+
+    def test_the_stride_comes_from_the_archives_own_counts(self):
+        """Ten is measured on one short-term part and nowhere else.
+
+        A part whose sequences are annotated every 15th frame must be unpacked
+        every 15th frame; keeping every 10th instead hands the indexer a tree
+        whose files it will pair with the wrong rows, and no gate downstream
+        can see that the mask sits on the wrong frame.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.archive(Path(tmp), frames=450, rows=30)
+            keep = sorted(n for n in tracked_members(archive, "rgb")
+                          if n.endswith(".jpg"))
+            self.assertEqual(keep, [f"bus_017/rgb/{i * 15:06d}.jpg"
+                                    for i in range(30)])
+
+    def test_both_halves_at_once_for_a_run_putting_frames_back(self):
+        """One tree serving a pool from either half.
+
+        16 and 17 unzip one modality each because they run on two runtimes and
+        prompt on their own half. A *training* run reads pools from both and
+        only needs the pixels back, so downloading the same 16 GiB part twice
+        to unpack a different tenth of it each time is the wrong trade.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = sorted(n for n in tracked_members(self.archive(Path(tmp)),
+                                                     "both")
+                          if n.endswith(".jpg"))
+            self.assertEqual(keep, [f"bus_017/{m}/{i * 10:06d}.jpg"
+                                    for m in ("ir", "rgb") for i in range(3)])
+
+    def test_an_unknown_modality_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                tracked_members(self.archive(Path(tmp)), "thermal")
+
+    def test_a_sequence_whose_counts_name_no_stride_keeps_no_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = self.archive(Path(tmp), frames=7, rows=3)
+            keep = tracked_members(archive, "rgb")
+            self.assertEqual([n for n in keep if n.endswith(".jpg")], [])
+            self.assertIn("bus_017/rgb.txt", keep)
+
+
+class TestParallelExtract(unittest.TestCase):
+    """Threads hide FUSE seek latency; they must change nothing else."""
+
+    def archive(self, tmp: Path) -> Path:
+        path = tmp / "part.zip"
+        with zipfile.ZipFile(path, "w") as handle:
+            for sequence in ("bus_017", "car_003", "van_009"):
+                for index in range(120):
+                    handle.writestr(f"{sequence}/rgb/{index:06d}.jpg",
+                                    bytes([index % 251]) * 64)
+                    handle.writestr(f"{sequence}/ir/{index:06d}.jpg",
+                                    bytes([(index + 7) % 251]) * 64)
+                rows = "".join(f"{i} 2 3 4\n" for i in range(12))
+                handle.writestr(f"{sequence}/rgb.txt", rows)
+                handle.writestr(f"{sequence}/ir.txt", rows)
+        return path
+
+    def tree(self, root: Path) -> dict:
+        return {p.relative_to(root).as_posix(): p.read_bytes()
+                for p in sorted(root.rglob("*")) if p.is_file()}
+
+    def test_a_threaded_unpack_writes_exactly_what_a_serial_one_does(self):
+        """Including the folders. `ZipFile.extract` makes a member's parent
+        with an `isdir` test then a `makedirs`, so two threads landing in one
+        folder both pass the test and one raises -- which reads as a corrupt
+        archive when the archive is fine."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = self.archive(root)
+            serial = extract(part, root / "a", frames="tracked_ir",
+                             workers=1, quiet=True)
+            threaded = extract(part, root / "b", frames="tracked_ir",
+                               workers=8, quiet=True)
+            self.assertEqual(threaded, serial)
+            self.assertEqual(self.tree(root / "b"), self.tree(root / "a"))
+
+    def test_a_second_pass_is_the_resume_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            part = self.archive(root)
+            first = extract(part, root / "a", frames="tracked_ir",
+                            workers=4, quiet=True)
+            self.assertEqual(extract(part, root / "a", frames="tracked_ir",
+                                     workers=4, quiet=True), first)
+
+
+class TestAnnotatedStride(unittest.TestCase):
+    """`lines = ceil(frames / stride)`, read backwards, refusing to guess."""
+
+    def test_the_expected_stride_wins_wherever_the_counts_allow_it(self):
+        # 25 frames and 3 rows are made by a stride of 9, 10, 11 or 12 alike.
+        # Where the caller's expectation is among them it is not overruled.
+        self.assertEqual(annotated_stride(25, 3), 10)
+        self.assertEqual(annotated_stride(2000, 200), 10)
+
+    def test_a_real_sequence_pins_one_answer(self):
+        self.assertEqual(annotated_stride(450, 30), 15)
+        self.assertEqual(annotated_stride(3000, 100), 30)
+        self.assertEqual(annotated_stride(500, 500), 1)
+
+    def test_counts_no_stride_explains_are_refused(self):
+        with self.assertRaises(ValueError):
+            annotated_stride(7, 3)
+
+    def test_an_empty_sequence_falls_back_rather_than_raising(self):
+        self.assertEqual(annotated_stride(0, 0), 10)
+        self.assertEqual(annotated_stride(0, 12, default=30), 30)
 
 
 class TestLabelMany(unittest.TestCase):

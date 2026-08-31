@@ -1,0 +1,117 @@
+# --policy guard_only: the same classical layer `guard` runs, without SAMURAI.
+#
+# `guard:` in a config, the `GuardConfig` dataclass and
+# `src/trackers/stabiliser.py` are one thing under three names -- the block
+# switches the module on and the dataclass is its settings. So this rung is
+# not a different layer from `guard`; it is `guard` with SAMURAI left out,
+# which is what its name says.
+#
+# `guard` is samurai + ego_motion + guard, which answers "is the whole stack
+# worth it" and not "which half of it did the work". The two halves fail
+# differently and are worth separating: SAMURAI decides which candidate mask is
+# picked and which frames reach the memory bank, so it acts *before* anything
+# is returned; the guard judges what came back and can refuse it. A run that
+# improved with `guard` and not with `samurai` was fixed by the refusals, and
+# one that improved with both is not evidence about either.
+#
+# It needs no SAMURAI to work. `EdgeTAMTracker.prepare` builds a `FrameMotion`
+# for the guard when no `ego_motion:` block asked for one, so the plausibility
+# gates, the hysteresis and the re-acquisition all run either way. The block is
+# here only to set `reduce`, which is the resolution the guard's own template
+# match and motion residual are computed at.
+#
+# Everything under `guard:` below is the same as configs/policies/guard.yaml --
+# a test compares the two, because two copies of eighteen thresholds is exactly
+# the shape that drifts.
+
+ego_motion:
+  # Half-size rather than quarter-size here, because the guard reads its frames
+  # from this same FrameMotion and does more with them than measure a
+  # translation. At reduce 4 a 512-pixel input is judged on a 128-pixel frame,
+  # where a 20-pixel target is 5 pixels across -- enough for a flow field, thin
+  # for the template match that re-acquires a lost track.
+  reduce: 2
+
+guard:
+  enabled: true
+
+  # --- plausibility: what a real target may do between two frames ---
+  # Ratios against the track's own running median, not absolutes, so a target
+  # that grows as the drone descends is not refused for growing.
+  max_area_ratio: 3.0
+  min_area_ratio: 0.3
+  max_aspect_ratio: 2.5
+  # How far a centre may travel in one frame, in units of the target's own
+  # size, *after* the camera's measured displacement is removed. This is the
+  # gate ego_motion exists to make meaningful: without the correction a 8.6
+  # pixel/frame pan on a 27-pixel target spends a third of this budget on
+  # motion that is not the target's.
+  max_jump: 2.5
+  # A mask that covers more than this fraction of the frame is the "spread over
+  # a field" failure and is refused whatever else agrees.
+  max_frame_share: 0.25
+
+  # --- hysteresis: one blurred frame is not a lost target ---
+  suspect_frames: 3
+  recover_frames: 2
+  history: 12
+
+  # --- re-acquisition, once the guard is driving ---
+  search_scale: 2.0
+  search_growth: 1.4
+  search_max: 8.0
+  # Normalised cross-correlation. A uniform patch is refused outright rather
+  # than matched: TM_CCOEFF_NORMED divides by the patch's own deviation and
+  # OpenCV answers 1.0 across the whole region instead of dividing by zero, so
+  # a saturated target -- which a thermal sensor produces regularly -- would
+  # otherwise be "re-acquired" anywhere.
+  match_threshold: 0.45
+  give_up_after: 90
+
+  # --- the contrast term, and the one honest thing to say about it ---
+  # No contrast *enhancement* ships anywhere in this repository, and that is a
+  # measurement rather than an omission: a linear stretch leaves the
+  # signal-to-clutter ratio where it was (1.66 -> 1.70) because it scales the
+  # target's signal and the ground's clutter alike, CLAHE lowers it
+  # (1.66 -> 0.79) by amplifying the clutter at least as much as the target,
+  # and a top-hat only helps when the clutter sits at a different scale
+  # (2.61 -> 2.58 when it does not). The model works on the ratio, so editing
+  # pixels cannot help it.
+  #
+  # What the guard does instead is *measure* that ratio -- the same one
+  # `image_loop.instance_contrast` reports -- and tighten its own gates on the
+  # frames where the target is inside the clutter.
+  #
+  # 1.0, not the 2.0 this started at: on HIT-UAV's real footage the median
+  # annotated target sits at 0.91 and 53 % are below 1, so at 2.0 this would
+  # have tightened the gates on seven frames in ten, which is not a caution.
+  caution_below: 1.0
+  caution_factor: 0.6
+  # Re-acquisition correlates a band-passed frame, cut to the target's own
+  # scale, rather than the raw pixels. Measured, not assumed: a box around a
+  # faint thermal target is mostly the ground under it, so normalised
+  # cross-correlation finds the ground -- on a synthetic bench of low-contrast
+  # cases the raw matcher put the peak on the target 0 times out of 36 and
+  # scored 0.64 at the template's *old* position against 0.17 at the target's
+  # new one. Band-passing takes that to 20/36 at 5 levels of lift and 35/36 at
+  # 8, and never scores worse where the raw matcher already worked -- it is an
+  # improvement, not a cure: at 3 levels it still reaches only 11/36. CLAHE and
+  # a top-hat were tried on the same bench first and moved it 0/36 -> 5/36:
+  # they lift the target and the clutter beside it together, so the template
+  # stays mostly ground. The scale separation is the mechanism, not the
+  # contrast stretch. 0 turns it off.
+  match_bandpass: 0.55
+  # A target crossing a canopy is the same brightness as the canopy, and its
+  # clutter is tree crowns at its own size -- so nothing separates it by
+  # brightness or by scale. What still differs is that the canopy does not move
+  # and it does. Compensating the camera's own displacement and differencing
+  # three frames finds it: on a canopy bench with the target 2 grey levels off
+  # the trees, raw correlation re-acquired 1/16, CLAHE 0/16, band-passed 4/16,
+  # a two-frame difference 8/16 (it cannot tell the place the target left from
+  # the place it arrived) and three frames 15/16. Where the target does stand
+  # out, appearance is 16/16 and this ties, so it is asked first only below
+  # `caution_below` -- the frames appearance is known to fail on.
+  reacquire_motion: true
+  # How far a residual peak must stand over its own search region, as a ratio,
+  # before it is believed.
+  motion_threshold: 0.6

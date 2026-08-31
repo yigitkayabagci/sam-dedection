@@ -59,12 +59,15 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.checkpoint_meta import warn_size_mismatch  # noqa: E402
 from src.training.aerial import (  # noqa: E402
     InstanceGates,
     index_frames,
@@ -86,6 +89,7 @@ from src.training.datasets import (  # noqa: E402
 )
 from src.training.finetune import Rates, apply_freeze, save_checkpoint  # noqa: E402
 from src.training.image_loop import TRAIN_PROMPTS  # noqa: E402
+from src.training.photometric import Photometric, augmenter  # noqa: E402
 from src.training.schedule import Schedule, images, run_stages  # noqa: E402
 
 INDEX_FILE = "instances.json"
@@ -101,6 +105,36 @@ RATES = {
     "lora": {"head": Rates(head=1e-3),
              "encoder": Rates(head=5e-4, neck=5e-4, trunk=5e-4)},
 }
+
+
+def scaled_rates(rates: Rates, scale: float = 1.0,
+                 overrides: Mapping[str, float] | None = None) -> Rates:
+    """`rates` after the batch's scaling rule and then any absolute override.
+
+    Two knobs that answer different questions, in that order. `scale` follows
+    the batch -- a bigger batch puts more samples behind one update, and the
+    linear rule says the step grows with it -- so it multiplies every part
+    equally and leaves the *shape* of the table alone.
+
+    An override replaces one part's rate outright, and is applied after the
+    scaling because a run that says "hold the decoder at 1e-5" means that
+    number, not that number times whatever batch fitted on the card. A zero
+    override means "leave this part alone", so the flag's own default is
+    inert.
+
+    The shape is the interesting knob. The table this repo shipped moves the
+    head five times faster than the trunk, which is right when the training
+    set is small: the trunk carries general visual features that took far more
+    data to learn than the set contains. On a set of tens of thousands of
+    frames that argument weakens, and a modality shift is a *trunk* problem --
+    so a run that wants the encoder to learn thermal rather than the decoder
+    to compensate for it sets trunk above head, deliberately.
+    """
+    out = Rates(head=rates.head * scale, neck=rates.neck * scale,
+                trunk=rates.trunk * scale, weight_decay=rates.weight_decay)
+    chosen = {part: float(value)
+              for part, value in (overrides or {}).items() if value}
+    return replace(out, **chosen) if chosen else out
 
 
 def build_index(request: Request, cache_dir: Path | None, workers: int,
@@ -140,37 +174,12 @@ def build_indexes(requests: list[Request], cache_dir: Path | None,
     return index
 
 
-def trained_size(checkpoint: str) -> int | None:
-    """The input size a checkpoint was trained at, if it recorded one.
-
-    `finetune.save` has always written `meta["image_size"]` and, until this
-    function, **nothing ever read it**. That matters more than it sounds:
-    EdgeTAM holds no resolution in any parameter, so a 512-trained checkpoint
-    loads into a 768 build with `strict=True` and no complaint at all -- same
-    982 keys, same shapes, no warning. The mismatch is undetectable at load
-    time and shows up only as a model that quietly underperforms.
-    """
-    import torch
-
-    try:
-        blob = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    except Exception:
-        return None
-    meta = blob.get("meta") if isinstance(blob, dict) else None
-    size = (meta or {}).get("image_size") if isinstance(meta, dict) else None
-    return int(size) if isinstance(size, (int, float)) else None
-
-
 def build_model(size: int, checkpoint: str, device: str):
     from sam2.build_sam import build_sam2_video_predictor
 
     from src.trackers._hydra_overrides import image_size_overrides
 
-    was = trained_size(checkpoint)
-    if was is not None and was != size:
-        print(f"!! {checkpoint} records image_size={was}, building at {size}. "
-              f"The weights load either way -- EdgeTAM keeps no resolution in "
-              f"any parameter -- so this will run and may simply be worse.")
+    warn_size_mismatch(checkpoint, size)
 
     model = build_sam2_video_predictor(
         "configs/edgetam.yaml", checkpoint, device=device,
@@ -178,6 +187,29 @@ def build_model(size: int, checkpoint: str, device: str):
     # eval() is the policy, not an oversight: RepViT's batch-norm statistics
     # must stay frozen so the checkpoint keeps matching its exported engines.
     return model.eval()
+
+
+def _mirror(args) -> None:
+    """The checkpoint onto `--mirror`, best-effort, on every improvement.
+
+    Best-effort because a Drive copy that fails must never end a training run
+    that is otherwise fine -- the local checkpoint is still the real one. The
+    write goes to a `.part` and is renamed, so a run reclaimed mid-copy leaves
+    the previous good file rather than a truncated one.
+    """
+    if not getattr(args, "mirror", None):
+        return
+    import shutil
+
+    try:
+        target = Path(args.mirror)
+        target.mkdir(parents=True, exist_ok=True)
+        staging = target / (Path(args.out).name + ".part")
+        shutil.copy(args.out, staging)
+        staging.replace(target / Path(args.out).name)
+    except Exception as failure:             # noqa: BLE001 - never fatal
+        print(f"   !! could not mirror the checkpoint to {args.mirror}: "
+              f"{failure}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -229,6 +261,33 @@ def main(argv: list[str] | None = None) -> int:
                         "move, as a fraction of its own side. Matches "
                         "eval_instances.py's default, so a model trained "
                         "against this distribution is scored against it.")
+    p.add_argument("--contrast-collapse", type=float, default=0.0,
+                   help="Probability that a training window's contrast is "
+                        "squeezed toward its own mean, manufacturing the "
+                        "low-contrast case these sets barely hold: almost every "
+                        "annotated thermal target in them is hot against cold "
+                        "ground, so `the bright blob` scores well and a parked "
+                        "car on warm concrete does not. Needs --sensor-noise to "
+                        "do anything at all -- squeezing alone divides the "
+                        "target's signal and the ground's clutter by the same "
+                        "number and leaves the ratio where it was.")
+    p.add_argument("--contrast-floor", type=float, default=0.35,
+                   help="The weakest scale --contrast-collapse may draw.")
+    p.add_argument("--polarity-flip", type=float, default=0.0,
+                   help="Probability of inverting a *thermal* window. White-hot "
+                        "and black-hot are the same scene under a different "
+                        "sensor convention, and a model that has only seen one "
+                        "of them has learned half a rule. Masks and boxes are "
+                        "untouched; RGB windows are never flipped.")
+    p.add_argument("--gamma-jitter", type=float, default=0.0,
+                   help="Half-width of a log-uniform gamma applied to each "
+                        "window -- a different transfer curve, which moves a "
+                        "target's separation from its ground non-linearly.")
+    p.add_argument("--sensor-noise", type=float, default=0.0,
+                   help="Read noise added last, in 8-bit levels. On its own it "
+                        "lowers the signal-to-clutter ratio; with "
+                        "--contrast-collapse it is what makes the collapse "
+                        "reach the ratio at all.")
     p.add_argument("--min-area", type=int, default=48)
     p.add_argument("--min-side", type=int, default=4)
     p.add_argument("--max-area", type=float, default=0.9)
@@ -261,12 +320,37 @@ def main(argv: list[str] | None = None) -> int:
                         "which is what every number recorded before this flag "
                         "was taken with.")
     p.add_argument("--accum", type=int, default=1)
+    for _part, _why in (
+            ("head", "the mask decoder, the prompt encoder and the object head"),
+            ("neck", "the image encoder above its trunk"),
+            ("trunk", "the RepViT backbone -- where a modality shift lives")):
+        p.add_argument(f"--lr-{_part}", type=float, default=0.0,
+                       help=f"Absolute learning rate for {_why}, in the "
+                            f"encoder stage only -- the head stage's warmup "
+                            f"keeps the method's own rate. 0 leaves this part "
+                            f"alone. Setting trunk above head moves the "
+                            f"features and holds the decoder, which inverts "
+                            f"the shipped table and only makes sense on a "
+                            f"training set large enough to earn it.")
     p.add_argument("--splits", default="",
                    help="A `save_splits` file naming the frames each "
                         "split holds. Without it the split is made "
                         "here, and any cap or overlap filter a caller "
                         "applied to its own copy of the index is lost.")
     p.add_argument("--steps", type=int, default=400, help="Batches per epoch.")
+    p.add_argument("--patience", type=int, default=0,
+                   help="Stop a stage after this many epochs with no "
+                        "improvement in the validation loss. 0 is off. A "
+                        "safety net for a long budget, not a tuning knob: the "
+                        "one-cycle rate anneals over the stage's full epoch "
+                        "count, so stopping early leaves the descent "
+                        "unfinished.")
+    p.add_argument("--mirror", default=None,
+                   help="Copy the checkpoint here every time it improves, not "
+                        "only when the run ends. For an overnight run on a "
+                        "runtime that can be reclaimed: the best weights so "
+                        "far are on Drive rather than on a disk that goes "
+                        "away with the VM.")
     p.add_argument("--epochs", type=int, nargs=2, default=(1, 3),
                    metavar=("HEAD", "ENCODER"))
     p.add_argument("--val-batches", type=int, default=24)
@@ -359,13 +443,17 @@ def main(argv: list[str] | None = None) -> int:
                              dropout=args.lora_dropout)
         print(lora.summarise(report))
         freeze = lora.freeze
-        def save(m, extra): lora.save_merged_checkpoint(m, args.out, {**meta, **extra})
+        def save(m, extra):
+            lora.save_merged_checkpoint(m, args.out, {**meta, **extra})
+            _mirror(args)
         meta |= {"lora_r": report["r"], "lora_alpha": report["alpha"],
                  "lora_parameters": report["parameters"],
                  "adapted_layers": len(report["adapted"])}
     else:
         freeze = apply_freeze
-        def save(m, extra): save_checkpoint(m, args.out, {**meta, **extra})
+        def save(m, extra):
+            save_checkpoint(m, args.out, {**meta, **extra})
+            _mirror(args)
         meta |= {"trainable_parameters":
                  sum(apply_freeze(model, "encoder").values())}
 
@@ -382,22 +470,47 @@ def main(argv: list[str] | None = None) -> int:
 
     # Scaling the rates rather than editing RATES keeps the table above the one
     # every recorded run used, and keeps `--lr-scale 1` byte-identical to it.
-    def scaled(rates: Rates) -> Rates:
-        if args.lr_scale == 1.0:
-            return rates
-        return Rates(head=rates.head * args.lr_scale,
-                     neck=rates.neck * args.lr_scale,
-                     trunk=rates.trunk * args.lr_scale,
-                     weight_decay=rates.weight_decay)
+    def scaled(rates: Rates, overrides: bool = True) -> Rates:
+        return scaled_rates(rates, args.lr_scale,
+                            {part: getattr(args, f"lr_{part}")
+                             for part in ("head", "neck", "trunk")}
+                            if overrides else None)
 
     meta |= {"batch_reserve": args.batch_reserve, "lr_scale": args.lr_scale}
+    # The overrides shape the *encoder* stage and leave the head stage's warmup
+    # alone. That first stage trains the head and nothing else -- a trunk rate
+    # there has no parameters to act on -- and its job is to let the mask
+    # decoder settle on thermal statistics before the features under it move.
+    # Slowing it would not protect the decoder; it would skip the one stage
+    # that adapts it.
+    head_rates = scaled(RATES[args.method]["head"], overrides=False)
+    encoder_rates = scaled(RATES[args.method]["encoder"])
+    meta["effective_rates"] = {
+        "head_stage": {"head": head_rates.head,
+                       "neck": head_rates.neck,
+                       "trunk": head_rates.trunk},
+        "encoder_stage": {"head": encoder_rates.head,
+                          "neck": encoder_rates.neck,
+                          "trunk": encoder_rates.trunk},
+    }
     schedule = Schedule(
-        stages=(("head", args.epochs[0], scaled(RATES[args.method]["head"])),
-                ("encoder", args.epochs[1],
-                 scaled(RATES[args.method]["encoder"]))),
+        stages=(("head", args.epochs[0], head_rates),
+                ("encoder", args.epochs[1], encoder_rates)),
         batch=batch, accum=args.accum, steps_per_epoch=args.steps,
         val_batches=args.val_batches, workers=args.workers, depth=args.depth,
-        seed=args.seed, meta=meta)
+        seed=args.seed, patience=args.patience, meta=meta)
+
+    photometric = Photometric(collapse=args.contrast_collapse,
+                              floor=args.contrast_floor,
+                              invert=args.polarity_flip,
+                              gamma=args.gamma_jitter,
+                              noise=args.sensor_noise)
+    harden = augmenter(photometric, args.seed) if photometric.active else None
+    print(photometric.describe())
+    if photometric.collapse and not photometric.noise:
+        print("   !! a collapse with no --sensor-noise is a no-op on the "
+              "signal-to-clutter ratio: it scales the target's signal and the "
+              "ground's clutter by the same factor. Set --sensor-noise.")
 
     started = time.time()
     result = run_stages(model, train, val, schedule, freeze=freeze, save=save,
@@ -405,7 +518,8 @@ def main(argv: list[str] | None = None) -> int:
                         loop=images(anchor, args.anchor_weight,
                                     prompt=args.prompt,
                                     jitter=args.prompt_jitter,
-                                    generator=prompts))
+                                    generator=prompts,
+                                    augment=harden))
     result |= {"seconds": round(time.time() - started, 1),
                "checkpoint": str(args.out),
                "peak_gib": (torch.cuda.max_memory_allocated() / 2**30

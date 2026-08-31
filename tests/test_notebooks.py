@@ -12,6 +12,8 @@ names that did not exist.
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -38,6 +40,14 @@ BUILDERS = {
     "18_": "build_kust4k_pool_notebook",
     "19_": "build_stage_b_notebooks",
     "20_": "build_stage_b_notebooks",
+    "21_": "build_data_readiness_notebook",
+    "22_": "build_stage_b_notebooks",
+    "23_": "build_stage_b_notebooks",
+    "26_": "build_segfly_audit_notebook",
+    "27_": "build_stage_b_notebooks",
+    "28_": "build_stage_b_notebooks",
+    "34_": "build_stage_b_notebooks",
+    "35_": "build_stage_b_notebooks",
 }
 
 # 15-20 were all asked for the same way -- cells only, no prose, no comments --
@@ -48,8 +58,13 @@ COMMENT_FREE = {
     "15_dronevehicle_shared_pool.ipynb": 6,
     "16_vtuav_rgb_pool.ipynb": 6,
     "17_vtuav_thermal_pool.ipynb": 6,
-    "19_thermal_stage_b_pool.ipynb": 8,
-    "20_thermal_stage_b_pool_rgb.ipynb": 8,
+    "19_thermal_stage_b_pool.ipynb": 9,
+    "20_thermal_stage_b_pool_rgb.ipynb": 9,
+    "21_pool_data_readiness.ipynb": 6,
+    "22_thermal_deep.ipynb": 9,
+    "23_thermal_deep_lora.ipynb": 9,
+    "27_thermal_deep_rgb_aerovis.ipynb": 9,
+    "28_rgb_deep_aerovis.ipynb": 9,
 }
 
 
@@ -178,6 +193,24 @@ class TestEveryNotebook(unittest.TestCase):
                 self.assertTrue((ROOT / "tools" / f"{builder}.py").is_file(),
                                 f"{name} points at tools/{builder}.py")
 
+    def test_no_generated_notebook_ships_an_unsubstituted_placeholder(self):
+        """`{{NAME}}` left in a cell is valid Python, which is the problem.
+
+        The builders template their settings cell with `{{KEY}}` and replace
+        each one per notebook. A key that no arm supplies survives into the
+        notebook -- and `X = {{KEY}}` parses fine (a set containing a set), so
+        the syntax check two tests down says nothing and the failure surfaces
+        as an unhashable-type error an hour into a Colab run.
+        """
+        import json
+
+        for path in sorted((ROOT / "notebooks").glob("*.ipynb")):
+            cells = json.loads(path.read_text())["cells"]
+            left = [line for cell in cells for line in cell["source"]
+                    if "{{" in line and "}}" in line]
+            with self.subTest(notebook=path.name):
+                self.assertEqual(left, [], f"{path.name} kept a placeholder")
+
     def test_the_comment_free_notebook_stays_comment_free(self):
         """15 was asked for as cells only -- no markdown, no comments.
 
@@ -253,9 +286,47 @@ class TestEveryNotebook(unittest.TestCase):
                         (ROOT / "notebooks" / name).read_text())["cells"]
                     for line in cell["source"])
                 self.assertIn('"--base", BASE_CKPT', source)
-                self.assertIn('"--anchor-weight", "0.0"', source)
+                # The anchor is a knob now -- the arms still *default* to
+                # running without one, which is what "stage B alone" means.
+                self.assertIn("ANCHOR_WEIGHT  = 0.0", source)
+                self.assertIn('"--anchor-weight", str(ANCHOR_WEIGHT)', source)
                 self.assertNotIn("pretrain_encoder", source)
                 self.assertNotIn("DISTILL", source)
+
+    def test_the_deep_rgb_arm_keeps_22s_training_recipe(self):
+        """27 is 22 with colour data, not a second optimiser experiment."""
+        thermal = settings_of(ROOT / "notebooks" / "22_thermal_deep.ipynb")
+        mixed = settings_of(
+            ROOT / "notebooks" / "27_thermal_deep_rgb_aerovis.ipynb")
+        for name in ("EPOCHS", "PATIENCE", "STEPS", "MIN_BOX_IOU",
+                     "METHOD", "LR_HEAD", "LR_NECK", "LR_TRUNK", "SEED",
+                     "SIZE", "PROMPT", "PROMPT_JITTER"):
+            self.assertEqual(thermal[name], mixed[name], name)
+        self.assertEqual(thermal["MODALITIES"], '["thermal"]')
+        self.assertEqual(mixed["MODALITIES"], '["thermal", "rgb"]')
+        self.assertIn('"visdrone"', mixed["SKIP_POOLS"])
+        source = (ROOT / "notebooks" /
+                  "27_thermal_deep_rgb_aerovis.ipynb").read_text()
+        self.assertIn('\\"aerovis_train\\": 10000', source)
+        self.assertIn('\\"aerovis_heldout\\": 1500', source)
+
+    def test_the_rgb_only_arm_contains_no_thermal_training_source(self):
+        """28 is the RGB control, with both AeroVIS sides guaranteed."""
+        thermal = settings_of(ROOT / "notebooks" / "22_thermal_deep.ipynb")
+        rgb = settings_of(ROOT / "notebooks" / "28_rgb_deep_aerovis.ipynb")
+        for name in ("EPOCHS", "PATIENCE", "STEPS", "MIN_BOX_IOU",
+                     "METHOD", "LR_HEAD", "LR_NECK", "LR_TRUNK", "SEED",
+                     "SIZE", "PROMPT", "PROMPT_JITTER"):
+            self.assertEqual(thermal[name], rgb[name], name)
+        self.assertEqual(rgb["MODALITIES"], '["rgb"]')
+        self.assertEqual(rgb["EVAL_DRAWN"], "None")
+        self.assertEqual(rgb["EXTRA_DATASETS"], "[]")
+        source = (ROOT / "notebooks" / "28_rgb_deep_aerovis.ipynb").read_text()
+        self.assertIn('\\"aerovis_train\\": 10000', source)
+        self.assertIn('\\"aerovis_heldout\\": 1500', source)
+        self.assertIn('SOURCE_ZIPS = []', source)
+        self.assertNotIn('\\"dronevehicle_thermal\\": 20000', source)
+        self.assertNotIn('\\"vtuav_thermal\\": \\"/content/drive', source)
 
     def test_the_reload_check_would_catch_the_line_that_shipped(self):
         # Otherwise the case above passes because the notebooks are clean *and*
@@ -496,6 +567,77 @@ class TestTheCheckerCatchesThings(unittest.TestCase):
         # execution -- treating it otherwise would flood the report.
         self.assertEqual(check(self.notebook("if x_flag := True:\n    Y = 1",
                                              "print(Y)")), [])
+
+
+
+class CheckpointPathsTest(unittest.TestCase):
+    """A notebook naming another notebook's output has to name the real path.
+
+    `REFERENCE_CHECKPOINT` and `BASE_CHECKPOINT` are hard-coded strings, and
+    the run that reads them either warns (the reference) or asserts (the base)
+    when nothing is there. A warning is the dangerous one: 27 would go on
+    scoring against stock EdgeTAM while its log said it was comparing against
+    22. So the paths are derived here from the settings of the notebook that
+    writes them, rather than being read twice by eye.
+
+    The rule that made this necessary: METHOD is appended to `MIRROR_DIR` only
+    when it is *not* `finetune`, so a fine-tune keeps the bare folder name.
+    Reading the append without the `if` above it is exactly the mistake this
+    catches.
+    """
+
+    def settings(self, name: str) -> dict:
+        source = "".join(json.loads(
+            (ROOT / "notebooks" / name).read_text())["cells"][0]["source"])
+        found = {}
+        for key in ("RUN", "MIRROR_DIR", "METHOD", "SIZE",
+                    "REFERENCE_CHECKPOINT", "BASE_CHECKPOINT"):
+            match = re.search(rf"^{key}\s*=\s*(.+)$", source, re.M)
+            if match:
+                found[key] = match.group(1).split("#")[0].strip().strip('"')
+        return found
+
+    def output_of(self, name: str) -> str:
+        """The Drive path a notebook's finished checkpoint lands at."""
+        s = self.settings(name)
+        run, mirror = s["RUN"], s["MIRROR_DIR"]
+        if s["METHOD"] != "finetune":
+            mirror = f"{mirror.rstrip('/')}_{s['METHOD']}"
+            run = f"{run}_{s['METHOD']}"
+        return f"{mirror}/edgetam_pool_{run}_{s['SIZE']}.pt"
+
+    def test_every_named_checkpoint_is_one_a_notebook_here_writes(self):
+        outputs = {}
+        for name in sorted(path.name for path in NOTEBOOKS):
+            try:
+                if "MIRROR_DIR" in self.settings(name):
+                    outputs[self.output_of(name)] = name
+            except KeyError:
+                continue
+        self.assertTrue(outputs, "no notebook declares a checkpoint output")
+
+        for name in sorted(outputs.values()):
+            for key in ("REFERENCE_CHECKPOINT", "BASE_CHECKPOINT"):
+                named = self.settings(name).get(key, "")
+                if not named:
+                    continue
+                with self.subTest(notebook=name, key=key):
+                    self.assertIn(
+                        named, outputs,
+                        f"{name} points {key} at {named}, which no notebook "
+                        f"writes. These do: {sorted(outputs)}")
+
+    def test_a_fine_tune_keeps_the_bare_folder_and_a_lora_does_not(self):
+        """The rule the wrong path came from, stated once."""
+        self.assertEqual(
+            self.output_of("22_thermal_deep.ipynb"),
+            "/content/drive/MyDrive/edgetam-stage-b/thermal_deep/"
+            "edgetam_pool_thermal_deep_512.pt")
+        self.assertEqual(
+            self.output_of("23_thermal_deep_lora.ipynb"),
+            "/content/drive/MyDrive/edgetam-stage-b/thermal_deep_lora/"
+            "edgetam_pool_thermal_deep_lora_512.pt")
+
 
 
 if __name__ == "__main__":

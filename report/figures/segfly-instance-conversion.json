@@ -1,0 +1,79 @@
+{
+  "dataset": "segfly",
+  "frame": "train_0212_row_0017",
+  "image": "markus-42/SegFly refs/convert/parquet/default/train/0212.parquet row 17 column image",
+  "label": "markus-42/SegFly refs/convert/parquet/default/train/0212.parquet row 17 column label",
+  "rgb_aligned": "markus-42/SegFly refs/convert/parquet/default/train/0212.parquet row 17 column RGB_aligned",
+  "shape": [
+    512,
+    640
+  ],
+  "palette_values": [
+    1,
+    2,
+    3,
+    4,
+    6,
+    7,
+    8,
+    9,
+    13,
+    16,
+    17,
+    33,
+    34,
+    36
+  ],
+  "thing_ids": {
+    "vehicle": 13,
+    "truck": 36
+  },
+  "thing_pixels": 30688,
+  "thing_pixel_share": 0.093652,
+  "gates": {
+    "min_area": 48,
+    "min_side": 4,
+    "max_area": 0.9,
+    "fill": 0.25
+  },
+  "modes": {
+    "components": {
+      "kept": 7,
+      "by_class": {
+        "vehicle": 7
+      },
+      "rejected": {
+        "fill": 1
+      },
+      "median_area_px": 2022.0,
+      "median_fill": 0.5877
+    },
+    "watershed": {
+      "kept": 9,
+      "by_class": {
+        "truck": 1,
+        "vehicle": 8
+      },
+      "rejected": {
+        "fill": 1
+      },
+      "median_area_px": 1983.0,
+      "median_fill": 0.5877
+    }
+  },
+  "sam_disagreement_audit": null,
+  "figure": "report/figures/segfly-instance-conversion.png",
+  "provenance": {
+    "dataset_id": "markus-42/SegFly",
+    "dataset_revision": "refs/convert/parquet",
+    "split": "train",
+    "shard": "0212.parquet",
+    "row_in_shard": 17,
+    "scene": "scene_03",
+    "altitude": "50m",
+    "modality": "thermal",
+    "license": "CC BY-NC-SA 4.0",
+    "analysis_code": "tools/analyze_segfly_instances.py"
+  },
+  "interpretation": "Connected components and SAM are pseudo-label diagnostics, not instance ground truth. Use SegFly for training; report held-out instance metrics on a dataset with drawn instance masks."
+}

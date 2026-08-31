@@ -97,7 +97,7 @@ class ImageBatch:
 
 
 def collate(samples: Sequence[Sample], device: str = "cpu",
-            executor=None) -> ImageBatch:
+            executor=None, augment=None) -> ImageBatch:
     """Read `samples`' pixels and their instance masks into one padded batch.
 
     **Every sample decodes itself**, through the `Source` it carries. That is
@@ -111,12 +111,22 @@ def collate(samples: Sequence[Sample], device: str = "cpu",
     this is real parallelism. It is also where the parallelism belongs: a batch
     is a few dozen images, and assembling whole batches concurrently instead
     would hold a copy of each in host memory at once.
+
+    `augment` is `(pixels, gray) -> pixels` on the 8-bit window, for the
+    training stream only -- see `photometric`. It runs **after** the pool, in
+    sample order, because its draws come from one generator and a thread pool
+    would hand them out in whatever order the decodes finished, which is not
+    reproducible from a seed. Masks and boxes are untouched by construction:
+    only the pixels go through it.
     """
     mapper = map if executor is None else executor.map
     size = samples[0].size
     pixels = list(mapper(
         lambda s: load_image(s.frame.image, image_origin(s), s.window, s.size,
                              s.source.gray if s.source else True), samples))
+    if augment is not None:
+        pixels = [augment(frame, s.source.gray if s.source else True)
+                  for frame, s in zip(pixels, samples)]
     masks = list(mapper(sample_masks, samples))
 
     width = max(len(s.instances) for s in samples)
@@ -383,6 +393,58 @@ def instance_iou(model, batch: ImageBatch, prompt: str = "box",
     return iou.float().cpu().numpy()
 
 
+# How far around a target counts as "right next to it" when its contrast is
+# measured. Nine pixels of the model's own input: wide enough to hold the
+# ground a 20-pixel vehicle sits on, narrow enough that a second vehicle two
+# car-lengths away is not read as this one's background.
+CONTRAST_RING = 9
+
+
+@torch.no_grad()
+def instance_contrast(batch: ImageBatch, ring: int = CONTRAST_RING) -> np.ndarray:
+    """How far each target stands out from the ground around it, per instance.
+
+    `|mean inside - mean in the ring| / std of the ring` -- the signal-to-clutter
+    ratio the thermal-tracking literature scores targets by, in units of the
+    local background's own variation. A white van on asphalt is 6; a grey car
+    on a grey roof is under 1, and *that* is the case a tracker loses. Reported
+    in the same flat row order `instance_iou` returns, so the two line up
+    without a join.
+
+    Measured on the normalised tensor the model was actually fed, which costs
+    nothing and is safe: an affine change of the pixels -- which is all
+    `normalise` is -- scales the numerator and the denominator alike, so the
+    ratio is the same number it would be on the raw 8-bit window. What it is
+    *not* invariant to is the contrast augmentation, and that is the point:
+    a collapsed window really does hold a fainter target.
+    """
+    import torch.nn.functional as F
+
+    width = batch.valid.shape[1]
+    rows = batch.valid.reshape(-1).nonzero().flatten()
+    if rows.numel() == 0:
+        return np.zeros(0, dtype=np.float64)
+    grey = batch.images.mean(dim=1, keepdim=True)
+    inside = batch.masks.reshape(-1, *batch.masks.shape[-2:])[rows][:, None].float()
+    around = (F.max_pool2d(inside, ring, stride=1, padding=ring // 2) > 0).float()
+    around = (around - inside).clamp(min=0.0)
+    frames = grey.index_select(0, torch.div(rows, width, rounding_mode="floor"))
+
+    def moments(weight):
+        total = weight.sum(dim=(1, 2, 3)).clamp(min=1.0)
+        mean = (frames * weight).sum(dim=(1, 2, 3)) / total
+        spread = (((frames - mean[:, None, None, None]) ** 2) * weight)
+        return mean, (spread.sum(dim=(1, 2, 3)) / total).sqrt()
+
+    target, _ = moments(inside)
+    ground, clutter = moments(around)
+    # A ring with no variation at all is a synthetic case (a flat test image)
+    # rather than a sensor one; the floor keeps it finite instead of dividing
+    # a real difference by zero and reporting infinite contrast.
+    return ((target - ground).abs()
+            / clutter.clamp(min=1e-3)).double().cpu().numpy()
+
+
 # --------------------------------------------------------------------------
 # Splits and the stream the schedule pulls on
 # --------------------------------------------------------------------------
@@ -447,7 +509,8 @@ def auto_batch_size(model, split: ImageSplit, device: str = "cuda",
 
 
 def stream(split: ImageSplit, batch: int, seed: int | None, limit: int | None,
-           device: str = "cuda", workers: int = 8, depth: int = 2):
+           device: str = "cuda", workers: int = 8, depth: int = 2,
+           augment=None):
     """Shuffled, prefetched batches of windows -- the image-mode data pipeline.
 
     Reuses `loader.batch_clips` for the shuffle and `loader.prefetch_with` for
@@ -460,6 +523,6 @@ def stream(split: ImageSplit, batch: int, seed: int | None, limit: int | None,
     chunks = batch_clips(split.samples, batch, seed=seed, limit=limit)
     return prefetch_with(
         chunks,
-        lambda chunk, pool: collate(chunk, "cpu", pool),
+        lambda chunk, pool: collate(chunk, "cpu", pool, augment),
         device=device, workers=workers, depth=depth,
     )
