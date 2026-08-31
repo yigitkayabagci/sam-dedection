@@ -772,7 +772,16 @@ if BASE_CHECKPOINT:
         f"Run the pretrain that writes it first, or clear the setting to "
         f"start from stock EdgeTAM.")
     BASE_CKPT = BASE_CHECKPOINT
+    _from = (Path(BASE_CHECKPOINT).stem
+             .replace("edgetam_pool_", "").replace(f"_{SIZE}", ""))[:24]
+    RUN = f"{RUN}_from_{_from}"
+    MIRROR_DIR = f"{MIRROR_DIR.rstrip('/')}_from_{_from}"
     print("starting from", BASE_CKPT, "-- not stock EdgeTAM.")
+    print("   the run is named", RUN, "so it lands beside the arm that starts "
+          "from stock rather than on top of it. MIRROR_DIR and the checkpoint "
+          "name both carry it: `pretrain then this` and `this alone` are two "
+          "measurements of the same recipe, and the whole reason to run the "
+          "second is to find out whether the first was worth it.")
     print("   BASE_CHECKPOINT is the weights this run starts from, which is a "
           "different question from REFERENCE_CHECKPOINT: that one only names "
           "what the before/after is scored against. Chaining a pretrain into "
@@ -902,6 +911,27 @@ print("\\na box the first gate stops is never measured against its own "
       "`teacher_iou` is the teacher's own confidence, which this repo "
       "measured as the weak gate. A pool whose rejects pile up there has "
       "not been shown to hold bad masks -- only unsure ones.")
+_impossible = {_name: (HARVEST[_name]["accepted"], _least)
+               for _name, _least in REQUIRE_POOLS.items()
+               if _name in HARVEST and HARVEST[_name]["accepted"] < _least}
+assert not _impossible, (
+    f"REQUIRE_POOLS cannot be met by these pools: {_impossible} (harvested, "
+    f"least). This is the harvest's own accepted count, before any frame is "
+    f"downloaded and before the gates are re-cut -- so it is an upper bound "
+    f"and cell 3's check can only come out lower. Failing here costs a "
+    f"minute; failing there costs the download first. Either the pool zip on "
+    f"Drive is not the one this run was written against, or REQUIRE_POOLS "
+    f"asks for more than was ever harvested.")
+if REQUIRE_POOLS:
+    print("\\nrequired pools, at harvest:",
+          ", ".join(f"{_n} {HARVEST[_n]['accepted']}/{_l}"
+                    for _n, _l in REQUIRE_POOLS.items() if _n in HARVEST)
+          or "none of them are here yet")
+    _absent = [_n for _n in REQUIRE_POOLS if _n not in HARVEST]
+    if _absent:
+        print("   not unpacked at all:", ", ".join(_absent),
+              "-- their zips are not under DRIVE_POOLS, so cell 3 will stop.")
+
 FOUND = sorted(POOLS)
 assert FOUND, f"no record.json under {POOL_ROOT} -- nothing was unpacked"
 
