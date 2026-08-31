@@ -193,7 +193,11 @@ from pathlib import Path
 # How many frames a pool may contribute. AeroVIS is the only one that needs a
 # cap in a stage-B run -- 39 943 frames of it beside 2 866 of HIT-UAV is not a
 # mixture -- and the RGB pretrain, where it *is* the run, raises it.
-CAPS = {"POOL_LIMITS": '{"aerovis_train": 10000, "aerovis_heldout": 1500}'}
+CAPS = {"POOL_LIMITS": '{"aerovis_train": 10000, "aerovis_heldout": 1500}',
+        # Empty = start from stock EdgeTAM. Point it at a pretrain's
+        # output (34/35) to chain, and the run asserts the file is
+        # there rather than silently restarting from stock.
+        "BASE_CHECKPOINT": '""'}
 
 PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
          "CONTRAST_COLLAPSE": "0.0", "POLARITY_FLIP": "0.0",
@@ -217,7 +221,7 @@ PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
 #
 # The right value is per-pool and the run now prints what it needs to choose:
 # read the per-band table in the evaluation before turning these up.
-HARDER = {**CAPS, "MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.25",
+HARDER = {**CAPS, "MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.2",
           "CONTRAST_COLLAPSE": "0.25", "POLARITY_FLIP": "0.25",
           "GAMMA_JITTER": "0.25", "SENSOR_NOISE": "2.0"}
 
@@ -541,6 +545,7 @@ MODALITIES  = {{MODALITIES}}
 RUN         = {{RUN}}
 MIRROR_DIR  = {{MIRROR_DIR}}
 REFERENCE_CHECKPOINT = {{REFERENCE_CHECKPOINT}}
+BASE_CHECKPOINT = {{BASE_CHECKPOINT}}
 DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"
 POOL_ROOT   = "/content/pool"
 DATA_ROOT   = "/content/data"
@@ -728,6 +733,22 @@ assert Path(sam2.__file__).resolve().parent.parent == Path(EDGETAM).resolve(), (
     f"checkout. pip uninstall -y sam2 SAM-2, then re-run this cell.")
 BASE_CKPT = str(Path(EDGETAM) / "checkpoints" / "edgetam.pt")
 assert Path(BASE_CKPT).is_file(), "edgetam.pt did not download"
+if BASE_CHECKPOINT:
+    assert Path(BASE_CHECKPOINT).is_file(), (
+        f"BASE_CHECKPOINT is set to {BASE_CHECKPOINT} and nothing is there. "
+        f"Run the pretrain that writes it first, or clear the setting to "
+        f"start from stock EdgeTAM.")
+    BASE_CKPT = BASE_CHECKPOINT
+    print("starting from", BASE_CKPT, "-- not stock EdgeTAM.")
+    print("   BASE_CHECKPOINT is the weights this run starts from, which is a "
+          "different question from REFERENCE_CHECKPOINT: that one only names "
+          "what the before/after is scored against. Chaining a pretrain into "
+          "a narrower run needs this one -- without it every arm restarts "
+          "from stock EdgeTAM and the pretrain's epochs buy the run below it "
+          "nothing at all.")
+    print("   the before/after below is measured against this checkpoint, so "
+          "it reports what THIS run added on top of the pretrain rather than "
+          "what the two together added to stock.")
 
 assert METHOD in ("finetune", "lora"), f"METHOD is finetune or lora, not {METHOD!r}"
 if METHOD != "finetune":

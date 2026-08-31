@@ -72,3 +72,45 @@ ego_motion:
   # difference between "free" and "a millisecond". The answer is returned as a
   # fraction of the frame, so this number never has to agree with image_size.
   reduce: 4
+
+guard:
+  # The classical layer (`src/trackers/stabiliser.py`), and the reason it is a
+  # block of its own rather than something `ego_motion` turns on: measuring the
+  # camera is cheap and always safe, while *refusing a mask* changes what the
+  # tracker outputs. That is a decision a config has to make on purpose.
+  #
+  # What it refuses is the impossible, not the unusual. Every threshold here is
+  # deliberately loose, because a gate that fires on a real target's honest
+  # change is worse than no gate: it turns a tracker that is occasionally wrong
+  # into one confidently stuck on its own prediction.
+  enabled: true
+  # The balloon, from three sides. A target's area at video rate cannot triple
+  # between frames; a mask leaking along a road keeps its area for a frame or
+  # two while its shape stops being a vehicle; and `max_frame_share` catches
+  # the case the ratios cannot -- the first frames already wrong, so the
+  # running median is poisoned from the start. AeroVIS measures the largest
+  # car ever annotated at 6.0 % of its frame and the largest truck at 13.6 %,
+  # so 0.25 here is roughly twice the biggest real target, not a tight cut.
+  max_area_ratio: 3.0
+  min_area_ratio: 0.3
+  max_aspect_ratio: 2.5
+  max_frame_share: 0.25
+  # The jump, in units of the target's own size and *after* the background's
+  # own motion is removed -- which is what `ego_motion` above is for. Without
+  # it a drone's yaw reads as the target accelerating.
+  max_jump: 2.5
+  # Hysteresis. One refused frame is blur; three in a row is a lost target,
+  # and two good ones bring it back.
+  suspect_frames: 3
+  recover_frames: 2
+  history: 12
+  # Re-acquisition: search where it was lost, growing while it stays missing,
+  # capped so a long loss does not become a whole-frame hunt for a 20-pixel
+  # car, and abandoned after 90 frames because the appearance kept from before
+  # the loss is stale by then and matching it is how a tracker locks onto a
+  # bush that happens to correlate.
+  search_scale: 2.0
+  search_growth: 1.4
+  search_max: 8.0
+  match_threshold: 0.45
+  give_up_after: 90
