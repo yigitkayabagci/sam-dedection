@@ -570,5 +570,143 @@ class TestFrameRecord(unittest.TestCase):
         self.assertFalse(FrameRecord(0.9, 1.0, -0.1).acceptable(cfg))
 
 
+
+class FilterGatingTest(unittest.TestCase):
+    """The hole the three memory thresholds cannot close.
+
+    They decide which frames enter the bank and they work -- once. The filter
+    is then updated with whatever box was chosen, so a mask that jumped to a
+    look-alike drags the filter onto it, and two frames later the filter agrees
+    with the distractor and the gate has nothing to say.
+    """
+
+    SIZE = 26
+
+    def walk(self, memory, kind, frames=34, jump_at=18):
+        """Boxes moving smoothly, then either teleporting or accelerating."""
+        position = np.array([300.0, 240.0])
+        velocity = np.array([3.0, 1.0])
+        kept = []
+        for index in range(frames):
+            if kind == "manoeuvre" and index >= jump_at:
+                velocity = np.array([16.0, 6.0])
+            position = position + velocity
+            if kind == "jump" and index == jump_at:
+                position = position + np.array([90.0, 0.0])
+            box = np.array([position[0] - 13, position[1] - 9,
+                            position[0] + 13, position[1] + 9])
+            chosen = memory.select(np.stack([box, box + 2, box - 2]),
+                                   np.array([0.9, 0.8, 0.8]))
+            memory.record(index, chosen.mask_score, 5.0, chosen.kf_score)
+            if index >= jump_at:
+                kept.append(memory.keep(index))
+        return sum(kept), len(kept)
+
+    def test_without_the_gate_the_filter_follows_the_distractor(self):
+        """The failure, stated as a number: the memory gate catches the jump
+        for exactly one frame and then the filter has been captured."""
+        memory = MotionAwareMemory(SamuraiConfig())
+        kept, total = self.walk(memory, "jump")
+        self.assertEqual(total, 16)
+        self.assertGreaterEqual(kept, 14)
+
+    def test_the_gate_keeps_most_of_a_jump_out_of_the_bank(self):
+        memory = MotionAwareMemory(SamuraiConfig(kf_gate=0.10))
+        kept, _ = self.walk(memory, "jump")
+        self.assertLessEqual(kept, 9)
+
+    def test_a_real_manoeuvre_pays_nothing_for_it(self):
+        """The half that makes the gate safe. A filter that never updates would
+        lock out a target that really did accelerate, so `kf_gate_patience`
+        re-initiates it -- and at 0.10 the honest case is untouched."""
+        plain = MotionAwareMemory(SamuraiConfig())
+        gated = MotionAwareMemory(SamuraiConfig(kf_gate=0.10))
+        self.assertEqual(self.walk(plain, "manoeuvre"),
+                         self.walk(gated, "manoeuvre"))
+
+    def test_a_filter_that_disagrees_for_long_enough_is_the_one_re_initiated(self):
+        memory = MotionAwareMemory(SamuraiConfig(kf_gate=0.9, kf_gate_patience=3))
+        self.walk(memory, "jump", frames=24)
+        # It cannot still be coasting: patience is 3 and the walk is long.
+        self.assertLess(memory.coasted, 3)
+
+    def test_off_by_default_and_off_means_untouched(self):
+        """This changes what the filter learns, so it is measured rather than
+        assumed -- `samurai` and `samurai_gated` differ by this line alone."""
+        self.assertEqual(SamuraiConfig().kf_gate, 0.0)
+        plain = MotionAwareMemory(SamuraiConfig())
+        default = MotionAwareMemory(SamuraiConfig(kf_gate=0.0))
+        self.assertEqual(self.walk(plain, "jump"), self.walk(default, "jump"))
+
+    def swell(self, memory, factor, at=20, frames=30):
+        """A mask that stays on the target and grows in place."""
+        position = np.array([300.0, 240.0])
+        kept = []
+        for index in range(frames):
+            position = position + np.array([3.0, 1.0])
+            half_w, half_h = (13.0, 9.0) if index < at else (13.0 * factor,
+                                                             9.0 * factor)
+            box = np.array([position[0] - half_w, position[1] - half_h,
+                            position[0] + half_w, position[1] + half_h])
+            chosen = memory.select(np.stack([box, box + 2, box - 2]),
+                                   np.array([0.9, 0.8, 0.8]))
+            memory.record(index, chosen.mask_score, 5.0, chosen.kf_score,
+                          chosen.area_ratio)
+            if index >= at:
+                kept.append(memory.keep(index))
+        return sum(kept), len(kept)
+
+    def test_a_mask_that_swells_in_place_passes_every_other_check(self):
+        """The failure the jump gate cannot see: the prediction is *inside* the
+        swollen box, so the IoU against it stays respectable."""
+        for factor in (2.0, 3.0, 4.0):
+            with self.subTest(factor=factor):
+                memory = MotionAwareMemory(SamuraiConfig(kf_gate=0.10))
+                kept, total = self.swell(memory, factor)
+                self.assertEqual(kept, total)
+
+    def test_the_area_ratio_keeps_a_balloon_out_of_the_bank(self):
+        for factor in (2.0, 3.0, 4.0):
+            with self.subTest(factor=factor):
+                memory = MotionAwareMemory(
+                    SamuraiConfig(kf_gate=0.10, memory_area_ratio=3.0))
+                self.assertEqual(self.swell(memory, factor)[0], 0)
+
+    def test_a_target_that_really_approaches_is_not_a_balloon(self):
+        """The ratio is against the running median of what was already
+        accepted, so it follows a target growing frame by frame."""
+        memory = MotionAwareMemory(
+            SamuraiConfig(kf_gate=0.10, memory_area_ratio=3.0))
+        position = np.array([300.0, 240.0])
+        kept = []
+        for index in range(40):
+            position = position + np.array([3.0, 1.0])
+            scale = 1.0 + 0.04 * index                  # 2.6x over the clip
+            box = np.array([position[0] - 13 * scale, position[1] - 9 * scale,
+                            position[0] + 13 * scale, position[1] + 9 * scale])
+            chosen = memory.select(np.stack([box, box + 2, box - 2]),
+                                   np.array([0.9, 0.8, 0.8]))
+            memory.record(index, chosen.mask_score, 5.0, chosen.kf_score,
+                          chosen.area_ratio)
+            kept.append(memory.keep(index))
+        self.assertGreaterEqual(sum(kept), 38)
+
+    def test_a_refused_area_never_joins_the_history(self):
+        """Or one balloon raises the median and the next one looks reasonable
+        beside it."""
+        memory = MotionAwareMemory(
+            SamuraiConfig(kf_gate=0.10, memory_area_ratio=3.0))
+        self.swell(memory, 4.0)
+        self.assertLess(float(np.median(memory.areas)), 13.0 * 9.0 * 4.0 * 4.0)
+
+    def test_a_reset_forgets_that_it_was_coasting(self):
+        memory = MotionAwareMemory(SamuraiConfig(kf_gate=0.9))
+        self.walk(memory, "jump", frames=20)
+        memory.reset()
+        self.assertEqual(memory.coasted, 0)
+        self.assertEqual(len(memory.areas), 0)
+
+
+
 if __name__ == "__main__":
     unittest.main()
