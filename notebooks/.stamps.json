@@ -23,5 +23,6 @@
  "28_rgb_deep_aerovis.ipynb": "4bc2a555f0",
  "32_aerial_thermal_stage_b_stable.ipynb": "beabed2638",
  "34_pretrain_thermal_aerial.ipynb": "d6f4e1cea3",
- "35_pretrain_rgb_aerial.ipynb": "f4f80efaa7"
+ "35_pretrain_rgb_aerial.ipynb": "f4f80efaa7",
+ "36_pretrain_fcmae_thermal.ipynb": "b34507eb73"
 }

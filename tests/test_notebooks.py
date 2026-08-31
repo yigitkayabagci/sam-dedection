@@ -48,6 +48,7 @@ BUILDERS = {
     "28_": "build_stage_b_notebooks",
     "34_": "build_stage_b_notebooks",
     "35_": "build_stage_b_notebooks",
+    "36_": "build_fcmae_notebook",
 }
 
 # 15-20 were all asked for the same way -- cells only, no prose, no comments --
@@ -65,6 +66,7 @@ COMMENT_FREE = {
     "23_thermal_deep_lora.ipynb": 9,
     "27_thermal_deep_rgb_aerovis.ipynb": 9,
     "28_rgb_deep_aerovis.ipynb": 9,
+    "36_pretrain_fcmae_thermal.ipynb": 9,
 }
 
 
@@ -98,14 +100,22 @@ def reload_calls(path: Path) -> list[str]:
     return found
 
 
+# `STAMP = "..."` at the start of a line, whatever the generator aligned it to.
+# Keyed on the exact spacing this used to return None for a notebook that was
+# stamped correctly and merely aligned differently -- which reads as "not
+# generated" and takes the notebook out of every check below.
+STAMP_LINE = re.compile(r'^STAMP\s*=\s*"([^"]*)"')
+
+
 def stamp_of(path: Path) -> str | None:
     """The build id a generated notebook embeds, or None if it has none."""
     import json
 
-    found = [line.split('"')[1]
+    found = [match.group(1)
              for cell in json.loads(path.read_text())["cells"]
              if cell["cell_type"] == "code"
-             for line in cell["source"] if line.startswith("STAMP    = ")]
+             for line in cell["source"]
+             for match in [STAMP_LINE.match(line)] if match]
     assert len(found) <= 1, f"{path.name} embeds {len(found)} stamps"
     return found[0] if found else None
 
@@ -859,6 +869,65 @@ class HardeningFlagsTest(unittest.TestCase):
                           self.notebook("32_aerial_thermal_stage_b_stable.ipynb")["cells"])
         self.assertIn("HARDEN = [", text)
         self.assertEqual(text.count("*HARDEN,"), 2)   # the pilot and the run
+
+
+
+class FCMAENotebookTest(unittest.TestCase):
+    """Notebook 36 -- the stage the paper's ablation says can fail silently.
+
+    Two properties are worth a test rather than a reading. The arm has to be a
+    real switch, because running only one of them measures nothing: the whole
+    experiment is `grn` against `plain`. And the two checks that stand between
+    a configured run and a wasted one -- no leak through the real trunk, GRN
+    actually inserted -- have to be *asserts*, not prints, or a run with half
+    the co-design missing finishes and looks like a result.
+    """
+
+    def cells(self):
+        from tools.build_fcmae_notebook import render
+
+        return render()[0]
+
+    def body(self):
+        return "\n".join(self.cells())
+
+    def test_the_arm_is_a_switch_and_lands_in_its_own_folder(self):
+        text = self.body()
+        self.assertIn('ARM         = "grn"', text)
+        self.assertIn('RUN         = f"fcmae_{ARM}"', text)
+        self.assertIn('MIRROR_DIR  = f"/content/drive/MyDrive/edgetam-stage-a/{RUN}"',
+                      text)
+        self.assertIn('assert ARM in ("grn", "plain")', text)
+
+    def test_the_leak_is_asserted_on_the_real_trunk(self):
+        """The unit test proves it on a toy stack; RepViT's kernels and strides
+        are not the toy's, so the property is re-measured on the model the run
+        is about to train."""
+        text = self.body()
+        self.assertIn("masked_convolutions(MODEL.image_encoder", text)
+        self.assertIn("assert _drift < 1e-4", text)
+
+    def test_a_missing_grn_stops_the_run(self):
+        text = self.body()
+        self.assertIn('assert REPORT["inserted"]', text)
+
+    def test_it_says_what_to_paste_into_32(self):
+        """A stage that cannot be measured against stage B from stock is a
+        stage nobody can tell apart from doing nothing."""
+        text = self.body()
+        self.assertIn("BASE_CHECKPOINT = ", text)
+        self.assertIn("32", text)
+
+    def test_the_grn_arm_warns_that_the_engines_no_longer_match(self):
+        text = self.body()
+        self.assertIn("export_edgetam_onnx.py", text)
+
+    def test_the_paper_s_ablation_travels_with_the_verdict(self):
+        """So the number this run has to be read against is in the file rather
+        than in someone's memory."""
+        text = self.body()
+        self.assertIn("2301.00808", text)
+        self.assertIn("v2_fcmae", text)
 
 
 

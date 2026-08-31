@@ -275,5 +275,60 @@ class DecoderTest(unittest.TestCase):
         torch.testing.assert_close(block.grn(expanded), expanded)
 
 
+class RunTest(unittest.TestCase):
+    """The parts of `tools/pretrain_fcmae.py` that do not need a model."""
+
+    def test_the_frame_walk_reads_every_image_and_no_record(self):
+        """Stage A's whole argument is volume, and it gets that volume by
+        ignoring the gates the mask pools apply: a frame whose teacher mask was
+        refused is still a frame."""
+        import tempfile
+
+        from tools.pretrain_fcmae import find_frames
+
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        (root / "seq" / "ir").mkdir(parents=True)
+        for index in range(4):
+            (root / "seq" / "ir" / f"{index:06d}.jpg").touch()
+        (root / "seq" / "record.json").write_text("{}")
+        (root / "seq" / "notes.txt").touch()
+        found = find_frames([root])
+        self.assertEqual(len(found), 4)
+        self.assertTrue(all(path.suffix == ".jpg" for path in found))
+
+    def test_the_same_frame_under_two_roots_is_read_once(self):
+        import tempfile
+
+        from tools.pretrain_fcmae import find_frames
+
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        (root / "a").mkdir()
+        (root / "a" / "x.png").touch()
+        self.assertEqual(len(find_frames([root, root / "a"])), 1)
+
+    def test_the_schedule_warms_up_then_decays_to_nothing(self):
+        from tools.pretrain_fcmae import learning_rate
+
+        peak, total, warmup = 1e-3, 1000, 100
+        self.assertLess(learning_rate(0, total, warmup, peak), peak)
+        self.assertAlmostEqual(learning_rate(warmup - 1, total, warmup, peak),
+                               peak, places=9)
+        self.assertLess(learning_rate(total - 1, total, warmup, peak), peak * 0.01)
+        rising = [learning_rate(s, total, warmup, peak) for s in range(warmup)]
+        self.assertEqual(rising, sorted(rising))
+
+    def test_the_peak_follows_the_batch_the_way_the_paper_scales_it(self):
+        """lr = base_lr x batch / 256. Written here because it is the one
+        hyperparameter a bigger card silently changes."""
+        base = 1.5e-4
+        self.assertAlmostEqual(base * 256 / 256.0, base)
+        self.assertAlmostEqual(base * 512 / 256.0, 2 * base)
+
+
+
 if __name__ == "__main__":
     unittest.main()
