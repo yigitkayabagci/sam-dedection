@@ -193,7 +193,11 @@ from pathlib import Path
 # How many frames a pool may contribute. AeroVIS is the only one that needs a
 # cap in a stage-B run -- 39 943 frames of it beside 2 866 of HIT-UAV is not a
 # mixture -- and the RGB pretrain, where it *is* the run, raises it.
-CAPS = {"POOL_LIMITS": '{"aerovis_train": 10000, "aerovis_heldout": 1500}'}
+CAPS = {"POOL_LIMITS": '{"aerovis_train": 10000, "aerovis_heldout": 1500}',
+        # Empty = start from stock EdgeTAM. Point it at a pretrain's
+        # output (34/35) to chain, and the run asserts the file is
+        # there rather than silently restarting from stock.
+        "BASE_CHECKPOINT": '""'}
 
 PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
          "CONTRAST_COLLAPSE": "0.0", "POLARITY_FLIP": "0.0",
@@ -217,7 +221,7 @@ PLAIN = {"MIN_AREA": "48", "MIN_SIDE": "4", "MAX_AREA": "0.9",
 #
 # The right value is per-pool and the run now prints what it needs to choose:
 # read the per-band table in the evaluation before turning these up.
-HARDER = {**CAPS, "MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.25",
+HARDER = {**CAPS, "MIN_AREA": "64", "MIN_SIDE": "6", "MAX_AREA": "0.2",
           "CONTRAST_COLLAPSE": "0.25", "POLARITY_FLIP": "0.25",
           "GAMMA_JITTER": "0.25", "SENSOR_NOISE": "2.0"}
 
@@ -481,8 +485,16 @@ ARMS = {
                           '                 "vtuav_lt_rgb": '
                           '"/content/drive/MyDrive/VTUAV"}'),
         "METHOD": '"finetune"',
+        # `_finetune` is not decoration: the settings cell appends METHOD to
+        # MIRROR_DIR so a fine-tune and a LoRA of the same RUN cannot overwrite
+        # each other's Drive folder, which means 22 mirrors to
+        # `thermal_deep_finetune/` and never to `thermal_deep/`. Naming the
+        # folder without it pointed this A/B at a path nothing ever writes, and
+        # cell 3 only warns -- so the run would have gone ahead scoring against
+        # stock EdgeTAM while the log said it was comparing against 22.
         "REFERENCE_CHECKPOINT": ('"/content/drive/MyDrive/edgetam-stage-b/'
-                                 'thermal_deep/edgetam_pool_thermal_deep_512.pt"'),
+                                 'thermal_deep_finetune/'
+                                 'edgetam_pool_thermal_deep_512.pt"'),
     },
     # A clean RGB control for the thermal and mixed arms. AeroVIS is both the
     # required training source and the held-out RGB grade; VisDrone stays out
@@ -533,6 +545,7 @@ MODALITIES  = {{MODALITIES}}
 RUN         = {{RUN}}
 MIRROR_DIR  = {{MIRROR_DIR}}
 REFERENCE_CHECKPOINT = {{REFERENCE_CHECKPOINT}}
+BASE_CHECKPOINT = {{BASE_CHECKPOINT}}
 DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"
 POOL_ROOT   = "/content/pool"
 DATA_ROOT   = "/content/data"
@@ -720,6 +733,22 @@ assert Path(sam2.__file__).resolve().parent.parent == Path(EDGETAM).resolve(), (
     f"checkout. pip uninstall -y sam2 SAM-2, then re-run this cell.")
 BASE_CKPT = str(Path(EDGETAM) / "checkpoints" / "edgetam.pt")
 assert Path(BASE_CKPT).is_file(), "edgetam.pt did not download"
+if BASE_CHECKPOINT:
+    assert Path(BASE_CHECKPOINT).is_file(), (
+        f"BASE_CHECKPOINT is set to {BASE_CHECKPOINT} and nothing is there. "
+        f"Run the pretrain that writes it first, or clear the setting to "
+        f"start from stock EdgeTAM.")
+    BASE_CKPT = BASE_CHECKPOINT
+    print("starting from", BASE_CKPT, "-- not stock EdgeTAM.")
+    print("   BASE_CHECKPOINT is the weights this run starts from, which is a "
+          "different question from REFERENCE_CHECKPOINT: that one only names "
+          "what the before/after is scored against. Chaining a pretrain into "
+          "a narrower run needs this one -- without it every arm restarts "
+          "from stock EdgeTAM and the pretrain's epochs buy the run below it "
+          "nothing at all.")
+    print("   the before/after below is measured against this checkpoint, so "
+          "it reports what THIS run added on top of the pretrain rather than "
+          "what the two together added to stock.")
 
 assert METHOD in ("finetune", "lora"), f"METHOD is finetune or lora, not {METHOD!r}"
 if METHOD != "finetune":
@@ -1216,6 +1245,41 @@ for _spec, _spec_root in ([(_s, DATA_ROOT) for _s in EXTRA_DATASETS]
         _kept, _thin = rebalance(_index, CLASS_WEIGHTS, seed=SEED)
         print(f"   CLASS_WEIGHTS thins it to {len(_kept)} frames / "
               f"{_thin['instances']['after']} instances before training sees it")
+
+print()
+print(f"{'pool':<28}{'inst':>8}{'p50 px':>8}{'p50':>8}{'p99.9':>8}{'max':>8}"
+      f"{'<min':>6}{'>max':>6}   share of the frame each target covers")
+for _row in PLAN:
+    _areas, _shares = [], []
+    _recs = sorted(Path(_row["dir"]).rglob(RECORD_FILE))
+    for _record in _recs[::max(len(_recs) // 400, 1)][:400]:
+        try:
+            _body = json.loads(_record.read_text())
+            _frame = float(int(_body["shape"][0]) * int(_body["shape"][1]))
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            continue
+        for _inst in _body.get("instances", []):
+            _px = _inst.get("area")
+            if _px and _frame:
+                _areas.append(float(_px))
+                _shares.append(float(_px) / _frame)
+    if not _shares:
+        continue
+    _a, _s = np.array(_areas), np.array(_shares)
+    print(f"{_row['pool']:<28}{len(_s):>8}{np.percentile(_a, 50):>8.0f}"
+          f"{np.percentile(_s, 50) * 100:>7.3f}%{np.percentile(_s, 99.9) * 100:>7.2f}%"
+          f"{_s.max() * 100:>7.2f}%{float((_a < MIN_AREA).mean()) * 100:>5.1f}%"
+          f"{float((_s > MAX_AREA).mean()) * 100:>5.2f}%")
+print("   MIN_AREA and MAX_AREA read against the pool's own annotations, so "
+      "the two gates can be set from what the data holds rather than from a "
+      "feel for how big a target looks. Measured on AeroVIS: the median "
+      "instance is 967 px (~31x31) and covers 0.065% of its frame; the "
+      "largest car ever annotated reaches 6.0%, the largest truck 13.6%, the "
+      "largest bus 4.7%. Everything above 25% is UAVDT's coarse `vehicle` "
+      "class -- 603 of 1 411 468 instances, 0.04% -- which is the class this "
+      "gate exists to stop teaching the decoder that the whole frame is an "
+      "answer. A `>max` column in the percents rather than the hundredths is "
+      "the signal that MAX_AREA is cutting real targets on this pool.")
 
 print()
 try:

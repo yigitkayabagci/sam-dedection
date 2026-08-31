@@ -102,9 +102,31 @@ def main() -> None:
             '                 "pool/vtuav_lt_thermal": 0.8,\n'
             '                 "segfly": 0.85,\n'
             '                 "car": 0.7, "truck": 0.7}')
+    # The weights this arm starts from. Empty keeps stock EdgeTAM, which is
+    # what 22 always did; pointing it at 34's output is what makes a
+    # pretrain -> stage B chain a chain rather than two unrelated runs.
+    replace(notebook, 'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"',
+            'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"\n'
+            'BASE_CHECKPOINT = ""')
+    replace(notebook,
+            'BASE_CKPT = str(Path(EDGETAM) / "checkpoints" / "edgetam.pt")\n'
+            'assert Path(BASE_CKPT).is_file(), "edgetam.pt did not download"',
+            'BASE_CKPT = str(Path(EDGETAM) / "checkpoints" / "edgetam.pt")\n'
+            'assert Path(BASE_CKPT).is_file(), "edgetam.pt did not download"\n'
+            'if BASE_CHECKPOINT:\n'
+            '    assert Path(BASE_CHECKPOINT).is_file(), (\n'
+            '        f"BASE_CHECKPOINT is set to {BASE_CHECKPOINT} and nothing '
+            'is there. "\n'
+            '        f"Run the pretrain that writes it first, or clear the '
+            'setting.")\n'
+            '    BASE_CKPT = BASE_CHECKPOINT\n'
+            '    print("starting from", BASE_CKPT, "-- not stock EdgeTAM, so "\n'
+            '          "the before/after below reports what THIS run added on "\n'
+            '          "top of the pretrain rather than what both added to '
+            'stock.")')
     replace(notebook, 'MIN_AREA       = 48', 'MIN_AREA       = 64')
     replace(notebook, 'MIN_SIDE       = 4', 'MIN_SIDE       = 6')
-    replace(notebook, 'MAX_AREA       = 0.9', 'MAX_AREA       = 0.25')
+    replace(notebook, 'MAX_AREA       = 0.9', 'MAX_AREA       = 0.2')
     replace(notebook,
             'PROMPT_JITTER  = 0.3\nMETHOD',
             'PROMPT_JITTER  = 0.3\n'

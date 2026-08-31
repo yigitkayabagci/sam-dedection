@@ -444,5 +444,64 @@ class GeometryTest(unittest.TestCase):
         self.assertEqual((guard.missing, guard.state), (0, TRACKING))
 
 
+class ShippedConfigTest(unittest.TestCase):
+    """The guard has to be reachable from a config file, or it does not exist.
+
+    `tools/track_adaptive.py` and `tools/eval_antiuav.py` both read a YAML and
+    splat it into `build_tracker(name, **backend)`, so every key in a shipped
+    config is a keyword argument to a tracker constructor. That makes an
+    unknown key a `TypeError` at start-up rather than something ignored -- and
+    it made the two failures these tests exist to stop: `stabiliser.py` was 700
+    lines that no shipped config turned on, and the TensorRT tracker accepted
+    `ego_motion` while dropping `guard` from its signature, so a config with
+    both worked on PyTorch and crashed on the engine build.
+    """
+
+    CONFIGS = ("edgetam_768_samurai.yaml", "edgetam_512_thermal_guard.yaml")
+
+    def configs(self):
+        import yaml
+
+        for name in self.CONFIGS:
+            path = ROOT / "configs" / name
+            self.assertTrue(path.is_file(), f"{name} is not in configs/")
+            yield name, yaml.safe_load(path.read_text())
+
+    def test_every_guard_block_is_a_guard_config(self):
+        import inspect
+
+        known = set(inspect.signature(GuardConfig).parameters)
+        for name, body in self.configs():
+            with self.subTest(config=name):
+                guard = body.get("guard")
+                self.assertIsInstance(guard, dict, f"{name} ships no guard block")
+                fields = {k: v for k, v in guard.items() if k != "enabled"}
+                self.assertEqual(set(fields) - known, set())
+                GuardConfig(**fields)
+
+    def test_the_thermal_config_runs_the_whole_classical_stack(self):
+        """`guard` measures the jump after the background's motion is removed,
+        so a guard without `ego_motion` is measuring a drone's yaw as the
+        target moving. The three belong together and the config that exists to
+        be pointed at thermal footage has to carry all three."""
+        body = dict(self.configs()).get("edgetam_512_thermal_guard.yaml")
+        for block in ("samurai", "ego_motion", "guard"):
+            self.assertIn(block, body)
+        self.assertEqual(body["image_size"], 512)
+
+    def test_both_trackers_accept_every_key_a_shipped_config_holds(self):
+        import inspect
+
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+        from src.trackers.edgetam_trt_tracker import EdgeTAMTRTTracker
+
+        for name, body in self.configs():
+            for tracker in (EdgeTAMTracker, EdgeTAMTRTTracker):
+                with self.subTest(config=name, tracker=tracker.__name__):
+                    taken = set(inspect.signature(tracker).parameters)
+                    self.assertEqual(set(body) - taken, set())
+
+
+
 if __name__ == "__main__":
     unittest.main()
