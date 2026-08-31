@@ -101,6 +101,7 @@ def main() -> None:
             '                 "pool/vtuav_thermal": 0.8,\n'
             '                 "pool/vtuav_lt_thermal": 0.8,\n'
             '                 "segfly": 0.85,\n'
+            '                 "segfly:truck": 0.0,\n'
             '                 "car": 0.7, "truck": 0.7}')
     # The weights this arm starts from. Empty keeps stock EdgeTAM, which is
     # what 22 always did; pointing it at 34's output is what makes a

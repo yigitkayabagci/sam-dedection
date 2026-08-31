@@ -309,10 +309,16 @@ SEGFLY = '["segfly:/content/data/SegFly:thermal:components:train"]'
 # joins at 0.8 -- a tracking set is one target followed for thousands of
 # frames, so its instances are correlated in a way a detection set's are not,
 # and counting each one as a full example over-weights a handful of scenes.
+# `segfly:truck` is zero and not 0.7 because that class is not a truck. Its
+# components are a ninth of `vehicle`'s area with 1.8x the count, and 95 % of
+# them sit inside tree and vegetation rather than beside a car -- measured in
+# `docs/segfly_decomposition.md` §4. The key is source-scoped, so Kust4K's and
+# DroneVehicle's real trucks keep the 0.7 they had.
 THERMAL_WEIGHTS = ('{"pool/dronevehicle_thermal": 0.45,\n'
                    '                 "pool/dronevehicle_thermal_only": 0.7,\n'
                    '                 "pool/vtuav_thermal": 0.8,\n'
                    '                 "pool/vtuav_rgb": 0.8,\n'
+                   '                 "segfly:truck": 0.0,\n'
                    '                 "car": 0.7, "truck": 0.7}')
 
 SOURCE_ZIPS_DEFAULT = (
