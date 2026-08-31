@@ -25,7 +25,9 @@ is why it can guard every combination rather than the one being worked on.
 """
 from __future__ import annotations
 
+import shutil
 import sys
+import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -36,7 +38,7 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
-from tools.run_records import (MODES, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
+from tools.run_records import (MODES, ab_table, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
@@ -571,6 +573,86 @@ class Provenance(unittest.TestCase):
             self.assertNotEqual(digest(same_a)["sha256"], digest(other)["sha256"])
             self.assertEqual(digest(same_a)["bytes"], 7)
             self.assertIsNone(digest(Path(tmp) / "missing.engine"))
+
+
+
+class EnginesMissingTest(unittest.TestCase):
+    """The pre-check has to see every engine the config names.
+
+    A TRT config names four. Checking only the encoder passes a directory that
+    a per-module rebuild left with one file in it -- and every shipped TRT
+    config sets `strict: false`, so the other three become one printed line and
+    a silent PyTorch fallback. The run then finishes and reports a speed that
+    is not the configuration's, which is the number the whole tool exists to
+    produce.
+    """
+
+    KEYS = ("image_encoder", "memory_attention", "memory_encoder", "sam_head")
+
+    def config_with(self, present):
+        """A config naming all four engines, with `present` of them on disk."""
+        import yaml
+
+        folder = Path(tempfile.mkdtemp(dir=ROOT))
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        body = {f"{k}_engine": f"{folder.name}/edgetam_{k}.engine" for k in self.KEYS}
+        for key in present:
+            (folder / f"edgetam_{key}.engine").write_bytes(b"")
+        path = folder / "backend.yaml"
+        path.write_text(yaml.safe_dump(body))
+        return str(path.relative_to(ROOT))
+
+    def test_a_complete_set_is_not_missing(self):
+        self.assertIsNone(engines_missing(self.config_with(self.KEYS)))
+
+    def test_one_engine_out_of_four_is_still_missing_three(self):
+        told = engines_missing(self.config_with(("image_encoder",)))
+        self.assertIsNotNone(told, "a partial set read as complete")
+        for key in ("memory_attention", "memory_encoder", "sam_head"):
+            self.assertIn(f"edgetam_{key}.engine", told)
+        self.assertNotIn("edgetam_image_encoder.engine", told)
+
+    def test_an_empty_directory_is_named_without_a_file_list(self):
+        told = engines_missing(self.config_with(()))
+        self.assertIsNotNone(told)
+        self.assertNotIn("--", told)
+
+    def test_a_config_naming_no_engines_is_not_this_check_s_business(self):
+        """The PyTorch configs. `--backend torch` reaches this with them."""
+        self.assertIsNone(engines_missing("configs/edgetam_768.yaml"))
+
+
+
+
+class ABTableTest(unittest.TestCase):
+    """Two arms, as the change in each number rather than two rows to subtract."""
+
+    A = {"track": {"frames": 300, "held": 300, "longest_gap": 0,
+                   "share_max": 0.41, "jumps": 7}, "fps": "31.2"}
+    B = {"track": {"frames": 300, "held": 286, "longest_gap": 4,
+                   "share_max": 0.09, "jumps": 1}, "fps": "31.0"}
+
+    def test_each_number_is_reported_as_its_change(self):
+        table = "\n".join(ab_table("plain", "guard_lite", "full768", self.A, self.B))
+        self.assertIn("| frames held | 300/300 | 286/300 | -14 |", table)
+        self.assertIn("| jumps | 7 | 1 | -6 |", table)
+        self.assertIn("| longest gap | 0 | 4 | +4 |", table)
+        self.assertIn("-32.0%", table)
+        self.assertIn("| FPS | 31.2 | 31.0 |", table)
+
+    def test_it_says_that_holding_fewer_frames_can_be_the_better_run(self):
+        """The one reading that would otherwise be got backwards: a refused
+        mask is reported empty, so the arm that stops scoring a mask covering a
+        field as a hit holds fewer frames."""
+        table = "\n".join(ab_table("plain", "guard_lite", "full768", self.A, self.B))
+        self.assertIn("not by itself a regression", table)
+
+    def test_nothing_is_drawn_when_an_arm_produced_no_numbers(self):
+        """An empty table would read as "no difference"."""
+        self.assertEqual(ab_table("plain", "guard_lite", "full768", self.A, None), [])
+        self.assertEqual(ab_table("plain", "guard_lite", "full768", None, self.B), [])
+        self.assertEqual(ab_table("plain", "guard_lite", "full768", {}, {}), [])
+
 
 
 if __name__ == "__main__":

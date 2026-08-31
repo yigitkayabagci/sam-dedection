@@ -193,6 +193,9 @@ POLICIES = {
     "plain": None,
     "samurai": "configs/policies/samurai.yaml",
     "ego": "configs/policies/ego.yaml",
+    # The gates alone, reading no pixels: the part measured to refuse a jump,
+    # without the decode and the optical flow measured to cost 18-27 ms a frame.
+    "guard_lite": "configs/policies/guard_lite.yaml",
     "guard": "configs/policies/guard.yaml",
     # `guard` minus SAMURAI. Named for what it leaves out rather than for the
     # module it runs: `guard:` in a config, `GuardConfig`, and
@@ -233,6 +236,18 @@ POLICY_NOTE = {
         "`dropout_episodes` counts a lost frame honestly instead of scoring a "
         "mask that covers a field as a hit. Expect dropouts to go **up** where "
         "they were being hidden. **Training-free.** Read against the `ego` row."
+    ),
+    "guard_lite": (
+        "Policy: `guard_lite` — the guard's gates and nothing that reads a "
+        "pixel. On a 1920x1080 source the full guard pays a JPEG decode (7 ms) "
+        "and `estimate_shift` (11-20 ms) on every frame, and neither is what "
+        "refuses a jump: the gates are arithmetic on the box and caught every "
+        "identity switch tested -- a 26-pixel target jumping 40 px and up, at "
+        "pans of 0 to 25 px a frame, with no honest frame refused. Measured at "
+        "0.1 ms a frame. `max_jump` is 1.2 here rather than 2.5 because the "
+        "full guard reaches 2.5 only with the contrast gate tightening it, and "
+        "this one has no frame to read. **Training-free.** Read against "
+        "`plain`."
     ),
     "guard_only": (
         "Policy: `guard_only` — the same classical layer `guard` runs "
@@ -393,10 +408,26 @@ def engines_missing(config: str) -> str | None:
     import yaml
 
     body = yaml.safe_load((ROOT / config).read_text()) or {}
-    engine = body.get("image_encoder_engine")
-    if not engine or (ROOT / engine).exists():
+    named = [body[key] for key in ("image_encoder_engine", "memory_attention_engine",
+                                   "memory_encoder_engine", "sam_head_engine")
+             if body.get(key)]
+    if not named:
         return None
-    return str(Path(engine).parent)
+    # All four, not just the encoder. A config that names four and has one is
+    # the state a per-module rebuild leaves behind -- and `strict: false`, which
+    # every shipped TRT config sets, turns the other three into a printed line
+    # and a silent PyTorch fallback. The run then finishes and reports a speed
+    # that is not the configuration's.
+    missing = [Path(e) for e in named if not (ROOT / e).exists()]
+    if not missing:
+        return None
+    where = str(missing[0].parent)
+    if len(missing) < len(named):
+        # Naming them matters when some exist: a per-module rebuild is
+        # how a directory ends up with one of four, and "needs this
+        # directory" reads as "nothing is built" when three files are.
+        return f"{where}/ -- {', '.join(sorted(m.name for m in missing))}"
+    return where
 
 
 def digest(path: Path) -> dict | None:
@@ -508,6 +539,50 @@ def resolve_prompts(record: Path, outdir: Path, args) -> Path | None:
         picked = (interactive.pick_points_multi(first) if args.multi
                   else interactive.pick_points(first))
     return save_prompts(picked, saved)
+
+
+
+def ab_table(base: str, other: str, mode: str, first, second) -> list[str]:
+    """One policy against one other, as the change in each number.
+
+    Two arms is the shape a question has: is this change worth it. Four rows
+    beside each other answer "which of these" and leave the reader to subtract,
+    which is where a small regression hides.
+
+    Returns `[]` when either arm produced no `track.json` -- there is nothing
+    to compare and an empty table would read as "no difference".
+    """
+    a = (first or {}).get("track") or {}
+    b = (second or {}).get("track") or {}
+    if not a or not b:
+        return []
+
+    def moved(key, digits=0):
+        return f"{b[key] - a[key]:+.{digits}f}" if digits else f"{b[key] - a[key]:+d}"
+
+    return [
+        "",
+        f"### `{other}` against `{base}` — {mode}",
+        "",
+        f"| | `{base}` | `{other}` | change |",
+        "|---|---|---|---|",
+        f"| frames held | {a['held']}/{a['frames']} | {b['held']}/{b['frames']} | "
+        f"{moved('held')} |",
+        f"| longest gap | {a['longest_gap']} | {b['longest_gap']} | "
+        f"{moved('longest_gap')} |",
+        f"| max share | {a['share_max']:.1%} | {b['share_max']:.1%} | "
+        f"{b['share_max'] - a['share_max']:+.1%} |",
+        f"| jumps | {a['jumps']} | {b['jumps']} | {moved('jumps')} |",
+        f"| FPS | {(first or {}).get('fps', '-')} | "
+        f"{(second or {}).get('fps', '-')} | |",
+        "",
+        "Read `max share` and `jumps` down, `longest gap` down, and the FPS "
+        "column as the price. **`frames held` going down is not by itself a "
+        "regression**: a refusal is reported as an empty mask, so a policy that "
+        "stops counting a mask covering a field as a hit holds fewer frames and "
+        "is the better run. It is a regression when `held` falls and `max "
+        "share` and `jumps` do not.",
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -642,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     absent = {} if args.pick_only else {
         m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
     if absent:
-        lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
+        lines = [f"  {m:<10} needs {d}" for m, d in sorted(absent.items())]
         sizes = sorted({MODES[m][0] for m in absent})
         builds = []
         for size in sizes:
@@ -878,6 +953,10 @@ def main(argv: list[str] | None = None) -> int:
                 cells += [r["stages"], f"{r['demo']} ms"]
             shown = mode if len(policies) == 1 else f"{mode} + {policy}"
             lines.append(f"| `{shown}` | " + " | ".join(cells) + " |")
+        if len(policies) == 2:
+            lines += ab_table(policies[0], policies[1], modes[0],
+                              per_mode.get((modes[0], policies[0])),
+                              per_mode.get((modes[0], policies[1])))
         lines += ["", "Videos and charts: "
                   + ", ".join(f"`{name}/{folder(mode, args, policy)}/`"
                               for mode, policy in itertools.product(modes, policies)),

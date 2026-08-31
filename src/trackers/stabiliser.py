@@ -180,6 +180,24 @@ class GuardConfig:
     # manages 42, so the second arm costs one detection in forty-eight. It buys
     # the flat-surround frame and it buys every shipped config keeping the 0.6
     # it pins, which would otherwise be a number in units that no longer exist.
+    # Whether the guard reads pixels at all. False is the cheap mode, and the
+    # measurement behind it: on a 1920x1080 source the guard's per-frame cost
+    # is one JPEG decode (7 ms) plus `estimate_shift` (11 ms at reduce 4, 20 at
+    # reduce 2), and *neither of those is what refuses a jump*. The geometry
+    # gates and the hysteresis are arithmetic on the box -- area, aspect, frame
+    # share, distance travelled -- and against a real identity switch they
+    # caught every case tested, from a 40-pixel jump on a 26-pixel target up,
+    # with no honest frame refused.
+    #
+    # What is given up is what the pixels buy: the camera's own motion is no
+    # longer subtracted, so `max_jump` is measured in raw image coordinates and
+    # a panning camera eats into its margin; the contrast gate cannot tighten
+    # on a faint frame; and a lost track is never re-acquired, because there is
+    # no appearance to match. On footage where the jump is many target-widths
+    # and the camera moves a few pixels a frame, that trade is most of the
+    # value for none of the cost.
+    read_frames: bool = True
+
     reacquire_motion: bool = True
     motion_threshold: float = 0.6
 
@@ -843,8 +861,20 @@ class Stabiliser:
         self._areas.clear()
         self._aspects.clear()
 
-    def update(self, frame: np.ndarray, box=None) -> Decision:
-        """One frame. `box` is the tracker's claim, `None` if it made none."""
+    def update(self, frame, box=None, shape=None) -> Decision:
+        """One frame. `box` is the tracker's claim, `None` if it made none.
+
+        `frame` may be `None` in the cheap mode, and then `shape` is the
+        `(height, width)` the boxes are in -- the only thing the geometry gates
+        need pixels for is `max_frame_share`, which needs the size and not the
+        picture.
+        """
+        if frame is None:
+            if shape is None:
+                raise ValueError("Stabiliser.update needs a frame or a shape")
+            self.frames += 1
+            return self._decide(None, tuple(shape), box, (0.0, 0.0))
+
         frame = np.ascontiguousarray(frame)
         if frame.ndim != 2:
             raise ValueError("Stabiliser.update takes a greyscale frame")
@@ -854,13 +884,17 @@ class Stabiliser:
         if self._previous is not None:
             shift = estimate_shift(self._previous, frame, self.box)
         self._previous = frame
-        if self.config.reacquire_motion:
+        if self.config.reacquire_motion and frame is not None:
             # Three frames and the two shifts between them, which is what
             # `motion_residual` needs and the only state the motion cue adds.
             self._history.append(frame)
             self._shifts.append(shift)
             del self._history[:-3], self._shifts[:-2]
 
+        return self._decide(frame, frame.shape[:2], box, shift)
+
+    def _decide(self, frame, shape, box, shift) -> Decision:
+        """The judgement itself, which needs the frame's size and not its pixels."""
         if self.box is None:
             # Nothing to compare against yet: the first box a tracker gives is
             # the one it was prompted with, and refusing that would leave the
@@ -871,7 +905,8 @@ class Stabiliser:
         if box is None:
             return self._refuse(frame, predicted, shift, "no mask")
 
-        verdict = self._implausible(frame, box, predicted, self._gates(frame, predicted))
+        gates = self._gates(frame, predicted) if frame is not None else self.config
+        verdict = self._implausible(shape, box, predicted, gates)
         if verdict:
             return self._refuse(frame, predicted, shift, verdict)
         return self._accept(frame, np.asarray(box, dtype=np.float64), shift)
@@ -903,15 +938,20 @@ class Stabiliser:
                        * config.caution_factor,
                        max_jump=config.max_jump * config.caution_factor)
 
-    def _implausible(self, frame: np.ndarray, box, predicted,
+    def _implausible(self, shape, box, predicted,
                      config: GuardConfig | None = None) -> str:
-        """The first gate this box fails, or `""` when it passes them all."""
+        """The first gate this box fails, or `""` when it passes them all.
+
+        Takes the frame's `(height, width)` rather than the frame: every gate
+        here is arithmetic on the box, which is why the cheap mode can run all
+        of them without decoding anything.
+        """
         config = config or self.config
         box = np.asarray(box, dtype=np.float64)
         area, aspect = area_of(box), aspect_of(box)
         if area <= 0:
             return "empty box"
-        if area > config.max_frame_share * frame.shape[0] * frame.shape[1]:
+        if area > config.max_frame_share * float(shape[0]) * float(shape[1]):
             return "covers the frame"
 
         typical_area = float(np.median(self._areas)) if self._areas else area
@@ -943,7 +983,8 @@ class Stabiliser:
         self.box = box
         self._areas.append(area_of(box))
         self._aspects.append(aspect_of(box))
-        self.template = _crop(self._view(frame, size_of(box)), box)
+        if frame is not None:
+            self.template = _crop(self._view(frame, size_of(box)), box)
         self.missing = 0
         self.driven = False
         was = self.state
@@ -1059,7 +1100,8 @@ class Stabiliser:
     def _search(self, frame: np.ndarray, predicted: np.ndarray
                 ) -> tuple[np.ndarray | None, float]:
         """Normalised cross-correlation in a region that grows while lost."""
-        if self.template is None or self.missing > self.config.give_up_after:
+        if (frame is None or self.template is None
+                or self.missing > self.config.give_up_after):
             return None, float("nan")
         grown = min(self.config.search_scale
                     * self.config.search_growth ** max(self.missing - 1, 0),
@@ -1102,7 +1144,8 @@ class Stabiliser:
         self.box = box
         self._areas.append(area_of(box))
         self._aspects.append(aspect_of(box))
-        self.template = _crop(self._view(frame, size_of(box)), box)
+        if frame is not None:
+            self.template = _crop(self._view(frame, size_of(box)), box)
         self.state = TRACKING
         self.healthy = 1
         return Decision(box=box, state=TRACKING, shift=tuple(shift))

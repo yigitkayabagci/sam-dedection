@@ -936,13 +936,27 @@ assert FOUND, f"no record.json under {POOL_ROOT} -- nothing was unpacked"
 
 GUESSED = set()
 
+RGB_SOURCES = ("visdrone", "aerovis", "vtuav_vis", "rgbt234", "lasher")
+
 def modality_of(pool):
+    """The modality a pool holds: declared, then read off the name, then known.
+
+    A pool name carries the modality only when whoever harvested it put it
+    there. `vtuav_thermal` says so; `visdrone` does not, and VisDrone is RGB.
+    Without `RGB_SOURCES` the fallback reads "no rgb in the name" as thermal,
+    so an RGB pool joins a thermal-only run, its frames are converted to grey,
+    and nothing says it happened. That list is what those datasets *are*, not a
+    preference, which is why it is a constant and POOL_MODALITIES is the
+    setting.
+    """
     if pool in POOL_MODALITIES:
         return POOL_MODALITIES[pool]
-    GUESSED.add(pool)
     lowered = pool.lower()
     if lowered.endswith("_rgb") or "_rgb_" in lowered or "rgb" in lowered.split("_"):
         return "rgb"
+    if any(source in lowered for source in RGB_SOURCES):
+        return "rgb"
+    GUESSED.add(pool)
     return "thermal"
 
 def images_for(pool):
@@ -1003,10 +1017,10 @@ _guessed = sorted(_pool for _pool in GUESSED & {_r["pool"] for _r in PLAN}
                   and "thermal" not in _pool.lower()
                   and "tir" not in _pool.lower())
 if _guessed:
-    print(f"   !! modality guessed for {_guessed} -- their names say neither. "
-          f"A pool not naming `rgb` is read as thermal, which converts colour "
-          f"frames to grey and trains them as thermal. Put them in "
-          f"POOL_MODALITIES if that is wrong.")
+    print(f"   !! modality guessed as thermal for {_guessed} -- their names say "
+          f"neither, and they are not one of the sources RGB_SOURCES names. "
+          f"Read as thermal, which converts colour frames to grey and trains "
+          f"them as thermal. Put them in POOL_MODALITIES if that is wrong.")
 if {"visdrone", "aerovis"} <= {_row["key"] for _row in PLAN}:
     print("   !! a VisDrone pool and an AeroVIS pool are both in this run. "
           "AeroVIS *is* VisDrone re-labelled (plus UAVDT and SeaDronesSee), "

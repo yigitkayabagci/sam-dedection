@@ -260,6 +260,13 @@ class EdgeTAMTracker(VideoTracker):
         """
         if self._motion is not None:
             return
+        if (self.guard_config is not None and self.ego_motion is None
+                and not getattr(self.guard_config, "read_frames", True)):
+            # The cheap guard. It judges boxes and never looks at a pixel, so
+            # opening a frame source would buy a JPEG decode a frame and give
+            # nothing back -- which is most of what made the full guard cost
+            # what it did.
+            return
         if self.ego_motion is not None:
             from .stabiliser import FrameMotion
 
@@ -371,13 +378,15 @@ class EdgeTAMTracker(VideoTracker):
         from .stabiliser import Stabiliser, box_of
 
         frame = self._motion.frame(frame_idx) if self._motion is not None else None
-        if frame is None:
+        blind = (frame is None and self.guard_config is not None
+                 and not getattr(self.guard_config, "read_frames", True))
+        if frame is None and not blind:
             return masks
         scale_x = scale_y = 1.0
         judged, record = {}, {}
         for obj_id, mask in masks.items():
             box = box_of(mask)
-            if box is not None:
+            if box is not None and frame is not None:
                 # The masks are at the model's own resolution and the frame was
                 # decoded small; the guard works in the decoded frame's pixels
                 # so that its template match and its flow agree with each other.
@@ -387,7 +396,10 @@ class EdgeTAMTracker(VideoTracker):
             guard = self._guards.get(obj_id)
             if guard is None:
                 guard = self._guards[obj_id] = Stabiliser(self.guard_config)
-            decision = guard.update(frame, box)
+            # In the cheap mode the boxes stay in the mask's own coordinates,
+            # which is all the gates need: every one of them is a ratio.
+            decision = (guard.update(None, box, shape=mask.shape[-2:]) if blind
+                        else guard.update(frame, box))
             record[obj_id] = decision
             judged[obj_id] = mask if decision.accepted else np.zeros_like(mask)
         self.verdicts[frame_idx] = record

@@ -640,5 +640,78 @@ class CheckpointPathsTest(unittest.TestCase):
 
 
 
+
+class ModalityTest(unittest.TestCase):
+    """No RGB pool trains in a thermal-only run without saying so.
+
+    A pool name carries its modality only when the harvest put it there.
+    `vtuav_thermal` says so; `visdrone` does not, and VisDrone is RGB. The
+    fallback reads "no rgb in the name" as thermal, so an unnamed RGB pool
+    joins a thermal run, its colour frames are converted to grey, and the only
+    trace is a warning that scrolls past. `RGB_SOURCES` closes it for the
+    sources this project actually harvests.
+    """
+
+    RGB_POOLS = ("visdrone", "visdrone_rgb", "aerovis_train", "aerovis_heldout",
+                 "vtuav_vis", "rgbt234", "kust4k_rgb", "vtuav_lt_rgb",
+                 "dronevehicle_rgb_only")
+    THERMAL_POOLS = ("hituav_thermal", "vtuav_thermal", "dronevehicle_thermal",
+                     "kaggle_uav_thermal", "segfly_thermal", "kust4k_thermal",
+                     "vtuav_lt_thermal", "dronevehicle_thermal_only")
+
+    def decider(self, name: str):
+        """`modality_of` lifted out of a notebook and made callable."""
+        source = "".join("".join(c["source"])
+                         for c in json.loads((ROOT / "notebooks" / name).read_text())
+                         ["cells"] if c["cell_type"] == "code")
+        start = source.find("RGB_SOURCES")
+        if start < 0:
+            start = source.find("def modality_of")
+        end = source.find("\ndef ", source.find("def modality_of") + 1)
+        self.assertGreater(start, -1, f"{name} has no modality_of")
+        scope = {"POOL_MODALITIES": {}, "GUESSED": set()}
+        exec(source[start:end], scope)                    # noqa: S102 - our own text
+        return scope["modality_of"], scope
+
+    def test_a_thermal_run_never_reads_an_rgb_pool_as_thermal(self):
+        for name in sorted(path.name for path in NOTEBOOKS):
+            body = json.loads((ROOT / "notebooks" / name).read_text())
+            code = "".join("".join(c["source"]) for c in body["cells"])
+            if "def modality_of" not in code or 'MODALITIES  = ["thermal"]' not in code:
+                continue
+            decide, _ = self.decider(name)
+            for pool in self.RGB_POOLS:
+                with self.subTest(notebook=name, pool=pool):
+                    self.assertEqual(decide(pool), "rgb")
+
+    def test_a_thermal_pool_is_still_thermal(self):
+        """The other direction, which matters more: reading a thermal pool as
+        RGB would drop it from a thermal run entirely."""
+        for name in sorted(path.name for path in NOTEBOOKS):
+            code = "".join("".join(c["source"])
+                           for c in json.loads((ROOT / "notebooks" / name).read_text())
+                           ["cells"])
+            if "def modality_of" not in code:
+                continue
+            decide, _ = self.decider(name)
+            for pool in self.THERMAL_POOLS:
+                with self.subTest(notebook=name, pool=pool):
+                    self.assertEqual(decide(pool), "thermal")
+
+    def test_a_declared_pool_beats_every_rule(self):
+        decide, scope = self.decider("32_aerial_thermal_stage_b_stable.ipynb")
+        scope["POOL_MODALITIES"]["visdrone"] = "thermal"
+        self.assertEqual(decide("visdrone"), "thermal")
+
+    def test_only_a_name_nothing_can_resolve_is_guessed(self):
+        decide, scope = self.decider("32_aerial_thermal_stage_b_stable.ipynb")
+        decide("visdrone")
+        decide("hituav_thermal")
+        self.assertNotIn("visdrone", scope["GUESSED"])
+        decide("some_new_harvest")
+        self.assertIn("some_new_harvest", scope["GUESSED"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
