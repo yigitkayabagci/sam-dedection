@@ -117,6 +117,34 @@ def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None,
     return True
 
 
+def _require_realtime_preprocess(tracker, paths, timer, view=None,
+                                 read_timer=None) -> bool:
+    """Install the lazy per-frame decode, and say so loudly when it did not.
+
+    The two callers on the frame path used to discard this answer. A False is
+    not a fallback: `init_state`'s bulk load has then already paid the decode
+    for every frame *before* the timer starts, so the run still finishes and
+    still prints an FPS -- one with the per-frame preprocessing cost missing
+    from it, which is higher than the configuration can sustain and looks like
+    a result rather than a fault.
+
+    The cause is always the same shape: the directory the tracker indexed and
+    the list this holds are different lengths. `_clear_staged` removes the one
+    way a reusable `--frames-cache` causes that; this catches whatever else
+    does, instead of letting it through as a number.
+    """
+    if _install_realtime_preprocess(tracker, paths, timer, view, read_timer):
+        return True
+    state = getattr(tracker, "_state", None) or {}
+    indexed = len(state.get("images", ()))
+    print(f"!! per-frame preprocessing not installed: the tracker indexed "
+          f"{indexed} frame(s) and this run holds {len(list(paths))}. Every "
+          f"decode happened up front in init_state, so the FPS below EXCLUDES "
+          f"it and is not comparable with other runs. Do not record this "
+          f"number; find the mismatch first.")
+    return False
+
+
 class _LazyVideoFrames:
     """`_LazyFrames`'s counterpart for direct-mp4 mode: decode+resize on demand
     through decord's random-access indexing instead of `load_video_frames_from_video_file`'s
@@ -362,6 +390,32 @@ def _source_frame_count(per_frame_dt: list[float], stride: int, meta) -> int:
     if (n - 1) * stride < total <= n * stride:
         return total
     return n * stride
+
+
+def _clear_staged(cache_root: Path) -> int:
+    """Remove frames a previous run staged here, and say how many there were.
+
+    `init_state` indexes **the directory**, not the list the caller is holding,
+    so a cache that outlives one run has to be emptied before the next stages
+    into it. A temp directory made per run could not have stale frames in it;
+    a `--frames-cache` on a real disk can, and the way it goes wrong is silent
+    and specifically ruins the measurement:
+
+    `_install_realtime_preprocess` refuses when `len(paths) != len(images)` and
+    returns False without raising. The lazy per-frame decode is then never
+    installed, `init_state`'s bulk load has already done that work up front,
+    and the per-frame preprocessing cost disappears from the timed region. The
+    run reports a *higher* FPS than the configuration can really sustain --
+    a number that looks like a result.
+
+    So this is not tidiness. Only the exact staging pattern is touched, never
+    anything else the directory happens to hold.
+    """
+    stale = [p for p in cache_root.glob("*.jpg")
+             if len(p.stem) == 5 and p.stem.isdigit()]
+    for path in stale:
+        path.unlink()
+    return len(stale)
 
 
 def _tracked_cache(cache_root: Path, keep: list[Path]) -> Path:
@@ -729,6 +783,11 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
 
     cache_root = Path(cfg.frames_cache) if cfg.frames_cache else Path(tempfile.mkdtemp(prefix="frames_"))
     cache_root.mkdir(parents=True, exist_ok=True)
+    if cfg.frames_cache:
+        dropped = _clear_staged(cache_root)
+        if dropped:
+            print(f"[pipeline] cleared {dropped} frame(s) staged by an earlier "
+                  f"run in {cache_root}")
     try:
         for idx, src in enumerate(tqdm(tracked, desc="transcoding", unit="frame")):
             rgb = view(load_frame_rgb8(src))
@@ -748,7 +807,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
-        _install_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
+        _require_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
 
         watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [frames]", unit="frame")
@@ -870,7 +929,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
-        _install_realtime_preprocess(tracker, tracked, preprocess_s,
+        _require_realtime_preprocess(tracker, tracked, preprocess_s,
                                      read_timer=read_s)
         watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [jpg]", unit="frame")

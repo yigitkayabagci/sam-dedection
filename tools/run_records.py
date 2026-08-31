@@ -332,6 +332,40 @@ def cache_for(record: Path, mode: str, args) -> Path | None:
     return Path(args.cache_dir) / record.name / "_".join(parts)
 
 
+def pointers_missing(config: str, policy: str) -> str | None:
+    """Why a SAMURAI policy would run at half strength on this engine set, or None.
+
+    SAMURAI does two things and only one of them survives an ordinary export.
+    Re-scoring the three candidate masks needs the sam_head engine's
+    `obj_ptr_all` output, which `export_edgetam_onnx.py` emits only under
+    `--all-pointers`; without it the tracker prints one warning line and keeps
+    going with the memory gate alone. That is a defensible fallback for a run
+    that did not ask for SAMURAI and a silent halving of the thing being
+    measured for one that did -- and the warning arrives after the engines are
+    loaded and the record is indexed, which is minutes in and far above the
+    scrollback by the time the summary prints.
+
+    Read off the sibling `.spec.json`, which lists what was exported. No engine,
+    or no spec beside it, is not this function's question: `engines_missing`
+    already answers the first, and an engine whose spec was deleted is not
+    evidence of anything either way.
+    """
+    import yaml
+
+    if "samurai" not in overlay_for(policy):
+        return None
+    head = (yaml.safe_load((ROOT / config).read_text()) or {}).get("sam_head_engine")
+    if not head or not (ROOT / head).exists():
+        return None
+    spec = (ROOT / head).with_suffix(".spec.json")
+    if not spec.exists():
+        return None
+    names = {o.get("name") for o in json.loads(spec.read_text()).get("outputs", [])}
+    if "obj_ptr_all" in names:
+        return None
+    return str(spec.parent)
+
+
 def engines_missing(config: str) -> str | None:
     """The engine directory a config expects, when it is not there yet.
 
@@ -578,7 +612,13 @@ def main(argv: list[str] | None = None) -> int:
                 (ROOT / config_for(args.weights, size, "", args.backend)).read_text())
             builds += [
                 f"  python tools/export_edgetam_onnx.py --outdir {Path(body['image_encoder_engine']).parent}/ \\",
-                f"      --image-size {size} --checkpoint {body['checkpoint']} --verify",
+                # --all-pointers unconditionally: it costs one pass of a
+                # 256-wide MLP over three tokens, and without it every
+                # --policy carrying `samurai:` loses its mask re-selection on
+                # these engines with one warning line. A set built from the
+                # command printed here has to serve every axis this tool has.
+                f"      --image-size {size} --checkpoint {body['checkpoint']} "
+                f"--all-pointers --verify",
                 f"  python tools/build_trt_engines.py --outdir {Path(body['image_encoder_engine']).parent}/ --max-batch 4",
             ]
         raise SystemExit(
@@ -586,6 +626,28 @@ def main(argv: list[str] | None = None) -> int:
             + "\n".join(lines)
             + "\n\nBuild them (engines are weight- and shape-specific, so each "
               "pair is its own export):\n" + "\n".join(builds)
+        )
+
+    half = {m: d for m, d in ((m, pointers_missing(c, args.policy))
+                             for m, c in configs.items()) if d}
+    if half:
+        raise SystemExit(
+            f"--policy {args.policy} carries `samurai:`, and these engines were "
+            "exported without `--all-pointers`:\n"
+            + "\n".join(f"  {m:<10} {d}/edgetam_sam_head.spec.json lists no "
+                         "obj_ptr_all" for m, d in sorted(half.items()))
+            + "\n\nSAMURAI would still gate the memory bank but could not "
+              "re-select the mask, so the row would be labelled with a policy "
+              "half of which did not run. Re-export the head:\n"
+            + "\n".join(
+                f"  python tools/export_edgetam_onnx.py --outdir {d}/ "
+                f"--image-size {MODES[m][0]} \\\n"
+                f"      --checkpoint {yaml.safe_load((ROOT / configs[m]).read_text())['checkpoint']} "
+                f"--all-pointers --verify"
+                for m, d in sorted(half.items()))
+            + "\n  python tools/build_trt_engines.py --outdir <that dir>/ --max-batch 4"
+            + f"\n\nOr measure the rest of the stack meanwhile with "
+              f"--policy plain, or on --backend torch, which needs no export."
         )
 
     out_root = Path(args.out)
