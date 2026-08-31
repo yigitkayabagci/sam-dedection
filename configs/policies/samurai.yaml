@@ -1,0 +1,35 @@
+# Motion-aware memory, and nothing else. Overlay -- see configs/policies/README.md.
+#
+# SAMURAI is training-free: the checkpoint is untouched and no engine changes
+# shape, because everything it touches is the memory bookkeeping this project
+# deliberately left in PyTorch (docs/tensorrt_fp16.md).
+#
+# The failure it exists for: contrast drops -> the mask degrades ->
+# object_score_logits goes negative -> EdgeTAM writes a constant "no object"
+# vector into the memory bank instead of an appearance -> the next several
+# frames read that back -> the target is lost and the box that comes back
+# covers a field. The memory gate is the half that stops the bank being
+# poisoned; the Kalman re-scoring is the half that picks a better candidate
+# while it still can.
+#
+# ON TENSORRT: mask re-selection needs the sam_head engine's `obj_ptr_all`
+# output, so the head must have been exported with --all-pointers. Without it
+# the tracker warns once and the memory gate still applies -- so this overlay
+# is never silently a no-op, but it is doing half its job.
+samurai:
+  enabled: true
+  # How much the motion model may overrule the IoU head when choosing among the
+  # three candidate masks. Small on purpose: appearance is usually right, and
+  # the motion score is here to break ties and to veto a candidate that jumped
+  # across the frame.
+  kf_weight: 0.15
+  # The filter has to agree with the tracker for this many frames before it is
+  # trusted. One initialised on a single box has no velocity estimate.
+  stable_frames: 15
+  stable_iou: 0.3
+  # A frame enters the bank only if all three agree it was a good one.
+  # memory_obj_score: 0.0 is exactly the threshold at which EdgeTAM starts
+  # writing no_obj_ptr.
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0

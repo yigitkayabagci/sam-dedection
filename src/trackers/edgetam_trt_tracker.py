@@ -90,6 +90,7 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
         samurai: dict | None = None,
         sam2long: dict | None = None,
         ego_motion: bool | dict | None = None,
+        guard: dict | None = None,
     ) -> None:
         super().__init__(
             model_cfg=model_cfg,
@@ -103,6 +104,12 @@ class EdgeTAMTRTTracker(EdgeTAMTracker):
             samurai=samurai,
             sam2long=sam2long,
             ego_motion=ego_motion,
+            # The guard is pure numpy over the decoded frames and never touches
+            # an engine, so it applies here exactly as it does in PyTorch --
+            # `propagate` is inherited and is where it runs. Without this the
+            # base class would still support it and a `guard:` block in a TRT
+            # config would be a TypeError at construction.
+            guard=guard,
         )
         self.engine_paths = {
             # `engine_path` is the pre-multi-engine config key for the image encoder.

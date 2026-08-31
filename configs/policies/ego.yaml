@@ -1,0 +1,44 @@
+# `samurai` plus the camera's own motion. Overlay -- see configs/policies/README.md.
+#
+# WHY THIS IS A SEPARATE RUNG. SAMURAI's Kalman filter lives in image
+# coordinates and published SAMURAI has no term for the camera's own motion. On
+# a drone that is the common case rather than an edge one, and it was measured
+# rather than argued: across 1 978 frame pairs of HIT-UAV's five 640x512 drone
+# videos the background's own displacement is a median 0.9 to 8.6 pixels a
+# frame depending on the flight, with one sequence panning 1 643 pixels end to
+# end. On a 27-pixel target -- the median annotated side there -- 8.6 pixels a
+# frame is a third of its own width of apparent motion that is not the
+# target's.
+#
+# Untreated, a target that never moved appears to accelerate, the
+# constant-velocity model learns that acceleration, and the frame the camera
+# changes what it is doing the filter predicts a jump -- which it then uses to
+# *score* candidate masks, so the error does not stay inside the filter.
+#
+# `stabiliser.estimate_shift` measures it (sparse Lucas-Kanade on a grid with
+# the target's neighbourhood excluded, robust median) and every candidate is
+# kept only if warping the frame back by it actually lowers the alignment
+# residual -- across those same 1 978 pairs that keeps all 995 estimates which
+# improve the alignment and rejects all 9 that made it worse. A frame with no
+# texture returns "no measurement", which a filter should be told rather than
+# handed a zero it would read as a measured standstill.
+#
+# THE BLOCK BELOW REQUIRES `samurai:`. The shift's only consumer is
+# `samurai.KalmanFilter.predict` -- `EdgeTAMTracker._shift_for` is handed to
+# `samurai.install` and nowhere else. Under a config with no `samurai:` block
+# the measurement is taken and dropped, so this file carries both.
+samurai:
+  enabled: true
+  kf_weight: 0.15
+  stable_frames: 15
+  stable_iou: 0.3
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0
+
+ego_motion:
+  # 4 decodes the JPEG at a quarter side directly (fewer coefficients, not a
+  # resize after the fact), which is plenty for a translation and is the
+  # difference between "free" and "a millisecond". The answer is returned as a
+  # fraction of the frame, so this number never has to agree with image_size.
+  reduce: 4

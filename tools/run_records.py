@@ -71,6 +71,33 @@ Usage:
         --modes full512,crop512,full768 --weights stock
     python tools/run_records.py --records frames --out frame_output \\
         --modes full512,crop512,full768 --weights pool_deep
+
+`--policy` is the third axis, and the one that needs no training and no export.
+The modes vary the input and `--weights` varies the model; a policy varies
+neither -- it layers `samurai:` / `ego_motion:` / `guard:` onto whichever
+backend YAML the pair chose (configs/policies/, merged into `config.yaml`
+beside the run). So it measures what the weights already on disk can be made to
+do, which is the one question that does not have to wait for a run to finish:
+
+    # The ladder, on one checkpoint, one prompt: each row differs from the one
+    # above it by exactly one thing.
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512 --weights pool_deep --box 700,300,830,430 --pick-only
+    for policy in plain samurai ego guard; do
+        python tools/run_records.py --records frames --out frame_output \\
+            --modes full512 --weights pool_deep --policy $policy
+    done
+    # -> full512_pool_deep/  _samurai/  _ego/  _guard/  under each record.
+
+    # Or just the two ends, if the question is only "is the stack worth it".
+    python tools/run_records.py --records frames --out frame_output \\
+        --modes full512 --weights pool_deep --policy guard
+
+Read `--policy guard`'s dropout count expecting it to go **up** where the
+tracker was previously reporting a mask covering a field: the guard refuses
+those and reports an empty mask, which `accuracy.dropout_episodes` counts as
+the lost frame it always was. A guard run whose dropouts did not move is a
+guard that never fired, not a guard that helped.
 """
 from __future__ import annotations
 
@@ -133,6 +160,59 @@ WEIGHTS = {
 # before this repository existed and records nothing about it.
 TRAINED_AT = {"stock": 1024, "pool_deep": 512}
 
+# --policy -> the overlay merged onto whichever backend YAML the (weights,
+# size) pair chose, or None for the baseline. This is the third axis and it is
+# orthogonal to the other two: `--modes` varies the input, `--weights` varies
+# the model, and nothing here varies either. No engine changes shape, no
+# checkpoint is touched, nothing is re-exported -- everything in
+# configs/policies/ is inference-time bookkeeping this project deliberately
+# left in PyTorch, which is exactly why it can be measured on the weights
+# already on disk instead of waiting for a training run.
+#
+# They are overlays rather than whole configs because whole ones would be
+# sizes x weights x policies copies of the same engine paths, and the day one
+# of those paths moved most of them would be quietly stale.
+POLICIES = {
+    "plain": None,
+    "samurai": "configs/policies/samurai.yaml",
+    "ego": "configs/policies/ego.yaml",
+    "guard": "configs/policies/guard.yaml",
+}
+
+# The blocks an overlay is allowed to set. A policy states runtime behaviour;
+# a checkpoint or an engine path in one of these files would be that policy
+# quietly changing what `--weights` means, so it is refused rather than merged.
+POLICY_KEYS = ("samurai", "sam2long", "ego_motion", "guard")
+
+# What the summary says about a policy run, so a table read later explains
+# itself. Each names the rung below it, because that is the row it has to be
+# read against.
+POLICY_NOTE = {
+    "samurai": (
+        "Policy: `samurai` — motion-aware memory. A Kalman filter re-scores the "
+        "three candidate masks and a frame enters the memory bank only if IoU, "
+        "object score and motion agree it was a good one. **Training-free**: the "
+        "checkpoint and the engines are the `plain` run's. Read against `plain`."
+    ),
+    "ego": (
+        "Policy: `ego` — `samurai`, plus the background's measured displacement "
+        "handed to that filter as a control input. On HIT-UAV's real drone "
+        "footage the camera moves a median 0.9-8.6 px a frame, which on a "
+        "27-pixel target is a third of its own width of apparent motion that is "
+        "not the target's. **Training-free.** Read against the `samurai` row: "
+        "the difference is the camera term and nothing else."
+    ),
+    "guard": (
+        "Policy: `guard` — `ego`, plus the classical layer with no weights in "
+        "it: area, aspect and travel plausibility once the camera's motion is "
+        "out, hysteresis, and template re-acquisition. A refused mask is "
+        "reported **empty**, never replaced by the guard's own prediction, so "
+        "`dropout_episodes` counts a lost frame honestly instead of scoring a "
+        "mask that covers a field as a hit. Expect dropouts to go **up** where "
+        "they were being hidden. **Training-free.** Read against the `ego` row."
+    ),
+}
+
 
 def config_for(weights: str, size: int, mode: str) -> str:
     """The YAML for one (weights, input size) pair, or a refusal that explains.
@@ -150,6 +230,64 @@ def config_for(weights: str, size: int, mode: str) -> str:
         f"cannot run under it (it has {have}). Drop that mode, or run it "
         f"under --weights stock."
     )
+
+
+def overlay_for(policy: str) -> dict:
+    """The policy blocks named by `--policy`, or `{}` for the baseline.
+
+    Refuses an overlay that reaches outside `POLICY_KEYS`: a `checkpoint:` in
+    one of these files would make `--policy` a second way to change the weights,
+    and the summary's `--weights` column would stop being true.
+    """
+    import yaml
+
+    path = POLICIES[policy]
+    if path is None:
+        return {}
+    body = yaml.safe_load((ROOT / path).read_text()) or {}
+    stray = sorted(set(body) - set(POLICY_KEYS))
+    if stray:
+        raise SystemExit(
+            f"{path} sets {', '.join(stray)}, which is not a policy. An overlay "
+            f"may only set {', '.join(POLICY_KEYS)} -- anything else belongs in "
+            f"the backend config the --weights axis selects."
+        )
+    return body
+
+
+def staged_config(config: str, policy: str, outdir: Path) -> str:
+    """The config the run actually reads: the backend YAML, plus the overlay.
+
+    For the baseline this is the backend YAML itself, unchanged, so a `plain`
+    run reads exactly the file earlier runs read. With a policy the merge is
+    written to `<outdir>/config.yaml` and *that* is what cli.py is pointed at,
+    which is the decisive record: the question asked later is not "which
+    overlay was named" but "what did this folder run", and the answer then sits
+    beside the video rather than in two files that have to be re-merged.
+
+    The merge is per block, not per key. A policy is a complete statement of
+    one -- half of `guard:` from a file and half from a backend config would be
+    a setting nobody wrote.
+
+    Relative `checkpoint:`/`*_engine:` paths are left alone: cli.py resolves
+    them against the repository root, not against the config's own directory,
+    so the copy works from wherever it is written.
+    """
+    import yaml
+
+    blocks = overlay_for(policy)
+    if not blocks:
+        return config
+    body = yaml.safe_load((ROOT / config).read_text()) or {}
+    body.update(blocks)
+    staged = outdir / "config.yaml"
+    staged.write_text(
+        f"# Generated by tools/run_records.py: {config}\n"
+        f"# + configs/policies/{policy}.yaml (--policy {policy}).\n"
+        f"# Edit those two, not this -- a re-run overwrites it.\n"
+        + yaml.safe_dump(body, sort_keys=False)
+    )
+    return str(staged)
 
 
 def engines_missing(config: str) -> str | None:
@@ -204,6 +342,11 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
     return {
         "weights": args.weights,
         "trained_at": TRAINED_AT.get(args.weights),
+        # The policy by name and by value. The name alone would not survive an
+        # edit to configs/policies/, and this file is read months later to
+        # explain a number.
+        "policy": args.policy,
+        "policy_blocks": overlay_for(args.policy),
         "mode": mode,
         "image_size": int(body.get("image_size", 1024)),
         "center_crop": crop,
@@ -215,15 +358,21 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
 
 
 def folder(mode: str, args) -> str:
-    """The output folder for one run: `<mode>[_<weights>][_skipN]`.
+    """The output folder for one run: `<mode>[_<weights>][_<policy>][_skipN]`.
 
     A plain `stock` run at every frame keeps the bare `<mode>` name, so results
     written before there was more than one axis stay where they are and a
-    re-run lands on top of them rather than beside them.
+    re-run lands on top of them rather than beside them. The same reasoning
+    puts the policy in the name: `full512_pool_deep` and
+    `full512_pool_deep_guard` are two measurements of one checkpoint, not a
+    result and its replacement, and the whole point of the ladder is reading
+    them side by side.
     """
     parts = [mode]
     if args.weights != "stock":
         parts.append(args.weights)
+    if args.policy != "plain":
+        parts.append(args.policy)
     if args.frame_skip > 1:
         parts.append(f"skip{args.frame_skip}")
     return "_".join(parts)
@@ -272,6 +421,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="frame_output", help="Where results go.")
     p.add_argument("--modes", default=",".join(MODES),
                    help=f"Comma-separated subset of {', '.join(MODES)}.")
+    p.add_argument("--policy", default="plain", choices=tuple(POLICIES),
+                   help="Inference-time policy layered onto the backend config: "
+                        "samurai (motion-aware memory), ego (that filter given "
+                        "the camera's own displacement), guard (ego plus the "
+                        "classical plausibility and re-acquisition layer). None "
+                        "of them trains anything or rebuilds an engine, so each "
+                        "runs on the weights already on disk. Results land in "
+                        "<mode>_<weights>_<policy>/ beside the baseline.")
     p.add_argument("--weights", default="stock", choices=tuple(WEIGHTS),
                    help="Which trained weights the modes run on. `stock` is "
                         "EdgeTAM as shipped; `pool_deep` is the checkpoint from "
@@ -388,7 +545,12 @@ def main(argv: list[str] | None = None) -> int:
             outdir = out_root / record.name / folder(mode, args)
             outdir.mkdir(parents=True, exist_ok=True)
 
-            cmd = [PY, "cli.py", "--tracker", "edgetam_trt", "--config", config,
+            # After mkdir: a policy run writes the merged config into the
+            # folder it is about to fill, so what ran and what it produced are
+            # never in two places.
+            run_config = staged_config(config, args.policy, outdir)
+
+            cmd = [PY, "cli.py", "--tracker", "edgetam_trt", "--config", run_config,
                    "--frames-dir", record, "--frame-pattern", args.pattern,
                    "--fps", args.fps,
                    "--prompt", "file", "--prompt-file", prompts,
@@ -448,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
         + (f"`{WEIGHTS[args.weights][MODES[modes[0]][0]]}` and its siblings, "
            f"trained at {trained}." if trained else "trained size unrecorded."),
         "",
+        *((POLICY_NOTE[args.policy], "") if args.policy != "plain" else ()),
         "| mode | model | input |",
         "|---|---|---|",
         *(described[m] for m in modes),
