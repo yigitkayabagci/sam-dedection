@@ -559,6 +559,62 @@ class _TrackWatch:
                                 label=getattr(tracker, "name", None))
         if out:
             print(f"[pipeline] wrote track chart -> {out}")
+        self.summarise(cfg)
+
+    def summarise(self, cfg: PipelineConfig) -> None:
+        """The same two curves as four numbers, beside the chart.
+
+        Footage off a drone has no drawn answer, so there is no IoU to report
+        and no way to rank two runs automatically -- which leaves a reader with
+        several folders of video and nothing to compare. These are what can be
+        computed from the tracker's own output alone, and they are the two
+        failures this project is about:
+
+            held / lost   frames the tracker returned a mask for, and the
+                          longest unbroken run of frames it returned nothing.
+                          A guard reports a refusal as an empty mask, so this
+                          counts refusals as lost on purpose: a mask covering a
+                          field is not a frame held.
+            share         how much of the frame the mask covered. The median is
+                          the target; the maximum is the balloon.
+            jumps         frames whose centre moved more than a target's own
+                          width, which is the skip.
+
+        None of it says a run was *right*. It says which runs behaved like a
+        tracker holding one small object and which did not, which is the
+        question three policies beside each other are there to answer.
+        """
+        import json
+
+        if not self.wanted or cfg.track_chart is None or not self.shares:
+            return
+        shares = np.asarray(self.shares, dtype=float)
+        held = shares > 0.0
+        longest, run = 0, 0
+        for value in held:
+            run = 0 if value else run + 1
+            longest = max(longest, run)
+        jumps = 0
+        for before, after in zip(self.centres, self.centres[1:]):
+            if before is None or after is None:
+                continue
+            step = ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5
+            # A target's own width is the natural unit, and the mask's area is
+            # the only measure of it here.
+            width = max(float(np.sqrt(shares[shares > 0].mean())) * 100.0, 1.0)
+            jumps += int(step > width)
+        path = Path(cfg.track_chart).with_suffix(".json")
+        path.write_text(json.dumps({
+            "frames": int(shares.size),
+            "held": int(held.sum()),
+            "lost": int((~held).sum()),
+            "longest_gap": int(longest),
+            "share_median": round(float(np.median(shares[held])) if held.any() else 0.0, 5),
+            "share_max": round(float(shares.max()), 5),
+            "jumps": int(jumps),
+        }, indent=2) + "\n")
+        print(f"[pipeline] held {int(held.sum())}/{shares.size} frames, "
+              f"longest gap {longest}, max share {shares.max():.1%} -> {path}")
 
 
 def _report_timing(

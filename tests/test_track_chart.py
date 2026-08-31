@@ -146,6 +146,63 @@ class PipelineTest(unittest.TestCase):
                 P._report_timing = real_report
             return out, out.is_file()
 
+    def numbers(self, kind):
+        """Run a tracker that fails in one named way, and read `track.json`."""
+        import json
+        import src.pipeline as P
+
+        class Tracker(PipelineTest._Tracker):
+            def propagate(inner):
+                for i in range(len(inner.seen)):
+                    mask = np.zeros((64, 64), dtype=bool)
+                    if kind == "good":
+                        mask[20:32, 20:32] = True
+                    elif kind == "balloon":
+                        side = 12 + (i * 3 if i > 8 else 0)
+                        mask[10:10 + min(side, 50), 10:10 + min(side, 50)] = True
+                    elif not 10 <= i < 20:          # loses it for ten frames
+                        mask[20:32, 20:32] = True
+                    yield PipelineTest._Result(i, mask)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            for i in range(30):
+                cv2.imwrite(str(folder / f"frame_{i:06d}.tiff"),
+                            np.full((64, 64, 3), 80, dtype=np.uint8))
+            chart = folder / "track.png"
+            real = P._report_timing
+            P._report_timing = lambda *a, **k: None
+            try:
+                P.run(Tracker(),
+                      PromptSet(boxes=[BoxPrompt(1, 0, (20, 20, 32, 32))]),
+                      PipelineConfig(output_path=None, frames_dir=folder,
+                                     frame_pattern="*.tif*", track_chart=chart))
+            finally:
+                P._report_timing = real
+            return json.loads(chart.with_suffix(".json").read_text())
+
+    def test_the_numbers_tell_a_balloon_from_a_loss_with_no_labels(self):
+        """What makes several policy folders comparable at all. There is no
+        drawn answer on this footage, so these are the only two failures that
+        can be seen from the tracker's own output -- and they have to separate,
+        or the summary table is decoration."""
+        good = self.numbers("good")
+        balloon = self.numbers("balloon")
+        lost = self.numbers("lost")
+
+        self.assertEqual((good["held"], good["longest_gap"]), (30, 0))
+        # The balloon holds every frame and is still the worse run.
+        self.assertEqual(balloon["held"], 30)
+        self.assertGreater(balloon["share_max"], 0.5)
+        self.assertLess(good["share_max"], 0.1)
+        # The loss holds fewer, and the gap is the length of it.
+        self.assertEqual((lost["held"], lost["longest_gap"]), (20, 10))
+        self.assertLess(lost["share_max"], 0.1)
+
+    def test_no_numbers_are_written_without_the_chart(self):
+        path, _ = self.run_one(self._Tracker(), chart=False)
+        self.assertFalse(path.with_suffix(".json").is_file())
+
     def test_the_chart_lands_where_the_run_was_told_to_put_it(self):
         try:
             import matplotlib  # noqa: F401

@@ -762,7 +762,15 @@ def main(argv: list[str] | None = None) -> int:
                 r"median per frame: pre ([\d.]+) \+ inference ([\d.]+) \+ post ([\d.]+) ms",
                 text,
             )
+            track = {}
+            track_file = outdir / "track.json"
+            if track_file.is_file():
+                try:
+                    track = json.loads(track_file.read_text())
+                except ValueError:
+                    track = {}
             rows[record.name][(mode, policy)] = {
+                "track": track,
                 "fps": find(r"avg ([\d.]+) FPS over", text) or "-",
                 # Under a skip, FPS counts inferences; this is the frame rate
                 # they cover, which is what has to clear the source's.
@@ -811,6 +819,19 @@ def main(argv: list[str] | None = None) -> int:
              "errors and the only symptom is a mask that is quietly worse. Read "
              f"those rows against a `--weights stock` run at the same size, never "
              f"against the {trained} row below.", ""] ) if off_size and trained else ()),
+        "**There is no accuracy column and there cannot be one.** These "
+        "recordings carry no drawn answer, so nothing here is an IoU and no "
+        "row is automatically the winner. `held` is the frames the tracker "
+        "returned a mask for and `longest gap` the longest run it returned "
+        "nothing -- a guard reports a refusal as an empty mask, so a guard row "
+        "holding fewer frames than `plain` may be the *better* one: it stopped "
+        "counting a mask that covered a field as a hit. `max share` is how much "
+        "of the frame the mask ever covered, which is the balloon (measured on "
+        "AeroVIS, the largest target ever annotated is 13.6 % of its frame), "
+        "and `jumps` counts frames whose centre moved more than a target's own "
+        "width. Read them beside `track.png`, and beside `verdicts.json` for "
+        "the rows that have one.",
+        "",
         f"`{args.warmup}` warm-up frames excluded from every number below. FPS is "
         "the real-time budget: per-frame decode + resize, the model, and masks "
         "back to source resolution. Drawing the overlay and encoding the mp4 are "
@@ -829,7 +850,8 @@ def main(argv: list[str] | None = None) -> int:
             "",
         ]
     columns = ["mode" if len(policies) == 1 else "mode + policy",
-               "model input from", "FPS"]
+               "model input from", "held", "longest gap", "max share", "jumps",
+               "FPS"]
     if skip > 1:
         columns.append("source FPS")
     columns += ["median ms: pre / inference / post", "overlay + mp4 (excluded)"]
@@ -843,9 +865,14 @@ def main(argv: list[str] | None = None) -> int:
         for mode, policy in itertools.product(modes, policies):
             r = per_mode.get((mode, policy))
             if r is None:
-                cells = ["-", "did not run"] + ["-"] * (len(columns) - 3)
+                cells = ["did not run"] + ["-"] * (len(columns) - 2)
             else:
-                cells = [r["input"], r["fps"]]
+                t = r.get("track") or {}
+                cells = [r["input"]]
+                cells += ([f"{t['held']}/{t['frames']}", str(t["longest_gap"]),
+                           f"{t['share_max']:.1%}", str(t["jumps"])]
+                          if t else ["-", "-", "-", "-"])
+                cells.append(r["fps"])
                 if skip > 1:
                     cells.append(r["source_fps"])
                 cells += [r["stages"], f"{r['demo']} ms"]
