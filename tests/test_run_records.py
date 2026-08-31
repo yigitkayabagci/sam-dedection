@@ -653,59 +653,5 @@ class ABTableTest(unittest.TestCase):
         self.assertEqual(ab_table("plain", "guard_lite", "full768", None, self.B), [])
         self.assertEqual(ab_table("plain", "guard_lite", "full768", {}, {}), [])
 
-
-
-
-@unittest.skipIf(__import__("importlib").util.find_spec("cv2") is None,
-                 "cv2 is needed to write the fixture frames")
-class MeasureRunTest(unittest.TestCase):
-    """`--measure` builds the command this tool built before the diagnostics.
-
-    Every artefact added since -- the track chart, the verdicts file, the mp4 --
-    costs wall-clock time that the FPS figure does not show, because it is
-    taken outside the timed window. A run whose only job is the number has to
-    be able to leave them out, or a number from today cannot be set beside one
-    from before they existed.
-    """
-
-    def build(self, *extra):
-        import json as _json
-
-        import cv2
-        import numpy as np
-
-        from tools.run_records import main
-
-        root = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        record = root / "clip"
-        record.mkdir()
-        for index in range(2):
-            cv2.imwrite(str(record / f"{index:05d}.tiff"),
-                        np.zeros((32, 32), np.uint8))
-        out = root / "out"
-        main(["--records", str(record), "--out", str(out), "--modes", "full768",
-              "--backend", "torch", "--policy", "guard", "--box", "1,1,9,9",
-              *extra])
-        written = sorted(out.rglob("provenance.json"))
-        self.assertTrue(written, "no run was described")
-        return _json.loads(written[0].read_text())["command"], written[0].parent
-
-    def test_a_measuring_run_asks_for_no_diagnostics(self):
-        command, _ = self.build("--measure")
-        for flag in ("--track-chart", "--verdicts", "--output"):
-            self.assertNotIn(flag, command)
-        self.assertIn("--no-video", command)
-        # The two that are computed after the run, not per frame, stay.
-        self.assertIn("--fps-chart", command)
-        self.assertIn("--stage-chart", command)
-
-    def test_without_it_the_diagnostics_are_asked_for(self):
-        command, _ = self.build()
-        self.assertIn("--track-chart", command)
-        self.assertIn("--verdicts", command)
-
-
-
 if __name__ == "__main__":
     unittest.main()

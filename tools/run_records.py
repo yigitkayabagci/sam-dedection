@@ -607,19 +607,6 @@ def main(argv: list[str] | None = None) -> int:
                         "of them trains anything or rebuilds an engine, so each "
                         "runs on the weights already on disk. Results land in "
                         "<mode>_<weights>_<policy>/ beside the baseline.")
-    p.add_argument("--measure", action="store_true",
-                   help="A run whose only job is the number. Implies "
-                        "--no-video, and drops the track chart and the "
-                        "verdicts file: those are diagnostics, and every one "
-                        "of them costs wall-clock time the FPS figure does not "
-                        "show, because it is taken outside the timed window. "
-                        "What is left is exactly the per-frame work this tool "
-                        "did before any of them existed, so a number from here "
-                        "is comparable with one taken then. Note that "
-                        "--cache-dir is the other difference and it is yours: "
-                        "without it the staging pass writes to the system temp "
-                        "directory, which on most machines is memory rather "
-                        "than a disk.")
     p.add_argument("--backend", default="trt", choices=("trt", "torch"),
                    help="Which runtime the modes run on. `trt` (default) is "
                         "the measurement of record and needs engines built for "
@@ -817,11 +804,9 @@ def main(argv: list[str] | None = None) -> int:
                    "--prompt", "file", "--prompt-file", prompts,
                    "--offload-video", "--fps-warmup", args.warmup,
                    "--fps-chart", outdir / "latency.png",
-                   "--stage-chart", outdir / "stages.png"]
-            if not args.measure:
-                cmd += ["--track-chart", outdir / "track.png"]
-            cmd += (["--no-video"] if args.no_video or args.measure
-                    else ["--output", outdir / "tracked.mp4"])
+                   "--stage-chart", outdir / "stages.png",
+                   "--track-chart", outdir / "track.png"]
+            cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
             cache = cache_for(record, mode, args)
             if cache is not None:
                 cache.mkdir(parents=True, exist_ok=True)
@@ -831,7 +816,7 @@ def main(argv: list[str] | None = None) -> int:
             # writing an empty file, so this is asked for whenever one might
             # exist: a refused frame is otherwise just a missing mask in the
             # mp4 with nothing saying which gate refused it.
-            if "guard" in overlay_for(policy) and not args.measure:
+            if "guard" in overlay_for(policy):
                 cmd += ["--verdicts", outdir / "verdicts.json"]
             if args.strict:
                 cmd += ["--strict"]
