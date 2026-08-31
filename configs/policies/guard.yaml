@@ -44,6 +44,9 @@ guard:
   # --- plausibility: what a real target may do between two frames ---
   # Ratios against the track's own running median, not absolutes, so a target
   # that grows as the drone descends is not refused for growing.
+  # Reads pixels: the flow, the contrast gate and the re-acquisition all
+  # need them. `guard_lite` is the same gates with this off.
+  read_frames: true
   max_area_ratio: 3.0
   min_area_ratio: 0.3
   max_aspect_ratio: 2.5

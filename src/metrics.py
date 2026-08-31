@@ -335,6 +335,14 @@ def track_geometry(masks) -> tuple[float, tuple[float, float] | None]:
     swelling over a field, and a union that jumps is a union that jumped
     whichever object did it. `None` for the centre when nothing was returned,
     which is what a refused mask looks like from here.
+
+    The centre is the bounding box's, not the centroid, for two reasons. It is
+    the point `stabiliser.centre_of(box_of(mask))` measures a jump from, so the
+    curve and the guard's verdicts describe the same quantity. And it comes out
+    of `countNonZero` and `boundingRect`, which at 768x768 cost 0.14 ms against
+    1.87 for `np.nonzero` -- this runs on every frame of every run, including
+    the ones with no policy at all, so it has to be near free or it is a tax on
+    the baseline it exists to compare against.
     """
     import numpy as np
 
@@ -343,12 +351,29 @@ def track_geometry(masks) -> tuple[float, tuple[float, float] | None]:
         array = np.asarray(mask)
         if array.ndim > 2:
             array = array.reshape(-1, *array.shape[-2:]).any(axis=0)
-        total = array.astype(bool) if total is None else (total | array.astype(bool))
-    if total is None or not total.any():
+        array = array.astype(bool, copy=False)
+        total = array if total is None else (total | array)
+    if total is None:
         return 0.0, None
-    rows, columns = np.nonzero(total)
-    return (float(total.sum()) / float(total.size),
-            (float(columns.mean()), float(rows.mean())))
+
+    try:
+        import cv2
+
+        flat = np.ascontiguousarray(total).view(np.uint8)
+        area = int(cv2.countNonZero(flat))
+        if not area:
+            return 0.0, None
+        x, y, width, height = cv2.boundingRect(flat)
+        return area / float(total.size), (x + width / 2.0, y + height / 2.0)
+    except ImportError:                                  # pragma: no cover
+        columns = total.any(axis=0)
+        rows = total.any(axis=1)
+        if not columns.any():
+            return 0.0, None
+        left, right = int(np.argmax(columns)), int(len(columns) - np.argmax(columns[::-1]))
+        top, bottom = int(np.argmax(rows)), int(len(rows) - np.argmax(rows[::-1]))
+        return (int(total.sum()) / float(total.size),
+                ((left + right) / 2.0, (top + bottom) / 2.0))
 
 
 def write_track_chart(shares, centres, out_path, verdicts=None,

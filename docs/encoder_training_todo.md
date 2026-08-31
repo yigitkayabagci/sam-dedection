@@ -260,10 +260,13 @@ bir arabaya değen bir insan böylece iki örnek kalıyor.
 ## 6. Açık sorular
 
 1. ~~**Bağlantılı bileşen ayrıştırması temiz örnek veriyor mu?**~~
-   **SegFly için cevaplandı: evet.** Yayıncının kendi etiket haritalarında,
-   repo'nun kendi kapılarıyla, `fill` üzerinden reddedilen **tek bir bileşen
-   yok** (termal); RGB'de %1,31. Kaynaşma bu sette olmuyor — ama havuz yine de
-   bozuk, sebebi `truck` sınıfı. Ölçüm ve sonuçları:
+   **SegFly için cevaplandı: pratik olarak evet.** Yayıncının kendi etiket
+   haritalarında, repo'nun kendi kapılarıyla, `fill` üzerinden reddedilen
+   **tek bir bileşen yok** (termal); RGB'de %1,31. `fill`'in göremediği
+   yan yana kaynaşma da aşındırma (0/127) ve şekil profili testleriyle
+   **hedeflerin en fazla %1,6'sı** olarak sınırlandı — şekille daha fazlası
+   dışlanamıyor, gerisi öğretmen ister. Havuz yine de bozuk, ama sebebi
+   ayrıştırma değil `truck` sınıfı. Ölçüm ve sonuçları:
    `docs/segfly_decomposition.md`, koşan kod `tools/segfly_decompose_audit.py`.
    Kust4K ve Caltech için aynı ölçüm hâlâ yapılmadı (bkz. 3).
 2. ~~**AnyThermal'ın distilasyon hedefi RepViT gövdesine takılıyor mu?**~~

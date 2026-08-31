@@ -38,7 +38,7 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
-from tools.run_records import (MODES, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
+from tools.run_records import (MODES, ab_table, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
@@ -620,6 +620,38 @@ class EnginesMissingTest(unittest.TestCase):
     def test_a_config_naming_no_engines_is_not_this_check_s_business(self):
         """The PyTorch configs. `--backend torch` reaches this with them."""
         self.assertIsNone(engines_missing("configs/edgetam_768.yaml"))
+
+
+
+
+class ABTableTest(unittest.TestCase):
+    """Two arms, as the change in each number rather than two rows to subtract."""
+
+    A = {"track": {"frames": 300, "held": 300, "longest_gap": 0,
+                   "share_max": 0.41, "jumps": 7}, "fps": "31.2"}
+    B = {"track": {"frames": 300, "held": 286, "longest_gap": 4,
+                   "share_max": 0.09, "jumps": 1}, "fps": "31.0"}
+
+    def test_each_number_is_reported_as_its_change(self):
+        table = "\n".join(ab_table("plain", "guard_lite", "full768", self.A, self.B))
+        self.assertIn("| frames held | 300/300 | 286/300 | -14 |", table)
+        self.assertIn("| jumps | 7 | 1 | -6 |", table)
+        self.assertIn("| longest gap | 0 | 4 | +4 |", table)
+        self.assertIn("-32.0%", table)
+        self.assertIn("| FPS | 31.2 | 31.0 |", table)
+
+    def test_it_says_that_holding_fewer_frames_can_be_the_better_run(self):
+        """The one reading that would otherwise be got backwards: a refused
+        mask is reported empty, so the arm that stops scoring a mask covering a
+        field as a hit holds fewer frames."""
+        table = "\n".join(ab_table("plain", "guard_lite", "full768", self.A, self.B))
+        self.assertIn("not by itself a regression", table)
+
+    def test_nothing_is_drawn_when_an_arm_produced_no_numbers(self):
+        """An empty table would read as "no difference"."""
+        self.assertEqual(ab_table("plain", "guard_lite", "full768", self.A, None), [])
+        self.assertEqual(ab_table("plain", "guard_lite", "full768", None, self.B), [])
+        self.assertEqual(ab_table("plain", "guard_lite", "full768", {}, {}), [])
 
 
 

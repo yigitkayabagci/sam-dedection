@@ -1,0 +1,74 @@
+# --policy guard_lite: the part of the guard that was measured to work, and
+# none of the part that was measured to cost.
+#
+# WHAT THE FULL GUARD SPENDS. Measured on a 1920x1080 source, per frame, every
+# frame, whether or not anything is wrong:
+#
+#     JPEG decode (FrameMotion)          7 ms
+#     estimate_shift (LK + validation)  11 ms at reduce 4, 20 ms at reduce 2
+#     local_contrast                     0.03 ms
+#     ----------------------------------------------------------------
+#     paid on every frame               18 ms at reduce 4, 27 ms at reduce 2
+#
+# beside an encoder that takes tens of milliseconds. That is not a rounding
+# error, and on a deployment with no headroom it is the whole objection.
+#
+# WHAT REFUSES A JUMP. Not any of that. The gates are arithmetic on the box --
+# area against its own median, aspect, share of the frame, and distance
+# travelled -- and against a tracker that switches identity and never comes
+# back they caught every case tested: a 26-pixel target jumping 40, 60 or 120
+# pixels, at target speeds from 2 to 20 px a frame, with no honest frame
+# refused. The hysteresis is what makes that safe: one refused frame is
+# `suspect`, not a loss.
+#
+# So this runs the gates and reads no pixels at all. `read_frames: false` stops
+# `EdgeTAMTracker.prepare` opening a frame source, so the decode and the flow
+# are not merely skipped -- they never happen. Cost measured at 0.1 ms per
+# frame per object, which is the arithmetic.
+#
+# WHAT IS GIVEN UP, AND WHAT IT COSTS IN THE THRESHOLD. Without the flow the
+# camera's own motion is no longer subtracted, so `max_jump` is measured in raw
+# image coordinates and a pan eats into its margin; without the frame the
+# contrast gate cannot tighten on a faint one, and a lost track is never
+# re-acquired. `max_jump` is 1.2 rather than the full guard's 2.5 for exactly
+# that reason -- the full guard reaches 2.5 only because the contrast gate
+# tightens it on the frames that matter, and this one has to stand on its own.
+# Swept against a panning camera: at 1.2 every jump from 40 pixels up is caught
+# at pans of 0, 5, 12 and 25 px a frame with no honest frame refused; 1.0
+# starts refusing honest frames at a pan of 25, and 2.0 begins missing a
+# 40-pixel jump.
+#
+# Read it against `plain`. If `verdicts.json` comes back all `tracking`, it
+# refused nothing and the jump is not one these gates can see -- raise nothing
+# and look at `reasons` first.
+guard:
+  enabled: true
+  read_frames: false
+
+  # The three geometry gates, unchanged from `guard`: they need no pixels.
+  max_area_ratio: 3.0
+  min_area_ratio: 0.3
+  max_aspect_ratio: 2.5
+  max_frame_share: 0.25
+
+  # Tighter than `guard`'s 2.5, and the sweep above is why.
+  max_jump: 1.2
+
+  # Hysteresis, unchanged. One refused frame is blur; three is a lost target.
+  suspect_frames: 3
+  recover_frames: 2
+  history: 12
+
+  # Everything below needs pixels and is therefore inert here. Set explicitly
+  # rather than left to the dataclass, so this file states the whole policy:
+  # a reader should not have to know a default to know what runs.
+  reacquire_motion: false
+  motion_threshold: 0.6
+  match_bandpass: 0.0
+  search_scale: 2.0
+  search_growth: 1.4
+  search_max: 8.0
+  match_threshold: 0.45
+  give_up_after: 90
+  caution_below: 0.0
+  caution_factor: 1.0

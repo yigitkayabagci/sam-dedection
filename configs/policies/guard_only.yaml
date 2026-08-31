@@ -34,6 +34,9 @@ ego_motion:
 
 guard:
   enabled: true
+  # Reads pixels: the flow, the contrast gate and the re-acquisition all
+  # need them. `guard_lite` is the same gates with this off.
+  read_frames: true
 
   # --- plausibility: what a real target may do between two frames ---
   # Ratios against the track's own running median, not absolutes, so a target

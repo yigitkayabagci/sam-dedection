@@ -36,11 +36,31 @@ from src.prompts import BoxPrompt, PromptSet  # noqa: E402
 
 class GeometryTest(unittest.TestCase):
     def test_the_share_and_the_centre_come_off_the_mask(self):
+        """The centre is the box's, which is the point the guard measures a
+        jump from -- so the curve and `verdicts.json` describe one quantity."""
+        from src.trackers.stabiliser import box_of, centre_of
+
         mask = np.zeros((40, 40), bool)
         mask[10:20, 10:22] = True
         share, centre = track_geometry({1: mask})
         self.assertAlmostEqual(share, 120 / 1600)
-        self.assertEqual(centre, (15.5, 14.5))
+        self.assertEqual(centre, (16.0, 15.0))
+        self.assertEqual(centre, tuple(float(v) for v in centre_of(box_of(mask))))
+
+    def test_it_costs_almost_nothing_at_a_real_mask_size(self):
+        """It runs on every frame of every run, including the ones with no
+        policy at all, so it must not be a tax on the baseline it exists to
+        compare against. `np.nonzero` here was 1.9 ms; this is a tenth of it."""
+        import time
+
+        mask = np.zeros((768, 768), bool)
+        mask[300:326, 400:418] = True
+        masks = {1: mask}
+        track_geometry(masks)
+        start = time.perf_counter()
+        for _ in range(50):
+            track_geometry(masks)
+        self.assertLess((time.perf_counter() - start) / 50 * 1000.0, 0.6)
 
     def test_several_objects_are_one_union(self):
         """The failure being watched for is a mask swelling over a field, and a
