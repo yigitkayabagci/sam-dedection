@@ -1151,16 +1151,24 @@ for _row in PLAN:
     _records = sorted(Path(_row["dir"]).rglob(RECORD_FILE))
     _probe = _records[::max(len(_records) // PROBES, 1)][:PROBES]
     _relocate = Relocator(_row["images"])
-    _recorded, _hit = "", 0
+    _recorded, _hit, _joined = "", 0, 0
     for _record in _probe:
-        _named = json.loads(_record.read_text()).get("image", "")
+        _body = json.loads(_record.read_text())
+        _named = _body.get("image", "")
         _recorded = _recorded or _named
-        _hit += _relocate(_named) is not None
+        _inside = _relocate.direct(_body.get("image_rel"))
+        _joined += _inside is not None
+        _hit += (_inside or _relocate(_named)) is not None
     READY[_row["pool"]] = {"records": len(_records), "probed": len(_probe),
                            "found": _hit, "images": _row["images"],
-                           "recorded": _recorded}
+                           "joined": _joined, "recorded": _recorded}
     print(f"{_row['pool']:<28}{len(_records):>9}{len(_probe):>8}{_hit:>7}   "
           f"{_row['images']}")
+    if _joined:
+        print(f"   {_joined} of them by joining the path the archive itself "
+              f"recorded, which cannot pick the wrong file -- AeroVIS names "
+              f"frames vd_001/0000001.jpg and 91 of its 117 sequences hold a "
+              f"file of that name, so a match by name would be a coin flip.")
     if _hit < len(_probe):
         _why = why_no_image(_row["dir"], _row["images"])
         print(f"   recorded as {_recorded}")

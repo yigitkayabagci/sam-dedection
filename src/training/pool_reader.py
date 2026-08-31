@@ -242,6 +242,21 @@ def resolve_images_root(records: Iterable[str | Path],
     four copies of one archive are one answer, DroneVehicle's two modalities
     are not. `None` also means no frame of the pool is anywhere underneath,
     which is the missing-download case and a fact to report.
+
+    **A record carrying `image_rel` is answered before any of that**, because
+    that path is not evidence to be weighed -- it is the archive saying where
+    the frame sits inside itself, and the root that makes it land is the root,
+    exactly. AeroVIS is the case: its `aero_vis.json` names frames
+    `vd_001/0000001.jpg` relative to `AeroVIS/sequences`, while the archive
+    unpacks a level above that, so a run configured at the extract directory
+    has `direct` miss on all 47 921 frames and falls back to matching the
+    harvest's own absolute path. That fallback happens to work, and it is the
+    wrong thing to be relying on: 91 of AeroVIS's 117 sequences hold a file
+    called `0000001.jpg`, so once the recorded path stops sharing a tail with
+    the local tree -- a different mirror, an archive restaged one folder over
+    -- what is left is a name that matches 91 files, and `Relocator` refuses a
+    tie rather than guessing. Naming `.../AeroVIS/sequences` here settles every
+    frame with a join and no search at all.
     """
     # A root can still carry the glob it was configured with, when nothing
     # matched it -- which is what a pattern resolved before the download looks
@@ -257,14 +272,21 @@ def resolve_images_root(records: Iterable[str | Path],
     every = list(records)
     spread_out = every[::max(len(every) // max(probes, 1), 1)][:max(probes, 1)]
     wanted: list[Path] = []
+    inside: list[Path] = []
     for record_path in spread_out:
         try:
-            wanted.append(Path(json.loads(
-                Path(record_path).read_text())["image"]))
+            read = json.loads(Path(record_path).read_text())
+            wanted.append(Path(read["image"]))
         except (OSError, ValueError, KeyError, TypeError):
             continue
+        if read.get("image_rel"):
+            inside.append(Path(str(read["image_rel"])))
     if not wanted:
         return None
+
+    exact = _root_of_archive_paths(inside, configured, base)
+    if exact is not None:
+        return exact
 
     def resolves(root: Path) -> int:
         relocate = Relocator(root, by_name=False)
@@ -305,6 +327,36 @@ def resolve_images_root(records: Iterable[str | Path],
     if len(best) > 1 and not _same_frames(best, wanted):
         return None
     return best[0]
+
+
+def _root_of_archive_paths(inside: SequenceABC[Path], configured: Path | None,
+                           base: Path) -> Path | None:
+    """The root under which every `image_rel` lands, when there is exactly one.
+
+    `image_rel` is an archive-relative path, so a root either joins onto it or
+    does not -- there is nothing to rank. Every probe has to agree, since a
+    root that answers four frames of five is not the archive's root; and two
+    roots agreeing means the tree is staged twice, which is a tie this cannot
+    break and `None` hands back to the ranking that can.
+
+    Returns `None`, not a refusal, when the pool carries no `image_rel` at all
+    -- most harvests do not -- so the caller falls through to reading the
+    recorded absolute paths.
+    """
+    if not inside:
+        return None
+    if configured is not None and all((configured / rel).is_file()
+                                      for rel in inside):
+        return configured
+
+    first, rest = inside[0], inside[1:]
+    tail = first.parts
+    roots = [Path(*path.parts[:len(path.parts) - len(tail)])
+             for path in _index_by_name(base).get(first.name, ())
+             if path.parts[-len(tail):] == tail]
+    landed = [root for root in roots
+              if all((root / rel).is_file() for rel in rest)]
+    return landed[0] if len(landed) == 1 else None
 
 
 def _same_frames(roots: SequenceABC[Path], wanted: SequenceABC[Path]) -> bool:

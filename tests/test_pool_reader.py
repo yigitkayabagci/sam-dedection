@@ -16,6 +16,7 @@ silently disagree rather than the ways either can crash:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -30,9 +31,11 @@ if str(ROOT) not in sys.path:
 
 from src.training.aerial import (InstanceGates, Sample, pool_masks,  # noqa: E402
                                  image_origin, sample_masks)
-from src.training.labels import MASK_STORE, save_masks  # noqa: E402
+from src.training.labels import (MASK_STORE, load_masks,  # noqa: E402
+                                 save_masks)
 from src.training.pool import RECORD_FILE  # noqa: E402
-from src.training.pool_reader import (Relocator, group_records,  # noqa: E402
+from src.training.pool_reader import (Relocator,  # noqa: E402
+                                      _root_of_archive_paths, group_records,
                                       index_pool, link_pool, load_pool_index,
                                       parse_pool, pool_datasets,
                                       extract_frames, resolve_images_root,
@@ -914,6 +917,177 @@ class ResolveImagesRootTest(unittest.TestCase):
         self.assertEqual(resolve_images_root([record], self.root / "HIT_UAV",
                                              search_root=self.root),
                          frames.parent)
+
+
+
+class AeroVISPathsTest(unittest.TestCase):
+    """AeroVIS end to end: the frame it names and the store beside its record.
+
+    The layout here is not invented. It was read out of `AeroVIS.zip` on the
+    Drive this project trains from, by range-requesting the archive's central
+    directory rather than the 13.5 GiB in front of it:
+
+        AeroVIS/aero_vis.json
+        AeroVIS/data.md
+        AeroVIS/sequences/{sd_001..vd_052}/{frame}.jpg   117 dirs, 49 204 files
+
+    and `aero_vis.json` opens `"videos": [{"id": 1, "name": "vd_001",
+    "file_names": ["vd_001/0000001.jpg", ...`. So `file_names` -- which is what
+    `aerovis.write_pool` stores as `image_rel` -- is relative to
+    **`AeroVIS/sequences`**, one level below the `AeroVIS` directory the
+    archive unpacks as and two below the `IMAGE_ROOTS` entry pointing at the
+    extract. Frame names are per-source and repeat: `0000001.jpg` exists in 91
+    of the 117 sequences, which is what makes the by-name fallback the wrong
+    thing to be leaning on here.
+    """
+
+    SEQUENCES = ("vd_001", "vd_002", "ud_001")
+    FRAMES = ("0000001.jpg", "0000002.jpg")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        # What `IMAGE_ROOTS` names, and where the archive really lands under it.
+        self.configured = self.root / "data" / "AeroVIS"
+        self.sequences = self.configured / "AeroVIS" / "sequences"
+        for order, sequence in enumerate(self.SEQUENCES):
+            for number, name in enumerate(self.FRAMES):
+                frame = self.sequences / sequence / name
+                frame.parent.mkdir(parents=True, exist_ok=True)
+                # Distinct pixels per frame: a reader that resolved the right
+                # name in the wrong sequence has to be able to fail.
+                shade = 20 + 40 * order + 7 * number
+                cv2.imwrite(str(frame), np.full((64, 64, 3), shade, np.uint8))
+
+    def write_pool(self, harvest: str) -> Path:
+        """The pool `aerovis.write_pool` writes, with `harvest` as its root."""
+        pool = self.root / "pool" / "aerovis_train"
+        for sequence in self.SEQUENCES:
+            for name in self.FRAMES:
+                relative = f"{sequence}/{name}"
+                key = relative[:-len(".jpg")]
+                target = pool.joinpath(*Path(key).parts)
+                target.mkdir(parents=True, exist_ok=True)
+                mask = np.zeros((64, 64), bool)
+                mask[20:32, 20:34] = True
+                (target / RECORD_FILE).write_text(json.dumps({
+                    "key": key, "dataset": "aerovis_train", "prompt": "dataset",
+                    "image": f"{harvest}/{relative}", "image_rel": relative,
+                    "shape": [64, 64], "teacher": "aerovis:ytvis",
+                    "source": "visdrone", "video_id": 1,
+                    "instances": [{"i": 0, "class": "car", "track_id": 1,
+                                   "box": [20.0, 20.0, 34.0, 32.0],
+                                   "area": int(mask.sum()),
+                                   "teacher_iou": None, "verdict": None}]}))
+                save_masks(target / MASK_STORE, (64, 64), {0: mask})
+        return pool
+
+    def test_a_frame_name_that_repeats_across_sequences_is_the_whole_problem(self):
+        """The premise, checked rather than asserted in a comment."""
+        self.assertEqual(len(list(self.sequences.rglob("0000001.jpg"))),
+                         len(self.SEQUENCES))
+
+    def test_the_sequences_directory_is_named_from_the_archive_relative_path(self):
+        """`image_rel` joins onto exactly one root, and that root is the answer.
+
+        The configured root is two levels above it and resolves nothing by
+        joining -- which is the state a run is in on a fresh runtime.
+        """
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        records = sorted(pool.rglob(RECORD_FILE))
+        self.assertIsNone(Relocator(self.configured).direct("vd_001/0000001.jpg"))
+        self.assertEqual(resolve_images_root(records, self.configured),
+                         self.sequences)
+
+    def test_it_is_named_the_same_way_when_the_harvest_staged_it_elsewhere(self):
+        """`image_rel` is the archive's own statement, so where the harvest
+        happened to put the frames does not enter into it. This is the case the
+        absolute path cannot answer: a recorded root sharing no component with
+        the local tree leaves the file name, and the file name matches every
+        sequence."""
+        pool = self.write_pool("/kaggle/input/aerovis/frames")
+        self.assertEqual(resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                             self.configured),
+                         self.sequences)
+
+    def test_both_paths_resolve_and_the_masks_belong_to_the_frames(self):
+        """The two halves together: every record finds its frame *and* the
+        store written beside it, and no frame is answered with another
+        sequence's copy of the same file name."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        found = resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                    self.configured)
+        index = index_pool(pool, str(found), modality="rgb")
+        self.assertEqual(len(index), len(self.SEQUENCES) * len(self.FRAMES))
+        for entry in index:
+            sequence, name = entry.frame.name.split("/")
+            self.assertEqual(entry.frame.image,
+                             self.sequences / sequence / f"{name}.jpg")
+            shape, masks = load_masks(entry.frame.mask)
+            self.assertEqual(shape, (64, 64))
+            self.assertEqual(set(masks), {0})
+            self.assertEqual(int(masks[0].sum()), 12 * 14)
+
+    def test_resolving_the_root_means_no_frame_is_matched_by_name(self):
+        """A join is not a search. Under the root `image_rel` names, `direct`
+        answers every frame and the by-name index -- the part that would have
+        to refuse 91 candidates -- is never built."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        found = resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                    self.configured)
+        relocate = Relocator(str(found))
+        for sequence in self.SEQUENCES:
+            for name in self.FRAMES:
+                self.assertEqual(relocate.direct(f"{sequence}/{name}"),
+                                 self.sequences / sequence / name)
+        self.assertEqual((relocate.found_by_name, relocate.ambiguous,
+                          relocate.misses), (0, 0, 0))
+
+    def test_a_pool_that_is_not_on_this_disk_is_still_reported_as_missing(self):
+        """`image_rel` must not turn a missing download into a search that
+        wanders off and finds something. Nothing joins, nothing is proposed."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        empty = self.root / "data" / "nothing"
+        empty.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                              empty))
+
+    def test_two_copies_of_the_tree_hand_the_question_back(self):
+        """A second extraction under the same root joins onto `image_rel` just
+        as well as the first, and there is nothing in an archive-relative path
+        to tell them apart -- so the exact pass declines and the recorded
+        absolute paths, which *can* tell them apart, decide. The frames still
+        come from the tree the harvest saw and never from the copy."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        twin = self.configured / "copy" / "sequences"
+        for sequence in self.SEQUENCES:
+            for name in self.FRAMES:
+                target = twin / sequence / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(self.sequences / sequence / name, target)
+        records = sorted(pool.rglob(RECORD_FILE))
+        self.assertIsNone(_root_of_archive_paths(
+            [Path(f"{s}/{self.FRAMES[0]}") for s in self.SEQUENCES],
+            self.configured, self.configured))
+        found = resolve_images_root(records, self.configured)
+        self.assertEqual(found, self.configured)
+        for entry in index_pool(pool, str(found), modality="rgb"):
+            sequence, name = entry.frame.name.split("/")
+            self.assertEqual(entry.frame.image,
+                             self.sequences / sequence / f"{name}.jpg")
+
+    def test_a_pool_without_image_rel_still_reads_the_recorded_paths(self):
+        """Most harvests write no `image_rel`. The exact pass has to stand
+        aside for them rather than answer `None`."""
+        pool = self.write_pool("/content/data/AeroVIS/AeroVIS/sequences")
+        for record in pool.rglob(RECORD_FILE):
+            body = json.loads(record.read_text())
+            body.pop("image_rel")
+            record.write_text(json.dumps(body))
+        self.assertEqual(resolve_images_root(sorted(pool.rglob(RECORD_FILE)),
+                                             self.configured),
+                         self.configured)
 
 
 class ParsePoolTest(unittest.TestCase):
