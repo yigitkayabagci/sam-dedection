@@ -128,6 +128,36 @@ def main() -> None:
             '          "the before/after below reports what THIS run added on "\n'
             '          "top of the pretrain rather than what both added to '
             'stock.")')
+    # A pool name carries its modality only when the harvest put it there.
+    # `vtuav_thermal` says so; `visdrone` does not, and VisDrone is RGB -- so
+    # the template's fallback reads it as thermal, converts its colour frames
+    # to grey and trains them in a thermal-only run with nothing saying it
+    # happened. The generated arms got RGB_SOURCES; 32 comes from the
+    # preserved template instead, so it is patched in here.
+    replace(notebook,
+            'def modality_of(pool):\n'
+            '    if pool in POOL_MODALITIES:\n'
+            '        return POOL_MODALITIES[pool]\n'
+            '    GUESSED.add(pool)\n'
+            '    lowered = pool.lower()\n'
+            '    if lowered.endswith("_rgb") or "_rgb_" in lowered '
+            'or "rgb" in lowered.split("_"):\n'
+            '        return "rgb"\n'
+            '    return "thermal"',
+            'RGB_SOURCES = ("visdrone", "aerovis", "vtuav_vis", "rgbt234", '
+            '"lasher")\n'
+            '\n'
+            'def modality_of(pool):\n'
+            '    if pool in POOL_MODALITIES:\n'
+            '        return POOL_MODALITIES[pool]\n'
+            '    lowered = pool.lower()\n'
+            '    if lowered.endswith("_rgb") or "_rgb_" in lowered '
+            'or "rgb" in lowered.split("_"):\n'
+            '        return "rgb"\n'
+            '    if any(source in lowered for source in RGB_SOURCES):\n'
+            '        return "rgb"\n'
+            '    GUESSED.add(pool)\n'
+            '    return "thermal"')
     replace(notebook, 'MIN_AREA       = 48', 'MIN_AREA       = 64')
     replace(notebook, 'MIN_SIDE       = 4', 'MIN_SIDE       = 6')
     replace(notebook, 'MAX_AREA       = 0.9', 'MAX_AREA       = 0.2')
