@@ -160,6 +160,22 @@ WEIGHTS = {
 # before this repository existed and records nothing about it.
 TRAINED_AT = {"stock": 1024, "pool_deep": 512}
 
+# --backend torch -> the plain PyTorch YAML for a size. The TensorRT tables
+# above are the default and stay the measurement of record; this exists for the
+# question asked before any engine is built, which is the only question the
+# policies can answer on their own: they are training-free *and* export-free,
+# so an engine build is a prerequisite of the tool and not of the thing being
+# measured. A shipped TRT config sets `strict: false` and would fall back to
+# PyTorch on its own, but silently and after printing a speed number that is
+# not what it says it is -- naming the backend keeps the row honest.
+TORCH = {
+    "stock": {1024: "configs/edgetam.yaml",
+              768: "configs/edgetam_768.yaml",
+              512: "configs/edgetam_512.yaml"},
+    "pool_deep": {768: "configs/edgetam_768_pool_deep.yaml",
+                  512: "configs/edgetam_512_pool_deep.yaml"},
+}
+
 # --policy -> the overlay merged onto whichever backend YAML the (weights,
 # size) pair chose, or None for the baseline. This is the third axis and it is
 # orthogonal to the other two: `--modes` varies the input, `--weights` varies
@@ -214,14 +230,14 @@ POLICY_NOTE = {
 }
 
 
-def config_for(weights: str, size: int, mode: str) -> str:
+def config_for(weights: str, size: int, mode: str, backend: str = "trt") -> str:
     """The YAML for one (weights, input size) pair, or a refusal that explains.
 
     A missing pair is not an oversight to fall back from: silently running the
     stock config here would put a row labelled `pool_deep` in the summary that
     was measured on different weights.
     """
-    table = WEIGHTS[weights]
+    table = (TORCH if backend == "torch" else WEIGHTS)[weights]
     if size in table:
         return table[size]
     have = ", ".join(str(k) for k in sorted(table))
@@ -395,6 +411,8 @@ def folder(mode: str, args) -> str:
     them side by side.
     """
     parts = [mode]
+    if getattr(args, "backend", "trt") != "trt":
+        parts.append(args.backend)
     if args.weights != "stock":
         parts.append(args.weights)
     if args.policy != "plain":
@@ -455,6 +473,18 @@ def main(argv: list[str] | None = None) -> int:
                         "of them trains anything or rebuilds an engine, so each "
                         "runs on the weights already on disk. Results land in "
                         "<mode>_<weights>_<policy>/ beside the baseline.")
+    p.add_argument("--backend", default="trt", choices=("trt", "torch"),
+                   help="Which runtime the modes run on. `trt` (default) is "
+                        "the measurement of record and needs engines built for "
+                        "every (weights, size) pair. `torch` runs the plain "
+                        "PyTorch configs and needs no export, which is the only "
+                        "way to answer what a --policy is worth before any "
+                        "engine exists -- the policies are training-free and "
+                        "export-free, so an engine build is a prerequisite of "
+                        "this tool rather than of the thing being measured. "
+                        "Results land in <mode>[_torch]_<weights>_<policy>/, "
+                        "because a policy measured on two runtimes is two "
+                        "measurements.")
     p.add_argument("--weights", default="stock", choices=tuple(WEIGHTS),
                    help="Which trained weights the modes run on. `stock` is "
                         "EdgeTAM as shipped; `pool_deep` is the checkpoint from "
@@ -536,14 +566,16 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"Unknown mode {m!r}; pick from {', '.join(MODES)}")
     # Resolve every config up front, so an unbuildable combination fails now
     # rather than after the first record has been indexed and prompted for.
-    configs = {m: config_for(args.weights, MODES[m][0], m) for m in modes}
+    configs = {m: config_for(args.weights, MODES[m][0], m, args.backend)
+               for m in modes}
     absent = {m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
     if absent:
         lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
         sizes = sorted({MODES[m][0] for m in absent})
         builds = []
         for size in sizes:
-            body = yaml.safe_load((ROOT / config_for(args.weights, size, "")).read_text())
+            body = yaml.safe_load(
+                (ROOT / config_for(args.weights, size, "", args.backend)).read_text())
             builds += [
                 f"  python tools/export_edgetam_onnx.py --outdir {Path(body['image_encoder_engine']).parent}/ \\",
                 f"      --image-size {size} --checkpoint {body['checkpoint']} --verify",
@@ -588,13 +620,15 @@ def main(argv: list[str] | None = None) -> int:
             # never in two places.
             run_config = staged_config(config, args.policy, outdir)
 
-            cmd = [PY, "cli.py", "--tracker", "edgetam_trt", "--config", run_config,
+            runtime = "edgetam" if args.backend == "torch" else "edgetam_trt"
+            cmd = [PY, "cli.py", "--tracker", runtime, "--config", run_config,
                    "--frames-dir", record, "--frame-pattern", args.pattern,
                    "--fps", args.fps,
                    "--prompt", "file", "--prompt-file", prompts,
                    "--offload-video", "--fps-warmup", args.warmup,
                    "--fps-chart", outdir / "latency.png",
-                   "--stage-chart", outdir / "stages.png"]
+                   "--stage-chart", outdir / "stages.png",
+                   "--track-chart", outdir / "track.png"]
             cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
             cache = cache_for(record, mode, args)
             if cache is not None:

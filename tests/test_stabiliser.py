@@ -489,6 +489,25 @@ class ShippedConfigTest(unittest.TestCase):
             self.assertIn(block, body)
         self.assertEqual(body["image_size"], 512)
 
+    def test_a_standalone_config_says_what_the_policy_overlay_says(self):
+        """The same thresholds now live in two places and must not drift.
+
+        `configs/policies/*.yaml` are overlays `tools/run_records.py` merges
+        onto whichever backend YAML a (weights, size) pair chose -- the right
+        shape for an ablation across engines. The two configs here are whole
+        files, for pointing `cli.py --config` at directly. Both are wanted, and
+        a `max_jump` changed in one of them and not the other would make two
+        runs that read as the same configuration behave differently.
+        """
+        import yaml
+
+        overlay = yaml.safe_load(
+            (ROOT / "configs" / "policies" / "guard.yaml").read_text())
+        for name, body in self.configs():
+            for block in ("samurai", "ego_motion", "guard"):
+                with self.subTest(config=name, block=block):
+                    self.assertEqual(body[block], overlay[block])
+
     def test_both_trackers_accept_every_key_a_shipped_config_holds(self):
         import inspect
 

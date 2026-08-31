@@ -232,6 +232,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fps-chart", default=None,
                    help="Save a per-frame latency chart (ms, with max/min/avg) to this "
                         "PNG path (needs matplotlib).")
+    p.add_argument("--track-chart", default=None,
+                   help="Save a per-frame chart of what the tracker returned "
+                        "to this PNG: how much of the frame the mask covers "
+                        "and how far its centre moved, with the guard's "
+                        "verdicts shaded behind both. The chart for real "
+                        "footage, which has no ground truth to draw an IoU "
+                        "curve against (needs matplotlib).")
     p.add_argument("--stage-chart", default=None,
                    help="Save a per-frame decode/inference/render breakdown chart to this "
                         "PNG path (needs matplotlib).")
@@ -297,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         fps_warmup=args.fps_warmup,
         fps_chart=Path(args.fps_chart) if args.fps_chart else None,
         stage_chart=Path(args.stage_chart) if args.stage_chart else None,
+        track_chart=Path(args.track_chart) if args.track_chart else None,
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")
