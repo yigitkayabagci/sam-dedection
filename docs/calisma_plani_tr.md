@@ -240,7 +240,41 @@ SAMURAI export yoluna hiç kurulmaz — doğrulandı, dosyada yalnızca iki yoru
 satırı geçiyor. `check_image_size()` artık 640/896'yı config okunurken
 reddeder, ilk ileri geçişte çökmek yerine.
 
-### 3f. `memgate`'in gerçekten bir şey yaptığını görmek
+### 3f. Default (hızlı hal) vs classic — tek komut, iki kol
+
+Karşılaştırmanın tamamı **tek** komut. `plain` referans koldur: hiçbir policy
+bloğu yüklenmez, guard kurulmaz, SAMURAI kurulmaz, fotometri ölçülmez — yani
+eski hızlı hal. `memgate` aynı motorlar, aynı checkpoint, aynı prompt ile
+yalnızca memory yazımına bir kapı ekler.
+
+```bash
+python3 tools/run_records.py \
+  --records /SSD/YOLUN/record28/vis3 \
+  --out frame_output --tag vis3_deneme1 \
+  --modes crop768 --weights pool_deep --backend trt \
+  --policy plain,memgate
+```
+
+`--records` hem bir kayıt klasörünü (içinde kareler) hem de kayıt klasörleri
+tutan bir dizini kabul eder; `--pattern` varsayılanı `*.tif*`, video varsayılan
+olarak açık.
+
+Çıkanlar:
+
+```
+frame_output/vis3_deneme1/vis3/crop768_pool_deep/          <- default (hızlı hal)
+frame_output/vis3_deneme1/vis3/crop768_pool_deep_memgate/  <- classic kapı
+frame_output/vis3_deneme1/SUMMARY.md                       <- iki satır + fark tablosu
+```
+
+Prompt `frame_output/vis3/prompts.json`'da tutulur (tag'lenmez), yani
+`--tag vis3_deneme2` ile ikinci denemede tekrar hedef seçtirmez.
+
+ms karşılaştırması için `SUMMARY.md`'deki iki satır yeter: `pre + inference +
+post`. `memgate` kare başına 33 µs olduğu için fark ölçüm gürültüsü kadar
+olmalı; olmuyorsa sebep bu kapı değildir.
+
+### 3g. `memgate`'in gerçekten bir şey yaptığını görmek
 
 ```bash
 python3 tools/run_records.py --records ~/Videos/records --modes crop768 \
