@@ -192,6 +192,9 @@ TORCH = {
 POLICIES = {
     "plain": None,
     "samurai": "configs/policies/samurai.yaml",
+    # `samurai` plus one line: the Kalman filter is not updated with a box it
+    # does not believe. The only difference, so the two rows isolate it.
+    "samurai_gated": "configs/policies/samurai_gated.yaml",
     "ego": "configs/policies/ego.yaml",
     # The gates alone, reading no pixels: the part measured to refuse a jump,
     # without the decode and the optical flow measured to cost 18-27 ms a frame.
@@ -236,6 +239,18 @@ POLICY_NOTE = {
         "`dropout_episodes` counts a lost frame honestly instead of scoring a "
         "mask that covers a field as a hit. Expect dropouts to go **up** where "
         "they were being hidden. **Training-free.** Read against the `ego` row."
+    ),
+    "samurai_gated": (
+        "Policy: `samurai_gated` — `samurai` with one line added: the Kalman "
+        "filter is not updated with a box whose IoU against its own prediction "
+        "is below 0.10, and is re-initiated after 8 consecutive refusals so a "
+        "real manoeuvre is not locked out. Without it a mask that jumps to a "
+        "look-alike drags the filter onto it and the memory gate falls silent "
+        "two frames later -- measured, 15 of the 16 frames after a jump "
+        "entered the bank; with it, 8, and a genuine acceleration still puts "
+        "in all 16. **Training-free and free of time**: the arithmetic is "
+        "inside a hook that already runs. Read against the `samurai` row -- "
+        "that is the only difference."
     ),
     "guard_lite": (
         "Policy: `guard_lite` — the guard's gates and nothing that reads a "

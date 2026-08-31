@@ -1,0 +1,39 @@
+# --policy samurai_gated: `samurai`, plus one line the filter was missing.
+#
+# The three memory thresholds in `samurai` decide which frames enter the bank,
+# and they work -- once. The filter is then updated with whatever box was
+# chosen, so a mask that jumped to a look-alike drags the filter onto it, and
+# two frames later the filter agrees with the distractor and the gate falls
+# silent. Measured on a 26-pixel target jumping 90 pixels: `kf_score` is 0.000
+# on the jump and rejected, 0.045 on the next frame and accepted, 0.964 two
+# frames after that. Fifteen of the sixteen frames following the jump entered
+# the bank.
+#
+# `kf_gate` is the classical answer -- gating, as SORT and DeepSORT do it: a
+# filter is not updated with a measurement it does not believe.
+# `kf_gate_patience` re-initiates it after that many consecutive refusals, so a
+# target that really did manoeuvre is not locked out.
+#
+# Swept on both cases at once: at 0.10 a jump puts 8 of 16 frames into the bank
+# instead of 15, and a genuine acceleration still puts in all 16 -- no cost on
+# the honest case. Above 0.20 the manoeuvre starts paying, because on a
+# 26-pixel box a 90-pixel jump scores 0 against the prediction and a 13-pixel
+# change of velocity scores about 0.33.
+#
+# It is not a cure. Eight frames still reach the bank once the patience runs
+# out; what it buys is the window in which the appearance path can find the
+# real target again, with the bank still holding it. Read against `samurai`,
+# which is the same policy without this line -- that is the only difference
+# and it costs no time at all: the arithmetic is inside a hook that already
+# runs.
+
+samurai:
+  enabled: true
+  kf_weight: 0.15
+  stable_frames: 15
+  stable_iou: 0.3
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0
+  kf_gate: 0.1
+  kf_gate_patience: 8

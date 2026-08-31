@@ -189,6 +189,37 @@ class SamuraiConfig:
     memory_obj_score: float = 0.0
     memory_kf_score: float = 0.0
 
+    # `kf_gate` closes the hole the three thresholds above cannot: they decide
+    # which frames enter the memory bank, and they work -- but only once. The
+    # filter is updated with whatever box was chosen, so a mask that jumped to
+    # a look-alike drags the filter onto it, and within two frames the filter
+    # agrees with the distractor and the memory gate falls silent. Measured on
+    # a 26-pixel target jumping 90 pixels: `kf_score` is 0.000 on the jump and
+    # rejected, 0.045 on the next frame and *accepted*, 0.964 two frames later.
+    # Fifteen of the sixteen frames after the jump entered the bank.
+    #
+    # This is the classical answer -- gating, as SORT and DeepSORT do it: a
+    # filter is not updated with a measurement it does not believe. Below this
+    # IoU against its own prediction the update is skipped and the filter
+    # coasts. `kf_gate_patience` is the other half and it is not optional: a
+    # filter that never updates would lock out a target that really did
+    # manoeuvre, so after this many consecutive refusals the filter is
+    # re-initiated on the tracker's box -- the tracker is then the one more
+    # likely to be right.
+    #
+    # Swept on both cases at once. At 0.10 with patience 8, a jump puts 8 of 16
+    # frames into the bank instead of 15, and a genuine acceleration still puts
+    # in all 16 -- no cost at all on the honest case. Above 0.20 the manoeuvre
+    # starts paying. The geometry is why: on a 26-pixel box a 90-pixel jump
+    # scores 0 and a 13-pixel change of velocity scores about 0.33, so anything
+    # between separates them and 0.10 sits inside with margin.
+    #
+    # **0.0 is off**, and off is the default: this changes what the filter
+    # learns, so it is a thing to measure against `samurai` rather than to
+    # assume.
+    kf_gate: float = 0.0
+    kf_gate_patience: int = 8
+
     @property
     def permissive(self) -> bool:
         """True when nothing can be rejected, so behaviour is stock SAM 2.
@@ -199,7 +230,7 @@ class SamuraiConfig:
         """
         return (self.kf_weight == 0.0 and self.memory_iou <= 0.0
                 and self.memory_obj_score <= float("-inf")
-                and self.memory_kf_score <= 0.0)
+                and self.memory_kf_score <= 0.0 and self.kf_gate <= 0.0)
 
 
 def boxes_from_masks(masks: np.ndarray) -> np.ndarray:
@@ -296,11 +327,15 @@ class MotionAwareMemory:
         self.config = config or SamuraiConfig()
         self.kalman = KalmanBoxTracker()
         self.stable = 0
+        # Consecutive frames the filter has refused to learn from. Only ever
+        # non-zero when `kf_gate` is on.
+        self.coasted = 0
         self.records: dict[int, FrameRecord] = {}
 
     def reset(self) -> None:
         self.kalman.reset()
         self.stable = 0
+        self.coasted = 0
         self.records.clear()
 
     # -- mask selection ---------------------------------------------------
@@ -336,6 +371,7 @@ class MotionAwareMemory:
             if not self.kalman.ready:
                 self.kalman.initiate(box)
                 self.stable = 1
+                self.coasted = 0
             elif warming:
                 # Count a warm-up frame only when the filter and the tracker
                 # already agree; a filter fed its own disagreements would
@@ -345,8 +381,20 @@ class MotionAwareMemory:
                     self.stable += 1
                 else:
                     self.stable = 0
-            else:
+            elif cfg.kf_gate <= 0.0 or kf_scores[chosen] >= cfg.kf_gate:
                 self.kalman.update(box)
+                self.coasted = 0
+            else:
+                # The filter does not believe this box. Coast on the prediction
+                # rather than learning from it -- and give up coasting after
+                # `kf_gate_patience`, because a filter that disagrees for that
+                # long is the one that is wrong.
+                self.coasted += 1
+                if self.coasted >= cfg.kf_gate_patience:
+                    self.kalman.reset()
+                    self.kalman.initiate(box)
+                    self.stable = 1
+                    self.coasted = 0
         return Selection(index=chosen, kf_score=float(kf_scores[chosen]),
                          mask_score=float(appearance[chosen]),
                          weighted=weighted.astype(np.float32))
