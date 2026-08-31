@@ -578,7 +578,12 @@ class StagedFrameCache(unittest.TestCase):
             (self.cache / f"{i:05d}.jpg").touch()
 
     def staged(self):
-        return sorted(p.stem for p in self.cache.glob("*.jpg") if p.stem.isdigit())
+        """Only what the staging pass writes -- `f"{idx:05d}.jpg"`, and nothing
+        else the directory happens to hold. Counting every digit-named jpg here
+        made `test_it_touches_only_what_the_staging_pass_writes` assert that
+        the two files it had just asked to be *kept* were gone."""
+        return sorted(p.stem for p in self.cache.glob("*.jpg")
+                      if len(p.stem) == 5 and p.stem.isdigit())
 
     def test_a_shorter_run_leaves_no_tail_of_the_longer_one(self):
         from src.pipeline import _clear_staged
