@@ -290,6 +290,32 @@ def staged_config(config: str, policy: str, outdir: Path) -> str:
     return str(staged)
 
 
+def cache_for(record: Path, mode: str, args) -> Path | None:
+    """Where one record's decoded frames are staged, or None for the default.
+
+    Keyed by what actually changes the bytes on disk rather than by the mode.
+    The pipeline crops in the pass that writes the cache, so the cache *is* the
+    cropped view: every `full*` mode stages the same source frames -- the
+    resize to `image_size` happens in the model, not here -- while `crop768`
+    and `crop512` stage different pixels. Sharing by crop is a space saving
+    rather than a time one: the staging pass rewrites its directory on every
+    run, so three full modes keep one copy of the frames between them instead
+    of three, and none of them skips the transcode.
+
+    The frame skip is in the key too, and that one is a correctness matter
+    rather than a saving: a skipped run writes fewer files, the tracker indexes
+    whatever the directory holds, and a leftover tail from a longer run would
+    be read as extra frames.
+    """
+    if not args.cache_dir:
+        return None
+    crop = MODES[mode][1]
+    parts = ["full" if crop is None else f"crop{crop}"]
+    if args.frame_skip > 1:
+        parts.append(f"skip{args.frame_skip}")
+    return Path(args.cache_dir) / record.name / "_".join(parts)
+
+
 def engines_missing(config: str) -> str | None:
     """The engine directory a config expects, when it is not there yet.
 
@@ -439,6 +465,18 @@ def main(argv: list[str] | None = None) -> int:
                         "<mode>_<weights>/ so a stock run is never overwritten "
                         "and the two share one saved prompt.")
     p.add_argument("--pattern", default="*.tif*", help="Frame glob inside a record.")
+    p.add_argument("--cache-dir", default=None,
+                   help="Where the decoded frames are staged, per record. The "
+                        "default is a system temp directory, which is the wrong "
+                        "disk whenever the records are on an external drive: "
+                        "every frame is written once as JPG before tracking "
+                        "starts. Point this at that drive. Each record gets a "
+                        "subdirectory per distinct staged view, so the full "
+                        "modes share one copy of the frames rather than keeping "
+                        "three; the staging pass still runs per mode, so this is "
+                        "disk space and the right drive, not saved time. What is "
+                        "written here is kept after a run and is yours to "
+                        "reclaim.")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Playback fps for the output mp4 (a sequence has none).")
     p.add_argument("--warmup", type=int, default=20,
@@ -558,6 +596,17 @@ def main(argv: list[str] | None = None) -> int:
                    "--fps-chart", outdir / "latency.png",
                    "--stage-chart", outdir / "stages.png"]
             cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
+            cache = cache_for(record, mode, args)
+            if cache is not None:
+                cache.mkdir(parents=True, exist_ok=True)
+                cmd += ["--frames-cache", cache]
+            # The guard's own account of the run. Only a policy that carries a
+            # `guard:` block produces any, and cli.py says so rather than
+            # writing an empty file, so this is asked for whenever one might
+            # exist: a refused frame is otherwise just a missing mask in the
+            # mp4 with nothing saying which gate refused it.
+            if "guard" in overlay_for(args.policy):
+                cmd += ["--verdicts", outdir / "verdicts.json"]
             if args.strict:
                 cmd += ["--strict"]
             if crop:

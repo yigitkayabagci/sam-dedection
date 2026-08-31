@@ -38,8 +38,8 @@ import yaml  # noqa: E402
 
 from tools.run_records import (MODES, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
                                TRAINED_AT, WEIGHTS, config_for, digest,
-                               engines_missing, folder, overlay_for,
-                               provenance, staged_config)
+                               cache_for, engines_missing, folder,
+                               overlay_for, provenance, staged_config)
 
 
 def body(config: str) -> dict:
@@ -325,6 +325,52 @@ class StagedConfig(unittest.TestCase):
         self.assertIn("run_records.py", head[0])
         self.assertIn(WEIGHTS["pool_deep"][512], head[0])
         self.assertIn("guard", head[1])
+
+
+class FrameCache(unittest.TestCase):
+    """Where the decoded frames are staged, and why the key is not the mode.
+
+    The pipeline crops in the pass that writes the cache, so the cache is the
+    cropped view. Two modes share it exactly when they stage the same bytes.
+    """
+
+    @staticmethod
+    def args(cache_dir="/mnt/ssd/cache", frame_skip=1):
+        return Namespace(cache_dir=cache_dir, frame_skip=frame_skip)
+
+    def test_the_default_is_left_to_the_pipeline(self):
+        self.assertIsNone(cache_for(Path("rec"), "full768", self.args(None)))
+
+    def test_every_full_mode_stages_the_same_frames(self):
+        """The resize to image_size happens in the model, not on disk."""
+        names = {cache_for(Path("rec"), m, self.args())
+                 for m in ("full512", "full768", "full1024")}
+        self.assertEqual(len(names), 1)
+
+    def test_a_crop_is_different_pixels_and_gets_its_own(self):
+        full = cache_for(Path("rec"), "full768", self.args())
+        crop = cache_for(Path("rec"), "crop768", self.args())
+        self.assertNotEqual(full, crop)
+        self.assertNotEqual(crop, cache_for(Path("rec"), "crop512", self.args()))
+
+    def test_two_records_never_share_one(self):
+        self.assertNotEqual(cache_for(Path("rec_a"), "full768", self.args()),
+                            cache_for(Path("rec_b"), "full768", self.args()))
+
+    def test_a_skip_gets_its_own_so_a_longer_run_leaves_no_tail(self):
+        """A skipped run writes fewer files; the tracker indexes the directory.
+
+        Sharing would leave the tail of a full-length run in place to be read
+        as extra frames -- a correctness matter, not a saving.
+        """
+        self.assertNotEqual(cache_for(Path("rec"), "full768", self.args()),
+                            cache_for(Path("rec"), "full768",
+                                      self.args(frame_skip=2)))
+
+    def test_it_lands_under_the_directory_it_was_given(self):
+        path = cache_for(Path("/media/ssd/frames/rec_028"), "crop768",
+                         self.args("/media/ssd/cache"))
+        self.assertEqual(path, Path("/media/ssd/cache/rec_028/crop768"))
 
 
 class Preflight(unittest.TestCase):

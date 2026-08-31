@@ -26,6 +26,7 @@ Frame sequence input (no video file; e.g. frame_000000.tiff, ...):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -62,6 +63,62 @@ def _resolve_paths(cfg: dict, keys: tuple[str, ...]) -> dict:
         if k in out and out[k]:
             out[k] = str(_resolve(out[k]))
     return out
+
+
+def _write_verdicts(tracker, path: Path) -> None:
+    """The guard's own account of the run, per frame and object.
+
+    A guard run's mp4 shows *that* a mask went missing and never *why*: an
+    empty frame from a refusal looks exactly like an empty frame from EdgeTAM's
+    own object score going negative. The tracker keeps every `Decision` it made
+    in `verdicts`, so the answer exists -- it just had no way out of the
+    process until now.
+
+    Written as a summary plus the rows, because the first question asked of it
+    is "did the guard fire at all", and a guard whose states are all `tracking`
+    changed nothing about the run whatever the video looks like.
+    """
+    verdicts = getattr(tracker, "verdicts", None)
+    if not verdicts:
+        print("no guard verdicts to write "
+              "(the backend config has no `guard:` block, or no frame was judged)")
+        return
+
+    rows, states, reasons = [], {}, {}
+    for frame_idx in sorted(verdicts):
+        for obj_id, decision in sorted(verdicts[frame_idx].items()):
+            states[decision.state] = states.get(decision.state, 0) + 1
+            if decision.reason:
+                reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
+            box = decision.box
+            rows.append({
+                "frame": int(frame_idx),
+                "obj_id": int(obj_id),
+                "state": decision.state,
+                "accepted": bool(decision.accepted),
+                "reason": decision.reason,
+                # The guard works in the decoded frame's pixels, not the
+                # source's -- see EdgeTAMTracker._judge.
+                "box": [float(v) for v in box] if box is not None else None,
+                # A fraction of the frame, so it needs no resolution to read.
+                "shift": [float(decision.shift[0]), float(decision.shift[1])],
+                "match": (None if decision.match != decision.match  # NaN
+                          else float(decision.match)),
+            })
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "frames_judged": len(verdicts),
+        "decisions": len(rows),
+        "states": dict(sorted(states.items(), key=lambda kv: -kv[1])),
+        "reasons": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
+        "refused": sum(0 if r["accepted"] else 1 for r in rows),
+        "rows": rows,
+    }, indent=2) + "\n")
+    kept = len(rows) - sum(0 if r["accepted"] else 1 for r in rows)
+    print(f"guard: {kept}/{len(rows)} decisions accepted, "
+          + (", ".join(f"{n}x {s}" for s, n in states.items()) or "nothing judged")
+          + f" -> {path}")
 
 
 def _collect_prompts(args: argparse.Namespace) -> PromptSet:
@@ -148,6 +205,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--video-mode", choices=("auto", "mp4", "jpg"), default="auto",
                    help="auto = use mp4 directly if decord is available, else fall back to jpg.")
     p.add_argument("--keep-frames", action="store_true", help="Do not delete extracted frames (jpg mode).")
+    p.add_argument("--frames-cache", default=None,
+                   help="Where the decoded frames the model reads are staged. "
+                        "Default is a system temp directory, which is the wrong "
+                        "disk when the source is on an external drive: every "
+                        "frame is written once as JPG before tracking starts, so "
+                        "a long record can be gigabytes landing on /tmp. Point "
+                        "this at the same drive as the frames. A directory given "
+                        "here is kept rather than deleted afterwards -- the "
+                        "staging pass still rewrites it on every run, so this "
+                        "buys the right disk, not a faster second run, and the "
+                        "space is yours to reclaim.")
+    p.add_argument("--verdicts", default=None,
+                   help="Write the guard's per-frame decisions here as JSON "
+                        "(requires a `guard:` block in the backend config). One "
+                        "row per judged frame and object: the state, the reason, "
+                        "the box the guard would have used, the camera shift it "
+                        "measured and the re-acquisition score. Without this a "
+                        "refused frame is only a missing mask in the mp4, with "
+                        "nothing saying which gate refused it.")
     p.add_argument("--no-bbox", action="store_true", help="Disable bounding-box overlay.")
     p.add_argument("--alpha", type=float, default=0.5, help="Mask overlay alpha.")
     p.add_argument("--fps-warmup", type=int, default=0,
@@ -215,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         frame_stride=args.frame_skip,
         video_mode=args.video_mode,
         keep_frames=args.keep_frames,
+        frames_cache=Path(args.frames_cache) if args.frames_cache else None,
         draw_bbox=not args.no_bbox,
         mask_alpha=args.alpha,
         fps_warmup=args.fps_warmup,
@@ -223,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")
+    if args.verdicts:
+        _write_verdicts(tracker, Path(args.verdicts))
     return 0
 
 
