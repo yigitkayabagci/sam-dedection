@@ -194,9 +194,12 @@ POLICIES = {
     "samurai": "configs/policies/samurai.yaml",
     "ego": "configs/policies/ego.yaml",
     "guard": "configs/policies/guard.yaml",
-    # The classical layer on its own -- `guard` minus SAMURAI, so the two
-    # halves of the stack can be told apart rather than only measured together.
-    "stabiliser": "configs/policies/stabiliser.yaml",
+    # `guard` minus SAMURAI. Named for what it leaves out rather than for the
+    # module it runs: `guard:` in a config, `GuardConfig`, and
+    # `src/trackers/stabiliser.py` are one thing under three names, so a rung
+    # called `stabiliser` beside one called `guard` read as two different
+    # layers when the only difference is the memory gate.
+    "guard_only": "configs/policies/guard_only.yaml",
 }
 
 # The blocks an overlay is allowed to set. A policy states runtime behaviour;
@@ -231,10 +234,11 @@ POLICY_NOTE = {
         "mask that covers a field as a hit. Expect dropouts to go **up** where "
         "they were being hidden. **Training-free.** Read against the `ego` row."
     ),
-    "stabiliser": (
-        "Policy: `stabiliser` — the classical layer *without* SAMURAI: the same "
-        "plausibility gates, hysteresis and re-acquisition as `guard`, and none "
-        "of the motion-aware memory. The two act at different moments -- SAMURAI "
+    "guard_only": (
+        "Policy: `guard_only` — the same classical layer `guard` runs "
+        "(`src/trackers/stabiliser.py`), with SAMURAI's motion-aware memory "
+        "left out. `guard` moves both at once; this moves one. They act at "
+        "different moments -- SAMURAI "
         "picks which candidate mask is used and which frames enter the memory "
         "bank, the guard judges what came back and can refuse it -- so a run "
         "that improves here and not under `samurai` was fixed by the refusals. "

@@ -226,14 +226,14 @@ class Policies(unittest.TestCase):
 
     def test_the_classical_layer_can_be_measured_without_the_memory_gate(self):
         """`guard` moves two things at once. `stabiliser` moves one of them."""
-        alone = overlay_for("stabiliser")
+        alone = overlay_for("guard_only")
         self.assertEqual(set(alone), {"ego_motion", "guard"})
         self.assertNotIn("samurai", alone)
 
     def test_the_two_guard_overlays_never_drift(self):
         """`guard` and `stabiliser` differ by SAMURAI and by nothing else --
         eighteen thresholds written twice is the shape that drifts."""
-        full, alone = overlay_for("guard"), overlay_for("stabiliser")
+        full, alone = overlay_for("guard"), overlay_for("guard_only")
         self.assertEqual(full["guard"], alone["guard"])
         self.assertEqual(full["ego_motion"], alone["ego_motion"])
 

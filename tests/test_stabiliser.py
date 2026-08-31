@@ -734,7 +734,7 @@ class CanopyTest(unittest.TestCase):
         self.assertGreaterEqual(recovered, 5)
 
     def test_the_guard_works_with_no_motion_aware_memory_behind_it(self):
-        """What `--policy stabiliser` relies on. `EdgeTAMTracker.prepare` builds
+        """What `--policy guard_only` relies on. `EdgeTAMTracker.prepare` builds
         a `FrameMotion` for the guard when no `ego_motion:` block asked for one,
         so every part of the classical layer -- the gates, the hysteresis, the
         re-acquisition and the motion residual -- runs with SAMURAI absent.

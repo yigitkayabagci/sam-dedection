@@ -1,4 +1,10 @@
-# --policy stabiliser: the classical layer on its own, without SAMURAI.
+# --policy guard_only: the same classical layer `guard` runs, without SAMURAI.
+#
+# `guard:` in a config, the `GuardConfig` dataclass and
+# `src/trackers/stabiliser.py` are one thing under three names -- the block
+# switches the module on and the dataclass is its settings. So this rung is
+# not a different layer from `guard`; it is `guard` with SAMURAI left out,
+# which is what its name says.
 #
 # `guard` is samurai + ego_motion + guard, which answers "is the whole stack
 # worth it" and not "which half of it did the work". The two halves fail
