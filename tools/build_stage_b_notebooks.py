@@ -1151,6 +1151,12 @@ for _pool, _folder in POOL_ARCHIVES.items():
     if _report["missing"]:
         print(f"   !! {_report['missing']} frames are in no archive listed "
               f"here -- name the missing parts in POOL_ARCHIVES")
+    if _report["unopened"]:
+        print(f"   !! {len(_report['unopened'])} of the archives could not be "
+              f"read at all -- what they hold is counted as missing above, and "
+              f"re-running this cell resumes rather than starts over:")
+        for _name, _why in _report["unopened"]:
+            print(f"      {_name}: {_why}")
 
 if FETCH:
     from tools.fetch_datasets import fetch, staged

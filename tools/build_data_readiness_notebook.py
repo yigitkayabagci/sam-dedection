@@ -490,6 +490,12 @@ for _pool, _folder in POOL_ARCHIVES.items():
               f"here -- name the missing parts, or drop them from the run")
     if _report["unreadable"]:
         print(f"   !! unreadable: {_report['unreadable'][:5]}")
+    if _report["unopened"]:
+        print(f"   !! {len(_report['unopened'])} of the archives could not be "
+              f"read at all -- what they hold is counted as missing above, and "
+              f"re-running this cell resumes rather than starts over:")
+        for _name, _why in _report["unopened"]:
+            print(f"      {_name}: {_why}")
     print(f"   {_root}: {_used(_root):.2f} GiB, free now {_free():.1f} GiB")
 
 if not POOL_ARCHIVES:
