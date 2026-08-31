@@ -37,3 +37,10 @@ samurai:
   memory_kf_score: 0.0
   kf_gate: 0.1
   kf_gate_patience: 8
+  # A mask that stays put and swells passes every other check: its IoU against
+  # the prediction stays high because the prediction is inside it. Measured on
+  # a box growing in place, all ten frames after the growth entered the bank at
+  # x2, x3 and x4 alike. Against the running median of the areas already
+  # accepted this is 0/10 at all three, while a target genuinely approaching --
+  # 2.6x over forty frames -- keeps 39 of its 40, because the median follows it.
+  memory_area_ratio: 3.0

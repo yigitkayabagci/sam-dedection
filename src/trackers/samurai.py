@@ -39,6 +39,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from collections import deque
+
 import numpy as np
 
 
@@ -220,6 +222,19 @@ class SamuraiConfig:
     kf_gate: float = 0.0
     kf_gate_patience: int = 8
 
+    # A mask that stays put and *swells* passes every check above: its IoU
+    # against the prediction stays high because the prediction is inside it.
+    # Measured on a box growing in place -- x2 scores 0.25 against the
+    # prediction, x3 scores 0.111, and every one of the ten frames after the
+    # growth entered the memory bank at all three sizes. That is the balloon,
+    # written into memory as the target's appearance.
+    #
+    # This is the ratio to the running median of the areas already accepted, so
+    # it follows a target that really is approaching. 0 is off. 3.0 is the same
+    # number `stabiliser.GuardConfig.max_area_ratio` uses, and for the same
+    # reason: a target's area between two frames at video rate cannot triple.
+    memory_area_ratio: float = 0.0
+
     @property
     def permissive(self) -> bool:
         """True when nothing can be rejected, so behaviour is stock SAM 2.
@@ -230,7 +245,8 @@ class SamuraiConfig:
         """
         return (self.kf_weight == 0.0 and self.memory_iou <= 0.0
                 and self.memory_obj_score <= float("-inf")
-                and self.memory_kf_score <= 0.0 and self.kf_gate <= 0.0)
+                and self.memory_kf_score <= 0.0 and self.kf_gate <= 0.0
+                and self.memory_area_ratio <= 0.0)
 
 
 def boxes_from_masks(masks: np.ndarray) -> np.ndarray:
@@ -300,6 +316,7 @@ class Selection:
     kf_score: float
     mask_score: float
     weighted: np.ndarray
+    area_ratio: float = 1.0
 
 
 @dataclass
@@ -309,11 +326,16 @@ class FrameRecord:
     iou: float
     object_score: float
     kf_score: float
+    # Area against the running median of the frames already accepted. 1.0 when
+    # there is no history to compare against, which is the neutral value.
+    area_ratio: float = 1.0
 
     def acceptable(self, cfg: SamuraiConfig) -> bool:
         return (self.iou > cfg.memory_iou
                 and self.object_score > cfg.memory_obj_score
-                and self.kf_score > cfg.memory_kf_score)
+                and self.kf_score > cfg.memory_kf_score
+                and (cfg.memory_area_ratio <= 0.0
+                     or self.area_ratio <= cfg.memory_area_ratio))
 
 
 class MotionAwareMemory:
@@ -330,12 +352,15 @@ class MotionAwareMemory:
         # Consecutive frames the filter has refused to learn from. Only ever
         # non-zero when `kf_gate` is on.
         self.coasted = 0
+        # Areas of the frames already accepted, for `memory_area_ratio`.
+        self.areas: deque = deque(maxlen=12)
         self.records: dict[int, FrameRecord] = {}
 
     def reset(self) -> None:
         self.kalman.reset()
         self.stable = 0
         self.coasted = 0
+        self.areas.clear()
         self.records.clear()
 
     # -- mask selection ---------------------------------------------------
@@ -395,16 +420,26 @@ class MotionAwareMemory:
                     self.kalman.initiate(box)
                     self.stable = 1
                     self.coasted = 0
+        area = float(max(box[2] - box[0], 0.0) * max(box[3] - box[1], 0.0))
+        typical = float(np.median(self.areas)) if self.areas else 0.0
+        ratio = area / typical if typical > 0 and area > 0 else 1.0
+        if area > 0 and (cfg.memory_area_ratio <= 0.0
+                         or ratio <= cfg.memory_area_ratio):
+            # Only an accepted area joins the history, or one balloon frame
+            # raises the median and the next one looks reasonable beside it.
+            self.areas.append(area)
         return Selection(index=chosen, kf_score=float(kf_scores[chosen]),
                          mask_score=float(appearance[chosen]),
-                         weighted=weighted.astype(np.float32))
+                         weighted=weighted.astype(np.float32),
+                         area_ratio=float(ratio))
 
     # -- memory gate ------------------------------------------------------
 
     def record(self, frame_idx: int, iou: float, object_score: float,
-               kf_score: float) -> None:
+               kf_score: float, area_ratio: float = 1.0) -> None:
         self.records[int(frame_idx)] = FrameRecord(float(iou), float(object_score),
-                                                   float(kf_score))
+                                                   float(kf_score),
+                                                   float(area_ratio))
 
     def keep(self, frame_idx: int) -> bool:
         """Whether this frame is fit to enter the memory bank.
@@ -524,7 +559,7 @@ class Samurai:
             out[row] = torch.as_tensor(selection.weighted, dtype=out.dtype,
                                        device=out.device)
             state.record(self.frame_idx, selection.mask_score, float(scores[row]),
-                         selection.kf_score)
+                         selection.kf_score, selection.area_ratio)
             if not state.keep(self.frame_idx):
                 self.rejected.add(self.frame_idx)
         # A single-candidate frame -- the prompted one, in configurations that

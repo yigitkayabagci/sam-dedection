@@ -31,6 +31,43 @@ from .trackers import VideoTracker
 from .visualize import overlay_masks
 
 
+def stretch_range(rgb, floor: int, low: int = 8, high: int = 247):
+    """Put a dark, flat frame back where the encoder's training data was.
+
+    **The claim this makes, and the one it does not.** It is affine, so it does
+    not raise the signal-to-clutter ratio -- scaling a window multiplies the
+    target's signal and the ground's clutter by the same number and the ratio
+    comes out where it started, which this project measured before. What it
+    changes is *where the frame lands in the encoder's input*. A thermal frame
+    at night can occupy sixty grey levels out of 255; divided by 255 and put
+    through ImageNet's mean and standard deviation, that is a band a tenth as
+    wide as anything the encoder was trained on. The hypothesis is that the
+    features are weak for that reason rather than because the target is faint,
+    and it is a hypothesis: only a run on real footage can answer it, which is
+    what the log below is for.
+
+    Applied only when the frame is actually flat -- `floor` is the used span,
+    in grey levels, below which it fires. A frame already using its range is
+    returned untouched, so this cannot quietly rescale footage that never
+    needed it.
+
+    Returns `(frame, report)`. `report` is None when nothing was done.
+    """
+    import numpy as np
+
+    grey = rgb[..., 0] if rgb.ndim == 3 else rgb
+    low_p, high_p = (float(v) for v in np.percentile(grey, (1.0, 99.0)))
+    span = high_p - low_p
+    if floor <= 0 or span >= floor or span < 1.0:
+        return rgb, None
+    scale = (high - low) / span
+    out = np.clip((rgb.astype(np.float32) - low_p) * scale + low, 0, 255)
+    return out.astype(np.uint8), {"p1": round(low_p, 1), "p99": round(high_p, 1),
+                                  "span": round(span, 1),
+                                  "span_after": round(span * scale, 1),
+                                  "gain": round(scale, 2)}
+
+
 class _LazyFrames:
     """Decode, crop, resize and normalise each source frame on demand.
 
@@ -55,10 +92,14 @@ class _LazyFrames:
     """
 
     def __init__(self, paths, image_size, timer: list[float], view=None,
-                 read_timer: list[float] | None = None) -> None:
+                 read_timer: list[float] | None = None, prefilter: int = 0,
+                 log: list | None = None) -> None:
         import torch
 
         self.paths = list(paths)
+        # The pre-encoder filter and its record. See `stretch_range`.
+        self.prefilter = int(prefilter)
+        self.log = log if log is not None else []
         self.image_size = image_size
         self.timer = timer
         # Reading a frame off disk is timed separately because a deployment fed
@@ -97,6 +138,9 @@ class _LazyFrames:
             img = cv2.resize(img, (size, size),
                              interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR)
         rgb = to_rgb8(img)
+        if self.prefilter:
+            rgb, report = stretch_range(rgb, self.prefilter)
+            self.log.append({"frame": int(index), **(report or {"span": None})})
         out = torch.from_numpy(rgb).permute(2, 0, 1).to(torch.float32).div_(255.0)
         out = out.sub_(self.mean).div_(self.std)
         self.timer.append(time.perf_counter() - start)
@@ -104,7 +148,8 @@ class _LazyFrames:
 
 
 def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None,
-                                 read_timer: list[float] | None = None) -> bool:
+                                 read_timer: list[float] | None = None,
+                                 prefilter: int = 0, log: list | None = None) -> bool:
     """Route the tracker's frame source through `_LazyFrames`. True if it took."""
     state = getattr(tracker, "_state", None)
     predictor = getattr(tracker, "_predictor", None)
@@ -113,12 +158,14 @@ def _install_realtime_preprocess(tracker, paths, timer: list[float], view=None,
     paths = list(paths)
     if len(paths) != len(state["images"]):
         return False
-    state["images"] = _LazyFrames(paths, predictor.image_size, timer, view, read_timer)
+    state["images"] = _LazyFrames(paths, predictor.image_size, timer, view,
+                                  read_timer, prefilter, log)
     return True
 
 
 def _require_realtime_preprocess(tracker, paths, timer, view=None,
-                                 read_timer=None) -> bool:
+                                 read_timer=None, prefilter: int = 0,
+                                 log: list | None = None) -> bool:
     """Install the lazy per-frame decode, and say so loudly when it did not.
 
     The two callers on the frame path used to discard this answer. A False is
@@ -133,7 +180,8 @@ def _require_realtime_preprocess(tracker, paths, timer, view=None,
     way a reusable `--frames-cache` causes that; this catches whatever else
     does, instead of letting it through as a number.
     """
-    if _install_realtime_preprocess(tracker, paths, timer, view, read_timer):
+    if _install_realtime_preprocess(tracker, paths, timer, view, read_timer,
+                                    prefilter, log):
         return True
     state = getattr(tracker, "_state", None) or {}
     indexed = len(state.get("images", ()))
@@ -509,6 +557,11 @@ class PipelineConfig:
     # truth -- which is every real recording -- and where the balloon and the
     # skip are visible without one.
     track_chart: Path | None = None
+    # Pre-encoder: the used span, in grey levels, below which a frame is
+    # stretched before the encoder ever sees it. 0 is off. See `stretch_range`.
+    prefilter: int = 0
+    # Where to write what it did, frame by frame.
+    prefilter_log: Path | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -615,6 +668,44 @@ class _TrackWatch:
         }, indent=2) + "\n")
         print(f"[pipeline] held {int(held.sum())}/{shares.size} frames, "
               f"longest gap {longest}, max share {shares.max():.1%} -> {path}")
+
+
+
+def _write_prefilter(cfg: PipelineConfig, rows: list) -> None:
+    """What the pre-encoder filter did, frame by frame, and whether it fired.
+
+    The first question asked of it is not "what does the video look like" but
+    "did anything change at all" -- a floor set below the footage's own span
+    leaves every frame untouched, and a run like that is the baseline under
+    another name. So the counts come first and the rows after.
+    """
+    import json
+
+    if cfg.prefilter_log is None or not cfg.prefilter:
+        return
+    fired = [r for r in rows if r.get("gain")]
+    body = {
+        "floor": int(cfg.prefilter),
+        "frames": len(rows),
+        "stretched": len(fired),
+        "span_before": (round(sum(r["span"] for r in fired) / len(fired), 1)
+                        if fired else None),
+        "span_after": (round(sum(r["span_after"] for r in fired) / len(fired), 1)
+                       if fired else None),
+        "gain_median": (round(sorted(r["gain"] for r in fired)[len(fired) // 2], 2)
+                        if fired else None),
+        "rows": rows,
+    }
+    path = Path(cfg.prefilter_log)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(body, indent=2) + "\n")
+    if fired:
+        print(f"[prefilter] stretched {len(fired)}/{len(rows)} frames, "
+              f"span {body['span_before']} -> {body['span_after']} levels "
+              f"(median gain x{body['gain_median']}) -> {path}")
+    else:
+        print(f"[prefilter] nothing stretched: no frame's span was under "
+              f"{cfg.prefilter} levels. This run is the baseline. -> {path}")
 
 
 def _report_timing(
@@ -863,7 +954,9 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
-        _require_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
+        prefilter_log: list = []
+        _require_realtime_preprocess(tracker, tracked, preprocess_s, view,
+                                     read_s, cfg.prefilter, prefilter_log)
 
         watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [frames]", unit="frame")
@@ -894,6 +987,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
         watch.write(cfg, tracker)
+        _write_prefilter(cfg, prefilter_log)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
@@ -985,8 +1079,10 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
+        prefilter_log: list = []
         _require_realtime_preprocess(tracker, tracked, preprocess_s,
-                                     read_timer=read_s)
+                                     read_timer=read_s, prefilter=cfg.prefilter,
+                                     log=prefilter_log)
         watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [jpg]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
@@ -1013,6 +1109,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
         watch.write(cfg, tracker)
+        _write_prefilter(cfg, prefilter_log)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()

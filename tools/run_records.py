@@ -199,6 +199,9 @@ POLICIES = {
     # The gates alone, reading no pixels: the part measured to refuse a jump,
     # without the decode and the optical flow measured to cost 18-27 ms a frame.
     "guard_lite": "configs/policies/guard_lite.yaml",
+    # Not an overlay: this one acts before the model, so it is a pipeline flag
+    # rather than a tracker block. `POLICY_FLAGS` carries it.
+    "prefilter": None,
     "guard": "configs/policies/guard.yaml",
     # `guard` minus SAMURAI. Named for what it leaves out rather than for the
     # module it runs: `guard:` in a config, `GuardConfig`, and
@@ -212,6 +215,12 @@ POLICIES = {
 # a checkpoint or an engine path in one of these files would be that policy
 # quietly changing what `--weights` means, so it is refused rather than merged.
 POLICY_KEYS = ("samurai", "sam2long", "ego_motion", "guard")
+
+# --policy -> extra cli.py flags, for a policy that acts somewhere the backend
+# config cannot reach. `prefilter` is the only one: it changes the pixels the
+# encoder is given, which happens in the pipeline's per-frame decode and not in
+# the tracker, so there is no block to overlay.
+POLICY_FLAGS = {"prefilter": ("--prefilter", "70")}
 
 # What the summary says about a policy run, so a table read later explains
 # itself. Each names the rung below it, because that is the row it has to be
@@ -248,9 +257,25 @@ POLICY_NOTE = {
         "look-alike drags the filter onto it and the memory gate falls silent "
         "two frames later -- measured, 15 of the 16 frames after a jump "
         "entered the bank; with it, 8, and a genuine acceleration still puts "
-        "in all 16. **Training-free and free of time**: the arithmetic is "
+        "in all 16. It also refuses a mask that swells in place -- x2, x3 "
+        "and x4 all put ten of ten frames into the bank without it and "
+        "none with it, while a target genuinely approaching keeps 39 of "
+        "40. **Training-free and free of time**: the arithmetic is "
         "inside a hook that already runs. Read against the `samurai` row -- "
         "that is the only difference."
+    ),
+    "prefilter": (
+        "Policy: `prefilter` — the only one that acts **before the encoder**. A "
+        "frame whose used span is under 70 grey levels is stretched back to the "
+        "full range in the per-frame decode, so the model is given a different "
+        "picture rather than a different reading of the same one. It is affine "
+        "and does not raise the signal-to-clutter ratio; the claim is that a "
+        "night frame using sixty levels of 255 lands nowhere near the encoder's "
+        "training distribution once ImageNet's normalisation is applied. That "
+        "is a hypothesis and `prefilter.json` in the run's folder is how to "
+        "test it -- read `stretched` first, because a floor below this "
+        "footage's own span leaves every frame untouched and the run is the "
+        "baseline under another name. **Training-free.** Read against `plain`."
     ),
     "guard_lite": (
         "Policy: `guard_lite` — the guard's gates and nothing that reads a "
@@ -831,6 +856,9 @@ def main(argv: list[str] | None = None) -> int:
             # writing an empty file, so this is asked for whenever one might
             # exist: a refused frame is otherwise just a missing mask in the
             # mp4 with nothing saying which gate refused it.
+            if policy in POLICY_FLAGS:
+                cmd += [*POLICY_FLAGS[policy],
+                        "--prefilter-log", outdir / "prefilter.json"]
             if "guard" in overlay_for(policy):
                 cmd += ["--verdicts", outdir / "verdicts.json"]
             if args.strict:

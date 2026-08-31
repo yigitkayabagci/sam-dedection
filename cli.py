@@ -232,6 +232,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--fps-chart", default=None,
                    help="Save a per-frame latency chart (ms, with max/min/avg) to this "
                         "PNG path (needs matplotlib).")
+    p.add_argument("--prefilter", type=int, default=0,
+                   help="Pre-encoder: stretch a frame whose used span is below "
+                        "this many grey levels back to the full range, before "
+                        "the encoder sees it. 0 is off. It is affine, so it "
+                        "does not raise the signal-to-clutter ratio -- the "
+                        "claim is that a night frame using sixty levels of 255 "
+                        "lands nowhere near the encoder's training "
+                        "distribution once ImageNet's normalisation is applied, "
+                        "and that this is why the features are weak. A "
+                        "hypothesis, which --prefilter-log is for.")
+    p.add_argument("--prefilter-log", default=None,
+                   help="Where to write what --prefilter did: how many frames "
+                        "it stretched, the span before and after, and a row "
+                        "per frame. A floor below the footage's own span "
+                        "leaves everything untouched, and that run is the "
+                        "baseline under another name -- this is how to tell.")
     p.add_argument("--track-chart", default=None,
                    help="Save a per-frame chart of what the tracker returned "
                         "to this PNG: how much of the frame the mask covers "
@@ -305,6 +321,9 @@ def main(argv: list[str] | None = None) -> int:
         fps_chart=Path(args.fps_chart) if args.fps_chart else None,
         stage_chart=Path(args.stage_chart) if args.stage_chart else None,
         track_chart=Path(args.track_chart) if args.track_chart else None,
+        prefilter=int(args.prefilter),
+        prefilter_log=(Path(args.prefilter_log) if args.prefilter_log
+                       else None),
     )
     out = run(tracker, prompts, cfg)
     print(f"wrote {out}" if out else "done (no video written)")
