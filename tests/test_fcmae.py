@@ -296,7 +296,7 @@ class RunTest(unittest.TestCase):
             (root / "seq" / "ir" / f"{index:06d}.jpg").touch()
         (root / "seq" / "record.json").write_text("{}")
         (root / "seq" / "notes.txt").touch()
-        found = find_frames([root])
+        found, _ = find_frames([root])
         self.assertEqual(len(found), 4)
         self.assertTrue(all(path.suffix == ".jpg" for path in found))
 
@@ -310,7 +310,7 @@ class RunTest(unittest.TestCase):
         root = Path(holder.name)
         (root / "a").mkdir()
         (root / "a" / "x.png").touch()
-        self.assertEqual(len(find_frames([root, root / "a"])), 1)
+        self.assertEqual(len(find_frames([root, root / "a"])[0]), 1)
 
     def test_the_schedule_warms_up_then_decays_to_nothing(self):
         from tools.pretrain_fcmae import learning_rate
@@ -402,6 +402,116 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(restore_grn(model, channels), 1)
         self.assertEqual(restore_grn(model, channels), 0)
         model.load_state_dict(torch.load(path, weights_only=False)["model"])
+
+
+
+class ModalityTest(unittest.TestCase):
+    """A walk with no modality filter is not a thermal pretrain.
+
+    The trees this reads hold both sensors, often inside one sequence, and
+    `load_image` turns a colour frame grey rather than refusing it -- so an
+    unfiltered run would have spent its capacity on grey RGB and printed
+    nothing about it.
+    """
+
+    def tree(self, *relative):
+        import tempfile
+
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        for rel in relative:
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        return root
+
+    LAYOUT = (
+        "VTUAV/train_ST_001/pedestrian_003/ir/0.jpg",
+        "VTUAV/train_ST_001/pedestrian_003/rgb/0.jpg",
+        "AeroVIS/sequences/sd_001/0.jpg",
+        "HIT_UAV/train/0.jpg",
+        "Kust4K/tir/0.png",
+        "Kust4K/rgb/0.png",
+    )
+
+    def test_a_thermal_run_leaves_the_colour_half_behind(self):
+        from tools.pretrain_fcmae import find_frames
+
+        frames, census = find_frames([self.tree(*self.LAYOUT)])
+        names = sorted(str(f).split("/")[-3:][0] + "/" + f.name for f in frames)
+        self.assertEqual(len(frames), 3)
+        self.assertTrue(all("rgb" not in str(f).lower() for f in frames), names)
+        self.assertTrue(all("aerovis" not in str(f).lower() for f in frames), names)
+
+    def test_the_census_counts_both_so_the_run_says_what_it_left(self):
+        from tools.pretrain_fcmae import describe, find_frames
+
+        _, census = find_frames([self.tree(*self.LAYOUT)])
+        self.assertEqual(census["VTUAV"], {"thermal": 1, "rgb": 1})
+        self.assertEqual(census["AeroVIS"], {"thermal": 0, "rgb": 1})
+        text = describe(census, "thermal")
+        self.assertIn("3 frames kept, 3 left out of 6", text)
+
+    def test_any_is_a_choice_and_has_to_be_asked_for(self):
+        from tools.pretrain_fcmae import find_frames, parser
+
+        self.assertEqual(parser().parse_args(["--frames", "x"]).modality,
+                         "thermal")
+        frames, _ = find_frames([self.tree(*self.LAYOUT)], modality="any")
+        self.assertEqual(len(frames), 6)
+
+    def test_the_one_definition_is_the_one_the_builders_embed(self):
+        """RGB_SOURCES lived in two builders and nowhere else, which is how the
+        fallback once read "no rgb in the name" as thermal. A third consumer
+        must not grow a third copy."""
+        from src.training.modality import RGB_SOURCES
+
+        import re
+
+        for builder in ("build_stage_b_notebooks", "build_stage_b_stable_notebook"):
+            with self.subTest(builder=builder):
+                # The stable builder writes the literal across two source
+                # lines, so the tuple it names is compared rather than the
+                # bytes it is spelled in.
+                text = (ROOT / "tools" / f"{builder}.py").read_text()
+                found = re.search(r"RGB_SOURCES = \((.*?)\)", text, re.S)
+                self.assertIsNotNone(found, f"{builder} names no RGB_SOURCES")
+                names = tuple(re.findall(r'"([a-z0-9_]+)"', found.group(1)))
+                self.assertEqual(names, RGB_SOURCES)
+
+    def test_the_name_rule_agrees_with_the_builders_on_every_pool(self):
+        from src.training.modality import modality_of_name
+
+        namespace = {"POOL_MODALITIES": {}, "GUESSED": set()}
+        text = (ROOT / "tools" / "build_stage_b_notebooks.py").read_text()
+        start = text.index('RGB_SOURCES = ("visdrone"')
+        end = text.index('    return "thermal"', start) + len('    return "thermal"')
+        exec(text[start:end], namespace)                     # noqa: S102
+        for name in ("visdrone", "aerovis_train", "vtuav_vis", "vtuav_thermal",
+                     "vtuav_rgb", "dronevehicle_thermal", "dronevehicle_rgb",
+                     "dronevehicle_rgb_only", "kust4k_rgb", "hituav_thermal",
+                     "segfly_thermal", "rgbt234", "lasher", "vtuav_lt_thermal",
+                     "kaggle_uav_thermal"):
+            with self.subTest(pool=name):
+                self.assertEqual(namespace["modality_of"](name),
+                                 modality_of_name(name))
+
+    def test_a_thermal_folder_beats_a_colour_name(self):
+        """`.../vtuav_rgb_pool/ir/...` is a thermal frame in a badly named
+        tree, and dropping it would be the gate firing on a real target."""
+        from src.training.modality import modality_of_path
+
+        self.assertEqual(modality_of_path("/x/vtuav_rgb_pool/ir/1.png"), "thermal")
+
+    def test_a_joined_path_is_read_component_by_component(self):
+        """The pool-name rule finds nothing in a joined path -- it splits on
+        `_` and `content/pool/vtuav_rgb/frames/1.png` comes back thermal."""
+        from src.training.modality import modality_of_name, modality_of_path
+
+        joined = "content/pool/vtuav_rgb/frames/1.png"
+        self.assertEqual(modality_of_name(joined), "thermal")
+        self.assertEqual(modality_of_path("/" + joined), "rgb")
 
 
 

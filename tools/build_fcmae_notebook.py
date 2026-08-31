@@ -58,6 +58,7 @@ MIRROR_DIR  = f"/content/drive/MyDrive/edgetam-stage-a/{RUN}"
 
 FRAME_ROOTS = ["/content/data", "/content/pool"]
 FRAME_LIMIT = 0
+MODALITY    = "thermal"
 
 DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"
 POOL_ROOT   = "/content/pool"
@@ -152,7 +153,7 @@ print(f"free disk {shutil.disk_usage('/content').free / 2**30:.1f} GiB")
 # the only thing that settles whether that is true on this Drive today.
 
 code('''
-from tools.pretrain_fcmae import find_frames
+from tools.pretrain_fcmae import describe, find_frames
 
 for _zip in sorted(Path(DRIVE_POOLS).glob("*.zip")) if Path(DRIVE_POOLS).is_dir() else []:
     if _zip.stat().st_size / 2**20 > 2048:
@@ -164,19 +165,17 @@ for _zip in sorted(Path(DRIVE_POOLS).glob("*.zip")) if Path(DRIVE_POOLS).is_dir(
         shutil.unpack_archive(str(_zip), str(_target))
         print(f"extracted {_zip.name} -> {_target}")
 
-FRAMES = find_frames(FRAME_ROOTS, FRAME_LIMIT)
-print(f"\\n{len(FRAMES)} frames under {FRAME_ROOTS}")
+FRAMES, CENSUS = find_frames(FRAME_ROOTS, FRAME_LIMIT, MODALITY)
+print()
+print(describe(CENSUS, MODALITY))
+print(f"\\n{len(FRAMES)} {MODALITY} frames under {FRAME_ROOTS}")
 assert len(FRAMES) >= BATCH * 10, (
     f"only {len(FRAMES)} frames. Stage A reads no labels, so its whole "
     f"argument is volume: point FRAME_ROOTS at the extracted image trees.")
 
-_by_root = {}
-for _f in FRAMES:
-    _by_root[str(Path(_f).parent.parent)] = _by_root.get(str(Path(_f).parent.parent), 0) + 1
-for _root, _count in sorted(_by_root.items(), key=lambda kv: -kv[1])[:12]:
-    print(f"  {_count:>8}  {_root}")
-print(f"\\nstage B trains on the gated mask pools; this reads every frame, "
-      f"gate or no gate.")
+print("\\nstage B trains on the gated mask pools; this reads every frame of "
+      "the wanted sensor, gate or no gate. The rgb column above is what a "
+      "walk with no modality filter would have pretrained on as grey.")
 ''')
 
 
@@ -285,7 +284,7 @@ _argv += ["--base", BASE_CKPT, "--out", CHECKPOINT, "--mirror", MIRROR_DIR,
           "--lr", str(BASE_LR), "--warmup", str(WARMUP),
           "--weight-decay", str(WEIGHT_DECAY), "--ema-decay", str(EMA_DECAY),
           "--workers", str(WORKERS), "--depth", str(DEPTH),
-          "--seed", str(SEED), "--device", "cuda",
+          "--seed", str(SEED), "--modality", MODALITY, "--device", "cuda",
           "--grn" if ARM == "grn" else "--no-grn"]
 if FRAME_LIMIT:
     _argv += ["--limit", str(FRAME_LIMIT)]
@@ -357,6 +356,7 @@ code('''
 VERDICT = {
     "notebook": NOTEBOOK, "stamp": STAMP, "run": RUN, "arm": ARM,
     "frames": RUN_LOG["frames"], "steps": RUN_LOG["steps"],
+    "modality": RUN_LOG["modality"], "census": RUN_LOG["census"],
     "mse_first": _history[0]["mse"], "mse_last": _history[-1]["mse"],
     "grn": REPORT, "config": RUN_LOG["config"], "peak_lr": RUN_LOG["peak_lr"],
     "batch": RUN_LOG["batch"], "seed": SEED, "minutes": RUN_LOG["seconds"] / 60,

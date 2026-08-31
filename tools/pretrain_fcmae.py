@@ -54,20 +54,60 @@ from src.training.fcmae import (  # noqa: E402
 from src.training.finetune import EMA, apply_freeze  # noqa: E402
 
 
-def find_frames(roots, limit: int = 0) -> list[Path]:
-    """Every image under `roots`, sorted, deduplicated by resolved path.
+def find_frames(roots, limit: int = 0,
+                modality: str = "thermal") -> tuple[list[Path], dict]:
+    """Every image under `roots` of the wanted sensor, and a census of both.
 
     A plain walk rather than the pool reader: this stage has no use for a
     record, a mask or a gate, and coupling it to them would exclude exactly the
     frames it exists to use -- the ones whose teacher mask was refused.
+
+    But a walk with no modality filter is not a thermal pretrain. The trees
+    this reads hold both sensors, often in one sequence
+    (`.../pedestrian_003/ir/` beside `.../rgb/`), and `load_image` converts a
+    colour frame to grey rather than refusing it -- so an unfiltered run would
+    have spent its capacity on grey RGB and printed nothing about it.
+    `modality="any"` is the escape hatch, and it has to be asked for.
+
+    Returns the frames and what was dropped, per source, because "what did
+    this actually train on" is the first question asked of a pretrain.
     """
-    seen: dict[Path, None] = {}
+    from src.training.modality import modality_of_path
+
+    seen: dict[Path, str] = {}
     for root in roots:
         for path in sorted(Path(root).rglob("*")):
             if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file():
-                seen.setdefault(path.resolve(), None)
-    frames = list(seen)
-    return frames[:limit] if limit else frames
+                seen.setdefault(path.resolve(), modality_of_path(path))
+    census: dict[str, dict[str, int]] = {}
+    frames = []
+    for path, found in seen.items():
+        # The source is the first directory under whichever root it came from,
+        # which is what a reader recognises: `VTUAV`, `AeroVIS`, `HIT_UAV`.
+        parts = path.parts
+        source = parts[3] if len(parts) > 3 else parts[-2]
+        row = census.setdefault(source, {"thermal": 0, "rgb": 0})
+        row[found] += 1
+        if modality == "any" or found == modality:
+            frames.append(path)
+    if limit:
+        frames = frames[:limit]
+    return frames, census
+
+
+def describe(census: dict, modality: str) -> str:
+    """The census as lines, so a run says what it read and what it left."""
+    lines = [f"{'source':<28}{'thermal':>10}{'rgb':>10}"]
+    for source, row in sorted(census.items(),
+                              key=lambda kv: -(kv[1]["thermal"] + kv[1]["rgb"])):
+        lines.append(f"{source:<28}{row['thermal']:>10}{row['rgb']:>10}")
+    kept = sum(row.get(modality, 0) for row in census.values()) if modality != "any" \
+        else sum(sum(row.values()) for row in census.values())
+    total = sum(sum(row.values()) for row in census.values())
+    lines.append(f"{'':<28}{'':>10}{'':>10}")
+    lines.append(f"modality {modality!r}: {kept} frames kept, {total - kept} left "
+                 f"out of {total}")
+    return "\n".join(lines)
 
 
 def collate(paths, size: int, pool) -> torch.Tensor:
@@ -108,14 +148,15 @@ def run(args) -> dict:
                          mask_ratio=args.mask_ratio,
                          decoder_dim=args.decoder_dim,
                          norm_floor=args.norm_floor)
-    frames = find_frames(args.frames, args.limit)
+    frames, census = find_frames(args.frames, args.limit, args.modality)
+    print(describe(census, args.modality))
     if len(frames) < args.batch:
         raise SystemExit(
             f"{len(frames)} frame(s) under {[str(r) for r in args.frames]} and "
             f"a batch of {args.batch}. Point --frames at the extracted image "
             f"trees, not at the pool archives.")
-    print(f"[fcmae] {len(frames)} frames | {args.size}px | patch {config.patch} "
-          f"| mask {config.mask_ratio:.0%} | grn {args.grn}")
+    print(f"[fcmae] {len(frames)} frames | {args.modality} | {args.size}px | "
+          f"patch {config.patch} | mask {config.mask_ratio:.0%} | grn {args.grn}")
 
     model = build_model(args.size, args.base, args.device)
     report = {"inserted": 0}
@@ -185,6 +226,7 @@ def run(args) -> dict:
 
     body = {"frames": len(frames), "steps": total, "history": history,
             "grn": report, "seconds": round(time.time() - started, 1),
+            "modality": args.modality, "census": census,
             "config": {"size": args.size, "patch": config.patch,
                        "mask_ratio": config.mask_ratio,
                        "decoder_dim": config.decoder_dim,
@@ -225,6 +267,13 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--frames", action="append", default=[], required=True,
                    help="A directory of images, walked recursively. Repeatable.")
     p.add_argument("--limit", type=int, default=0, help="Cap the frame count.")
+    p.add_argument("--modality", default="thermal",
+                   choices=("thermal", "rgb", "any"),
+                   help="Which sensor to pretrain on. The trees this walks "
+                        "hold both, often in one sequence, and load_image "
+                        "turns a colour frame grey rather than refusing it -- "
+                        "so 'any' is a choice to be made, not a default to "
+                        "fall into.")
     p.add_argument("--base", default="third_party/EdgeTAM/checkpoints/edgetam.pt")
     p.add_argument("--out", default="checkpoints/edgetam_fcmae_512.pt")
     p.add_argument("--mirror", default=None)
