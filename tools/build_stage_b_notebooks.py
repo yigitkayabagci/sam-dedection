@@ -1226,6 +1226,41 @@ for _spec, _spec_root in ([(_s, DATA_ROOT) for _s in EXTRA_DATASETS]
               f"{_thin['instances']['after']} instances before training sees it")
 
 print()
+print(f"{'pool':<28}{'inst':>8}{'p50 px':>8}{'p50':>8}{'p99.9':>8}{'max':>8}"
+      f"{'<min':>6}{'>max':>6}   share of the frame each target covers")
+for _row in PLAN:
+    _areas, _shares = [], []
+    _recs = sorted(Path(_row["dir"]).rglob(RECORD_FILE))
+    for _record in _recs[::max(len(_recs) // 400, 1)][:400]:
+        try:
+            _body = json.loads(_record.read_text())
+            _frame = float(int(_body["shape"][0]) * int(_body["shape"][1]))
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            continue
+        for _inst in _body.get("instances", []):
+            _px = _inst.get("area")
+            if _px and _frame:
+                _areas.append(float(_px))
+                _shares.append(float(_px) / _frame)
+    if not _shares:
+        continue
+    _a, _s = np.array(_areas), np.array(_shares)
+    print(f"{_row['pool']:<28}{len(_s):>8}{np.percentile(_a, 50):>8.0f}"
+          f"{np.percentile(_s, 50) * 100:>7.3f}%{np.percentile(_s, 99.9) * 100:>7.2f}%"
+          f"{_s.max() * 100:>7.2f}%{float((_a < MIN_AREA).mean()) * 100:>5.1f}%"
+          f"{float((_s > MAX_AREA).mean()) * 100:>5.2f}%")
+print("   MIN_AREA and MAX_AREA read against the pool's own annotations, so "
+      "the two gates can be set from what the data holds rather than from a "
+      "feel for how big a target looks. Measured on AeroVIS: the median "
+      "instance is 967 px (~31x31) and covers 0.065% of its frame; the "
+      "largest car ever annotated reaches 6.0%, the largest truck 13.6%, the "
+      "largest bus 4.7%. Everything above 25% is UAVDT's coarse `vehicle` "
+      "class -- 603 of 1 411 468 instances, 0.04% -- which is the class this "
+      "gate exists to stop teaching the decoder that the whole frame is an "
+      "answer. A `>max` column in the percents rather than the hundredths is "
+      "the signal that MAX_AREA is cutting real targets on this pool.")
+
+print()
 try:
     import torch
 
