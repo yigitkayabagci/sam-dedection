@@ -676,6 +676,59 @@ class ExtractFramesTest(unittest.TestCase):
         report = extract_frames(self.records(), [first, second], self.root / "out")
         self.assertEqual(report["by_archive"], {"a.zip": 1, "b.zip": 1})
 
+    def test_a_frame_named_the_archives_own_way_is_still_extracted(self):
+        """AeroVIS is the case. Its records name a frame `vd_001/0000001.jpg`
+        -- relative to the directory inside the archive -- while the archive
+        stores it at `AeroVIS/sequences/vd_001/0000001.jpg`. Matching only the
+        recorded absolute path ties the extraction to whatever directory the
+        harvest happened to run in, and a pool harvested elsewhere reads as
+        every frame missing."""
+        import zipfile
+
+        archive = self.root / "aerovis.zip"
+        members = [f"AeroVIS/sequences/{sequence}/{name}"
+                   for sequence in ("vd_001", "ud_001")
+                   for name in ("0000001.jpg", "0000002.jpg")]
+        with zipfile.ZipFile(archive, "w") as handle:
+            for member in members:
+                handle.writestr(member, b"\xff\xd8\xff\xdb" + b"0" * 64)
+
+        pool = self.root / "aerovis_train"
+        for member in members:
+            relative = member.split("AeroVIS/sequences/")[1]
+            target = pool.joinpath(*Path(relative[:-4]).parts)
+            target.mkdir(parents=True, exist_ok=True)
+            (target / RECORD_FILE).write_text(json.dumps({
+                "key": relative[:-4], "dataset": "aerovis_train",
+                # A harvest directory sharing nothing with the archive's own
+                # layout: only `image_rel` can answer this.
+                "image": f"/kaggle/input/aerovis/frames/{relative}",
+                "image_rel": relative, "shape": [64, 64],
+                "teacher": "aerovis:ytvis", "instances": []}))
+            save_masks(target / MASK_STORE, (64, 64), {})
+
+        records = sorted(pool.rglob(RECORD_FILE))
+        report = extract_frames(records, [archive], self.root / "frames")
+        self.assertEqual((report["asked"], report["taken"], report["missing"]),
+                         (4, 4, 0))
+        self.assertTrue(
+            (self.root / "frames" / "AeroVIS" / "sequences"
+             / "vd_001" / "0000001.jpg").is_file())
+
+    def test_two_names_for_one_frame_are_counted_once(self):
+        """`asked` and `missing` are frames, not the strings naming them."""
+        pool = self.root / "twice"
+        target = pool / "a"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / RECORD_FILE).write_text(json.dumps({
+            "key": "a", "dataset": "twice", "image": "/somewhere/else/a.jpg",
+            "image_rel": "deep/a.jpg", "shape": [8, 8], "teacher": "x",
+            "instances": []}))
+        save_masks(target / MASK_STORE, (8, 8), {})
+        report = extract_frames(sorted(pool.rglob(RECORD_FILE)), [],
+                                self.root / "nothing")
+        self.assertEqual((report["asked"], report["missing"]), (1, 1))
+
     def test_wanted_frames_keys_by_basename(self):
         wanted = wanted_frames(self.records())
         self.assertEqual(sorted(wanted), ["000000.jpg", "000010.jpg"])

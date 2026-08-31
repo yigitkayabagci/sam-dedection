@@ -806,11 +806,36 @@ def wanted_frames(records: SequenceABC[Path]) -> dict[str, set[str]]:
     """
     wanted: dict[str, set[str]] = {}
     for record_path in records:
-        recorded = json.loads(record_path.read_text()).get("image")
-        if recorded:
+        body = json.loads(record_path.read_text())
+        for key in ("image", "image_rel"):
+            recorded = body.get(key)
+            if not recorded:
+                continue
             posix = Path(recorded).as_posix()
             wanted.setdefault(Path(posix).name, set()).add(posix)
     return wanted
+
+
+def _wanted_groups(records: SequenceABC[Path]) -> dict[str, list[tuple[str, ...]]]:
+    """`{basename: [(every name one record gives its frame), ...]}`.
+
+    A record can name its frame twice -- where it was when the pool was
+    harvested, and where it sits inside the archive. Those are one frame, so
+    they travel together: matching either retires both, and the counts stay in
+    frames rather than in aliases.
+    """
+    groups: dict[str, list[tuple[str, ...]]] = {}
+    for record_path in records:
+        try:
+            body = json.loads(Path(record_path).read_text())
+        except (OSError, ValueError):
+            continue
+        names = tuple(dict.fromkeys(
+            Path(body[key]).as_posix() for key in ("image", "image_rel")
+            if body.get(key)))
+        if names:
+            groups.setdefault(Path(names[0]).name, []).append(names)
+    return groups
 
 
 def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
@@ -823,17 +848,26 @@ def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
     bill nobody has to pay: the pool *is* the manifest, and a zip's central
     directory can be read without inflating a byte.
 
-    A member is taken when a recorded path ends with it -- exact, and it cannot
-    pick the wrong modality the way a basename match could, because the
-    recorded path carries `.../ir/000000.jpg` and so does the member. Members
+    A member is taken when a recorded path ends with it, or when the member
+    ends with the record's archive-relative `image_rel` -- exact either way,
+    and neither can pick the wrong modality the way a basename match could,
+    because the recorded path carries `.../ir/000000.jpg` and so does the
+    member. The second direction is what makes this work on a pool harvested
+    somewhere else: AeroVIS names frames `vd_001/0000001.jpg` inside an archive
+    that stores them at `AeroVIS/sequences/vd_001/0000001.jpg`, and matching
+    only the first way ties the extraction to whatever directory the harvest
+    happened to run in. Members
     already on disk with a non-zero size are skipped, which makes a second run
     the resume path.
     """
     target = Path(target)
-    wanted = wanted_frames(records)
-    report = {"asked": sum(len(v) for v in wanted.values()), "taken": 0,
+    # Grouped by record rather than flattened, because one frame can be named
+    # two ways and both have to be retired together when it is found -- and
+    # counted once, or `asked` and `missing` report aliases instead of frames.
+    groups = _wanted_groups(records)
+    report = {"asked": sum(len(v) for v in groups.values()), "taken": 0,
               "already": 0, "unreadable": [], "by_archive": {}, "missing": 0}
-    still = {name: set(paths) for name, paths in wanted.items()}
+    still = {name: list(rows) for name, rows in groups.items()}
     stream = archives if progress is None else progress(
         archives, total=len(archives), desc="archives")
     for archive in stream:
@@ -846,11 +880,21 @@ def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
                 candidates = still.get(base)
                 if not candidates:
                     continue
-                hit = next((c for c in candidates
-                            if c.endswith("/" + member) or c == member), None)
+                # Two directions, because a record can name the frame two
+                # ways. `image` is where it was when the pool was harvested, so
+                # the *recorded* path ends with the member. `image_rel` is
+                # where it sits inside the archive, so the *member* ends with
+                # it -- and that one does not care where the harvest ran, which
+                # is the whole reason `aerovis.write_pool` stores it. An
+                # absolute path can never be a member's suffix (members are
+                # relative), so testing both ways cannot cross them.
+                hit = next((row for row in candidates
+                             if any(c.endswith("/" + member) or c == member
+                                    or member.endswith("/" + c) for c in row)),
+                            None)
                 if hit is None:
                     continue
-                candidates.discard(hit)
+                candidates.remove(hit)
                 landing = target / member
                 if landing.is_file() and landing.stat().st_size:
                     report["already"] += 1
