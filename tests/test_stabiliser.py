@@ -27,6 +27,7 @@ except ImportError:                                      # pragma: no cover
 
 from src.trackers.stabiliser import (  # noqa: E402
     bandpass,
+    motion_residual,
     LOST,
     REACQUIRED,
     SUSPECT,
@@ -595,6 +596,148 @@ class ReacquisitionTest(unittest.TestCase):
         self.scene()
         frame, _ = self.frame_with((300, 240))
         self.assertIs(guard._view(frame, (26, 18)), frame)
+
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is needed for the residual")
+class CanopyTest(unittest.TestCase):
+    """The case appearance cannot answer, and the cue that can.
+
+    A target crossing a forest: the same temperature as the canopy, clutter of
+    tree crowns at its own size, and a frame that spans sixty grey levels in
+    total. Every transform that works by separating scales is useless here --
+    a canopy has no scale a target does not -- and that is measured below
+    rather than argued.
+    """
+
+    W, H = 26, 18
+    PAN = (6.0, 2.5)
+    STEP = (13, 7)
+
+    def canopy(self, seed, height=320, width=384, span=38.0, level=96.0):
+        rng = np.random.default_rng(seed)
+        field = np.zeros((height, width), np.float32)
+        for scale, weight in ((14.0, 1.0), (7.0, 0.6), (3.0, 0.35), (28.0, 0.5)):
+            field += weight * cv2.GaussianBlur(
+                rng.normal(0, 1, (height, width)).astype(np.float32), (0, 0), scale)
+        field -= field.mean()
+        field *= span / max(field.std() * 6.0, 1e-6)
+        return field + level
+
+    def warp(self, image, dx, dy):
+        matrix = np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], np.float32)
+        return cv2.warpAffine(np.asarray(image, np.float32), matrix,
+                              (image.shape[1], image.shape[0]),
+                              flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+    def target_on(self, field, cx, cy, lift, seed):
+        out = field.copy()
+        x0, y0 = cx - self.W // 2, cy - self.H // 2
+        x1, y1 = cx + self.W // 2, cy + self.H // 2
+        local = float(field[max(y0 - 12, 0):y1 + 12, max(x0 - 12, 0):x1 + 12].mean())
+        stamp = out.copy()
+        stamp[y0:y1, x0:x1] = local + lift
+        alpha = np.zeros_like(out)
+        alpha[y0:y1, x0:x1] = 1.0
+        alpha = cv2.GaussianBlur(alpha, (0, 0), 0.8)
+        out = out * (1 - alpha) + stamp * alpha
+        out = out + np.random.default_rng(seed).normal(0, 1.6, out.shape)
+        return (np.clip(out, 0, 255).astype(np.uint8),
+                np.array([x0, y0, x1, y1], float))
+
+    def flight(self, seed, lift, steps=3):
+        """The camera pans, the target crosses the canopy on its own."""
+        field = self.canopy(seed)
+        frames, boxes = [], []
+        for k in range(steps):
+            moved = self.warp(field, -self.PAN[0] * k, -self.PAN[1] * k)
+            frame, box = self.target_on(
+                moved,
+                180 - int(self.PAN[0] * k) + self.STEP[0] * k,
+                150 - int(self.PAN[1] * k) + self.STEP[1] * k,
+                lift, seed + 50 * k)
+            frames.append(frame)
+            boxes.append(box)
+        return frames, boxes
+
+    def test_the_frame_is_as_hard_as_the_case_it_stands_for(self):
+        """Guard against the bench quietly becoming easy: a target 2 levels off
+        a canopy has to measure below 1, which is where HIT-UAV's median sits
+        and where `caution_below` puts the tracker in its known-bad regime."""
+        faint, faint_boxes = self.flight(0, 2.0)
+        clear, clear_boxes = self.flight(0, 16.0)
+        self.assertLess(local_contrast(faint[0], faint_boxes[0]), 1.0)
+        self.assertGreater(local_contrast(clear[0], clear_boxes[0]), 1.0)
+
+    def test_scale_separation_buys_nothing_on_a_canopy(self):
+        """The band-pass that fixes a target on open ground does not move this
+        one, because there is no scale here that is the ground's and not the
+        target's. Kept so the earlier result is not over-read."""
+        gains = []
+        for seed in range(6):
+            frames, boxes = self.flight(seed, 2.0)
+            raw = local_contrast(frames[0], boxes[0])
+            passed = bandpass(frames[0], (self.W, self.H))
+            gains.append(local_contrast(passed, boxes[0]) / max(raw, 1e-6))
+        self.assertLess(float(np.mean(gains)), 1.15)
+
+    def test_a_single_difference_cannot_say_which_end_the_target_is_at(self):
+        """It marks the place the target left as brightly as the place it
+        arrived. That ambiguity is the whole reason for the third frame."""
+        frames, boxes = self.flight(0, 2.0)
+        shifts = [(-self.PAN[0], -self.PAN[1])] * 2
+        one = np.abs(np.asarray(frames[2], np.float32)
+                     - self.warp(frames[1], *shifts[-1]))
+        left = boxes[1] - np.array([self.PAN[0], self.PAN[1]] * 2)
+        here, there = boxes[2], left
+        self.assertGreater(
+            float(one[int(there[1]):int(there[3]), int(there[0]):int(there[2])].mean()),
+            float(one.mean()) * 1.2)
+        self.assertGreater(
+            float(one[int(here[1]):int(here[3]), int(here[0]):int(here[2])].mean()),
+            float(one.mean()) * 1.2)
+
+    def test_three_frames_leave_only_where_the_target_is_now(self):
+        frames, boxes = self.flight(0, 2.0)
+        shifts = [(-self.PAN[0], -self.PAN[1])] * 2
+        residual = motion_residual(frames, shifts)
+        self.assertIsNotNone(residual)
+        here = boxes[2]
+        at_target = float(residual[int(here[1]):int(here[3]),
+                                   int(here[0]):int(here[2])].mean())
+        self.assertGreater(at_target, float(residual.mean()) * 1.5)
+
+    def test_it_says_nothing_until_it_has_three_frames(self):
+        frames, _ = self.flight(0, 4.0)
+        self.assertIsNone(motion_residual(frames[:2], [(1.0, 1.0)]))
+        self.assertIsNone(motion_residual(frames, [(1.0, 1.0)]))
+
+    def test_the_guard_re_acquires_a_target_it_cannot_see(self):
+        """End to end through `Stabiliser`, on frames where the appearance
+        matcher is measured at 1/16: the tracker returns nothing, the guard
+        goes LOST, and the motion cue puts the box back on the target."""
+        recovered = 0
+        for seed in range(8):
+            frames, boxes = self.flight(seed, 2.0, steps=6)
+            guard = Stabiliser(GuardConfig(suspect_frames=1, give_up_after=90))
+            guard.update(frames[0], boxes[0])
+            guard.update(frames[1], boxes[1])
+            decision = None
+            for frame in frames[2:]:
+                decision = guard.update(frame, None)   # the tracker lost it
+            if decision.state == REACQUIRED and decision.box is not None:
+                centre = centre_of(decision.box)
+                truth = centre_of(boxes[-1])
+                if abs(centre[0] - truth[0]) <= 14 and abs(centre[1] - truth[1]) <= 14:
+                    recovered += 1
+        self.assertGreaterEqual(recovered, 5)
+
+    def test_turning_the_motion_cue_off_leaves_the_guard_as_it_was(self):
+        frames, boxes = self.flight(0, 2.0, steps=6)
+        guard = Stabiliser(GuardConfig(reacquire_motion=False))
+        guard.update(frames[0], boxes[0])
+        guard.update(frames[1], boxes[1])
+        self.assertEqual(guard._history, [])
 
 
 class ShippedConfigTest(unittest.TestCase):

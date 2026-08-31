@@ -137,6 +137,13 @@ class GuardConfig:
     # pixels as they are.
     match_bandpass: float = 0.55
 
+    # The motion cue, for the case appearance cannot answer: a target crossing
+    # a canopy it matches in brightness. `motion_residual` has the measurement.
+    # The strength a residual peak must reach over its own search region before
+    # it is believed -- a ratio, so it does not depend on the sensor's scale.
+    reacquire_motion: bool = True
+    motion_threshold: float = 0.6
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -432,6 +439,69 @@ def bandpass(frame: np.ndarray, size, low: float = 0.55,
             - cv2.GaussianBlur(field, (0, 0), outer))
 
 
+def motion_residual(frames, shifts, blur: float = 1.5) -> np.ndarray | None:
+    """Where something moved that the camera's own motion does not explain.
+
+    **The cue for the case appearance cannot answer.** A target crossing a
+    forest canopy is the same temperature as the canopy, its clutter is tree
+    crowns at the target's own size, and the frame as a whole spans sixty grey
+    levels. Nothing separates it by brightness: on a bench built to that
+    description, CLAHE moved the signal-to-clutter ratio 1.06-1.14x, a
+    band-pass 0.98-1.05x and a top-hat made it worse -- because a band-pass
+    separates by *scale*, and a canopy has no scale a target does not.
+
+    What still differs is that the canopy does not move and the target does.
+    Compensating the camera's own displacement and differencing leaves the
+    target and cancels the canopy, and that costs almost nothing here: the
+    displacement is already measured every frame for the Kalman filter.
+
+    **Three frames, not two.** A single difference marks the place the target
+    left as well as the place it arrived, and the two are equally bright, so
+    the peak is a coin flip -- 8/16 on the bench, at every contrast. Subtracting
+    the previous difference, brought into this frame's coordinates, leaves only
+    what is new. Re-acquisition on a canopy, target 2 grey levels off it:
+
+        raw NCC 1/16   CLAHE NCC 0/16   band-passed NCC 4/16
+        two-frame difference 8/16       three-frame difference 15/16
+
+    At 16 levels, where the target does stand out, appearance is 16/16 and this
+    is 16/16 -- so it is a cue for the low-contrast end, not a replacement.
+
+    `frames` is oldest-first and `shifts[i]` is how far the background moved
+    from `frames[i]` to `frames[i+1]`, in pixels. `None` when there are not
+    three frames yet, or when the camera's motion was never measured -- a shift
+    of zero on a moving camera would align nothing and difference everything.
+    """
+    import cv2
+
+    # A shift of zero reads two ways -- the camera was still, or the estimate
+    # failed -- and they look identical from here. Still is the safe reading:
+    # the difference is then already aligned. The unsafe one would be to skip
+    # the warp on a camera that did move, which differences the whole canopy.
+    if len(frames) < 3 or len(shifts) < 2:
+        return None
+
+    def warp(image, dx, dy):
+        matrix = np.array([[1.0, 0.0, float(dx)], [0.0, 1.0, float(dy)]],
+                          dtype=np.float32)
+        return cv2.warpAffine(np.asarray(image, dtype=np.float32), matrix,
+                              (image.shape[1], image.shape[0]),
+                              flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_REFLECT)
+
+    older, previous, current = (np.asarray(f, dtype=np.float32)
+                                for f in frames[-3:])
+    (dx1, dy1), (dx2, dy2) = shifts[-2], shifts[-1]
+    now = np.abs(current - warp(previous, dx2, dy2))
+    before = np.abs(previous - warp(older, dx1, dy1))
+    # `before` is in the previous frame's coordinates; bring it into this one's
+    # before subtracting, or the place the target left is cancelled at the
+    # wrong pixels and both residues survive.
+    aligned = warp(before, dx2, dy2)
+    residual = np.maximum(now - aligned, 0.0)
+    return cv2.GaussianBlur(residual, (0, 0), float(blur))
+
+
 def match_template(frame: np.ndarray, template: np.ndarray,
                    region) -> tuple[np.ndarray | None, float]:
     """Best normalised cross-correlation of `template` inside `region`.
@@ -569,6 +639,10 @@ class Stabiliser:
     box: np.ndarray | None = None
     velocity: np.ndarray = field(default_factory=lambda: np.zeros(2))
     template: np.ndarray | None = None
+    # The last three frames and the two background shifts between them, kept
+    # only when `reacquire_motion` is on.
+    _history: list = field(default_factory=list)
+    _shifts: list = field(default_factory=list)
     missing: int = 0
     healthy: int = 0
     frames: int = 0
@@ -593,6 +667,8 @@ class Stabiliser:
         self.box = None
         self.velocity = np.zeros(2)
         self.template = None
+        self._history.clear()
+        self._shifts.clear()
         self.missing = self.healthy = self.frames = 0
         self.driven = False
         self._previous = None
@@ -610,6 +686,12 @@ class Stabiliser:
         if self._previous is not None:
             shift = estimate_shift(self._previous, frame, self.box)
         self._previous = frame
+        if self.config.reacquire_motion:
+            # Three frames and the two shifts between them, which is what
+            # `motion_residual` needs and the only state the motion cue adds.
+            self._history.append(frame)
+            self._shifts.append(shift)
+            del self._history[:-3], self._shifts[:-2]
 
         if self.box is None:
             # Nothing to compare against yet: the first box a tracker gives is
@@ -737,6 +819,38 @@ class Stabiliser:
         return Decision(box=found, state=REACQUIRED, reason=f"{reason} -> matched",
                         shift=tuple(shift), match=score)
 
+    def _by_motion(self, predicted: np.ndarray, region) -> tuple[np.ndarray | None, float]:
+        """The strongest unexplained movement inside `region`, as a box.
+
+        Scored as the residual's mean over a target-sized window divided by the
+        region's own mean, so the number is comparable across frames and can be
+        held to `match_threshold` the way a correlation is.
+        """
+        import cv2
+
+        residual = motion_residual(self._history, self._shifts)
+        if residual is None:
+            return None, float("nan")
+        width, height = (max(int(round(v)), 2) for v in size_of(predicted))
+        x0, y0, x1, y1 = (int(round(float(v))) for v in region)
+        x0, y0 = max(x0, 0), max(y0, 0)
+        x1 = min(x1, residual.shape[1])
+        y1 = min(y1, residual.shape[0])
+        if x1 - x0 <= width or y1 - y0 <= height:
+            return None, float("nan")
+        window = cv2.filter2D(residual, -1,
+                              np.ones((height, width), np.float32) / (width * height))
+        patch = window[y0:y1, x0:x1]
+        floor = float(patch.mean())
+        if not np.isfinite(floor) or floor <= 1e-6:
+            return None, float("nan")
+        row, column = np.unravel_index(int(np.argmax(patch)), patch.shape)
+        peak = float(patch[row, column])
+        left = x0 + column - width // 2
+        top = y0 + row - height // 2
+        return (np.array([left, top, left + width, top + height], dtype=np.float64),
+                peak / floor - 1.0)
+
     def _view(self, frame: np.ndarray, size) -> np.ndarray:
         """The frame the matcher sees: band-passed, or raw when turned off."""
         if not self.config.match_bandpass:
@@ -758,9 +872,27 @@ class Stabiliser:
         shape = (self.template.shape[1], self.template.shape[0])
         found, score = match_template(self._view(frame, shape), self.template,
                                       region)
-        if found is None or not np.isfinite(score) or score < self.config.match_threshold:
+        by_look = (found, score) if (found is not None and np.isfinite(score)
+                                     and score >= self.config.match_threshold) else None
+
+        # Which cue to ask first is decided by the frame, not by preference.
+        # Below `caution_below` the target is inside the clutter -- the regime
+        # where appearance was measured at 1/16 and movement at 15/16 -- and
+        # above it appearance is the better answer and movement merely ties.
+        # Whichever is asked first, the other is still the fallback.
+        by_move = None
+        if self.config.reacquire_motion:
+            moved, strength = self._by_motion(predicted, region)
+            if (moved is not None and np.isfinite(strength)
+                    and strength >= self.config.motion_threshold):
+                by_move = (moved, strength)
+
+        faint = local_contrast(frame, predicted) < self.config.caution_below
+        first, second = (by_move, by_look) if faint else (by_look, by_move)
+        chosen = first or second
+        if chosen is None:
             return None, score
-        return found, score
+        return chosen
 
     def _adopt(self, frame: np.ndarray, box, shift) -> Decision:
         """The first box of a track, taken as given."""
@@ -801,5 +933,5 @@ __all__ = ["Decision", "FrameMotion", "GuardConfig", "LOST", "REACQUIRED",
            "STATES", "SUSPECT",
            "Stabiliser", "TRACKING", "area_of", "aspect_of", "box_of",
            "bandpass", "centre_of", "estimate_shift", "local_contrast",
-           "match_template",
+           "match_template", "motion_residual",
            "size_of"]

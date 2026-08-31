@@ -106,3 +106,17 @@ guard:
   # stays mostly ground. The scale separation is the mechanism, not the
   # contrast stretch. 0 turns it off.
   match_bandpass: 0.55
+  # A target crossing a canopy is the same brightness as the canopy, and its
+  # clutter is tree crowns at its own size -- so nothing separates it by
+  # brightness or by scale. What still differs is that the canopy does not move
+  # and it does. Compensating the camera's own displacement and differencing
+  # three frames finds it: on a canopy bench with the target 2 grey levels off
+  # the trees, raw correlation re-acquired 1/16, CLAHE 0/16, band-passed 4/16,
+  # a two-frame difference 8/16 (it cannot tell the place the target left from
+  # the place it arrived) and three frames 15/16. Where the target does stand
+  # out, appearance is 16/16 and this ties, so it is asked first only below
+  # `caution_below` -- the frames appearance is known to fail on.
+  reacquire_motion: true
+  # How far a residual peak must stand over its own search region, as a ratio,
+  # before it is believed.
+  motion_threshold: 0.6

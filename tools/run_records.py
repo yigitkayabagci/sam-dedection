@@ -102,6 +102,7 @@ guard that never fired, not a guard that helped.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import re
 import sys
@@ -401,7 +402,8 @@ def digest(path: Path) -> dict | None:
             "sha256": hasher.hexdigest()}
 
 
-def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
+def provenance(mode: str, config: str, crop: int | None, args, cmd,
+               policy: str | None = None) -> dict:
     """Everything needed to answer "which weights produced this folder".
 
     Written beside the video and the charts, because that question is asked
@@ -421,8 +423,8 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
         # The policy by name and by value. The name alone would not survive an
         # edit to configs/policies/, and this file is read months later to
         # explain a number.
-        "policy": args.policy,
-        "policy_blocks": overlay_for(args.policy),
+        "policy": policy or args.policy,
+        "policy_blocks": overlay_for(policy or args.policy),
         "mode": mode,
         "image_size": int(body.get("image_size", 1024)),
         "center_crop": crop,
@@ -433,7 +435,7 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
     }
 
 
-def folder(mode: str, args) -> str:
+def folder(mode: str, args, policy: str | None = None) -> str:
     """The output folder for one run: `<mode>[_<weights>][_<policy>][_skipN]`.
 
     A plain `stock` run at every frame keeps the bare `<mode>` name, so results
@@ -449,8 +451,9 @@ def folder(mode: str, args) -> str:
         parts.append(args.backend)
     if args.weights != "stock":
         parts.append(args.weights)
-    if args.policy != "plain":
-        parts.append(args.policy)
+    chosen = policy or args.policy
+    if chosen != "plain":
+        parts.append(chosen)
     if args.frame_skip > 1:
         parts.append(f"skip{args.frame_skip}")
     return "_".join(parts)
@@ -499,8 +502,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="frame_output", help="Where results go.")
     p.add_argument("--modes", default=",".join(MODES),
                    help=f"Comma-separated subset of {', '.join(MODES)}.")
-    p.add_argument("--policy", default="plain", choices=tuple(POLICIES),
-                   help="Inference-time policy layered onto the backend config: "
+    p.add_argument("--policy", default="plain",
+                   help="Inference-time policy layered onto the backend config. "
+                        "Comma-separate to run several in one command -- "
+                        "`--policy plain,samurai,guard` is the whole ladder off "
+                        "one prompt, which is the point: picking the target "
+                        "separately per command would give each rung a "
+                        "different box and make them incomparable. "
                         "samurai (motion-aware memory), ego (that filter given "
                         "the camera's own displacement), guard (ego plus the "
                         "classical plausibility and re-acquisition layer). None "
@@ -594,6 +602,13 @@ def main(argv: list[str] | None = None) -> int:
     if not records:
         raise SystemExit(f"No frames matching {args.pattern!r} in {root}/, and no "
                          "record folders inside it either.")
+    policies = [one.strip() for one in args.policy.split(",") if one.strip()]
+    for one in policies:
+        if one not in POLICIES:
+            raise SystemExit(
+                f"Unknown policy {one!r}; pick from {', '.join(POLICIES)}")
+    if not policies:
+        raise SystemExit("--policy took nothing; pass at least one.")
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     for m in modes:
         if m not in MODES:
@@ -628,8 +643,9 @@ def main(argv: list[str] | None = None) -> int:
               "pair is its own export):\n" + "\n".join(builds)
         )
 
-    half = {m: d for m, d in ((m, pointers_missing(c, args.policy))
-                             for m, c in configs.items()) if d}
+    half = {m: d for one in policies
+            for m, d in ((m, pointers_missing(c, one)) for m, c in configs.items())
+            if d}
     if half:
         raise SystemExit(
             f"--policy {args.policy} carries `samurai:`, and these engines were "
@@ -668,19 +684,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f">> {record.name}: {prompts}")
             continue
 
-        for mode in modes:
+        for mode, policy in itertools.product(modes, policies):
             config, crop = configs[mode], MODES[mode][1]
             # A skipped run, and a run on other weights, are different
             # measurements of the same mode rather than replacements for it, so
             # each gets its own folder next to the baseline. `stock` with no
             # skip keeps the bare `<mode>/` name earlier runs already wrote.
-            outdir = out_root / record.name / folder(mode, args)
+            outdir = out_root / record.name / folder(mode, args, policy)
             outdir.mkdir(parents=True, exist_ok=True)
 
             # After mkdir: a policy run writes the merged config into the
             # folder it is about to fill, so what ran and what it produced are
             # never in two places.
-            run_config = staged_config(config, args.policy, outdir)
+            run_config = staged_config(config, policy, outdir)
 
             runtime = "edgetam" if args.backend == "torch" else "edgetam_trt"
             cmd = [PY, "cli.py", "--tracker", runtime, "--config", run_config,
@@ -701,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
             # writing an empty file, so this is asked for whenever one might
             # exist: a refused frame is otherwise just a missing mask in the
             # mp4 with nothing saying which gate refused it.
-            if "guard" in overlay_for(args.policy):
+            if "guard" in overlay_for(policy):
                 cmd += ["--verdicts", outdir / "verdicts.json"]
             if args.strict:
                 cmd += ["--strict"]
@@ -711,15 +727,18 @@ def main(argv: list[str] | None = None) -> int:
                 cmd += ["--frame-skip", args.frame_skip]
 
             (outdir / "provenance.json").write_text(
-                json.dumps(provenance(mode, config, crop, args, cmd), indent=2) + "\n")
-            ok, text = run_step(f"{record.name} — {mode}", cmd, outdir / "run.txt")
+                json.dumps(provenance(mode, config, crop, args, cmd, policy),
+                           indent=2) + "\n")
+            label = mode if policy == "plain" else f"{mode} + {policy}"
+            ok, text = run_step(f"{record.name} — {label}", cmd,
+                                outdir / "run.txt")
             if not ok:
-                failed.append(f"{record.name}/{mode}")
+                failed.append(f"{record.name}/{label}")
             stages = re.search(
                 r"median per frame: pre ([\d.]+) \+ inference ([\d.]+) \+ post ([\d.]+) ms",
                 text,
             )
-            rows[record.name][mode] = {
+            rows[record.name][(mode, policy)] = {
                 "fps": find(r"avg ([\d.]+) FPS over", text) or "-",
                 # Under a skip, FPS counts inferences; this is the frame rate
                 # they cover, which is what has to clear the source's.
@@ -745,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     skip = args.frame_skip
     title = (f"# Recorded clips — {len(records)} record(s), {len(modes)} mode(s), "
+             f"{len(policies)} polic{'y' if len(policies) == 1 else 'ies'}, "
              f"weights `{args.weights}`")
     trained = TRAINED_AT.get(args.weights)
     off_size = sorted({MODES[m][0] for m in modes if MODES[m][0] != trained})
@@ -755,7 +775,8 @@ def main(argv: list[str] | None = None) -> int:
         + (f"`{WEIGHTS[args.weights][MODES[modes[0]][0]]}` and its siblings, "
            f"trained at {trained}." if trained else "trained size unrecorded."),
         "",
-        *((POLICY_NOTE[args.policy], "") if args.policy != "plain" else ()),
+        *(line for one in policies if one != "plain"
+          for line in (POLICY_NOTE[one], "")),
         "| mode | model | input |",
         "|---|---|---|",
         *(described[m] for m in modes),
@@ -783,7 +804,8 @@ def main(argv: list[str] | None = None) -> int:
             "the tail off `latency.png` rather than the median.",
             "",
         ]
-    columns = ["mode", "model input from", "FPS"]
+    columns = ["mode" if len(policies) == 1 else "mode + policy",
+               "model input from", "FPS"]
     if skip > 1:
         columns.append("source FPS")
     columns += ["median ms: pre / inference / post", "overlay + mp4 (excluded)"]
@@ -794,8 +816,8 @@ def main(argv: list[str] | None = None) -> int:
             "| " + " | ".join(columns) + " |",
             "|" + "---|" * len(columns),
         ]
-        for mode in modes:
-            r = per_mode.get(mode)
+        for mode, policy in itertools.product(modes, policies):
+            r = per_mode.get((mode, policy))
             if r is None:
                 cells = ["-", "did not run"] + ["-"] * (len(columns) - 3)
             else:
@@ -803,10 +825,12 @@ def main(argv: list[str] | None = None) -> int:
                 if skip > 1:
                     cells.append(r["source_fps"])
                 cells += [r["stages"], f"{r['demo']} ms"]
-            lines.append(f"| `{mode}` | " + " | ".join(cells) + " |")
-        suffix = folder("", args).lstrip("_")
-        lines += ["", f"Videos and charts: `{name}/<mode>"
-                      f"{'_' + suffix if suffix else ''}/`", ""]
+            shown = mode if len(policies) == 1 else f"{mode} + {policy}"
+            lines.append(f"| `{shown}` | " + " | ".join(cells) + " |")
+        lines += ["", "Videos and charts: "
+                  + ", ".join(f"`{name}/{folder(mode, args, policy)}/`"
+                              for mode, policy in itertools.product(modes, policies)),
+                  ""]
 
     if failed:
         lines += [f"> **Did not complete: {', '.join(failed)}** — see their `run.txt`.", ""]
