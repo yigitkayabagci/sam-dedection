@@ -26,7 +26,8 @@ try:
 except ImportError:                                      # pragma: no cover
     cv2 = None
 
-from tools.inspect_vtuav_vis import contrast, layout, main, pairs  # noqa: E402
+from tools.inspect_vtuav_vis import (contrast, layout, main,  # noqa: E402
+                                     overlap, pairs)
 
 
 @unittest.skipIf(cv2 is None, "OpenCV is not installed")
@@ -133,6 +134,61 @@ class ArchiveTest(unittest.TestCase):
         holds = tree["sequences"]["train_003_001"]
         self.assertEqual(holds["ir"], 6)
         self.assertEqual(holds["mask/ir"], 6)
+
+
+@unittest.skipIf(cv2 is None, "OpenCV is not installed")
+class LeakTest(ArchiveTest):
+    """A sequence graded here and trained on there is not a held-out grade.
+
+    The check runs against a harvested pool's `manifest.json` rather than its
+    frames, because the manifest records the sequence names the harvest walked
+    -- so the answer does not depend on which frames survived a gate.
+    """
+
+    def manifest(self, folder: Path, sequences, name="manifest.json"):
+        import json
+
+        path = folder / name
+        path.write_text(json.dumps({"pool": "vtuav_thermal",
+                                    "teacher": "facebook/sam2.1-hiera-large",
+                                    "sequences": list(sequences)}))
+        return path
+
+    def test_a_disjoint_pool_is_reported_clean(self):
+        folder = self.tmp()
+        archive = self.build(folder, sequences=("pedestrian_230",))
+        manifest = self.manifest(folder, ["pedestrian_191", "pedestrian_193"])
+        _, text = self.run_on(archive, "--against", str(manifest))
+        self.assertIn("clean: no sequence here was harvested", text)
+
+    def test_a_shared_sequence_is_named(self):
+        folder = self.tmp()
+        archive = self.build(folder, sequences=("pedestrian_191", "car_002"))
+        manifest = self.manifest(folder, ["pedestrian_191", "truck_009"])
+        _, text = self.run_on(archive, "--against", str(manifest))
+        self.assertIn("are in BOTH", text)
+        self.assertIn("pedestrian_191", text)
+        self.assertNotIn("        car_002", text)
+
+    def test_the_pool_is_named_so_the_answer_says_what_it_checked(self):
+        folder = self.tmp()
+        archive = self.build(folder, sequences=("a",))
+        _, text = self.run_on(archive, "--against", str(self.manifest(folder, ["b"])))
+        self.assertIn("vtuav_thermal", text)
+        self.assertIn("facebook/sam2.1-hiera-large", text)
+
+    def test_the_intersection_is_computed_on_names_not_substrings(self):
+        """`train_003` and `train_003_001` are different sequences, and a
+        substring test would call the pair a leak."""
+        shared, _ = overlap({"train_003_001"},
+                            self.manifest(self.tmp(), ["train_003"]))
+        self.assertEqual(shared, set())
+
+    def test_without_the_flag_nothing_is_claimed(self):
+        folder = self.tmp()
+        _, text = self.run_on(self.build(folder))
+        self.assertNotIn("leak check", text)
+
 
 
 if __name__ == "__main__":

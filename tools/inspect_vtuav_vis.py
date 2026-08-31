@@ -143,7 +143,24 @@ def sample(archive: Path, chosen: list[tuple[str, str]], seed: int = 0) -> list[
     return rows
 
 
-def report(archive: Path, modality: str, count: int, seed: int) -> int:
+def overlap(sequences: set[str], manifest: Path) -> tuple[set[str], dict]:
+    """Which of these sequences the pool in `manifest` was harvested from.
+
+    The manifest is the right side of this comparison rather than the pool's
+    frames: it records the sequence names the harvest actually walked, so the
+    answer does not depend on which frames survived a gate. An empty
+    intersection is the result to want -- VTUAV's own ST-tracking and VIS
+    segmentation splits are disjoint by construction, and this is how to know
+    that rather than assume it.
+    """
+    import json
+
+    body = json.loads(manifest.read_text())
+    return sequences & set(body.get("sequences", [])), body
+
+
+def report(archive: Path, modality: str, count: int, seed: int,
+           against: Path | None = None) -> int:
     infos = members(archive)
     tree = layout(infos)
     print(f"== {archive}  ({archive.stat().st_size / 2**30:.1f} GiB, "
@@ -171,6 +188,19 @@ def report(archive: Path, modality: str, count: int, seed: int) -> int:
             if f"mask/{modality}" in holds and modality in holds]
     print(f"   sequences with both {modality}/ and mask/{modality}/: "
           f"{len(both)}/{len(tree['sequences'])}")
+
+    if against is not None:
+        shared, pool = overlap(set(tree["sequences"]), against)
+        print(f"\n   leak check against {pool.get('pool', against.name)} "
+              f"({len(pool.get('sequences', []))} sequences, teacher "
+              f"{pool.get('teacher', 'unknown')}):")
+        if shared:
+            print(f"     !! {len(shared)} sequence(s) are in BOTH -- grading on "
+                  f"them measures memorisation, not tracking:")
+            for name in sorted(shared):
+                print(f"        {name}")
+        else:
+            print("     clean: no sequence here was harvested into that pool.")
 
     chosen = pairs(infos, modality)
     print(f"   masks with a frame beside them: {len(chosen)}")
@@ -231,10 +261,16 @@ def main(argv=None) -> int:
     parser.add_argument("--sample", type=int, default=40,
                         help="How many mask/frame pairs to decode and measure.")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--against", type=Path, default=None,
+                        help="A harvested pool's manifest.json. Prints the "
+                             "sequences this archive shares with that pool -- "
+                             "the leak check, because a sequence graded here "
+                             "and trained on there is not a held-out grade.")
     args = parser.parse_args(argv)
     worst = 0
     for archive in args.archives:
-        worst = max(worst, report(archive, args.modality, args.sample, args.seed))
+        worst = max(worst, report(archive, args.modality, args.sample,
+                                  args.seed, args.against))
         print()
     return worst
 
