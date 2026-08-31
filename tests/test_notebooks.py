@@ -713,5 +713,154 @@ class ModalityTest(unittest.TestCase):
 
 
 
+class ArmFieldsTest(unittest.TestCase):
+    """Every setting an arm names has to reach the notebook.
+
+    `render` substitutes `{{KEY}}` and silently ignores a key the cells never
+    mention, so an arm can carry a setting that does nothing at all -- which is
+    how `LR_SCALE_MAX: 1.0`, written to stop a pretrain training its head at
+    four times the rate it diverged at, would have been a comment.
+    """
+
+    def cells(self):
+        from tools.build_stage_b_notebooks import CELLS
+
+        return "\n".join(CELLS)
+
+    def test_every_arm_key_is_a_placeholder_in_the_cells(self):
+        from tools.build_stage_b_notebooks import ARMS
+
+        text = self.cells()
+        for name, fields in ARMS.items():
+            for key in fields:
+                with self.subTest(notebook=name, key=key):
+                    self.assertIn("{{" + key + "}}", text,
+                                  f"{name} sets {key} and no cell reads it")
+
+    def test_no_placeholder_survives_into_a_notebook(self):
+        """`{{STAMP}}` excepted: `build` fills it after `render`, from the
+        hash over what `render` produced."""
+        from tools.build_stage_b_notebooks import ARMS, build
+
+        for name in ARMS:
+            with self.subTest(notebook=name):
+                text = "\n".join("".join(cell["source"])
+                                 for cell in build(name)["cells"])
+                self.assertNotIn("{{", text)
+
+
+class PretrainRatesTest(unittest.TestCase):
+    """The two long arms must not carry the rates that were measured to diverge.
+
+    The recorded run reached 0.2723 on the head stage, 21.84 the moment the
+    encoder opened, then NaN -- at neck and trunk 1e-4 with the linear rule at
+    x4. What it left on disk was the head-only checkpoint, which is the part
+    that makes this worth a test rather than a comment: the failure produces a
+    file, and a file is what the next notebook starts from.
+    """
+
+    PRETRAINS = ("34_pretrain_thermal_aerial.ipynb", "35_pretrain_rgb_aerial.ipynb")
+
+    def settings(self, notebook: str) -> dict:
+        from tools.build_stage_b_notebooks import ARMS
+
+        return ARMS[notebook]
+
+    def test_neither_pretrain_runs_the_profile_that_went_non_finite(self):
+        for name in self.PRETRAINS:
+            with self.subTest(notebook=name):
+                fields = self.settings(name)
+                self.assertLessEqual(float(fields["LR_TRUNK"]), 2e-5)
+                self.assertLessEqual(float(fields["LR_NECK"]), 5e-5)
+                self.assertEqual(float(fields["LR_SCALE_MAX"]), 1.0)
+
+    def test_a_non_finite_run_is_not_mirrored_as_a_pretrain(self):
+        """Training stops on non-finite loss and keeps the last finite
+        checkpoint, so without this the notebook prints a plausible table over
+        a head-only model and copies it to Drive under the pretrain's name."""
+        from tools.build_stage_b_notebooks import render
+
+        for name in self.PRETRAINS:
+            with self.subTest(notebook=name):
+                text = "\n".join(render(name)[0])
+                self.assertIn("_bad_stops", text)
+                self.assertIn("stopped_early", text)
+
+
+class ThinningReachesTrainingTest(unittest.TestCase):
+    """`rebalance` decides per instance; a split file records frames.
+
+    Measured on a synthetic pool: a train split the notebook cut to 476
+    instances came back as 1500 when `train_encoder` re-indexed, because
+    `apply_splits` could only filter frames. Every arm that sets CLASS_WEIGHTS
+    has to hand them to `save_splits` as well, or the by-class table it prints
+    describes a set nothing trains on.
+    """
+
+    def test_every_generated_arm_hands_the_weights_to_the_split_file(self):
+        from tools.build_stage_b_notebooks import ARMS, render
+
+        for name in ARMS:
+            with self.subTest(notebook=name):
+                text = "\n".join(render(name)[0])
+                self.assertIn("save_splits(Path(WORK) / \"splits.json\", SPLITS,",
+                              text)
+                self.assertIn("CLASS_WEIGHTS, seed=SEED", text)
+
+    def test_the_stable_notebook_does_too(self):
+        import json
+
+        body = json.loads(Path(ROOT, "notebooks",
+                               "32_aerial_thermal_stage_b_stable.ipynb").read_text())
+        text = "\n".join("".join(cell["source"]) for cell in body["cells"])
+        self.assertIn("CLASS_WEIGHTS, seed=SEED", text)
+
+
+class HardeningFlagsTest(unittest.TestCase):
+    """The photometric flags go to the trainer and to nothing else.
+
+    `tools/eval_instances.py` does not define them and argparse is strict, so a
+    run that spread them through `COMMON` died on its first scoring call --
+    after the whole download and re-index had been paid for.
+    """
+
+    def notebook(self, name):
+        import json
+
+        return json.loads(Path(ROOT, "notebooks", name).read_text())
+
+    def test_no_scoring_call_is_handed_a_training_flag(self):
+        from tools.build_stage_b_notebooks import ARMS, render
+
+        flags = ("--contrast-collapse", "--contrast-floor", "--polarity-flip",
+                 "--gamma-jitter", "--sensor-noise")
+        bodies = {name: "\n".join(render(name)[0]) for name in ARMS}
+        bodies["32_aerial_thermal_stage_b_stable.ipynb"] = "\n".join(
+            "".join(cell["source"])
+            for cell in self.notebook("32_aerial_thermal_stage_b_stable.ipynb")["cells"])
+        for name, text in bodies.items():
+            with self.subTest(notebook=name):
+                for line in text.splitlines():
+                    if "COMMON +=" in line or "COMMON =" in line:
+                        continue
+                    self.assertFalse(
+                        any(flag in line for flag in flags) and "eval_instances" in line,
+                        f"{name}: {line}")
+                # The decisive check: whatever COMMON collects must be
+                # something eval_instances.py accepts.
+                collected = [line for line in text.splitlines()
+                             if "COMMON" in line and any(f in line for f in flags)]
+                self.assertEqual(collected, [], f"{name}: {collected}")
+
+    def test_the_stable_notebook_still_hardens_its_training(self):
+        """Moving them out of COMMON must not drop them: they are the reason
+        the notebook exists."""
+        text = "\n".join("".join(cell["source"]) for cell in
+                          self.notebook("32_aerial_thermal_stage_b_stable.ipynb")["cells"])
+        self.assertIn("HARDEN = [", text)
+        self.assertEqual(text.count("*HARDEN,"), 2)   # the pilot and the run
+
+
+
 if __name__ == "__main__":
     unittest.main()

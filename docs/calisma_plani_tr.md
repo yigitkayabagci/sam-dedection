@@ -341,3 +341,98 @@ kontrol erken dönüşteyken kapı TensorRT yolunda sessizce hiç çalışmıyor
    diyebilir. (AeroVIS için zaten kazanç yok: havuz arşivin %97'sini istiyor.)
 3. **34/35 zincirlenmiş değil.** İkisi de sıfırdan başlıyor. 34'ün çıktısını
    22/32'ye temel yapmak istersen `REFERENCE_CHECKPOINT`'i elle ver.
+
+
+---
+
+## 5. 32 / 34 / 35 uçuş öncesi — bulunan ve düzeltilen engelleyiciler
+
+Üç notebook, koşu başlamadan önce paralel olarak ayrı ayrı incelendi. Beş tanesi
+koşuyu boşa harcayacak cinstendi; hepsi düzeltildi, notebook'lar yeniden
+üretildi.
+
+### 32 — hücre 4'te kesin çökme
+
+Hardening flag'leri (`--contrast-collapse` ve dördü) `COMMON`'a konmuştu.
+`COMMON` yalnız eğitime değil **`tools/eval_instances.py`'ye de** gidiyor; o da
+bu argümanları tanımıyor ve argparse strict. Ölçüldü:
+
+```
+$ python3 tools/eval_instances.py --checkpoint x --contrast-collapse 0.4
+eval_instances.py: error: unrecognized arguments: --contrast-collapse 0.4
+```
+
+Yani veri indirme + tam yeniden indeksleme (soğuk oturumda 1-2 saat) bittikten
+sonra, eğitim başlamadan çöküyordu. Flag'ler artık `HARDEN` listesinde ve
+yalnız iki `train_encoder` çağrısına (pilot + tam koşu) gidiyor.
+
+### 32 — reponun kendi ölçümüyle elediği fotometri
+
+`CONTRAST_COLLAPSE 0.40` / `SENSOR_NOISE 5.0`, hedefi SCR 20'de duran sentetik
+bir pencerede seçilmişti; HIT-UAV'ın gerçek hedefleri **medyan 0.91**'de duruyor
+ve o ayar medyanı yalnız 0.85 → 0.79 oynatıp dinamik aralığı her yerde
+harcıyordu. `HARDER` preset'ine çekildi (0.25 / 0.15 / 0.25 / 0.25 / 2.0) — ayrıca
+34 ile aynı şiddet, yoksa iki kol karşılaştırılamazdı.
+
+### 34 / 35 — NaN'a giden LR profilinin ta kendisi, üstelik 10× bütçeyle
+
+Kayıtlı koşu: head aşamasında val loss `0.2723`, encoder açılınca `21.84`,
+ardından **NaN** — `neck/trunk 1e-4`, `lr_scale 4`. 34/35 tam bu yapılandırmayı
+`EPOCHS [3, 40]` ile tekrarlıyordu ve 32'deki non-finite assert'i taşımıyordu.
+Eğitim non-finite'te durur ama **son finite checkpoint'i bırakır** — yani
+head-only bir model, "pretrain" adıyla Drive'a aynalanırdı.
+
+Düzeltildi: `LR_NECK 5e-5`, `LR_TRUNK 2e-5` (32'nin pilotunun hayatta kalan
+profillerinden ikincisi — trunk hâlâ tablonun 2 katı, çünkü modalite kayması bir
+trunk problemi), `LR_SCALE_MAX 1.0`, ve cell 5'e non-finite assert'i eklendi.
+Diğer altı kol `1e-4`'te bırakıldı: kayıtlı koşuları onunla yapıldı.
+
+### Hepsi — `CLASS_WEIGHTS` eğitime hiç ulaşmıyordu
+
+`rebalance` **instance** bazında inceltiyor, `save_splits` ise yalnız hangi
+**karelerin** kaldığını yazıyordu. `train_encoder` yeniden indeksleyip kareye
+göre süzünce inceltme geri alınıyordu. Sentetik bir havuzda ölçüldü:
+
+```
+notebook'un seçtiği train split : 476 instance
+train_encoder'ın gördüğü        : 1500 instance   (eski)
+train_encoder'ın gördüğü        : 476 instance    (yeni)
+```
+
+`save_splits` artık ağırlıkları ve seed'i de yazıyor, `apply_splits` aynı kararı
+yeniden uyguluyor — `rebalance` kare kimliği + instance etiketi + seed hash'i
+olduğu için sonuç birebir aynı, dosya 292 bayt büyüyor. Basılan by-class tablosu
+artık eğitilen veriyi tarif ediyor.
+
+### 35 — kaynak ağırlığı, sınıf ağırlığını gölgeliyordu
+
+`rebalance`'ta en spesifik anahtar kazanır ve **çarpışmaz**. `"pool/aerovis_train": 0.9`,
+AeroVIS'in eğitim yarısında `car`/`vehicle` 0.5'i tamamen değiştiriyordu: eğitim
+yarısı arabalarının %90'ını tutarken, kaynak anahtarı olmayan held-out yarısı
+%50'sini kaybediyordu — yani skorun sınıf karışımı eğitim setininkiyle aynı
+değildi. `pool/aerovis_train:car` gibi kaynak+sınıf anahtarlarına çevrildi.
+
+### Küçükler
+
+* 35 `SOURCE_ZIPS = []` — termal SegFly ve Kust4K açılıp hiç okunmuyordu.
+* `WORK` artık `/content/work_<RUN>`. İki kol aynı runtime'da koşarsa
+  `score_<tag>_<prompt>.json` önbelleği paylaşılıyor ve **ikinci kolun "before"u
+  birincinin taban ölçümü** oluyordu — sessizce.
+* Yeni testler: bir kolun yazdığı her ayarın notebook'a gerçekten ulaştığı
+  (`LR_SCALE_MAX` şablonda placeholder değildi, sessizce yok sayılıyordu),
+  pretrain'lerin ıraksayan profili taşımadığı, ağırlıkların split dosyasına
+  girdiği, ve hiçbir skorlama çağrısına eğitim flag'i geçmediği.
+
+### Zincirleme: doğru değişken `BASE_CHECKPOINT`
+
+32'de `REFERENCE_CHECKPOINT` **yok**; üretilen ailede de ağırlıkları değiştirmez,
+yalnız before/after'ın neye karşı ölçüleceğini seçer. Pretrain'i temel almak için
+32 hücre 1'de:
+
+```python
+BASE_CHECKPOINT = "/content/drive/MyDrive/edgetam-stage-b/pretrain_thermal_aerial/edgetam_pool_pretrain_thermal_aerial_512.pt"
+```
+
+34'ün gerçekten yazdığı yol budur (`METHOD == "finetune"` olduğu için `_finetune`
+eki **yok**). Boş bırakılırsa stok EdgeTAM'den başlar ve iki kol `_from_...`
+ekiyle ayrı klasörlere yazar — biri diğerini ezmez.
