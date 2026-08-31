@@ -803,10 +803,18 @@ def wanted_frames(records: SequenceABC[Path]) -> dict[str, set[str]]:
     A pool names every frame it needs and nothing else, so it is a
     manifest. Keying by basename first makes the membership test against an
     archive's name list one dict hit per member rather than a scan.
+
+    A record that will not parse is skipped rather than raised on, the same
+    way `_wanted_groups` skips it: a pool zip that unpacked short leaves a
+    truncated `record.json` behind, and one of those is not a reason for the
+    other forty thousand frames to stay inside the archives.
     """
     wanted: dict[str, set[str]] = {}
     for record_path in records:
-        body = json.loads(record_path.read_text())
+        try:
+            body = json.loads(Path(record_path).read_text())
+        except (OSError, ValueError):
+            continue
         for key in ("image", "image_rel"):
             recorded = body.get(key)
             if not recorded:
@@ -859,6 +867,10 @@ def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
     happened to run in. Members
     already on disk with a non-zero size are skipped, which makes a second run
     the resume path.
+
+    An archive that will not open, or that the mount stops reading halfway
+    through, lands in `unopened` with the reason rather than raising -- see
+    the loop for why one bad part must not take the other fourteen with it.
     """
     target = Path(target)
     # Grouped by record rather than flattened, because one frame can be named
@@ -866,46 +878,61 @@ def extract_frames(records: SequenceABC[Path], archives: SequenceABC[Path],
     # counted once, or `asked` and `missing` report aliases instead of frames.
     groups = _wanted_groups(records)
     report = {"asked": sum(len(v) for v in groups.values()), "taken": 0,
-              "already": 0, "unreadable": [], "by_archive": {}, "missing": 0}
+              "already": 0, "unreadable": [], "by_archive": {}, "missing": 0,
+              "unopened": []}
     still = {name: list(rows) for name, rows in groups.items()}
     stream = archives if progress is None else progress(
         archives, total=len(archives), desc="archives")
     for archive in stream:
         took = 0
-        with zipfile.ZipFile(archive) as handle:
-            for member in handle.namelist():
-                if member.endswith("/"):
-                    continue
-                base = member.rsplit("/", 1)[-1]
-                candidates = still.get(base)
-                if not candidates:
-                    continue
-                # Two directions, because a record can name the frame two
-                # ways. `image` is where it was when the pool was harvested, so
-                # the *recorded* path ends with the member. `image_rel` is
-                # where it sits inside the archive, so the *member* ends with
-                # it -- and that one does not care where the harvest ran, which
-                # is the whole reason `aerovis.write_pool` stores it. An
-                # absolute path can never be a member's suffix (members are
-                # relative), so testing both ways cannot cross them.
-                hit = next((row for row in candidates
-                             if any(c.endswith("/" + member) or c == member
-                                    or member.endswith("/" + c) for c in row)),
-                            None)
-                if hit is None:
-                    continue
-                candidates.remove(hit)
-                landing = target / member
-                if landing.is_file() and landing.stat().st_size:
-                    report["already"] += 1
-                    took += 1
-                    continue
-                try:
-                    handle.extract(member, target)
-                    report["taken"] += 1
-                    took += 1
-                except Exception:
-                    report["unreadable"].append(member)
+        # One archive is not the run. VTUAV's shelf is fifteen files on a
+        # Drive mount, and any of them can be a part that synced short, a
+        # split volume named `.zip`, or a read the mount fails on halfway
+        # through -- none of which says anything about the other fourteen.
+        # Raising here loses the frames already taken out of this archive
+        # too, because the caller's loop dies with it; recording the archive
+        # and carrying on keeps them, names what went wrong, and leaves a
+        # re-run to resume, since a member already on disk is skipped.
+        try:
+            with zipfile.ZipFile(archive) as handle:
+                names = handle.namelist()
+                for member in names:
+                    if member.endswith("/"):
+                        continue
+                    base = member.rsplit("/", 1)[-1]
+                    candidates = still.get(base)
+                    if not candidates:
+                        continue
+                    # Two directions, because a record can name the frame two
+                    # ways. `image` is where it was when the pool was
+                    # harvested, so the *recorded* path ends with the member.
+                    # `image_rel` is where it sits inside the archive, so the
+                    # *member* ends with it -- and that one does not care where
+                    # the harvest ran, which is the whole reason
+                    # `aerovis.write_pool` stores it. An absolute path can
+                    # never be a member's suffix (members are relative), so
+                    # testing both ways cannot cross them.
+                    hit = next((row for row in candidates
+                                if any(c.endswith("/" + member) or c == member
+                                       or member.endswith("/" + c)
+                                       for c in row)), None)
+                    if hit is None:
+                        continue
+                    candidates.remove(hit)
+                    landing = target / member
+                    if landing.is_file() and landing.stat().st_size:
+                        report["already"] += 1
+                        took += 1
+                        continue
+                    try:
+                        handle.extract(member, target)
+                        report["taken"] += 1
+                        took += 1
+                    except Exception:
+                        report["unreadable"].append(member)
+        except (OSError, zipfile.BadZipFile, EOFError, ValueError) as error:
+            report["unopened"].append(
+                (Path(archive).name, f"{type(error).__name__}: {error}"))
         report["by_archive"][Path(archive).name] = took
     report["missing"] = sum(len(v) for v in still.values())
     return report

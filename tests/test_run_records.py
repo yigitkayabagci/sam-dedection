@@ -653,7 +653,5 @@ class ABTableTest(unittest.TestCase):
         self.assertEqual(ab_table("plain", "guard_lite", "full768", None, self.B), [])
         self.assertEqual(ab_table("plain", "guard_lite", "full768", {}, {}), [])
 
-
-
 if __name__ == "__main__":
     unittest.main()
