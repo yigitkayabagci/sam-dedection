@@ -71,16 +71,20 @@ Bu oturum boyunca sırayla şunlar konuşuldu ve hepsi koda döküldü:
 AeroVIS havuzu `aerotrack/` alt klasöründe (`aerovis_train.zip` 372 MB,
 `aerovis_heldout.zip` 77 MB). Hiçbir şey yapmana gerek yok.
 
-**0b. AeroVIS kareleri** — yalnızca 27, 28 veya 35 çalıştıracaksan:
+**0b. AeroVIS kareleri.** Artık elle bir şey yapman gerekmiyor. Sürüm
+arşivi Drive'da: `MyDrive/edgetam-pool/AeroVIS.zip` (12.63 GiB — dosyanın
+kendisi ya da paylaşılan kopyaya bir kısayol, mount ikisini de çözer).
+`POOL_ARCHIVES` bunu 20, 27, 28, 35 ve 21'de adıyla gösteriyor; havuzun
+kayıtları hangi kareyi istediğini tek tek söylediği için arşivden yalnızca o
+üyeler çıkarılır ve `/content/data/AeroVIS/AeroVIS/sequences/` altına iner —
+`resolve_images_root` da tam orayı adlandırır.
 
-```python
-!pip -q install gdown
-!mkdir -p /content/data/AeroVIS
-!gdown 1DMLagGZMPntrvxk5W0PsaIoybsE7WX56 -O /content/AeroVIS.zip
-!unzip -q /content/AeroVIS.zip -d /content/data/AeroVIS && rm /content/AeroVIS.zip
-```
+Eskiden burada duran `gdown` + `unzip` adımı **artık gereksiz**: her oturumda
+13.5 GiB'ı ağdan indirmek yerine kareler Drive'dan geliyor. Diskte tepe
+kullanım yine yüksek olabilir, `21`'i çalıştırmadan önce `!df -h /content`.
 
-12.63 GiB zip → 12.76 GiB açılmış, tepe ~25.4 GiB. Önce `!df -h /content`.
+Kareler bir kez diskteyse 20/27/28/35 hiçbir şeyi yeniden çıkarmaz
+(`already there`), yani `21`'i bir kez çalıştırmak eğitim koşularını hazırlar.
 
 **0c. `21_pool_data_readiness.ipynb`** — eğitim yapmaz. Her havuzun ne
 kaydettiğini, kaç karesinin diskte olduğunu, geri kalanının neden olmadığını

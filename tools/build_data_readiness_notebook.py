@@ -35,6 +35,17 @@ def code(text: str) -> None:
 # --------------------------------------------------------------------------
 # 1. The knobs, the repo, the mount, the disk
 # --------------------------------------------------------------------------
+#
+# `POOL_ARCHIVES` ships with AeroVIS in it because AeroVIS is the pool this
+# notebook was written about: its stores travel to Drive without their 12.6 GiB
+# of frames, so it is `no_image` on all 47 921 records until an archive is
+# named, and naming one is the whole fix. Cell 5 takes only the members the
+# records ask for and prints the disk before and after each one.
+#
+# It is unconditional here, unlike in 19-28 where the modality filter decides,
+# because this notebook reports on every pool the Drive holds rather than on
+# one run's plan. A thermal-only session that does not want AeroVIS's colour
+# frames on its disk drops the two entries; the cell prints what it was given.
 
 code('''
 DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"
@@ -51,7 +62,10 @@ ARCHIVE_DIRS = ["/content/drive/MyDrive/datasets",
 
 FETCH       = []
 
-POOL_ARCHIVES = {}
+POOL_ARCHIVES = {
+    "aerovis_train": "/content/drive/MyDrive/edgetam-pool/AeroVIS.zip",
+    "aerovis_heldout": "/content/drive/MyDrive/edgetam-pool/AeroVIS.zip",
+}
 
 VTUAV_PARTS     = []
 VTUAV_VIS_PARTS = []
