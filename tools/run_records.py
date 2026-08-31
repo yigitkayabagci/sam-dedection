@@ -133,6 +133,67 @@ WEIGHTS = {
 # before this repository existed and records nothing about it.
 TRAINED_AT = {"stock": 1024, "pool_deep": 512}
 
+# --stack -> {model input size: PyTorch backend YAML}. The third axis, and a
+# different question again from the other two: `--modes` varies the *input*,
+# `--weights` varies the *model*, and this varies the *inference-time layers*
+# wrapped around a fixed model -- none of which are trained, so a stack run
+# measures them against stock EdgeTAM without waiting for a stage B.
+#
+# `off` is the default and keeps what this tool always did: the TensorRT
+# backend on the engine configs above. A named stack switches to the PyTorch
+# backend, because that is where the memory bookkeeping these layers touch
+# lives and because it needs no engine build -- which is the point of being
+# able to try them today.
+#
+# The rungs are ordered and meant to be run in order. `samurai` changes which
+# candidate mask is picked and which frames reach the memory bank; `guard`
+# changes what the tracker *returns*, since a refused mask comes back empty.
+# Run together first, an improvement is unattributable and a regression is
+# undiagnosable. There is deliberately no guard-without-motion rung: the guard
+# measures the jump after the background's own motion is removed, so without
+# `ego_motion` it reads a drone's yaw as the target moving.
+STACKS = {
+    "plain": {768: "configs/edgetam_768.yaml",
+              512: "configs/edgetam_512.yaml"},
+    "motion": {768: "configs/edgetam_768_motion.yaml",
+               512: "configs/edgetam_512_motion.yaml"},
+    "guard": {768: "configs/edgetam_768_samurai.yaml",
+              512: "configs/edgetam_512_thermal_guard.yaml"},
+}
+
+
+def stack_config(stack: str, size: int, mode: str, checkpoint: str | None,
+                 outdir: Path) -> str:
+    """The YAML for one (stack, size), with `checkpoint` swapped in if given.
+
+    A stack run defaults to stock EdgeTAM on purpose -- the layers are
+    training-free, so stock is the honest place to measure what they are worth.
+    `--checkpoint` points the same three rungs at a stage-B output instead, and
+    it does that by writing a copy of the config beside the results rather than
+    editing the shipped one: the copy is then part of the run's own record, and
+    two runs on different weights cannot end up crediting each other.
+    """
+    import yaml as _yaml
+
+    table = STACKS[stack]
+    if size not in table:
+        have = ", ".join(str(k) for k in sorted(table))
+        raise SystemExit(
+            f"--stack {stack} has no {size} configuration, so mode {mode!r} "
+            f"cannot run under it (it has {have}).")
+    config = table[size]
+    if not checkpoint:
+        return config
+    weights = Path(checkpoint)
+    if not weights.is_file():
+        raise SystemExit(f"--checkpoint {weights} is not a file.")
+    body = _yaml.safe_load((ROOT / config).read_text()) or {}
+    body["checkpoint"] = str(weights.resolve())
+    outdir.mkdir(parents=True, exist_ok=True)
+    copy = outdir / "config.yaml"
+    copy.write_text(_yaml.safe_dump(body, sort_keys=False))
+    return str(copy)
+
 
 def config_for(weights: str, size: int, mode: str) -> str:
     """The YAML for one (weights, input size) pair, or a refusal that explains.
@@ -194,7 +255,8 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
     later -- when the mp4s are being compared and the terminal that ran them is
     gone.
     """
-    body = yaml.safe_load((ROOT / config).read_text()) or {}
+    body = yaml.safe_load(Path(config).read_text() if Path(config).is_absolute()
+                          else (ROOT / config).read_text()) or {}
     engines = {
         name.removesuffix("_engine"): digest(ROOT / body[name])
         for name in ("image_encoder_engine", "memory_attention_engine",
@@ -202,13 +264,19 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd) -> dict:
         if body.get(name)
     }
     return {
-        "weights": args.weights,
+        "weights": getattr(args, "checkpoint", None) or args.weights,
+        "stack": getattr(args, "stack", "off"),
+        "layers": sorted(k for k in ("samurai", "ego_motion", "guard")
+                         if body.get(k)),
         "trained_at": TRAINED_AT.get(args.weights),
         "mode": mode,
         "image_size": int(body.get("image_size", 1024)),
         "center_crop": crop,
         "config": config,
-        "checkpoint": digest(ROOT / body["checkpoint"]) if body.get("checkpoint") else None,
+        "checkpoint": digest(Path(body["checkpoint"])
+                             if Path(body["checkpoint"]).is_absolute()
+                             else ROOT / body["checkpoint"])
+                      if body.get("checkpoint") else None,
         "engines": engines,
         "command": [str(c) for c in cmd],
     }
@@ -222,7 +290,9 @@ def folder(mode: str, args) -> str:
     re-run lands on top of them rather than beside them.
     """
     parts = [mode]
-    if args.weights != "stock":
+    if getattr(args, "stack", "off") != "off":
+        parts.append(args.stack)
+    elif args.weights != "stock":
         parts.append(args.weights)
     if args.frame_skip > 1:
         parts.append(f"skip{args.frame_skip}")
@@ -281,6 +351,24 @@ def main(argv: list[str] | None = None) -> int:
                         "a different runtime setting. Results land in "
                         "<mode>_<weights>/ so a stock run is never overwritten "
                         "and the two share one saved prompt.")
+    p.add_argument("--stack", default="off", choices=("off",) + tuple(STACKS),
+                   help="Which inference-time layers run around the model. "
+                        "`off` (default) keeps the TensorRT backend and the "
+                        "engine configs. `plain`, `motion` and `guard` are an "
+                        "ordered ablation on the PyTorch backend, needing no "
+                        "engine build: plain is nothing, motion adds SAMURAI's "
+                        "memory gate and ego-motion, guard adds the classical "
+                        "plausibility and re-acquisition layer. Run them in "
+                        "that order -- guard changes what the tracker returns, "
+                        "so running it together with motion first makes an "
+                        "improvement unattributable. Results land in "
+                        "<mode>_<stack>/.")
+    p.add_argument("--checkpoint", default=None,
+                   help="Weights for a --stack run, replacing stock EdgeTAM. "
+                        "A copy of the config with this path substituted is "
+                        "written beside the results, so the run records which "
+                        "weights produced it. This is how a stage-B output is "
+                        "used without another notebook.")
     p.add_argument("--pattern", default="*.tif*", help="Frame glob inside a record.")
     p.add_argument("--fps", type=float, default=30.0,
                    help="Playback fps for the output mp4 (a sequence has none).")
@@ -341,7 +429,21 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"Unknown mode {m!r}; pick from {', '.join(MODES)}")
     # Resolve every config up front, so an unbuildable combination fails now
     # rather than after the first record has been indexed and prompted for.
-    configs = {m: config_for(args.weights, MODES[m][0], m) for m in modes}
+    if args.stack != "off":
+        # A stack run resolves per record, because --checkpoint writes its
+        # config copy into that record's output folder. Validate the pairs now
+        # so an impossible one still fails before any frame is read.
+        for m in modes:
+            stack_config(args.stack, MODES[m][0], m, None, Path(args.out))
+        configs = {}
+    else:
+        if args.checkpoint:
+            raise SystemExit(
+                "--checkpoint needs --stack: without one this tool runs the "
+                "TensorRT engines, and weights are baked into an engine at "
+                "export time rather than read at runtime. Use --weights, or "
+                "pick a stack.")
+        configs = {m: config_for(args.weights, MODES[m][0], m) for m in modes}
     absent = {m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
     if absent:
         lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
@@ -380,7 +482,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         for mode in modes:
-            config, crop = configs[mode], MODES[mode][1]
+            crop = MODES[mode][1]
+            if args.stack != "off":
+                config = stack_config(args.stack, MODES[mode][0], mode,
+                                      args.checkpoint,
+                                      out_root / record.name / folder(mode, args))
+            else:
+                config = configs[mode]
             # A skipped run, and a run on other weights, are different
             # measurements of the same mode rather than replacements for it, so
             # each gets its own folder next to the baseline. `stock` with no
@@ -388,13 +496,15 @@ def main(argv: list[str] | None = None) -> int:
             outdir = out_root / record.name / folder(mode, args)
             outdir.mkdir(parents=True, exist_ok=True)
 
-            cmd = [PY, "cli.py", "--tracker", "edgetam_trt", "--config", config,
+            backend = "edgetam" if args.stack != "off" else "edgetam_trt"
+            cmd = [PY, "cli.py", "--tracker", backend, "--config", config,
                    "--frames-dir", record, "--frame-pattern", args.pattern,
                    "--fps", args.fps,
                    "--prompt", "file", "--prompt-file", prompts,
                    "--offload-video", "--fps-warmup", args.warmup,
                    "--fps-chart", outdir / "latency.png",
-                   "--stage-chart", outdir / "stages.png"]
+                   "--stage-chart", outdir / "stages.png",
+                   "--track-chart", outdir / "track.png"]
             cmd += ["--no-video"] if args.no_video else ["--output", outdir / "tracked.mp4"]
             if args.strict:
                 cmd += ["--strict"]

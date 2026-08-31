@@ -23,7 +23,9 @@ from .io_utils import (
     read_first_frame_dir,
 )
 from .io_utils.video import read_metadata
-from .metrics import format_benchmark_note, fps_summary, write_latency_chart, write_stage_chart
+from .metrics import (format_benchmark_note, fps_summary, track_geometry,
+                      write_latency_chart, write_stage_chart,
+                      write_track_chart)
 from .prompts import PromptSet
 from .trackers import VideoTracker
 from .visualize import overlay_masks
@@ -448,6 +450,11 @@ class PipelineConfig:
     # Per-frame breakdown: preprocess (decode + resize to model input), model
     # inference, postprocess (masks back to source resolution).
     stage_chart: Path | None = None
+    # What the tracker returned, frame by frame: how much of the frame the mask
+    # covers and how far its centre moved. The chart for footage with no ground
+    # truth -- which is every real recording -- and where the balloon and the
+    # skip are visible without one.
+    track_chart: Path | None = None
 
 
 def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
@@ -460,6 +467,44 @@ def _benchmark_note(tracker: VideoTracker, meta, prompts: PromptSet) -> str:
         model_size=model_size,
         batch=objects,
     )
+
+
+class _TrackWatch:
+    """Per-frame mask geometry, collected as the loop runs.
+
+    Cheap on purpose: one boolean OR and one `nonzero` over masks that are
+    already in memory, and nothing at all when no chart was asked for -- this
+    sits inside the timed region, so it must not show up in a frame budget.
+    """
+
+    def __init__(self, wanted: bool) -> None:
+        self.wanted = wanted
+        self.shares: list[float] = []
+        self.centres: list[tuple[float, float] | None] = []
+
+    def see(self, result) -> None:
+        if not self.wanted:
+            return
+        share, centre = track_geometry(getattr(result, "masks", None))
+        self.shares.append(share)
+        self.centres.append(centre)
+
+    def write(self, cfg: PipelineConfig, tracker) -> None:
+        if not self.wanted or cfg.track_chart is None:
+            return
+        verdicts = getattr(tracker, "verdicts", None)
+        states = None
+        if verdicts:
+            states = {int(frame): getattr(next(iter(per_object.values())), "state",
+                                          None)
+                      for frame, per_object in verdicts.items() if per_object}
+        elif getattr(tracker, "guard_config", None) is not None:
+            states = {}
+        out = write_track_chart(self.shares, self.centres, cfg.track_chart,
+                                verdicts=states,
+                                label=getattr(tracker, "name", None))
+        if out:
+            print(f"[pipeline] wrote track chart -> {out}")
 
 
 def _report_timing(
@@ -705,11 +750,13 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         # would add a lossy compression round-trip to every measurement.
         _install_realtime_preprocess(tracker, tracked, preprocess_s, view, read_s)
 
+        watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [frames]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
+                watch.see(result)
                 per_frame_dt.append(_split_frame(
                     t1 - t0, preprocess_s, post_s, read_s,
                     pre_ms, infer_ms, post_ms, read_ms))
@@ -731,6 +778,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
+        watch.write(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()
@@ -762,12 +810,14 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
               "for mp4 mode -- decode+resize cost will be folded into 'inference' "
               "rather than reported as 'pre'. Total frame time is still correct.")
     cursor = 0
+    watch = _TrackWatch(cfg.track_chart is not None)
     progress = tqdm(total=meta.frame_count, desc="tracking [mp4]", unit="frame")
     try:
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
+                watch.see(result)
                 per_frame_dt.append(_split_frame(
                     t1 - t0, preprocess_s, post_s, read_s,
                     pre_ms, infer_ms, post_ms, read_ms))
@@ -793,7 +843,8 @@ def _run_mp4(tracker, prompts, cfg, video_path, meta):
         tracker.reset()
 
     _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
-                       post_ms, encode_ms, read_ms)
+                   post_ms, encode_ms, read_ms)
+    watch.write(cfg, tracker)
     return Path(cfg.output_path).resolve() if cfg.output_path else None
 
 
@@ -821,11 +872,13 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_s: list[float] = []
         _install_realtime_preprocess(tracker, tracked, preprocess_s,
                                      read_timer=read_s)
+        watch = _TrackWatch(cfg.track_chart is not None)
         progress = tqdm(total=len(tracked), desc="tracking [jpg]", unit="frame")
         with _video_sink(cfg, meta) as emit, _postprocess_timer(tracker) as post_s:
             t0 = time.perf_counter()
             for result in tracker.propagate():
                 t1 = time.perf_counter()
+                watch.see(result)
                 per_frame_dt.append(_split_frame(
                     t1 - t0, preprocess_s, post_s, read_s,
                     pre_ms, infer_ms, post_ms, read_ms))
@@ -844,6 +897,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         progress.close()
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
+        watch.write(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
         tracker.reset()

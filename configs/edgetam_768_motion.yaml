@@ -1,0 +1,48 @@
+# 768 with the motion layers on and the classical guard OFF.
+#
+# The middle rung of a three-step ablation, and the reason it exists as a file
+# rather than a flag: the two halves of this project's inference-time work fail
+# differently and have to be attributable separately.
+#
+#   configs/edgetam_768.yaml          nothing.   the "before".
+#   configs/edgetam_768_motion.yaml   this one.  samurai + ego_motion.
+#   configs/edgetam_768_samurai.yaml  the full stack, guard included.
+#
+# `samurai` changes which candidate mask is chosen and which frames reach the
+# memory bank. `guard` changes what the tracker *returns* -- a refused mask
+# comes back empty. Running them together first makes an improvement
+# unattributable and a regression undiagnosable, so the ladder is run in order
+# and each step answers one question:
+#
+#   plain -> motion   did the memory gate stop the target being lost after a
+#                     low-contrast frame?
+#   motion -> guard   did the classical layer stop the box ballooning over a
+#                     field, and the jumps?
+#
+# There is deliberately no "guard without ego_motion" rung. The guard measures
+# how far the target travelled *after* the background's own motion is removed;
+# without `ego_motion` it reads a drone's yaw as the target moving and fires on
+# honest frames. The two are one mechanism.
+#
+# On 640x512 thermal, prefer the 512 configs -- 768 upsamples there and pays
+# 2.25x the token count for interpolated pixels. See configs/edgetam_768.yaml.
+model_cfg: configs/edgetam.yaml
+checkpoint: third_party/EdgeTAM/checkpoints/edgetam.pt
+image_size: 768
+device: cuda
+precision: bfloat16
+mask_threshold: 0.0
+offload_video_to_cpu: false
+offload_state_to_cpu: false
+
+samurai:
+  enabled: true
+  kf_weight: 0.15
+  stable_frames: 15
+  stable_iou: 0.3
+  memory_iou: 0.5
+  memory_obj_score: 0.0
+  memory_kf_score: 0.0
+
+ego_motion:
+  reduce: 4
