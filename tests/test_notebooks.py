@@ -12,6 +12,8 @@ names that did not exist.
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -565,6 +567,77 @@ class TestTheCheckerCatchesThings(unittest.TestCase):
         # execution -- treating it otherwise would flood the report.
         self.assertEqual(check(self.notebook("if x_flag := True:\n    Y = 1",
                                              "print(Y)")), [])
+
+
+
+class CheckpointPathsTest(unittest.TestCase):
+    """A notebook naming another notebook's output has to name the real path.
+
+    `REFERENCE_CHECKPOINT` and `BASE_CHECKPOINT` are hard-coded strings, and
+    the run that reads them either warns (the reference) or asserts (the base)
+    when nothing is there. A warning is the dangerous one: 27 would go on
+    scoring against stock EdgeTAM while its log said it was comparing against
+    22. So the paths are derived here from the settings of the notebook that
+    writes them, rather than being read twice by eye.
+
+    The rule that made this necessary: METHOD is appended to `MIRROR_DIR` only
+    when it is *not* `finetune`, so a fine-tune keeps the bare folder name.
+    Reading the append without the `if` above it is exactly the mistake this
+    catches.
+    """
+
+    def settings(self, name: str) -> dict:
+        source = "".join(json.loads(
+            (ROOT / "notebooks" / name).read_text())["cells"][0]["source"])
+        found = {}
+        for key in ("RUN", "MIRROR_DIR", "METHOD", "SIZE",
+                    "REFERENCE_CHECKPOINT", "BASE_CHECKPOINT"):
+            match = re.search(rf"^{key}\s*=\s*(.+)$", source, re.M)
+            if match:
+                found[key] = match.group(1).split("#")[0].strip().strip('"')
+        return found
+
+    def output_of(self, name: str) -> str:
+        """The Drive path a notebook's finished checkpoint lands at."""
+        s = self.settings(name)
+        run, mirror = s["RUN"], s["MIRROR_DIR"]
+        if s["METHOD"] != "finetune":
+            mirror = f"{mirror.rstrip('/')}_{s['METHOD']}"
+            run = f"{run}_{s['METHOD']}"
+        return f"{mirror}/edgetam_pool_{run}_{s['SIZE']}.pt"
+
+    def test_every_named_checkpoint_is_one_a_notebook_here_writes(self):
+        outputs = {}
+        for name in sorted(path.name for path in NOTEBOOKS):
+            try:
+                if "MIRROR_DIR" in self.settings(name):
+                    outputs[self.output_of(name)] = name
+            except KeyError:
+                continue
+        self.assertTrue(outputs, "no notebook declares a checkpoint output")
+
+        for name in sorted(outputs.values()):
+            for key in ("REFERENCE_CHECKPOINT", "BASE_CHECKPOINT"):
+                named = self.settings(name).get(key, "")
+                if not named:
+                    continue
+                with self.subTest(notebook=name, key=key):
+                    self.assertIn(
+                        named, outputs,
+                        f"{name} points {key} at {named}, which no notebook "
+                        f"writes. These do: {sorted(outputs)}")
+
+    def test_a_fine_tune_keeps_the_bare_folder_and_a_lora_does_not(self):
+        """The rule the wrong path came from, stated once."""
+        self.assertEqual(
+            self.output_of("22_thermal_deep.ipynb"),
+            "/content/drive/MyDrive/edgetam-stage-b/thermal_deep/"
+            "edgetam_pool_thermal_deep_512.pt")
+        self.assertEqual(
+            self.output_of("23_thermal_deep_lora.ipynb"),
+            "/content/drive/MyDrive/edgetam-stage-b/thermal_deep_lora/"
+            "edgetam_pool_thermal_deep_lora_512.pt")
+
 
 
 if __name__ == "__main__":

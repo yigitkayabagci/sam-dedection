@@ -95,8 +95,8 @@ başlatmadan önce buradan geç.**
 
 | sıra | notebook | süre | çıktı |
 |---|---|---|---|
-| 1 | `34_pretrain_thermal_aerial.ipynb` | uzun (`EPOCHS [3, 40]`, `STEPS 1000`) | `edgetam-stage-b/pretrain_thermal_aerial_finetune/edgetam_pool_pretrain_thermal_aerial_512.pt` |
-| 1′ | `35_pretrain_rgb_aerial.ipynb` | uzun | `edgetam-stage-b/pretrain_rgb_aerial_finetune/edgetam_pool_pretrain_rgb_aerial_512.pt` |
+| 1 | `34_pretrain_thermal_aerial.ipynb` | uzun (`EPOCHS [3, 40]`, `STEPS 1000`) | `edgetam-stage-b/pretrain_thermal_aerial/edgetam_pool_pretrain_thermal_aerial_512.pt` |
+| 1′ | `35_pretrain_rgb_aerial.ipynb` | uzun | `edgetam-stage-b/pretrain_rgb_aerial/edgetam_pool_pretrain_rgb_aerial_512.pt` |
 
 İkisi **paralel çalışabilir** (ayrı runtime) — birbirine bağlı değiller.
 34 asıl hedef (hava + termal), 35 yanındaki ikinci RGB modeli.

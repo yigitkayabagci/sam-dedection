@@ -34,7 +34,7 @@ var: LR'yi batch'ten bağımsız 1.0 ölçekte tutuyor, trunk'ı en yavaş açı
 
 | | notebook | çıktı |
 |---|---|---|
-| 34 | `34_pretrain_thermal_aerial.ipynb` | `edgetam-stage-b/pretrain_thermal_aerial_finetune/edgetam_pool_pretrain_thermal_aerial_512.pt` |
+| 34 | `34_pretrain_thermal_aerial.ipynb` | `edgetam-stage-b/pretrain_thermal_aerial/edgetam_pool_pretrain_thermal_aerial_512.pt` |
 | 32 | üstteki checkpoint'ten devam | `edgetam-stage-b/aerial_thermal_stable/edgetam_pool_aerial_thermal_stable_512.pt` |
 
 **Zincirleme artık mümkün** — daha önce değildi. `BASE_CKPT` stok
@@ -43,7 +43,7 @@ var: LR'yi batch'ten bağımsız 1.0 ölçekte tutuyor, trunk'ı en yavaş açı
 `BASE_CHECKPOINT` eklendi:
 
 ```python
-BASE_CHECKPOINT = "/content/drive/MyDrive/edgetam-stage-b/pretrain_thermal_aerial_finetune/edgetam_pool_pretrain_thermal_aerial_512.pt"
+BASE_CHECKPOINT = "/content/drive/MyDrive/edgetam-stage-b/pretrain_thermal_aerial/edgetam_pool_pretrain_thermal_aerial_512.pt"
 ```
 
 Dosya yoksa koşu **assert ile durur** — sessizce stoktan başlamaz.
