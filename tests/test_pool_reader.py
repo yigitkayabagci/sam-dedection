@@ -734,6 +734,45 @@ class ExtractFramesTest(unittest.TestCase):
         self.assertEqual(sorted(wanted), ["000000.jpg", "000010.jpg"])
         self.assertEqual(wanted["000000.jpg"], {self.wanted[0]})
 
+    def test_one_archive_that_will_not_open_does_not_take_the_shelf_with_it(self):
+        """VTUAV is fifteen files on a Drive mount. A part that synced short is
+        one archive's worth of frames, not the run: raising here loses the
+        fourteen that are fine, and the frames already taken out of the ones
+        walked before it, because the notebook's loop dies with the call."""
+        good = self.archive("part_a.zip", [
+            "train_ST_008/car_01/ir/000000.jpg"])
+        broken = self.root / "part_b.zip"
+        broken.write_bytes(b"PK\x03\x04 and then the sync stopped")
+        later = self.archive("part_c.zip", [
+            "train_ST_008/car_01/ir/000010.jpg"])
+
+        report = extract_frames(self.records(), [good, broken, later],
+                                self.root / "out")
+
+        self.assertEqual((report["taken"], report["missing"]), (2, 0))
+        self.assertEqual([name for name, _ in report["unopened"]],
+                         ["part_b.zip"])
+        self.assertIn("BadZipFile", report["unopened"][0][1])
+        self.assertEqual(report["by_archive"]["part_b.zip"], 0)
+
+    def test_a_record_that_will_not_parse_is_skipped_not_raised_on(self):
+        """A pool zip that unpacked short leaves a truncated `record.json`
+        behind. One of those is not a reason for the other forty thousand
+        frames to stay inside the archives -- and it read as a crash in the
+        cell that extracts them, with nothing in the log naming the file."""
+        stray = self.pool / "demo" / "car_01" / "999999"
+        stray.mkdir(parents=True, exist_ok=True)
+        (stray / RECORD_FILE).write_text('{"image": "/half/a/rec')
+        archive = self.archive("part.zip", [
+            "train_ST_008/car_01/ir/000000.jpg",
+            "train_ST_008/car_01/ir/000010.jpg"])
+
+        self.assertEqual(sorted(wanted_frames(self.records())),
+                         ["000000.jpg", "000010.jpg"])
+        report = extract_frames(self.records(), [archive], self.root / "out")
+        self.assertEqual((report["asked"], report["taken"], report["missing"]),
+                         (2, 2, 0))
+
 
 class StoreAreasTest(unittest.TestCase):
     def test_areas_match_a_decoded_mask(self):
