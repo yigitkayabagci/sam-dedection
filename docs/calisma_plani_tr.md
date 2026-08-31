@@ -248,16 +248,32 @@ eski hızlı hal. `memgate` aynı motorlar, aynı checkpoint, aynı prompt ile
 yalnızca memory yazımına bir kapı ekler.
 
 ```bash
+cd ~/Documents/sam-dedection
 python3 tools/run_records.py \
   --records /SSD/YOLUN/record28/vis3 \
   --out frame_output --tag vis3_deneme1 \
+  --pattern '*.tif*' \
+  --cache-dir /SSD/YOLUN/_cache \
   --modes crop768 --weights pool_deep --backend trt \
   --policy plain,memgate
 ```
 
+Üç not:
+
+* **`--pattern`**: varsayılan `*.tif*`. Kareler jpg ise `--pattern '*.jpg'`
+  (tırnak şart, yoksa shell açar). Yanlışsa koşu artık **hemen** durur ve doğru
+  pattern'i adıyla söyler — eskiden yirmi dakika sonra "did not run" satırlarıyla
+  dolu bir SUMMARY üretiyordu.
+* **`--cache-dir`**: kareler her koşuda geçici diske yeniden yazılıyor. Kayıt
+  harici diskteyse staging'i de oraya al, sistem temp'ini şişirmesin.
+* **Depo kökünden çalıştır.** `--out` göreliyse ve başka bir dizindeysen,
+  run_records kendi dosyalarını senin dizinine, cli.py ise depo köküne yazardı;
+  artık yollar mutlaklaştırılıyor ama alışkanlık olarak `cd` iyi.
+
 `--records` hem bir kayıt klasörünü (içinde kareler) hem de kayıt klasörleri
-tutan bir dizini kabul eder; `--pattern` varsayılanı `*.tif*`, video varsayılan
-olarak açık.
+tutan bir dizini kabul eder; ikisinde de `record.name` `vis3` olur, yani çıktı
+yolu aynı. Video varsayılan olarak açık; `--box x1,y1,x2,y2` verirsen ekransız
+makinede de çalışır (yoksa interaktif seçiciye düşer).
 
 Çıkanlar:
 

@@ -575,6 +575,28 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd,
     }
 
 
+# Extensions worth naming back to someone whose --pattern found nothing. The
+# default is `*.tif*` because that is what this project's thermal records are;
+# a folder of jpgs then fails in a way that reads like an empty directory.
+KNOWN_FRAMES = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
+
+
+def suggest_pattern(folder: Path, pattern: str) -> str:
+    """The `--pattern` that would have matched this folder, as a sentence.
+
+    Empty when nothing here looks like frames, because a guess in that case
+    would be noise on top of a real problem.
+    """
+    for candidate in KNOWN_FRAMES:
+        if candidate == pattern:
+            continue
+        found = len(list(folder.glob(candidate)))
+        if found:
+            return (f" It holds {found} {candidate} file(s) -- "
+                    f"pass --pattern '{candidate}'.")
+    return ""
+
+
 def roots(args) -> tuple[Path, Path]:
     """Where this attempt writes, and where the target selection lives.
 
@@ -588,7 +610,13 @@ def roots(args) -> tuple[Path, Path]:
     root -- a new tag must not send someone back to the picker for a box they
     already chose.
     """
-    root = Path(args.out)
+    # Absolute, always. `run_step` launches cli.py with `cwd=ROOT` while these
+    # paths are resolved against whatever directory the user ran this from, so
+    # a relative `--out` puts run_records' own files (config.yaml,
+    # provenance.json, SUMMARY.md) in one tree and everything cli.py writes
+    # (the mp4, the charts, the logs) in another -- and the prompt file cli.py
+    # is handed does not exist, so every arm dies on a missing prompt.
+    root = Path(args.out).expanduser().resolve()
     return (root / args.tag if getattr(args, "tag", None) else root), root
 
 
@@ -808,7 +836,8 @@ def main(argv: list[str] | None = None) -> int:
                         "measurement with nothing else competing.")
     args = p.parse_args(argv)
 
-    root = Path(args.records)
+    # Absolute for the same reason `--out` is: cli.py runs with `cwd=ROOT`.
+    root = Path(args.records).expanduser().resolve()
     if not root.is_dir():
         raise SystemExit(f"{root} is not a directory.")
     # A folder holding frames is one record; a folder holding folders is a set
@@ -817,7 +846,18 @@ def main(argv: list[str] | None = None) -> int:
         sorted(d for d in root.iterdir() if d.is_dir())
     if not records:
         raise SystemExit(f"No frames matching {args.pattern!r} in {root}/, and no "
-                         "record folders inside it either.")
+                         "record folders inside it either."
+                         + suggest_pattern(root, args.pattern))
+    # A record whose frames are there under another extension is the failure
+    # that looks like success: the run reaches the summary and every row says
+    # "did not run", because the pattern is a *default* and the footage decided
+    # what it is years ago. Say it here, once, naming the pattern that works.
+    for record in records:
+        if not list(record.glob(args.pattern)):
+            hint = suggest_pattern(record, args.pattern)
+            raise SystemExit(f"{record}/ has no frames matching "
+                             f"{args.pattern!r}." + (hint or
+                             " Check --pattern and the record directory."))
     policies = [one.strip() for one in args.policy.split(",") if one.strip()]
     for one in policies:
         if one not in POLICIES:
@@ -900,7 +940,8 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # no display, nothing selected, unreadable frame
             print(f"!! {record.name}: no prompts ({exc}); skipped. Pass --box to "
                   "run without a display.")
-            failed += [f"{record.name}/{m}" for m in modes]
+            failed += [f"{record.name}/{m}" + ("" if p == "plain" else f" + {p}")
+                       for m, p in itertools.product(modes, policies)]
             continue
 
         if args.pick_only:

@@ -38,8 +38,11 @@ if str(ROOT) not in sys.path:
 
 import yaml  # noqa: E402
 
+from tools.run_records import main as run_records_main  # noqa: E402
+
 from tools.run_records import (MODES, ab_table, account_flags, POLICIES,  # noqa: E402
                                POLICY_KEYS, POLICY_NOTE, roots,
+                               suggest_pattern,
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
@@ -731,12 +734,20 @@ class Roots(unittest.TestCase):
 
     def test_without_a_tag_nothing_moves(self):
         out, pick = roots(self.args())
-        self.assertEqual(out, Path("frame_output"))
+        self.assertEqual(out.name, "frame_output")
         self.assertEqual(pick, out)
 
     def test_a_tag_names_the_attempt(self):
         out, _ = roots(self.args("vis3_deneme1"))
-        self.assertEqual(out, Path("frame_output/vis3_deneme1"))
+        self.assertEqual(out.parts[-2:], ("frame_output", "vis3_deneme1"))
+
+    def test_the_paths_are_absolute(self):
+        """cli.py is launched with cwd=ROOT while --out is resolved against the
+        caller's directory, so a relative one splits the output across two
+        trees and hands cli.py a prompt file that is not there."""
+        out, pick = roots(self.args("vis3_deneme1"))
+        self.assertTrue(out.is_absolute())
+        self.assertTrue(pick.is_absolute())
 
     def test_two_attempts_sit_beside_each_other(self):
         first, _ = roots(self.args("vis3_deneme1"))
@@ -750,6 +761,49 @@ class Roots(unittest.TestCase):
         _, pick_b = roots(self.args("vis3_deneme2"))
         self.assertEqual(pick_a, pick_b)
         self.assertNotEqual(pick_a, first)
+
+
+
+class PatternHint(unittest.TestCase):
+    """A `--pattern` that matches nothing is the failure that looks like success.
+
+    The default is `*.tif*` because this project's records are thermal TIFFs.
+    Point it at a folder of jpgs and the old behaviour was a summary full of
+    `did not run` rows, or -- with a parent directory -- a per-record "no
+    prompts" line that reads like a display problem.
+    """
+
+    def folder(self, names):
+        import tempfile
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name in names:
+            (root / name).touch()
+        return root
+
+    def test_it_names_the_pattern_that_would_have_worked(self):
+        hint = suggest_pattern(self.folder(["a.jpg", "b.jpg"]), "*.tif*")
+        self.assertIn("--pattern '*.jpg'", hint)
+        self.assertIn("2", hint)
+
+    def test_it_says_nothing_when_there_are_no_frames_at_all(self):
+        """A guess on top of a real problem is noise."""
+        self.assertEqual(suggest_pattern(self.folder(["notes.txt"]), "*.tif*"), "")
+
+    def test_it_does_not_suggest_the_pattern_that_already_failed(self):
+        self.assertEqual(suggest_pattern(self.folder(["a.jpg"]), "*.jpg"), "")
+
+    def test_a_record_with_no_matching_frames_stops_the_run(self):
+        """Rather than reaching a summary of empty rows twenty minutes later."""
+        root = self.folder([])
+        (root / "vis3").mkdir()
+        (root / "vis3" / "frame_000000.jpg").touch()
+        with self.assertRaises(SystemExit) as caught:
+            run_records_main(["--records", str(root), "--pattern", "*.tif*",
+                              "--modes", "crop768"])
+        self.assertIn("--pattern '*.jpg'", str(caught.exception))
 
 
 
