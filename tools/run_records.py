@@ -349,7 +349,7 @@ def overlay_for(policy: str) -> dict:
     return body
 
 
-def account_flags(policy: str, outdir: Path) -> list:
+def account_flags(policy: str, outdir: Path, photometry: bool = False) -> list:
     """The flags that make a policy write down what it actually did.
 
     Every layer here is invisible in the mp4 in its own way, and each has one
@@ -359,6 +359,13 @@ def account_flags(policy: str, outdir: Path) -> list:
     * `prefilter` rewrites the pixels the encoder is given; `prefilter.json`
       says how many frames were under the floor, and a floor below the
       footage's own span leaves every frame untouched.
+    * `photometry` asks any run for the same measurement without the filter:
+      `--prefilter 0` touches no pixel and writes `photometry.json`, which
+      carries each frame's used span and how far it has moved from the frames
+      the memory bank is holding. That is the pair of numbers that separates
+      "the encoder cannot read this frame" from "the bank is holding another
+      exposure", and it costs 0.23 ms a frame, so it is asked for rather than
+      assumed.
     * a `samurai:` block judges whether a frame may enter the memory bank.
       Nothing about the *output* of an accepted frame changes -- what changes
       is what the frames after it read back -- so `memory.json` is the only
@@ -377,6 +384,8 @@ def account_flags(policy: str, outdir: Path) -> list:
         flags += ["--verdicts", outdir / "verdicts.json"]
     if "samurai" in overlay:
         flags += ["--memory-log", outdir / "memory.json"]
+    if photometry and policy not in POLICY_FLAGS:
+        flags += ["--prefilter-log", outdir / "photometry.json"]
     return flags
 
 
@@ -566,6 +575,23 @@ def provenance(mode: str, config: str, crop: int | None, args, cmd,
     }
 
 
+def roots(args) -> tuple[Path, Path]:
+    """Where this attempt writes, and where the target selection lives.
+
+    `--tag` names an attempt: everything lands in `<out>/<tag>/`, SUMMARY.md
+    included, so a second attempt sits beside the first instead of on top of
+    it. Policies are compared *inside* one tag, attempts across tags, and the
+    counter in a name like `vis3_deneme1` is the user's to turn.
+
+    The pick is deliberately **not** tagged. Which pixels the target is in is a
+    property of the record, not of the attempt, so it stays at the untagged
+    root -- a new tag must not send someone back to the picker for a box they
+    already chose.
+    """
+    root = Path(args.out)
+    return (root / args.tag if getattr(args, "tag", None) else root), root
+
+
 def folder(mode: str, args, policy: str | None = None) -> str:
     """The output folder for one run: `<mode>[_<weights>][_<policy>][_skipN]`.
 
@@ -675,6 +701,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--records", default="frames",
                    help="Directory of record folders, each an image sequence.")
     p.add_argument("--out", default="frame_output", help="Where results go.")
+    p.add_argument("--photometry", action="store_true",
+                   help="Measure every frame's used grey-level span and how "
+                        "far it has moved from the frames the memory bank is "
+                        "holding, and write it beside each run as "
+                        "photometry.json. No pixel is changed. This is the "
+                        "measurement that separates a frame the encoder cannot "
+                        "read (small span) from a bank holding another "
+                        "exposure (span fine, but moved). 0.23 ms a frame.")
+    p.add_argument("--tag", default=None,
+                   help="Name this attempt. Everything lands in "
+                        "<out>/<tag>/ instead of <out>/, including SUMMARY.md, "
+                        "so a second attempt with a different --tag sits "
+                        "beside the first rather than on top of it. Compare "
+                        "policies inside one tag; compare attempts across "
+                        "tags. e.g. --tag vis3_deneme1")
     p.add_argument("--modes", default=",".join(MODES),
                    help=f"Comma-separated subset of {', '.join(MODES)}.")
     p.add_argument("--policy", default="plain",
@@ -848,14 +889,14 @@ def main(argv: list[str] | None = None) -> int:
               f"--policy plain, or on --backend torch, which needs no export."
         )
 
-    out_root = Path(args.out)
+    out_root, pick_root = roots(args)
     rows: dict[str, dict[str, dict]] = {}
     failed: list[str] = []
 
     for record in records:
         rows[record.name] = {}
         try:
-            prompts = resolve_prompts(record, out_root / record.name, args)
+            prompts = resolve_prompts(record, pick_root / record.name, args)
         except Exception as exc:  # no display, nothing selected, unreadable frame
             print(f"!! {record.name}: no prompts ({exc}); skipped. Pass --box to "
                   "run without a display.")
@@ -899,7 +940,7 @@ def main(argv: list[str] | None = None) -> int:
             # writing an empty file, so this is asked for whenever one might
             # exist: a refused frame is otherwise just a missing mask in the
             # mp4 with nothing saying which gate refused it.
-            cmd += account_flags(policy, outdir)
+            cmd += account_flags(policy, outdir, args.photometry)
             if args.strict:
                 cmd += ["--strict"]
             if crop:

@@ -38,7 +38,13 @@ both arithmetic on the box, no filter and no re-scoring:
 | gate | what it refuses | measured |
 |---|---|---|
 | `memory_jump: 2.5` | a mask whose centre lands more than 2.5 of the last accepted box's own lengths away | a 90 px jump on a 26 px target: 16 of the 16 following frames enter the bank without it, 8 with it |
-| `memory_area_ratio: 3.0` | a mask that stays put and swells past 3x the running median of the areas already accepted | x2, x3, x4 balloons: 10 of 10 frames in without it, 0 of 10 with it |
+| `memory_area_ratio: 2.5` | a mask that stays put and swells past 2.5x the running median of the areas already accepted | sides doubling, tripling, quadrupling: 10 of 10 frames in without it, 0 of 10 with it |
+
+The two are an **OR** — either refuses the frame on its own. `memory_area_ratio`
+is an *area* ratio, not a side ratio: 2.5 fires on a box whose sides grow about
+1.6x in one frame, and a box that doubles its sides is 4x the area and well past
+it. 2.0 was measured too and refused a 1.5x side growth, which a target closing
+on the camera can manage.
 
 Both are safe on the honest cases in the same measurements: a real manoeuvre to
 16 px a frame keeps all 16, a real 2.6x approach keeps 40 of 40, and
@@ -91,3 +97,25 @@ therefore drops to `reduce: 2`; `ego`, which only needs the translation, keeps
 4. That difference is a deliberate part of the ladder, not an oversight: if
 `guard` were run at 4 the rung would be measuring the decode as much as the
 policy.
+
+
+## Which of the two failures you have
+
+A track that leaves the target and settles on something else has two possible
+causes and they need opposite fixes:
+
+* the **encoder** could not read the frame — it uses sixty grey levels of 255,
+  and after ImageNet's normalisation that is a tenth of the band the backbone
+  was trained on;
+* the **memory bank** is holding another exposure — the frame is perfectly
+  readable, but the gain moved, and attention is matching appearances encoded
+  before the move against pixels that no longer sit where they did.
+
+They look identical in the mp4. `--photometry` measures both without changing a
+pixel (0.23 ms a frame): each frame's used span, and how far it has moved from
+the frames the bank is holding. `tools/diagnose_break.py` reads that against
+`track.json` and says which one moved at each break — or **NEITHER**, which
+means the pixels did not change and the cause is a look-alike, not contrast.
+
+    python3 tools/run_records.py ... --policy plain,memgate --photometry --tag vis3_deneme1
+    python3 tools/diagnose_break.py frame_output/vis3_deneme1/<record>/crop768_pool_deep_memgate

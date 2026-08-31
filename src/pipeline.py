@@ -31,6 +31,33 @@ from .trackers import VideoTracker
 from .visualize import overlay_masks
 
 
+def photometry(rgb) -> dict:
+    """Where this frame sits in the 0-255 range: the 1st and 99th percentile.
+
+    Off a 256-bin histogram rather than `np.percentile`, which was the whole
+    cost of the pre-encoder filter: at 768 the percentile pair is **7.1 ms a
+    frame** and the histogram is **0.23 ms** for the same two numbers to within
+    one grey level (the histogram gives the order statistic, the percentile
+    interpolates between two). A measurement that costs a third of an
+    inference is a measurement that changes what it measures.
+
+    The percentiles rather than min/max because one hot pixel or one dead one
+    would otherwise say the frame uses the whole range when it uses sixty
+    levels of it.
+    """
+    import numpy as np
+
+    grey = rgb[..., 0] if rgb.ndim == 3 else rgb
+    counts = cv2.calcHist([grey], [0], None, [256], [0, 256]).ravel()
+    total = float(counts.sum())
+    if total <= 0:
+        return {"p1": 0.0, "p99": 0.0, "span": 0.0}
+    running = np.cumsum(counts)
+    low = float(np.searchsorted(running, 0.01 * total))
+    high = float(np.searchsorted(running, 0.99 * total))
+    return {"p1": low, "p99": high, "span": round(high - low, 1)}
+
+
 def stretch_range(rgb, floor: int, low: int = 8, high: int = 247):
     """Put a dark, flat frame back where the encoder's training data was.
 
@@ -51,21 +78,25 @@ def stretch_range(rgb, floor: int, low: int = 8, high: int = 247):
     returned untouched, so this cannot quietly rescale footage that never
     needed it.
 
-    Returns `(frame, report)`. `report` is None when nothing was done.
+    Returns `(frame, report)`. The report is always the frame's photometry, so
+    a `floor` of 0 measures without touching a pixel; `gain` is present only
+    when the frame was actually stretched.
+
+    The mapping goes through a 256-entry lookup table rather than arithmetic on
+    the array: `cv2.LUT` gives bit-identical output at 0.23 ms a frame against
+    3.0 ms for the float multiply at 768.
     """
     import numpy as np
 
-    grey = rgb[..., 0] if rgb.ndim == 3 else rgb
-    low_p, high_p = (float(v) for v in np.percentile(grey, (1.0, 99.0)))
-    span = high_p - low_p
+    stats = photometry(rgb)
+    span = stats["span"]
     if floor <= 0 or span >= floor or span < 1.0:
-        return rgb, None
+        return rgb, stats
     scale = (high - low) / span
-    out = np.clip((rgb.astype(np.float32) - low_p) * scale + low, 0, 255)
-    return out.astype(np.uint8), {"p1": round(low_p, 1), "p99": round(high_p, 1),
-                                  "span": round(span, 1),
-                                  "span_after": round(span * scale, 1),
-                                  "gain": round(scale, 2)}
+    table = np.clip((np.arange(256, dtype=np.float32) - stats["p1"]) * scale + low,
+                    0, 255).astype(np.uint8)
+    return cv2.LUT(rgb, table), {**stats, "span_after": round(span * scale, 1),
+                                 "gain": round(scale, 2)}
 
 
 class _LazyFrames:
@@ -100,6 +131,9 @@ class _LazyFrames:
         # The pre-encoder filter and its record. See `stretch_range`.
         self.prefilter = int(prefilter)
         self.log = log if log is not None else []
+        # Photometry costs 0.23 ms a frame, so it is measured when something
+        # asked for it -- a log to write into, or a filter to drive.
+        self.measure = log is not None or int(prefilter) > 0
         self.image_size = image_size
         self.timer = timer
         # Reading a frame off disk is timed separately because a deployment fed
@@ -138,9 +172,12 @@ class _LazyFrames:
             img = cv2.resize(img, (size, size),
                              interpolation=cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR)
         rgb = to_rgb8(img)
-        if self.prefilter:
+        if self.measure:
+            # A `prefilter` of 0 measures and changes nothing, which is the
+            # mode that answers "is this footage dark at all" without also
+            # answering it differently by being switched on.
             rgb, report = stretch_range(rgb, self.prefilter)
-            self.log.append({"frame": int(index), **(report or {"span": None})})
+            self.log.append({"frame": int(index), **report})
         out = torch.from_numpy(rgb).permute(2, 0, 1).to(torch.float32).div_(255.0)
         out = out.sub_(self.mean).div_(self.std)
         self.timer.append(time.perf_counter() - start)
@@ -592,11 +629,21 @@ class _TrackWatch:
         self.wanted = wanted
         self.shares: list[float] = []
         self.centres: list[tuple[float, float] | None] = []
+        # The mask grid's longer side, so a jump can be stated in the target's
+        # own widths rather than in pixels of an unstated resolution.
+        self.side = 0
 
     def see(self, result) -> None:
         if not self.wanted:
             return
-        share, centre = track_geometry(getattr(result, "masks", None))
+        masks = getattr(result, "masks", None)
+        share, centre = track_geometry(masks)
+        if not self.side:
+            for mask in (masks or {}).values():
+                shape = np.asarray(mask).shape
+                if len(shape) >= 2:
+                    self.side = int(max(shape[-2:]))
+                break
         self.shares.append(share)
         self.centres.append(centre)
 
@@ -651,15 +698,33 @@ class _TrackWatch:
         for value in held:
             run = 0 if value else run + 1
             longest = max(longest, run)
-        jumps = 0
-        for before, after in zip(self.centres, self.centres[1:]):
-            if before is None or after is None:
-                continue
-            step = ((after[0] - before[0]) ** 2 + (after[1] - before[1]) ** 2) ** 0.5
-            # A target's own width is the natural unit, and the mask's area is
-            # the only measure of it here.
-            width = max(float(np.sqrt(shares[shares > 0].mean())) * 100.0, 1.0)
-            jumps += int(step > width)
+        # A target's own width is the natural unit for a jump, and the mask's
+        # area is the only measure of it here: `sqrt(share)` is the target's
+        # side as a fraction of the frame's, so times the grid's side it is
+        # pixels. It used to be times 100, which on a 768 grid made the
+        # threshold seven times too small and `jumps` a count of ordinary
+        # motion.
+        typical = float(np.sqrt(shares[held].mean())) if held.any() else 0.0
+        width = max(typical * float(self.side or 100), 1.0)
+        rows, jumps, previous, seen = [], 0, None, []
+        for index, (share, centre) in enumerate(zip(self.shares, self.centres)):
+            step = None
+            if previous is not None and centre is not None:
+                step = float(np.hypot(centre[0] - previous[0],
+                                      centre[1] - previous[1])) / width
+                jumps += int(step > 1.0)
+            grew = None
+            if share > 0.0:
+                if seen:
+                    grew = share / float(np.median(seen))
+                seen.append(share)
+                del seen[:-12]
+            rows.append({"frame": index, "held": bool(share > 0.0),
+                         "share": round(float(share), 6),
+                         "jump": None if step is None else round(step, 2),
+                         "grew": None if grew is None else round(grew, 2)})
+            if centre is not None:
+                previous = centre
         path = Path(cfg.track_chart).with_suffix(".json")
         path.write_text(json.dumps({
             "frames": int(shares.size),
@@ -669,14 +734,57 @@ class _TrackWatch:
             "share_median": round(float(np.median(shares[held])) if held.any() else 0.0, 5),
             "share_max": round(float(shares.max()), 5),
             "jumps": int(jumps),
+            # Per frame, so a break can be located and explained rather than
+            # only counted. `tools/diagnose_break.py` reads these against the
+            # photometry to say whether the encoder or the memory bank was the
+            # thing that moved.
+            "rows": rows,
         }, indent=2) + "\n")
         print(f"[pipeline] held {int(held.sum())}/{shares.size} frames, "
               f"longest gap {longest}, max share {shares.max():.1%} -> {path}")
 
 
 
+def _measuring(cfg: "PipelineConfig") -> bool:
+    """Whether anything this run does needs the frames' photometry."""
+    return bool(cfg.prefilter) or cfg.prefilter_log is not None
+
+
+def photometric_drift(rows: list, depth: int = 7) -> list:
+    """How far each frame's own range has moved from the frames just before it.
+
+    The number that separates the two explanations for a track that breaks in
+    the dark. A frame the encoder cannot read is a frame with a *small span*.
+    A frame the memory bank cannot match is a frame whose span is fine but has
+    *moved* -- the bank holds appearances encoded under a different exposure,
+    and memory attention is comparing them against pixels that no longer sit
+    where they did.
+
+    `depth` is the bank's own depth (SAM 2 keeps `num_maskmem - 1` past
+    frames), so this compares a frame against the window the memory attention
+    is actually reading. In grey levels, off the same two percentiles.
+    """
+    import numpy as np
+
+    out: list = []
+    for index, row in enumerate(rows):
+        window = [r for r in rows[max(index - depth, 0):index]
+                  if r.get("p1") is not None]
+        if not window or row.get("p1") is None:
+            out.append(None)
+            continue
+        low = float(np.median([r["p1"] for r in window]))
+        high = float(np.median([r["p99"] for r in window]))
+        out.append(round(max(abs(row["p1"] - low), abs(row["p99"] - high)), 1))
+    return out
+
+
 def _write_prefilter(cfg: PipelineConfig, rows: list) -> None:
-    """What the pre-encoder filter did, frame by frame, and whether it fired.
+    """The frame-by-frame photometry, and what the pre-encoder filter did to it.
+
+    Written whenever a log path was given, whether or not the filter fired --
+    with `--prefilter 0` nothing is touched and this is a pure measurement of
+    the footage, which is the arm the diagnosis needs.
 
     The first question asked of it is not "what does the video look like" but
     "did anything change at all" -- a floor set below the footage's own span
@@ -685,13 +793,27 @@ def _write_prefilter(cfg: PipelineConfig, rows: list) -> None:
     """
     import json
 
-    if cfg.prefilter_log is None or not cfg.prefilter:
+    if cfg.prefilter_log is None or not rows:
         return
     fired = [r for r in rows if r.get("gain")]
+    spans = [r["span"] for r in rows if r.get("span") is not None]
+    drift = photometric_drift(rows)
+    moved = [d for d in drift if d is not None]
+    for row, value in zip(rows, drift):
+        row["drift"] = value
     body = {
         "floor": int(cfg.prefilter),
         "frames": len(rows),
         "stretched": len(fired),
+        # The footage's own range, measured whether or not anything was done to
+        # it: the span is what says "the encoder was given sixty grey levels",
+        # and the drift is what says "the memory bank is holding another
+        # exposure".
+        "span_median": round(float(sorted(spans)[len(spans) // 2]), 1) if spans else None,
+        "span_min": round(min(spans), 1) if spans else None,
+        "dark_frames": sum(1 for v in spans if v < 70),
+        "drift_median": round(sorted(moved)[len(moved) // 2], 1) if moved else None,
+        "drift_max": round(max(moved), 1) if moved else None,
         "span_before": (round(sum(r["span"] for r in fired) / len(fired), 1)
                         if fired else None),
         "span_after": (round(sum(r["span_after"] for r in fired) / len(fired), 1)
@@ -703,7 +825,12 @@ def _write_prefilter(cfg: PipelineConfig, rows: list) -> None:
     path = Path(cfg.prefilter_log)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(body, indent=2) + "\n")
-    if fired:
+    print(f"[photometry] span median {body['span_median']} levels, "
+          f"{body['dark_frames']}/{body['frames']} frames under 70; "
+          f"exposure drift median {body['drift_median']}, max {body['drift_max']}")
+    if not cfg.prefilter:
+        print(f"[photometry] measured only, no pixel changed -> {path}")
+    elif fired:
         print(f"[prefilter] stretched {len(fired)}/{len(rows)} frames, "
               f"span {body['span_before']} -> {body['span_after']} levels "
               f"(median gain x{body['gain_median']}) -> {path}")
@@ -993,7 +1120,11 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         # The source frames, not the JPG cache: the cache only existed to get
         # `init_state` through its bulk load, and re-decoding it per frame
         # would add a lossy compression round-trip to every measurement.
-        prefilter_log: list = []
+        # `None` rather than an empty list when nothing asked to measure: the
+        # frame source treats a log to write into as the request itself, and
+        # photometry is 0.23 ms a frame that a run nobody is diagnosing should
+        # not pay.
+        prefilter_log: list | None = [] if _measuring(cfg) else None
         _require_realtime_preprocess(tracker, tracked, preprocess_s, view,
                                      read_s, cfg.prefilter, prefilter_log)
 
@@ -1026,7 +1157,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
         watch.write(cfg, tracker)
-        _write_prefilter(cfg, prefilter_log)
+        _write_prefilter(cfg, prefilter_log or [])
         _write_memory(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:
@@ -1119,7 +1250,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         read_ms: list[float] = []
         preprocess_s: list[float] = []
         read_s: list[float] = []
-        prefilter_log: list = []
+        prefilter_log: list | None = [] if _measuring(cfg) else None
         _require_realtime_preprocess(tracker, tracked, preprocess_s,
                                      read_timer=read_s, prefilter=cfg.prefilter,
                                      log=prefilter_log)
@@ -1149,7 +1280,7 @@ def _run_jpg(tracker, prompts, cfg, video_path):
         _report_timing(cfg, tracker, meta, prompts, per_frame_dt, pre_ms, infer_ms,
                        post_ms, encode_ms, read_ms)
         watch.write(cfg, tracker)
-        _write_prefilter(cfg, prefilter_log)
+        _write_prefilter(cfg, prefilter_log or [])
         _write_memory(cfg, tracker)
         return Path(cfg.output_path).resolve() if cfg.output_path else None
     finally:

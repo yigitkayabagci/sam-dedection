@@ -299,7 +299,7 @@ yok. Bu turda değişenler:
 
 ## 7. Şu anki durum
 
-* `python3 -m pytest tests/ -q` → **1124 passed, 9 skipped, 368 subtests**.
+* `python3 -m pytest tests/ -q` → **1163 passed, 9 skipped, 379 subtests**.
 * Yeni test dosyaları: `tests/test_photometric.py` (11),
   `tests/test_stabiliser.py` (27), `tests/test_pool_reader.py`'de
   `AeroVISPathsTest` (8).
@@ -334,7 +334,14 @@ hedefin "hatırlanan görünümü" olmasını engelleyemez.
 | ayar | neyi reddediyor | ölçüm |
 |---|---|---|
 | `memory_jump: 2.5` | merkezi, kabul edilen son kutunun kendi uzun kenarının 2.5 katından fazla uzağa düşen maske | 26 px hedefte 90 px sıçrama: kapı yokken sonraki 16 karenin 16'sı bank'a giriyor, varken 8'i |
-| `memory_area_ratio: 3.0` | yerinde durup şişen maske (kabul edilmiş alanların koşan medyanının 3 katı) | x2, x3, x4 balon: kapısız 10/10 kare bank'a giriyor, kapılı 0/10 |
+| `memory_area_ratio: 2.5` | yerinde durup şişen maske (kabul edilmiş alanların koşan medyanının 2.5 katı) | kenarları x2, x3, x4 olan balon: kapısız 10/10 kare bank'a giriyor, kapılı 0/10 |
+
+İkisi **OR**: biri tek başına kareyi reddeder — sıçrayan maske büyümemiş olsa
+da, yerinde şişen maske hiç kıpırdamamış olsa da. `memory_area_ratio` bir
+**alan** oranıdır, kenar oranı değil: 2.5, kenarları bir karede ~1.6 kat büyüyen
+kutuda ateşlenir; kenarları ikiye katlanan kutu 4 kat alan eder, fazlasıyla
+içeride. 2.0 denendi ve kenarları 1.5 kat (alan 2.25) büyümeyi de reddediyordu —
+kameraya yaklaşan hedef için fazla dar bulundu.
 
 Dürüst durumlarda bedeli yok, aynı ölçümlerde: gerçek manevra (16 px/kare'ye
 hızlanma) 16/16 kalıyor, gerçek 2.6x yaklaşma 40/40 kalıyor. `memory_patience:
@@ -392,3 +399,89 @@ python3 tools/run_records.py --records ~/Videos/records --modes crop768 \
 
 `prefilter.json`'da ilk bakılacak alan `stretched`; 0 ise eşik bu görüntünün
 kendi aralığının altında kalmış demektir ve o koşu da `plain`'dir.
+
+
+---
+
+## 9. Kırılmanın sebebini ayırmak: encoder mi, memory mi?
+
+Sorulan soru buydu: düşük kontrast encoder'ı mı çökertiyor, yoksa memory'de
+duran karelerin matrisleri yeni renge/pozlamaya uymadığı için mi patlıyor?
+İkisi videoda **aynı** görünüyor — kutu hedeften kopup benzer bir şeye
+yapışıyor — ama tedavileri zıt. Ayrım ölçülebilir, ve artık ölçülüyor.
+
+### İki sayı
+
+Her kare için, encoder'a giren pikseller üzerinden:
+
+| sayı | ne demek | hangi arıza |
+|---|---|---|
+| **span** — karenin kullandığı gri seviye aralığı (1.–99. persentil) | gece termalde 255'in 60 seviyesi. /255 ve ImageNet normalizasyonundan sonra encoder'ın eğitildiği bandın onda biri | küçükse: **encoder kareyi okuyamıyor** |
+| **drift** — bu karenin p1/p99'unun, memory bank'ın tuttuğu son 7 karenin medyanından uzaklığı | pozlama kaydı: gain değişti, güneş bulut arkasına girdi, sensör yeniden aralıklandı | büyükse: **bank başka bir pozlamayı tutuyor** |
+
+Yavaş sürüklenme sayılmaz — bank onu takip eder, drift küçük kalır. Sayan şey
+**basamak**: bank'ın içi eski pozlamada kodlanmışken kareler artık başka yerde.
+
+### Nasıl koşulur
+
+```bash
+python3 tools/run_records.py --records ~/Videos/records --modes crop768 \
+  --weights pool_deep --backend trt --policy plain,memgate \
+  --photometry --tag vis3_deneme1
+```
+
+`--photometry` **hiçbir pikseli değiştirmez**; sadece ölçer, kare başına
+0.23 ms. Her koşu klasörüne `photometry.json` yazar.
+
+Sonra:
+
+```bash
+python3 tools/diagnose_break.py frame_output/vis3_deneme1/<record>/crop768_pool_deep_memgate
+```
+
+Çıktı şuna benzer:
+
+```
+   40/40 frames held, longest gap 0, 2 jumps, max share 0.9%
+   span median 28.0 levels (40/40 under 70), exposure drift median 1.0, max 110.0
+
+          frames   span- drift+  what happened
+              20    27.0  110.0  jumped 6.7 widths
+                    BOTH — the frame is dark and the exposure moved
+```
+
+Dört karar var ve dördü de bir sonraki adımı söyler:
+
+* **ENCODER** (span küçük, drift yok) → `--policy prefilter`, ya da eğitimde
+  fotometrik augmentasyon (`photometric.py`).
+* **MEMORY** (span iyi, drift büyük) → `--policy memgate`, daha kısa bank, ya
+  da memory yolunu pozlama değişimleriyle eğitmek.
+* **BOTH** → ikisi de.
+* **NEITHER** (pikseller değişmemiş) → sorun kontrast değil; benzer görünen
+  bir distractor. Bu da bir sonuç: yanlış yeri düzeltmekten kurtarır.
+
+### Yol boyunca bulunan ikinci gerçek hata
+
+`--prefilter` kare başına **10 ms** harcıyordu ve bunun 7.1 ms'i sadece
+`np.percentile` idi — yani ölçüm, ölçtüğü şeyi değiştiriyordu. 256 kutuluk
+histogram aynı iki sayıyı bir gri seviye içinde **0.23 ms**'de veriyor; germe
+işlemi de float çarpım yerine `cv2.LUT` ile bit bit aynı sonucu 3.0 ms yerine
+0.23 ms'de veriyor. `--prefilter` artık ~10 ms değil ~0.86 ms.
+
+Ayrıca `track.json`'daki `jumps` yanlış birimdeydi: hedefin kendi genişliği
+`sqrt(share) * 100` ile hesaplanıyordu, oysa maske ızgarasının kenarı 768.
+Eşik yedi kat küçük çıkıyor, sıradan hareket sıçrama sayılıyordu. Artık gerçek
+kenar kullanılıyor ve `track.json` kare kare satır tutuyor.
+
+### Çıktı klasörü: `--tag`
+
+```
+frame_output/vis3_deneme1/<record>/crop768_pool_deep/
+frame_output/vis3_deneme1/<record>/crop768_pool_deep_memgate/
+frame_output/vis3_deneme1/SUMMARY.md
+```
+
+Aynı tag ile tekrar koşarsan üstüne yazar (bir deneme = bir klasör). Sayacı sen
+çevirirsin: `--tag vis3_deneme2`. **Hedef seçimi tag'lenmez** —
+`frame_output/<record>/prompts.json`'da kalır, yeni tag seni tekrar seçiciye
+göndermez.

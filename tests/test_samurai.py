@@ -814,6 +814,63 @@ class MemoryGateTest(unittest.TestCase):
         self.assertFalse(memory.keep(1))
         self.assertGreater(chosen.jump, memory.config.memory_jump)
 
+    def swell(self, factor, at=20, frames=30):
+        """A mask that stays on the target and grows in place, by `factor` on
+        each side -- so the area goes as its square."""
+        memory = MotionAwareMemory(memgate())
+        position = np.array([300.0, 240.0])
+        kept = []
+        for index in range(frames):
+            position = position + np.array([3.0, 1.0])
+            half_w, half_h = ((13.0, 9.0) if index < at
+                              else (13.0 * factor, 9.0 * factor))
+            box = np.array([position[0] - half_w, position[1] - half_h,
+                            position[0] + half_w, position[1] + half_h])
+            chosen = memory.select(np.stack([box, box + 2, box - 2]),
+                                   np.array([0.9, 0.8, 0.8]))
+            memory.record(index, chosen.mask_score, 5.0, chosen.kf_score,
+                          chosen.area_ratio, chosen.jump)
+            if index >= at:
+                kept.append(memory.keep(index))
+        return sum(kept), len(kept)
+
+    def test_a_balloon_is_kept_out_of_the_bank(self):
+        """Sides doubling and worse -- 4x, 9x, 16x the area."""
+        for factor in (2.0, 3.0, 4.0):
+            with self.subTest(factor=factor):
+                self.assertEqual(self.swell(factor), (0, 10))
+
+    def test_a_growth_a_closing_target_could_manage_is_left_alone(self):
+        """1.5x on each side is 2.25x the area, under the 2.5 gate. A gate at
+        2.0 refuses it, which is why the shipped number is not 2.0."""
+        self.assertEqual(self.swell(1.5), (10, 10))
+
+    def test_the_area_gate_is_an_area_ratio_not_a_side_ratio(self):
+        """Worth pinning because the two readings differ by a square, and the
+        threshold reads like a size."""
+        memory = MotionAwareMemory(memgate())
+        box = np.array([100.0, 100.0, 120.0, 120.0])
+        memory.select(np.stack([box] * 3), np.array([0.9, 0.8, 0.8]))
+        doubled = np.array([100.0, 100.0, 140.0, 140.0])       # 2x side, 4x area
+        chosen = memory.select(np.stack([doubled] * 3), np.array([0.9, 0.8, 0.8]))
+        self.assertAlmostEqual(chosen.area_ratio, 4.0, places=6)
+
+    def test_the_two_gates_are_an_or(self):
+        """A frame is refused by either on its own. Both were asked for, and a
+        mask that jumps without growing is the common one."""
+        config = memgate()
+        moved = FrameRecord(iou=0.9, object_score=5.0, kf_score=0.0,
+                            area_ratio=1.0, jump=9.0)
+        grew = FrameRecord(iou=0.9, object_score=5.0, kf_score=0.0,
+                           area_ratio=6.0, jump=0.1)
+        both = FrameRecord(iou=0.9, object_score=5.0, kf_score=0.0,
+                           area_ratio=6.0, jump=9.0)
+        self.assertFalse(moved.acceptable(config))
+        self.assertFalse(grew.acceptable(config))
+        self.assertFalse(both.acceptable(config))
+        self.assertTrue(FrameRecord(iou=0.9, object_score=5.0, kf_score=0.0,
+                                    area_ratio=1.2, jump=0.4).acceptable(config))
+
     def test_the_filter_is_not_run_when_nothing_reads_it(self):
         """`kf_weight: 0` and no motion gate leaves the Kalman with no reader,
         and a policy that gates on geometry should not pay for a motion model

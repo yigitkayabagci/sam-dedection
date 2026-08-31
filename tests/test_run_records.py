@@ -39,7 +39,7 @@ if str(ROOT) not in sys.path:
 import yaml  # noqa: E402
 
 from tools.run_records import (MODES, ab_table, account_flags, POLICIES,  # noqa: E402
-                               POLICY_KEYS, POLICY_NOTE,
+                               POLICY_KEYS, POLICY_NOTE, roots,
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
@@ -696,12 +696,60 @@ class AccountFlags(unittest.TestCase):
                          ["--prefilter", "70",
                           "--prefilter-log", "OUT/prefilter.json"])
 
+    def test_the_measurement_arm_touches_no_pixel(self):
+        """`--photometry` asks every run for the frames' own numbers without
+        also changing them -- `--prefilter` is absent, so the floor stays 0."""
+        flags = [str(f) for f in account_flags("memgate", Path("OUT"),
+                                               photometry=True)]
+        self.assertIn("--prefilter-log", flags)
+        self.assertIn("OUT/photometry.json", flags)
+        self.assertNotIn("--prefilter", flags)
+
+    def test_the_filter_s_own_log_is_not_overwritten_by_the_measurement(self):
+        """`prefilter` already writes one, and the two are different runs of
+        different pixels: one file each."""
+        flags = [str(f) for f in account_flags("prefilter", Path("OUT"),
+                                               photometry=True)]
+        self.assertIn("OUT/prefilter.json", flags)
+        self.assertNotIn("OUT/photometry.json", flags)
+
     def test_every_flag_it_names_is_one_cli_py_takes(self):
         source = (ROOT / "cli.py").read_text()
         for policy in POLICIES:
             for flag in self.flags(policy):
                 if flag.startswith("--"):
                     self.assertIn(f'"{flag}"', source, flag)
+
+
+
+class Roots(unittest.TestCase):
+    """`--tag`: one attempt, one folder, and the counter is the user's."""
+
+    @staticmethod
+    def args(tag=None):
+        return Namespace(out="frame_output", tag=tag)
+
+    def test_without_a_tag_nothing_moves(self):
+        out, pick = roots(self.args())
+        self.assertEqual(out, Path("frame_output"))
+        self.assertEqual(pick, out)
+
+    def test_a_tag_names_the_attempt(self):
+        out, _ = roots(self.args("vis3_deneme1"))
+        self.assertEqual(out, Path("frame_output/vis3_deneme1"))
+
+    def test_two_attempts_sit_beside_each_other(self):
+        first, _ = roots(self.args("vis3_deneme1"))
+        second, _ = roots(self.args("vis3_deneme2"))
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent, second.parent)
+
+    def test_the_pick_is_not_tagged(self):
+        """Or every new attempt would ask for the target again."""
+        first, pick_a = roots(self.args("vis3_deneme1"))
+        _, pick_b = roots(self.args("vis3_deneme2"))
+        self.assertEqual(pick_a, pick_b)
+        self.assertNotEqual(pick_a, first)
 
 
 
