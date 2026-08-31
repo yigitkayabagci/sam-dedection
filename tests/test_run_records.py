@@ -39,7 +39,8 @@ import yaml  # noqa: E402
 from tools.run_records import (MODES, POLICIES, POLICY_KEYS, POLICY_NOTE,  # noqa: E402
                                TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
-                               overlay_for, provenance, staged_config)
+                               overlay_for, pointers_missing, provenance,
+                               staged_config)
 
 
 def body(config: str) -> dict:
@@ -373,11 +374,78 @@ class FrameCache(unittest.TestCase):
         self.assertEqual(path, Path("/media/ssd/cache/rec_028/crop768"))
 
 
+class AllPointers(unittest.TestCase):
+    """SAMURAI does two things; an ordinary export leaves one of them out.
+
+    Mask re-selection needs the sam_head engine's `obj_ptr_all`, emitted only
+    under `--all-pointers`. Without it the tracker warns once and carries on
+    with the memory gate -- fine for a run that never asked for SAMURAI, and a
+    silent halving of the thing being measured for one that did.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def config(self, outputs, spec=True, engine=True):
+        import json
+
+        head = self.dir / "edgetam_sam_head.engine"
+        if engine:
+            head.touch()
+        if spec:
+            head.with_suffix(".spec.json").write_text(json.dumps(
+                {"outputs": [{"name": n} for n in outputs]}))
+        path = self.dir / "config.yaml"
+        path.write_text(yaml.safe_dump({"sam_head_engine": str(head)}))
+        return str(path)
+
+    ORDINARY = ["pred_masks", "ious", "obj_ptr", "object_score_logits"]
+
+    def test_a_policy_without_samurai_does_not_care(self):
+        self.assertIsNone(pointers_missing(self.config(self.ORDINARY), "plain"))
+
+    def test_every_samurai_rung_is_refused_on_an_ordinary_export(self):
+        config = self.config(self.ORDINARY)
+        for policy in ("samurai", "ego", "guard"):
+            self.assertIsNotNone(pointers_missing(config, policy), policy)
+
+    def test_an_all_pointers_export_passes(self):
+        config = self.config(self.ORDINARY + ["obj_ptr_all"])
+        for policy in POLICIES:
+            self.assertIsNone(pointers_missing(config, policy), policy)
+
+    def test_a_missing_engine_is_the_other_preflight_s_question(self):
+        """`engines_missing` already answers it; two errors for one cause is noise."""
+        self.assertIsNone(
+            pointers_missing(self.config(self.ORDINARY, engine=False), "guard"))
+
+    def test_a_deleted_spec_is_not_evidence_either_way(self):
+        self.assertIsNone(
+            pointers_missing(self.config(self.ORDINARY, spec=False), "guard"))
+
+
 class Preflight(unittest.TestCase):
     def test_reports_the_directory_an_unbuilt_config_wants(self):
         """Engines are gitignored, so nothing in a clean checkout has them."""
         directory = engines_missing(WEIGHTS["pool_deep"][512])
         self.assertEqual(directory, "models512_pool_deep")
+
+    def test_the_build_command_it_prints_serves_every_policy(self):
+        """A set built from the printed command has to work under --policy too.
+
+        `--all-pointers` costs one pass of a 256-wide MLP over three tokens;
+        leaving it out costs SAMURAI's mask re-selection, discovered minutes
+        into a run as one warning line.
+        """
+        source = (ROOT / "tools/run_records.py").read_text()
+        marker = "python tools/export_edgetam_onnx.py --outdir"
+        self.assertIn(marker, source)
+        printed = source[source.index(marker):source.index(marker) + 600]
+        self.assertIn("--all-pointers", printed)
 
     def test_says_nothing_about_a_config_with_no_engines_at_all(self):
         self.assertIsNone(engines_missing("configs/edgetam_512.yaml"))
