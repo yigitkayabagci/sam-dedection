@@ -749,6 +749,102 @@ def _allocate(total: int, fractions: SequenceABC[float]) -> list[int]:
     return counts
 
 
+def drop_merge_profile(index: SequenceABC[FrameIndex],
+                       sources: SequenceABC[str] = ("segfly",),
+                       area_factor: float = 1.6, square: float = 0.72,
+                       stretch: float = 1.5, min_sample: int = 200
+                       ) -> tuple[list[FrameIndex], dict]:
+    """Drop the components whose shape says two objects, where `fill` cannot.
+
+    `InstanceGates.fill` catches the *bridged* merge -- two objects joined by a
+    neck sit in a large, mostly empty box. It cannot catch the other one: two
+    vehicles touching along a full edge tile into a solid rectangle that fills
+    its box, and no property of a mask separates that from one larger vehicle.
+    `docs/segfly_decomposition.md` §2b measures what is left over after `fill`
+    and erosion have both said nothing: on SegFly's 15 044 `vehicle` instances,
+    10.4 % carry a merge's shape.
+
+    A merge doubles one dimension, and *which* one decides how it looks. Nose
+    to tail the length doubles and the blob goes long and thin, so its aspect
+    ratio grows. **Side by side the width doubles and catches the length up**,
+    so the blob turns nearly square and its aspect *collapses toward 1* -- the
+    case a long-side test never sees, and the larger of the two here (8.5 %
+    against 1.9 %). Both bands are cut.
+
+    **This removes real targets too, and that is not a bug to be tuned away.**
+    A bus photographed from directly overhead is square and large; it lands in
+    the same band as two hatchbacks parked abreast, because from a mask they
+    are the same thing. The caller is choosing to lose those rather than train
+    on the merges, and the report says which is which is undecidable from
+    geometry. Use it where the targets are reconstructed and plentiful, not on
+    a set whose instances were drawn by hand.
+
+    The reference sizes are computed **per source and class**, from the index
+    itself rather than from a constant, because a class's typical footprint is
+    a function of the altitude and sensor it was shot with. A pairing with
+    fewer than `min_sample` instances is left alone: a median over a handful of
+    boxes is not a prior worth dropping data on.
+    """
+    scale: dict[tuple[str, str], tuple[float, float]] = {}
+    shapes: dict[tuple[str, str], list[tuple[float, float]]] = {}
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        name = spec.name if spec is not None else "?"
+        short = name.split("/", 1)[1] if name.startswith("pool/") else name
+        if name not in sources and short not in sources:
+            continue
+        for instance in entry.instances:
+            key = (name, spec.name_of(instance.class_id) if spec else "?")
+            shapes.setdefault(key, []).append(
+                (float(instance.area),
+                 max(instance.width, instance.height)
+                 / max(min(instance.width, instance.height), 1)))
+    for key, rows in shapes.items():
+        if len(rows) < min_sample:
+            continue
+        areas = np.array([r[0] for r in rows])
+        aspects = np.array([r[1] for r in rows])
+        scale[key] = (float(np.median(areas)), float(np.median(aspects)))
+
+    kept: list[FrameIndex] = []
+    report: dict[str, dict] = {}
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        name = spec.name if spec is not None else "?"
+        survivors = []
+        for instance in entry.instances:
+            key = (name, spec.name_of(instance.class_id) if spec else "?")
+            reference = scale.get(key)
+            if reference is None:
+                survivors.append(instance)
+                continue
+            median_area, median_aspect = reference
+            aspect = (max(instance.width, instance.height)
+                      / max(min(instance.width, instance.height), 1))
+            row = report.setdefault(f"{key[0]}:{key[1]}",
+                                    {"before": 0, "abreast": 0,
+                                     "end_to_end": 0, "after": 0})
+            row["before"] += 1
+            if instance.area > area_factor * median_area:
+                if aspect < square * median_aspect:
+                    row["abreast"] += 1
+                    continue
+                if aspect > stretch * median_aspect:
+                    row["end_to_end"] += 1
+                    continue
+            row["after"] += 1
+            survivors.append(instance)
+        if survivors:
+            kept.append(replace(entry, instances=tuple(survivors)))
+    for key, row in report.items():
+        row["dropped"] = row["abreast"] + row["end_to_end"]
+        row["share"] = row["dropped"] / max(row["before"], 1)
+    return kept, {"by_class": report,
+                  "unmeasured": sorted(f"{a}:{b}" for a, b in shapes
+                                       if (a, b) not in scale),
+                  "frames": {"before": len(index), "after": len(kept)}}
+
+
 def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
               seed: int = 0) -> tuple[list[FrameIndex], dict]:
     """`index` with over-represented classes thinned, and what that cost.

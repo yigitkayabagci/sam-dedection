@@ -91,6 +91,36 @@ def main() -> None:
             'REQUIRE_POOLS = {"dronevehicle_thermal": 20000, "vtuav_thermal": 20000,\n'
             '                 "vtuav_lt_thermal": 5000, "hituav_thermal": 2000,\n'
             '                 "kaggle_uav_thermal": 10000}')
+    # The shape cut for merges `fill` cannot see -- two vehicles touching along
+    # a full edge fill their box and pass every gate. See
+    # `docs/segfly_decomposition.md` 2b; it is an upper bound, because a bus
+    # from overhead lands in the same band.
+    replace(notebook,
+            'from src.training.aerial import (InstanceGates, rebalance, '
+            'sample_windows,\n'
+            '                                 save_splits, split_index)',
+            'from src.training.aerial import (InstanceGates, drop_merge_profile,\n'
+            '                                 rebalance, sample_windows,\n'
+            '                                 save_splits, split_index)')
+    replace(notebook,
+            'if CLASS_WEIGHTS:\n'
+            '    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)',
+            'INDEX, _shape = drop_merge_profile(\n'
+            '    INDEX, sources=("segfly", "segfly_thermal", "segfly_rgb"))\n'
+            'if _shape["by_class"]:\n'
+            '    print("\\nshape cut -- the merges `fill` cannot see "\n'
+            '          "(docs/segfly_decomposition.md 2b):")\n'
+            '    for _name, _row in sorted(_shape["by_class"].items()):\n'
+            '        print(f"   {_name:<26}{_row[\'before\']:>7} ->"\n'
+            '              f"{_row[\'after\']:>7}   dropped {_row[\'dropped\']} "\n'
+            '              f"({_row[\'share\']:.1%}: {_row[\'abreast\']} abreast, "\n'
+            '              f"{_row[\'end_to_end\']} end to end)")\n'
+            '    print("   an upper bound, not a count of merges: a bus from "\n'
+            '          "overhead is square and large too. What it buys is that "\n'
+            '          "no merge survives.")\n'
+            '\n'
+            'if CLASS_WEIGHTS:\n'
+            '    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)')
     replace(notebook,
             'CLASS_WEIGHTS = {"pool/dronevehicle_thermal": 0.45,\n'
             '                 "pool/dronevehicle_thermal_only": 0.7,\n'

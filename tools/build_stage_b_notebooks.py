@@ -1425,7 +1425,8 @@ subprocess.run(["df", "-h", "/content"], check=False)
 code('''
 import numpy as np
 
-from src.training.aerial import (InstanceGates, rebalance, sample_windows,
+from src.training.aerial import (InstanceGates, drop_merge_profile,
+                                 rebalance, sample_windows,
                                  save_splits, split_index)
 from src.training.datasets import parse
 from src.training.image_loop import ImageSplit
@@ -1612,6 +1613,21 @@ COMMON += ["--index", INDEX_DIR, "--size", str(SIZE),
            "--per-image", str(PER_IMAGE), "--max-instances", str(MAX_INSTANCES),
            "--min-area", str(MIN_AREA), "--min-side", str(MIN_SIDE),
            "--max-area", str(MAX_AREA), "--fill", str(FILL), "--seed", str(SEED)]
+
+INDEX, _shape = drop_merge_profile(INDEX, sources=("segfly", "segfly_thermal",
+                                                   "segfly_rgb"))
+if _shape["by_class"]:
+    print("\\nshape cut -- the merges `fill` cannot see "
+          "(docs/segfly_decomposition.md 2b):")
+    for _name, _row in sorted(_shape["by_class"].items()):
+        print(f"   {_name:<26}{_row['before']:>7} ->{_row['after']:>7}   "
+              f"dropped {_row['dropped']} ({_row['share']:.1%}: "
+              f"{_row['abreast']} abreast, {_row['end_to_end']} end to end)")
+    print("   an upper bound, not a count of merges: a bus from overhead is "
+          "square and large too, and nothing about a mask tells it apart from "
+          "two cars parked abreast. What it buys is that no merge survives.")
+    for _name in _shape["unmeasured"]:
+        print(f"   {_name}: too few instances to take a median from, left alone")
 
 if CLASS_WEIGHTS:
     INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)
