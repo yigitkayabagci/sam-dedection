@@ -27,7 +27,10 @@ It reports, per mode:
 - raw component sizes per thing class, before any gate -- which is where a
   class that is not what its name says shows itself;
 - what a `truck` component's border is made of, which separates "a shredded
-  vehicle" from "a standalone blob in the vegetation".
+  vehicle" from "a standalone blob in the vegetation";
+- and how much of the fusion `fill` *cannot* see is still on the table -- an
+  erosion probe for the bridged case and a shape profile for the side-by-side
+  one, because a zero on `fill` alone does not answer the question.
 
     python tools/segfly_decompose_audit.py --shards 63 410 692
     python tools/segfly_decompose_audit.py --shards 475 550 50 --modes components
@@ -121,6 +124,86 @@ def raw_components(maps, spec) -> dict:
             "under_min_area": float((sizes < 48).mean()) if len(sizes) else 0.0,
         }
     return out
+
+
+def fusion_probe(maps, spec, gates, name: str = "vehicle") -> dict:
+    """How much of the fusion `fill` cannot see is still on the table.
+
+    `fill` catches the *bridged* merge: two objects joined by a few pixels sit
+    in a large, mostly empty box. It cannot catch the other one -- two vehicles
+    touching along a full edge tile into a solid rectangle whose box is well
+    filled, and that shape is identical to one larger vehicle's. No property of
+    the mask separates those two, so this does not try to. It bounds them.
+
+    Two probes, both on accepted components only:
+
+    `erosion` -- shave 1 and 2 px off each component and count the pieces that
+    survive. Anything held together by a thin neck falls apart here, so a zero
+    means `fill`'s zero is not an artefact of where the threshold sits.
+
+    `profile` -- a side-by-side merge has a signature: *one* side roughly
+    doubles while the other stays the size it was. A genuinely larger vehicle
+    grows in both. Counting the first shape is an upper bound on the merges,
+    and it is the cut worth making if one is made -- it leaves the vans alone.
+    """
+    import cv2
+
+    class_id = spec.classes[name]
+    kernel = np.ones((3, 3), np.uint8)
+    areas, longs, shorts, fills = [], [], [], []
+    split = {1: 0, 2: 0}
+    for _, array in maps:
+        mask = (array == class_id).astype(np.uint8)
+        if not mask.any():
+            continue
+        count, labelled, stats, _ = cv2.connectedComponentsWithStats(
+            mask, connectivity=8)
+        for index in range(1, count):
+            area = int(stats[index, cv2.CC_STAT_AREA])
+            w = int(stats[index, cv2.CC_STAT_WIDTH])
+            h = int(stats[index, cv2.CC_STAT_HEIGHT])
+            if area < gates.min_area or min(w, h) < gates.min_side:
+                continue
+            fill = area / max(w * h, 1)
+            if fill < gates.fill:
+                continue
+            areas.append(area); fills.append(fill)
+            longs.append(max(w, h)); shorts.append(min(w, h))
+            x = int(stats[index, cv2.CC_STAT_LEFT])
+            y = int(stats[index, cv2.CC_STAT_TOP])
+            blob = np.zeros((h + 8, w + 8), np.uint8)
+            blob[4:4 + h, 4:4 + w] = (labelled[y:y + h, x:x + w] == index)
+            for rounds in (1, 2):
+                eroded = cv2.erode(blob, kernel, iterations=rounds)
+                pieces, _, sub, _ = cv2.connectedComponentsWithStats(
+                    eroded, connectivity=8)
+                # 15 % of the parent, so a shaved corner is not a "piece"
+                if sum(1 for j in range(1, pieces)
+                       if sub[j, cv2.CC_STAT_AREA] >= 0.15 * area) >= 2:
+                    split[rounds] += 1
+
+    area = np.array(areas, dtype=float)
+    long_side = np.array(longs, dtype=float)
+    short_side = np.array(shorts, dtype=float)
+    fill = np.array(fills, dtype=float)
+    if not len(area):
+        return {"components": 0}
+    med_a, med_l, med_s = np.median(area), np.median(long_side), np.median(short_side)
+    oversized = area > 1.6 * med_a
+    merged = oversized & (long_side > 1.6 * med_l) & (short_side < 1.4 * med_s)
+    bigger = oversized & (long_side > 1.4 * med_l) & (short_side > 1.4 * med_s)
+    return {
+        "components": int(len(area)),
+        "split_after_1px_erosion": split[1],
+        "split_after_2px_erosion": split[2],
+        "oversized_share": float(oversized.mean()),
+        "merge_profile_share": float(merged.mean()),
+        "larger_vehicle_profile_share": float(bigger.mean()),
+        "fill_median_all": float(np.median(fill)),
+        # A merge with a gap between the two would sit *below* the population;
+        # above it is evidence against the merge reading.
+        "fill_median_merge_profile": float(np.median(fill[merged])) if merged.any() else None,
+    }
 
 
 def border_of(maps, spec, name: str, limit: int = 400) -> dict:
@@ -220,6 +303,7 @@ def main() -> int:
               "modes": {m: run_mode(maps, spec, gates, m) for m in args.modes}}
     for name in spec.things:
         report.setdefault("borders", {})[name] = border_of(maps, spec, name)
+    report["fusion"] = {n: fusion_probe(maps, spec, gates, n) for n in spec.things}
 
     print(json.dumps(report, indent=2))
     if args.out:

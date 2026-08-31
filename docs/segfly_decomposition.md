@@ -14,9 +14,11 @@ etiket haritası üzerinde çıkarıyor, ve aynı ölçüm
 
 > **Bağlantılı bileşen ayrıştırması temiz örnek veriyor mu?** … Cevap hâlâ yok.
 
-Kısa hâli: **kaynaşma korkusu gerçek çıkmadı.** Ama aynı ölçüm başka bir şey
-buldu: `truck` sınıfı bir kamyon gibi davranmıyor, ve SegFly havuzunun
-aşama B'deki bütün sorunları oradan geliyor.
+Kısa hâli: **kaynaşma korkusu, ölçülebildiği kadarıyla gerçek çıkmadı** —
+köprülü hâli hiç yok, yan yana hâli hedeflerin en fazla %1,6'sı (§2b; şekille
+daha fazlası dışlanamıyor). Ama aynı ölçüm başka bir şey buldu: `truck`
+sınıfı bir kamyon gibi davranmıyor, ve SegFly havuzunun aşama B'deki bütün
+sorunları oradan geliyor.
 
 Tarih: 2026-08-31. Koşan kod: `tools/segfly_decompose_audit.py`.
 
@@ -88,9 +90,65 @@ Nesneler birbirine değiyor — termalde dörtte biri, RGB'de üçte biri — am
 RGB'de `fill` reddi sıfır değil ama küçük: 141 haritada 10 299 bileşenin
 **135'i (%1,31)**.
 
-Yani §`sec:segfly-instance`'in "Connected component = object" satırına
-verdiği **Koşullu** notu, SegFly'ın kendi verisinde koşul lehine çözülüyor.
-Aşama B'nin üzerine kurulduğu varsayım bu sette tutuyor.
+§`sec:segfly-instance`'in "Connected component = object" satırına verdiği
+**Koşullu** notu, bu ölçüm koşul lehine çeviriyor — ama tamamen kaldırmıyor.
+Sebebi bir sonraki bölüm.
+
+---
+
+## 2b. `fill`'in göremediği kaynaşma, ve nereye kadar dışlanabildiği
+
+Yukarıdaki sıfır tek başına "kaynaşma yok" demek **değil**. `fill` yalnız
+**köprülü** kaynaşmayı yakalar: iki nesne ince bir bağla birleşince kutu
+büyür ve boşalır. Yan yana **tam kenardan** yapışmış iki araç ise düzgün ve
+dolu bir dikdörtgen verir — `fill`'i yüksek çıkar, kapıdan geçer. Ve o
+şekil, gerçek bir minibüsün şekliyle **birebir aynıdır**; maske geometrisi
+ikisini ayıramaz. Defter 07'nin 16. hücresi ve §`sec:segfly-instance` bunu
+zaten söylüyordu ("full-edge contact'ı ayıramaz"); buradaki iş, geriye ne
+kadar belirsizlik kaldığını sayıya bağlamak.
+
+İki ek test yapıldı.
+
+**Aşındırma.** Kabul edilen her `vehicle` bileşeni kenarından 1 ve 2 piksel
+yontuldu; aralarında ince bir bağ olan her çift bu işlemde dağılır.
+
+| | |
+|---|---|
+| 1 px aşındırınca ≥2 anlamlı parçaya ayrılan | **0 / 127** |
+| 2 px aşındırınca ayrılan | **0 / 127** |
+
+Yani `fill`'in sıfırı bir kapı artefaktı değil; zayıf bağlı bileşen de yok.
+
+**Şekil profili.** Yan yana kaynaşmanın imzası bellidir: *bir* kenar ikiye
+katlanır, diğeri normal kalır. Havuzun 15 044 `vehicle` örneğinde:
+
+| | | |
+|---|---:|---|
+| alanı medyanın 1,6 katından büyük | 3 900 · %25,9 | ilk bakışta ürkütücü |
+| …bunlardan **iki kenarı da** büyük | 1 615 · %10,7 | kaynaşma bir kenarı büyütür, ikisini değil → gerçek büyük araç |
+| …bunlardan **bir kenarı 2×, diğeri normal** | **235 · %1,6** | kaynaşma profiline uyan tek grup |
+
+Üçüncü satırın `fill` medyanı **0,839**, normal grubunki 0,762 — yani
+şüpheli grup daha *dolu*. Aralarında boşluk kalmış iki aracın `fill`'i
+düşük olurdu; yüksek olması kaynaşma aleyhine delil.
+
+**Söylenebilecek olan:** köprülü kaynaşma yok (0/127), yan yana kaynaşma
+olsa olsa hedeflerin **%1,6'sı** kadar, ve o grubun `fill` profili de bunun
+aleyhine. Kalan belirsizlik şekille kapatılamaz.
+
+**O %1,6 düşürülmek istenirse**, ucuzdan pahalıya:
+
+| yöntem | ne yapar | bedeli |
+|---|---|---|
+| alan üstü kesme (medyanın 2,5 katı) | kaba; minibüsleri de atar | %9,8 hedef |
+| **şekil profili kesmesi** (bir kenar 2×, diğeri normal) | hedefli; büyük araca dokunmaz | **%1,6 hedef** |
+| öğretmenle çapraz kontrol (SAM'a lekenin içinden nokta) | tek gerçek çözüm — görüntüye bakar, tam kenardan yapışığı da ayırır | bir GPU geçişi |
+| gerçek örnek maskesi olan set (VTUAV VIS) | problemi ortadan kaldırır | — |
+
+Üçüncüsü repoda zaten var: `tools/analyze_segfly_instances.py --sam-teacher`,
+kapı olarak değil inceleme kuyruğu olarak — çünkü SAM de bir sözde-etiket,
+düşük uyuşma "hangisi yanlış" demiyor. Dördüncüsü ise projenin verdiği
+karar: SegFly eğitir, not vermez.
 
 ---
 
