@@ -14,9 +14,10 @@ etiket haritası üzerinde çıkarıyor, ve aynı ölçüm
 
 > **Bağlantılı bileşen ayrıştırması temiz örnek veriyor mu?** … Cevap hâlâ yok.
 
-Kısa hâli: **kaynaşma korkusu, ölçülebildiği kadarıyla gerçek çıkmadı** —
-köprülü hâli hiç yok, yan yana hâli hedeflerin en fazla %1,6'sı (§2b; şekille
-daha fazlası dışlanamıyor). Ama aynı ölçüm başka bir şey buldu: `truck`
+Kısa hâli: **korkulan kaynaşmanın kapının kovaladığı hâli hiç çıkmadı** —
+köprülü birleşme yok (0/127). Ama `fill`'in göremediği bir hâli var ve o
+elenmiyor: yan yana yapışmış çift, hedeflerin **en fazla %10,4'ü** (§2b, üst
+sınır; şekille daha fazlası ayrılamıyor, canlı örneği de orada). Ama aynı ölçüm başka bir şey buldu: `truck`
 sınıfı bir kamyon gibi davranmıyor, ve SegFly havuzunun aşama B'deki bütün
 sorunları oradan geliyor.
 
@@ -119,29 +120,50 @@ yontuldu; aralarında ince bir bağ olan her çift bu işlemde dağılır.
 
 Yani `fill`'in sıfırı bir kapı artefaktı değil; zayıf bağlı bileşen de yok.
 
-**Şekil profili.** Yan yana kaynaşmanın imzası bellidir: *bir* kenar ikiye
-katlanır, diğeri normal kalır. Havuzun 15 044 `vehicle` örneğinde:
+**Şekil profili.** Kaynaşma iki boyuttan *birini* ikiye katlar, ve hangisi
+olduğu lekenin nasıl göründüğünü belirliyor:
 
-| | | |
-|---|---:|---|
-| alanı medyanın 1,6 katından büyük | 3 900 · %25,9 | ilk bakışta ürkütücü |
-| …bunlardan **iki kenarı da** büyük | 1 615 · %10,7 | kaynaşma bir kenarı büyütür, ikisini değil → gerçek büyük araç |
-| …bunlardan **bir kenarı 2×, diğeri normal** | **235 · %1,6** | kaynaşma profiline uyan tek grup |
+- **uç uca** birleşirlerse uzun kenar iki katına çıkar, leke uzar ve incelir
+  → en-boy oranı **büyür**;
+- **yan yana** birleşirlerse **kısa kenar** iki katına çıkıp uzun kenarı
+  yakalar, leke **kareleşir** → en-boy oranı **1'e doğru çöker**.
 
-Üçüncü satırın `fill` medyanı **0,839**, normal grubunki 0,762 — yani
-şüpheli grup daha *dolu*. Aralarında boşluk kalmış iki aracın `fill`'i
-düşük olurdu; yüksek olması kaynaşma aleyhine delil.
+İlk ölçümde yalnız birincisi sayılmıştı; ikincisi — yani `fill`'in en kör
+olduğu geometri — kaçırılmıştı. Tek aracın en-boy medyanı **1,74** olan
+havuzun 15 044 `vehicle` örneğinde, düzeltilmiş sayım:
 
-**Söylenebilecek olan:** köprülü kaynaşma yok (0/127), yan yana kaynaşma
-olsa olsa hedeflerin **%1,6'sı** kadar, ve o grubun `fill` profili de bunun
-aleyhine. Kalan belirsizlik şekille kapatılamaz.
+| | | `fill` medyanı |
+|---|---:|---:|
+| alanı medyanın 1,6 katından büyük | 3 900 · %25,9 | |
+| ├ **uç uca profili** (en-boy > 2,6) | 280 · **%1,9** | 0,635 |
+| ├ **yan yana profili** (en-boy < 1,25 → kareleşmiş) | 1 280 · **%8,5** | 0,678 |
+| └ ikisi de değil (büyük ama normal oranlı araç) | 2 340 · %15,6 | |
+| **iki kaynaşma profili toplamı** | **1 560 · %10,4** | |
+| tek araç grubu (karşılaştırma) | | 0,762 |
+
+Yan yana grubun alan medyanı tek aracın **2,1 katı** ve en-boy oranı **1,09**
+— yani "iki araç genişliğinde, tek araç boyunda". İmza tam olarak bu. `fill`
+medyanı da normal grubun altında (0,678 / 0,762), ki bu kaynaşma okumasının
+*lehine* zayıf bir işaret.
+
+**Canlı örnek** (`scene_09` · 40 m, shard 00410 satır 46): 4 503 px'lik tek
+bir bileşen, kutusu **77×76** (en-boy **1,01**), `fill` **0,77**. Köprü yok,
+aşındırma 1/2/3 pikselde ayırmıyor, bütün kapılardan geçiyor — ama termal
+görüntüde **yan yana park etmiş iki araç** duruyor. Kodun tek hedef saydığı
+şey iki nesne.
+
+**Söylenebilecek olan:** köprülü kaynaşma yok (0/127); yan yana kaynaşma
+hedeflerin **en fazla %10,4'ü** (%8,5'i kareleşmiş profil). Bu bir **üst
+sınır**: tepeden bakılan bir otobüs de kare ve büyüktür, ve onu yan yana iki
+hatchback'ten ayıran hiçbir maske özelliği yok. Kalan belirsizlik şekille
+kapatılamaz.
 
 **O %1,6 düşürülmek istenirse**, ucuzdan pahalıya:
 
 | yöntem | ne yapar | bedeli |
 |---|---|---|
 | alan üstü kesme (medyanın 2,5 katı) | kaba; minibüsleri de atar | %9,8 hedef |
-| **şekil profili kesmesi** (bir kenar 2×, diğeri normal) | hedefli; büyük araca dokunmaz | **%1,6 hedef** |
+| **şekil profili kesmesi** (kareleşmiş + uzayıp incelmiş) | hedefli ama üst sınır; tepeden kare görünen gerçek araçları da alır | **%10,4 hedef** |
 | öğretmenle çapraz kontrol (SAM'a lekenin içinden nokta) | tek gerçek çözüm — görüntüye bakar, tam kenardan yapışığı da ayırır | bir GPU geçişi |
 | gerçek örnek maskesi olan set (VTUAV VIS) | problemi ortadan kaldırır | — |
 
