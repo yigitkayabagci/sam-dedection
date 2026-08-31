@@ -219,8 +219,9 @@ _scrambled[_grid.expand_as(_scrambled)] = torch.randn(
 _second, _ = _features(_scrambled)
 _drift = float((_first - _second).abs().max())
 
-_plain = encoder_features(MODEL, _image)
-_plain_other = encoder_features(MODEL, _scrambled)
+with torch.no_grad():
+    _plain = encoder_features(MODEL, _image)
+    _plain_other = encoder_features(MODEL, _scrambled)
 print(f"convolutions masked: {_touched}")
 print(f"rewriting every masked pixel moves the features by {_drift:.3e} "
       f"(masked) and {float((_plain - _plain_other).abs().max()):.3e} (unmasked)")
