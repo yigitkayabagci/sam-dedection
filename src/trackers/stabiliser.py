@@ -32,6 +32,15 @@ the last good appearance, and when the track is declared lost, look for it
 again -- normalised cross-correlation over a search region that grows every
 frame the target stays missing and that travels with the camera.
 
+And a fourth, which this module caused itself and `cfar_peak` is the answer to:
+**a guard that finds a target where there is none.** The motion cue below reads
+what the camera's own displacement does not explain, so everything the
+registration got wrong arrives as signal. Told the camera was still when it had
+panned, the first scorer here believed a peak in the wrong place on 29 frames of
+36, and on canopy with no target in it at all it invented one on 36 of 96 -- not
+because its threshold was mistuned but because a peak-to-mean ratio cannot tell
+a compact blob from a mis-registered ridge. Both are now 0, on the same frames.
+
 What this module deliberately does *not* do is decide anything about pixels the
 model is better at. It never edits a mask, never moves a box it accepted, and
 never invents a target: a rejected frame yields the *predicted* box and a state
@@ -50,6 +59,20 @@ import numpy as np
 # noise rather than a confidence threshold -- the separation between a right
 # shift and an invented one on real footage is a whole level, not a hundredth.
 MIN_ALIGNMENT_GAIN = 0.05
+
+# How far a motion-residual peak must stand above its own surroundings, in
+# units of their spread, before it is a target rather than a piece of terrain
+# the registration got wrong. See `cfar_peak`, which is where the number was
+# measured: over 72 real crossings the faintest true peak reached 5.93 sigma,
+# and over 96 stretches of canopy with no target in them the strongest false
+# one reached 1.91. A floor of 4 sits 2.1x above the highest thing that was
+# never there and 1.5x below the faintest thing that was.
+#
+# Not a `GuardConfig` field on purpose. It is a property of the detector, not
+# of a run: it is in units of the clutter's own spread, so it does not move
+# with the sensor, the terrain or the target's size, which is exactly what the
+# ratio it stands beside could not manage.
+MOTION_SIGMAS = 4.0
 
 # States, in the order a track passes through them. `suspect` is not a failure
 # yet: it is one frame the gates refused, and a single refused frame is far more
@@ -139,8 +162,24 @@ class GuardConfig:
 
     # The motion cue, for the case appearance cannot answer: a target crossing
     # a canopy it matches in brightness. `motion_residual` has the measurement.
+    #
     # The strength a residual peak must reach over its own search region before
     # it is believed -- a ratio, so it does not depend on the sensor's scale.
+    # It is the **second** of two tests and it still means exactly what it
+    # always meant, which is why every shipped config's 0.6 is left alone: the
+    # peak is now found and floored by `cfar_peak` at `MOTION_SIGMAS` first,
+    # and this asks the surviving one to also stand above the region's mean.
+    #
+    # Keeping both is not belt and braces. The sigma test is blind in one
+    # place -- a residual whose surround is *exactly* flat divides by nothing
+    # and calls any speck a target -- and the ratio's own `floor <= 1e-6` guard
+    # is what refuses that frame.
+    #
+    # It is not free, and the price is written down rather than waved past: the
+    # sigma test on its own re-acquires 43 of 48 crossings where the pair
+    # manages 42, so the second arm costs one detection in forty-eight. It buys
+    # the flat-surround frame and it buys every shipped config keeping the 0.6
+    # it pins, which would otherwise be a number in units that no longer exist.
     reacquire_motion: bool = True
     motion_threshold: float = 0.6
 
@@ -348,6 +387,13 @@ def aspect_of(box) -> float:
     return width / height if height > 0 else float("inf")
 
 
+def _clipped(box, shape) -> tuple[int, int, int, int]:
+    """`box` as integer corners inside an image of `shape`, in `(h, w)` order."""
+    height, width = shape[0], shape[1]
+    x0, y0, x1, y1 = (int(round(float(v))) for v in box)
+    return (max(x0, 0), max(y0, 0), min(x1, width), min(y1, height))
+
+
 def local_contrast(frame: np.ndarray, box, ring: int = 9) -> float:
     """Signal-to-clutter for one box: `|mean inside - mean ring| / std ring`.
 
@@ -500,6 +546,128 @@ def motion_residual(frames, shifts, blur: float = 1.5) -> np.ndarray | None:
     aligned = warp(before, dx2, dy2)
     residual = np.maximum(now - aligned, 0.0)
     return cv2.GaussianBlur(residual, (0, 0), float(blur))
+
+
+def _odd(value) -> int:
+    """`value` rounded to a whole number and then up to an odd one, never below 3.
+
+    Odd on purpose: `cv2.boxFilter` anchors a kernel at its centre, and an even
+    one has no centre to anchor at -- the peak would come back offset by half a
+    cell in a direction that depends on the size, which is a bias, not a
+    rounding.
+    """
+    return max(int(round(float(value))) | 1, 3)
+
+
+def cfar_peak(residual: np.ndarray, size, region, ring: float = 3.0,
+              guard: float = 2.0) -> tuple[np.ndarray | None, float]:
+    """The strongest **compact** blob in `region`, in units of its own surround.
+
+    Cell-averaging CFAR, out of radar, and it is here for the reason radar
+    invented it: the clutter level is not known in advance and changes across
+    the picture, so a target has to be measured against *its own
+    neighbourhood* rather than against a number chosen beforehand or against
+    the average of the whole search region.
+
+    Three concentric boxes at every position -- a cell the target's size, a
+    guard band around it, and a ring around that -- and the score is
+
+        (mean over the cell - mean over the ring) / (spread over the ring)
+
+    Each of the three earns its place, and the guard band is the one that is
+    easy to leave out: a target is never exactly the cell's size, and the part
+    of it that spills past the cell lands in its own reference and raises the
+    level it is being judged against -- so the clearer the target, the less it
+    scores. That is not a refinement. With no guard band at all the faintest
+    true peak below falls to 2.06 sigma, *under* the floor this detector holds
+    them to, while the strongest false one barely moves (1.66 against 1.91):
+
+        guard band        1.0     1.4     1.7     2.0     2.5
+        faintest true    2.06    3.19    5.42    5.93    6.31
+        strongest false  1.66    1.74    1.78    1.91    1.78
+
+    2.0 is where that stops buying much and the reference ring is still local.
+
+    **What it replaced, and why a ratio could not do this job.** The first
+    scorer here took the peak of a target-sized box mean and divided it by that
+    mean over the whole search region. That number cannot distinguish the two
+    things a motion residual contains. A target is a compact blob, so its cell
+    rises and its ring does not. Mis-registration is a *ridge* along every
+    contrasty edge in the frame, so it raises the cell and the ring together
+    and the sigma stays near zero -- while the ratio, which has no local
+    reference at all, reads the ridge as a peak. Measured on the canopy bench,
+    the residual deliberately built from a wrong registration:
+
+        a wrong place believed         ratio 29/36      this 0/36
+        a target invented where
+        there was none at all          ratio 36/96      this 0/96
+
+    and on the case this exists for -- an aircraft tracked over open ground
+    that flies into forest, the tracker going silent once the target is inside
+    the canopy -- re-acquisition lands on the target 42 times in 48 against 37,
+    with the wrong locks falling from 11 to 6.
+
+    **That last figure is the pair of changes, not this one alone, and the two
+    do not separate.** A sharper peak is re-localised more often, and
+    re-localising every frame while `_refuse` threw the velocity away left the
+    search region a frame's travel behind the target: this scorer on its own
+    takes the crossing from 37/48 to 41/48 but the older canopy bench, where
+    the target never leaves the trees, *down* from 22/24 to 20/24. With the
+    velocity kept it is 42/48 and 23/24. Neither half was worth shipping
+    without the other.
+
+    Four running sums instead of one convolution, so it costs more than the
+    mean it replaced and the difference is real on a frame budget: at the size
+    the guard actually runs -- `ego_motion.reduce: 2`, a 512-pixel input
+    decoded to 256 -- 1.1 ms against 0.2 ms, and at `reduce: 4` 0.2 ms against
+    0.02 ms. It runs only on frames where the track is already lost.
+
+    **The region's mean is subtracted before anything is squared, and that is
+    load-bearing rather than tidy.** The spread comes from `E[x^2] - E[x]^2`
+    over a ring of a few thousand values, which is a difference of two large
+    nearly-equal numbers, and the residual of a badly registered frame sits
+    high everywhere with only a little local variation -- exactly the shape
+    that cancels. In float32 and left uncentred it does not degrade, it breaks:
+    on a residual sitting at 240 levels with a spread of 0.5, 12.8 % of the
+    ring variances come back *negative* and the sigma at the peak reads
+    7 278 976 instead of 90. Variance does not care about a constant, so
+    removing one costs a subtraction and makes the arithmetic honest -- matched
+    against float64 it agrees to 3e-4 and picks the same peak every time, at
+    half the cost (1.16 ms against 2.32 ms on a 256x256 map).
+
+    `size` is the target's `(width, height)`. Returns `(box, sigmas)` for the
+    best position, or `(None, nan)` when the region cannot hold the cell.
+    """
+    import cv2
+
+    residual = np.asarray(residual, dtype=np.float32)
+    width, height = (max(int(round(float(v))), 2) for v in size)
+    x0, y0, x1, y1 = _clipped(region, residual.shape)
+    if x1 - x0 <= width or y1 - y0 <= height:
+        return None, float("nan")
+
+    cell = (_odd(width), _odd(height))
+    band = (max(_odd(width * guard), cell[0] + 2), max(_odd(height * guard), cell[1] + 2))
+    outer = (max(_odd(width * ring), band[0] + 2), max(_odd(height * ring), band[1] + 2))
+
+    def total(image, box):
+        return cv2.boxFilter(image, -1, box, normalize=False,
+                             borderType=cv2.BORDER_REFLECT)
+
+    centred = residual - np.float32(residual[y0:y1, x0:x1].mean())
+    squares = centred * centred
+    around = outer[0] * outer[1] - band[0] * band[1]
+    inside = total(centred, cell) / (cell[0] * cell[1])
+    mean = (total(centred, outer) - total(centred, band)) / around
+    spread = np.sqrt(np.maximum(
+        (total(squares, outer) - total(squares, band)) / around - mean * mean, 0.0))
+    sigmas = (inside - mean) / np.maximum(spread, 1e-6)
+
+    patch = sigmas[y0:y1, x0:x1]
+    row, column = np.unravel_index(int(np.argmax(patch)), patch.shape)
+    left, top = x0 + column - width // 2, y0 + row - height // 2
+    return (np.array([left, top, left + width, top + height], dtype=np.float64),
+            float(patch[row, column]))
 
 
 def match_template(frame: np.ndarray, template: np.ndarray,
@@ -794,6 +962,10 @@ class Stabiliser:
         """Hold the prediction, count the miss, and search once lost."""
         self.healthy = 0
         self.missing += 1
+        # Where the track was before the prediction replaced it, which is what
+        # a re-acquisition below measures its velocity against. `update` sends
+        # a track with no box to `_adopt`, so there is always one here.
+        previous = np.asarray(self.box, dtype=np.float64)
         self.box = predicted
         if self.missing < self.config.suspect_frames and not self.driven:
             self.state = SUSPECT
@@ -811,7 +983,20 @@ class Stabiliser:
         self.box = found
         self._areas.append(area_of(found))
         self._aspects.append(aspect_of(found))
-        self.velocity = np.zeros(2)
+        # A found box is a position measurement on a target that was being
+        # followed a frame ago, so the velocity is updated from it rather than
+        # thrown away -- damped by the same quarter step `_accept` uses, so a
+        # spurious match moves the next prediction by a quarter of its error
+        # instead of all of it.
+        #
+        # Zeroing it was the safe-looking choice, and it is what left the
+        # search region a frame's travel behind a target crossing at 16 px a
+        # frame. It only became load-bearing once `cfar_peak` made
+        # re-localisation frequent enough to matter: with that scorer in place,
+        # keeping the velocity takes the canopy bench from 20/24 to 23/24 and
+        # the crossing from 41/48 to 42/48.
+        moved = centre_of(found) - centre_of(previous) - np.asarray(shift, dtype=np.float64)
+        self.velocity = 0.75 * self.velocity + 0.25 * moved
         self.missing = 0
         self.driven = True
         self.healthy = 0
@@ -822,34 +1007,48 @@ class Stabiliser:
     def _by_motion(self, predicted: np.ndarray, region) -> tuple[np.ndarray | None, float]:
         """The strongest unexplained movement inside `region`, as a box.
 
-        Scored as the residual's mean over a target-sized window divided by the
-        region's own mean, so the number is comparable across frames and can be
-        held to `match_threshold` the way a correlation is.
+        Two tests, in this order, because they answer different questions and
+        only the first one can tell a target from terrain.
+
+        **Where.** `cfar_peak` finds the position and scores it against its own
+        surroundings, and a peak that does not clear `MOTION_SIGMAS` is not
+        reported at all. That is what stops a mis-registered ridge -- which is
+        most of what a residual holds on a bad frame -- being read as a target.
+
+        **How strong.** The peak that survives is then scored the way this
+        always scored it, as the residual's mean over a target-sized window
+        against the search region's own mean, so `motion_threshold` keeps its
+        meaning and the value every shipped config pins keeps its effect.
+
+        Returning the ratio rather than the sigma is deliberate: it is what
+        `Decision.match` has always carried for this cue, and a run recorded
+        before this change stays comparable with one recorded after.
         """
         import cv2
 
         residual = motion_residual(self._history, self._shifts)
         if residual is None:
             return None, float("nan")
-        width, height = (max(int(round(v)), 2) for v in size_of(predicted))
-        x0, y0, x1, y1 = (int(round(float(v))) for v in region)
-        x0, y0 = max(x0, 0), max(y0, 0)
-        x1 = min(x1, residual.shape[1])
-        y1 = min(y1, residual.shape[0])
-        if x1 - x0 <= width or y1 - y0 <= height:
+        size = tuple(max(int(round(v)), 2) for v in size_of(predicted))
+        box, sigmas = cfar_peak(residual, size, region)
+        if box is None or not np.isfinite(sigmas) or sigmas < MOTION_SIGMAS:
             return None, float("nan")
-        window = cv2.filter2D(residual, -1,
-                              np.ones((height, width), np.float32) / (width * height))
+
+        width, height = size
+        window = cv2.boxFilter(residual, -1, (width, height), normalize=True,
+                               borderType=cv2.BORDER_REFLECT)
+        x0, y0, x1, y1 = _clipped(region, residual.shape)
         patch = window[y0:y1, x0:x1]
         floor = float(patch.mean())
         if not np.isfinite(floor) or floor <= 1e-6:
+            # A search region whose residual is *exactly* flat. The sigma test
+            # cannot see this one -- a spread of zero divides any speck into a
+            # large number -- so this is the arm that refuses it.
             return None, float("nan")
-        row, column = np.unravel_index(int(np.argmax(patch)), patch.shape)
-        peak = float(patch[row, column])
-        left = x0 + column - width // 2
-        top = y0 + row - height // 2
-        return (np.array([left, top, left + width, top + height], dtype=np.float64),
-                peak / floor - 1.0)
+        centre = centre_of(box)
+        peak = float(window[int(np.clip(centre[1], 0, window.shape[0] - 1)),
+                            int(np.clip(centre[0], 0, window.shape[1] - 1))])
+        return box, peak / floor - 1.0
 
     def _view(self, frame: np.ndarray, size) -> np.ndarray:
         """The frame the matcher sees: band-passed, or raw when turned off."""
@@ -929,9 +1128,9 @@ def _grown(box, scale: float, width: int, height: int) -> np.ndarray:
                      min(centre[1] + half_h, height)], dtype=np.float64)
 
 
-__all__ = ["Decision", "FrameMotion", "GuardConfig", "LOST", "REACQUIRED",
-           "STATES", "SUSPECT",
+__all__ = ["Decision", "FrameMotion", "GuardConfig", "LOST", "MOTION_SIGMAS",
+           "REACQUIRED", "STATES", "SUSPECT",
            "Stabiliser", "TRACKING", "area_of", "aspect_of", "box_of",
-           "bandpass", "centre_of", "estimate_shift", "local_contrast",
-           "match_template", "motion_residual",
+           "bandpass", "centre_of", "cfar_peak", "estimate_shift",
+           "local_contrast", "match_template", "motion_residual",
            "size_of"]
