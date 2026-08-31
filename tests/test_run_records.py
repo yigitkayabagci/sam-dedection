@@ -208,17 +208,34 @@ class Policies(unittest.TestCase):
             finally:
                 POLICIES.pop("_stray")
 
-    def test_ego_motion_never_ships_without_the_filter_that_consumes_it(self):
-        """A shift with no `samurai:` is a decode and a flow bought for nothing.
+    def test_ego_motion_never_ships_without_something_that_consumes_it(self):
+        """A shift nothing reads is a decode and a flow bought for nothing.
 
-        `EdgeTAMTracker._shift_for` is handed to `samurai.install` and has no
-        other consumer, so an ego-only overlay would cost a millisecond a frame
-        and change no output.
+        There are two readers, not one. `EdgeTAMTracker._shift_for` is handed to
+        `samurai.install`, and the guard takes its frames from the same
+        `FrameMotion` -- `prepare` builds one for the guard when no
+        `ego_motion:` asked for it, so the block's `reduce` is the resolution
+        the guard's template match and motion residual are computed at. An
+        overlay carrying `ego_motion:` and neither of them would change no
+        output at all.
         """
         for policy in POLICIES:
             blocks = overlay_for(policy)
             if "ego_motion" in blocks:
-                self.assertIn("samurai", blocks, policy)
+                self.assertTrue({"samurai", "guard"} & set(blocks), policy)
+
+    def test_the_classical_layer_can_be_measured_without_the_memory_gate(self):
+        """`guard` moves two things at once. `stabiliser` moves one of them."""
+        alone = overlay_for("stabiliser")
+        self.assertEqual(set(alone), {"ego_motion", "guard"})
+        self.assertNotIn("samurai", alone)
+
+    def test_the_two_guard_overlays_never_drift(self):
+        """`guard` and `stabiliser` differ by SAMURAI and by nothing else --
+        eighteen thresholds written twice is the shape that drifts."""
+        full, alone = overlay_for("guard"), overlay_for("stabiliser")
+        self.assertEqual(full["guard"], alone["guard"])
+        self.assertEqual(full["ego_motion"], alone["ego_motion"])
 
     def test_the_ladder_adds_one_thing_per_rung(self):
         rungs = ["plain", "samurai", "ego", "guard"]
@@ -245,8 +262,12 @@ class Policies(unittest.TestCase):
             for node in cls.body if isinstance(node, ast.AnnAssign)
         }
         self.assertTrue(fields, "GuardConfig has fields to check")
-        configured = set(overlay_for("guard")["guard"]) - {"enabled"}
-        self.assertEqual(configured, fields)
+        for policy in POLICIES:
+            blocks = overlay_for(policy)
+            if "guard" not in blocks:
+                continue
+            with self.subTest(policy=policy):
+                self.assertEqual(set(blocks["guard"]) - {"enabled"}, fields)
 
     def test_the_guard_reads_frames_at_the_size_it_can_match_a_template_on(self):
         """The guard shares ego_motion's FrameMotion, so `reduce` is its resolution.

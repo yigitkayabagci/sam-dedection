@@ -194,6 +194,9 @@ POLICIES = {
     "samurai": "configs/policies/samurai.yaml",
     "ego": "configs/policies/ego.yaml",
     "guard": "configs/policies/guard.yaml",
+    # The classical layer on its own -- `guard` minus SAMURAI, so the two
+    # halves of the stack can be told apart rather than only measured together.
+    "stabiliser": "configs/policies/stabiliser.yaml",
 }
 
 # The blocks an overlay is allowed to set. A policy states runtime behaviour;
@@ -227,6 +230,16 @@ POLICY_NOTE = {
         "`dropout_episodes` counts a lost frame honestly instead of scoring a "
         "mask that covers a field as a hit. Expect dropouts to go **up** where "
         "they were being hidden. **Training-free.** Read against the `ego` row."
+    ),
+    "stabiliser": (
+        "Policy: `stabiliser` — the classical layer *without* SAMURAI: the same "
+        "plausibility gates, hysteresis and re-acquisition as `guard`, and none "
+        "of the motion-aware memory. The two act at different moments -- SAMURAI "
+        "picks which candidate mask is used and which frames enter the memory "
+        "bank, the guard judges what came back and can refuse it -- so a run "
+        "that improves here and not under `samurai` was fixed by the refusals. "
+        "**Training-free.** Read against `plain`, and against `guard` to see "
+        "what SAMURAI added on top of it."
     ),
 }
 
@@ -617,7 +630,13 @@ def main(argv: list[str] | None = None) -> int:
     # rather than after the first record has been indexed and prompted for.
     configs = {m: config_for(args.weights, MODES[m][0], m, args.backend)
                for m in modes}
-    absent = {m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
+    # Both pre-checks are about *running* a mode. `--pick-only` draws a box and
+    # writes a json; it loads no model and reads no engine, and failing it for
+    # a missing engine set means the prompt cannot be picked until the export
+    # is done -- which is backwards, since the prompt is what the export is
+    # for.
+    absent = {} if args.pick_only else {
+        m: d for m, d in ((m, engines_missing(c)) for m, c in configs.items()) if d}
     if absent:
         lines = [f"  {m:<10} needs {d}/" for m, d in sorted(absent.items())]
         sizes = sorted({MODES[m][0] for m in absent})
@@ -643,9 +662,10 @@ def main(argv: list[str] | None = None) -> int:
               "pair is its own export):\n" + "\n".join(builds)
         )
 
-    half = {m: d for one in policies
-            for m, d in ((m, pointers_missing(c, one)) for m, c in configs.items())
-            if d}
+    half = {} if args.pick_only else {
+        m: d for one in policies
+        for m, d in ((m, pointers_missing(c, one)) for m, c in configs.items())
+        if d}
     if half:
         raise SystemExit(
             f"--policy {args.policy} carries `samurai:`, and these engines were "

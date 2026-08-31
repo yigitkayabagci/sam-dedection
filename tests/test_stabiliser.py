@@ -26,6 +26,7 @@ except ImportError:                                      # pragma: no cover
     cv2 = None
 
 from src.trackers.stabiliser import (  # noqa: E402
+    LOST,
     bandpass,
     motion_residual,
     LOST,
@@ -731,6 +732,32 @@ class CanopyTest(unittest.TestCase):
                 if abs(centre[0] - truth[0]) <= 14 and abs(centre[1] - truth[1]) <= 14:
                     recovered += 1
         self.assertGreaterEqual(recovered, 5)
+
+    def test_the_guard_works_with_no_motion_aware_memory_behind_it(self):
+        """What `--policy stabiliser` relies on. `EdgeTAMTracker.prepare` builds
+        a `FrameMotion` for the guard when no `ego_motion:` block asked for one,
+        so every part of the classical layer -- the gates, the hysteresis, the
+        re-acquisition and the motion residual -- runs with SAMURAI absent.
+        Without this the classical half could only ever be measured on top of
+        the memory gate, and neither could be credited."""
+        from src.trackers.edgetam_tracker import EdgeTAMTracker
+
+        built = EdgeTAMTracker(model_cfg="configs/edgetam.yaml",
+                               checkpoint="none.pt",
+                               guard={"suspect_frames": 1})
+        self.assertIsNone(built.samurai_config)
+        self.assertIsNone(built.ego_motion)
+        self.assertIsNotNone(built.guard_config)
+
+        frames, boxes = self.flight(0, 2.0, steps=6)
+        guard = Stabiliser(GuardConfig(suspect_frames=1))
+        guard.update(frames[0], boxes[0])
+        guard.update(frames[1], boxes[1])
+        last = None
+        for frame in frames[2:]:
+            last = guard.update(frame, None)
+        self.assertIn(last.state, (REACQUIRED, LOST))
+        self.assertGreater(len(guard._history), 0)
 
     def test_turning_the_motion_cue_off_leaves_the_guard_as_it_was(self):
         frames, boxes = self.flight(0, 2.0, steps=6)
