@@ -294,10 +294,25 @@ def main() -> None:
                 marker.write_text("ok\n")
 
         if USE_VTUAV_VIS:
-            subprocess.run([
-                sys.executable, "tools/fetch_datasets.py", "vtuav_vis",
-                "--dest", str(VTUAV_VIS_DATA), "--parts", *VTUAV_VIS_PARTS,
-                "--frames", "masked"], check=True)
+            # One part per call, with the same `.done` markers the tracking
+            # archives above use. These parts are 8.5, 15 and 17 GB, and a
+            # Drive refusal on one of them is the failure that actually
+            # happens; asking for all three again would re-download the ones
+            # that already landed and spend the quota before reaching the one
+            # that did not. `fetch_datasets` keeps what it got either way --
+            # this is what stops the *retry* from costing anything.
+            vis_staged = VTUAV_VIS_DATA / "_staged"
+            vis_staged.mkdir(parents=True, exist_ok=True)
+            for vis_part in VTUAV_VIS_PARTS:
+                vis_marker = vis_staged / f"{vis_part}.done"
+                if vis_marker.is_file():
+                    print("already staged", vis_part)
+                    continue
+                subprocess.run([
+                    sys.executable, "tools/fetch_datasets.py", "vtuav_vis",
+                    "--dest", str(VTUAV_VIS_DATA), "--parts", vis_part,
+                    "--frames", "masked"], check=True)
+                vis_marker.write_text("ok\n")
 
         subprocess.run([
             sys.executable, "tools/fetch_datasets.py", "birdsai",

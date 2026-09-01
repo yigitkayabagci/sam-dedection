@@ -6,6 +6,7 @@ and a tile that draws a box on an absent frame invents a target.
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -153,6 +154,22 @@ class TestRender(unittest.TestCase):
                         quiet=True)
         self.assertEqual(report["vtuav"][0]["masks"], 1)
         self.assertEqual(report["vtuav"][0]["visible"], 20)
+
+    def test_the_index_says_where_the_disappearances_come_from(self):
+        """Only VTUAV reads a real `exist` column; VTUAV-VIS and BIRDSAI both
+        hand back `exist=np.ones`. A source with no absent frame trains the
+        object-score head on nothing, and that is worth reading off the sheet
+        rather than off three function bodies."""
+        never = Sequence(name="birdsai__flight_b__track_9", split="unsplit",
+                         frames=self.sequence.frames,
+                         labels=labels(np.ones(24, bool)))
+        out = self.root / "out4"
+        render([self.sequence, never],
+               {self.sequence.name: {}, never.name: {}}, out,
+               per_source=1, span=6, windows=1, quiet=True)
+        index = json.loads((out / "index.json").read_text())
+        self.assertEqual(index["absence"]["vtuav"]["absent"], 4)
+        self.assertEqual(index["absence"]["birdsai"]["absent"], 0)
 
     def test_sheets_are_grouped_by_source(self):
         other = Sequence(name="birdsai__flight_b__track_9", split="unsplit",

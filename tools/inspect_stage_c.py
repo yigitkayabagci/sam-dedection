@@ -198,8 +198,30 @@ def render(sequences: SequenceABC, stores: Mapping[str, Mapping],
             if not quiet:
                 print(f"   {sequence.name:<44}{len(sequence):>6} frames"
                       f"{len(store):>7} masks")
-    (out / "index.json").write_text(json.dumps(report, indent=2) + "\n")
+    # Where the disappearance supervision actually comes from. Only
+    # `vtuav_sequences` reads a real `exist` column; `vtuav_vis_sequences` sets
+    # `exist=np.ones` because every extracted frame is a masked one, and
+    # `birdsai_sequences` splits a track on its gaps instead of marking them.
+    # So a source with no absent frames trains the object-score head on nothing
+    # -- which is worth seeing beside the sheets rather than inferred from
+    # three function bodies.
+    absence = {}
+    for source, rows in sorted(by_source.items()):
+        frames = sum(len(s) for s in rows)
+        visible = sum(int(np.count_nonzero(s.labels.exist)) for s in rows)
+        absence[source] = {"sequences": len(rows), "frames": frames,
+                           "absent": frames - visible}
+    (out / "index.json").write_text(
+        json.dumps({"sheets": report, "absence": absence}, indent=2) + "\n")
     if not quiet:
+        print(f"\n{'source':<14}{'seqs':>7}{'frames':>10}{'absent':>10}")
+        for source, row in absence.items():
+            print(f"{source:<14}{row['sequences']:>7}{row['frames']:>10}"
+                  f"{row['absent']:>10}")
+        if not any(row["absent"] for row in absence.values()):
+            print("!! no source here has an absent frame: nothing trains the "
+                  "object-score head,\n   which is the head that decides "
+                  "whether the target is there at all.")
         total = sum(len(v) for v in report.values())
         print(f"\n{total} sheets -> {out}")
         print("   green box = box only (the loss uses box projection here)")
