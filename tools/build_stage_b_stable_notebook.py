@@ -263,9 +263,9 @@ def main() -> None:
             'GAMMA_JITTER      = 0.25\n'
             'SENSOR_NOISE      = 2.0\n'
             'METHOD')
-    replace(notebook, 'EPOCHS         = [2, 24]', 'EPOCHS         = [2, 12]')
+    replace(notebook, 'EPOCHS         = [2, 24]', 'EPOCHS         = [2, 30]')
     replace(notebook, 'STEPS          = 800', 'STEPS          = 500')
-    replace(notebook, 'PATIENCE       = 4', 'PATIENCE       = 0')
+    replace(notebook, 'PATIENCE       = 4', 'PATIENCE       = 10')
     replace(notebook, 'VAL_BATCHES    = 24', 'VAL_BATCHES    = 32')
     replace(notebook, 'BATCH_CEILING  = 512', 'BATCH_CEILING  = 128')
     replace(notebook, 'BATCH_RESERVE  = 0.12', 'BATCH_RESERVE  = 0.15')
@@ -276,6 +276,7 @@ def main() -> None:
             'RUN_LR_PILOT   = True\n'
             'LR_PILOT_STEPS = 150\n'
             'LR_PROFILES = {\n'
+            '    "gentle":   (1e-5, 1e-5, 2e-6),\n'
             '    "cautious": (2e-5, 2e-5, 5e-6),\n'
             '    "stable":   (5e-5, 5e-5, 1e-5),\n'
             '    "thermal":  (5e-5, 5e-5, 2e-5),\n'
@@ -403,15 +404,22 @@ def main() -> None:
         ## LR pilotu ve tam eğitim bütçesi
 
         `epoch` burada veri setinin fiziksel olarak bir kez okunması değildir;
-        `STEPS × batch` örneklemesidir. Tam encoder koşusu `12 × 500 = 6000`
-        optimizer adımıdır. OneCycle bu toplam bütçeye göre kurulduğu için
-        `PATIENCE=0`: en iyi validation checkpoint'i yine korunur, fakat LR
-        inişi erken kesilmez.
+        `STEPS × batch` örneklemesidir. Tam encoder koşusu `30 × 500 = 15000`
+        optimizer adımıdır. Bütçe 12'den 30'a çıktı çünkü OneCycle inişi bu
+        toplama göre kuruluyor: daha uzun bütçe, daha yavaş inen bir LR ve
+        kararsız bir encoder'ın ihtiyacı olan şey tam olarak budur.
 
-        Pilot üç profili aynı split, aynı augmentasyon ve aynı seed ile
-        `1 head + 2 encoder`, epoch başına 150 adımda sınar. Herhangi bir
+        `PATIENCE=10` bir ayar knob'u değil, emniyet ağıdır. Erken durmak LR'yi
+        yüksek ve inişi yarım bırakır, o yüzden eşik bütçenin üçte biri: gerçek
+        bir plato kesilir, normal dalgalanma kesilmez.
+
+        Pilot dört profili aynı split, aynı augmentasyon ve aynı seed ile
+        `1 head + 2 encoder`, epoch başına 150 adımda sınar. `gentle` en alt
+        basamaktır (trunk 2e-6) ve kararsızlık için oradadır. Herhangi bir
         non-finite encoder loss profili elenir. Bu kısa pilot nihai accuracy
-        ölçümü değildir; kararsız LR'yi pahalı tam koşudan önce elemek içindir.
+        ölçümü değildir; kararsız LR'yi pahalı tam koşudan önce elemek içindir
+        -- ve 150 adımda yüksek bir rate iyi görünüp 30 epoch'ta patlayabilir,
+        o yüzden pilot sonucunu `lr_pilot.json`'dan okuyun.
     """))
     notebook["cells"].insert(train_index + 1, code(r"""
         import math

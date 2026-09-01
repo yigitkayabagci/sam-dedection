@@ -23,7 +23,7 @@
 #
 #   1) It is off the training resolution, as above.
 #   2) 22 is a thermal run. configs/edgetam_768.yaml already argues that 768 is
-#      for sources that carry the detail -- 1280x720 recordings -- and the
+#      for sources that carry the detail -- the 1280x768 recordings -- and the
 #      wrong tool for thermal frames like Anti-UAV410's 640x512, where 768
 #      *upsamples*: 2.25x the 512 token count spent on interpolated pixels, and
 #      a 6-pixel drone becomes a 9-pixel one, still inside a single stride-16

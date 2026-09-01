@@ -488,7 +488,9 @@ tokens² (~5×), its cross-attention to the fixed memory bank with tokens (2.25�
 *upsamples*: 2.25× the 512 token count for interpolated pixels carrying no new
 information, and a 6-pixel drone reaches 9 pixels — still inside one stride-16
 cell. `src/trackers/adaptive.py` buys 4–10× magnification at the 512
-price and is the right tool there. 768 is for the 1280×720 recordings.
+price and is the right tool there. 768 is for the deployment recordings, which
+are **1280×768** -- a short side of exactly 768, so `crop768` is a native window
+and not a resize in either direction.
 
 **Status: configs and tests ready; nothing exported or measured. The export's
 own guard is the first real check — `_CrossAttentionGraph.__init__` raises

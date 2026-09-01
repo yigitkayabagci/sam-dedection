@@ -22,7 +22,8 @@
 #
 # WHETHER 768 IS THE RIGHT SIZE IS A QUESTION ABOUT YOUR FOOTAGE, NOT ABOUT
 # THESE WEIGHTS. 768 is the midpoint for sources carrying more than 512x512 of
-# real detail -- 1280x720 recordings. On a 640x512 thermal frame it *upsamples*:
+# real detail -- this project's recordings are 1280x768, so `crop768` takes a
+# native 768 window with no resampling. On a 640x512 thermal frame it *upsamples*:
 # 2.25x the 512 token count (2304 against 1024) spent on interpolated pixels
 # carrying no new information, and a 6-pixel drone reaches 9 pixels, still
 # inside a single stride-16 cell. `src/trackers/adaptive.py` buys 4-10x

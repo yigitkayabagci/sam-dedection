@@ -22,15 +22,19 @@ training, a real tracking sequence -- use these instead:
 | long-interval instance masks | VTUAV-VIS |
 | free negatives | crop windows with no target in them |
 
-## The deployment target: 1280x720 in, **768** into the model
+## The deployment target: **1280x768** in, **768** into the model
 
-**768 is the size, not a midpoint under evaluation.** The camera is roughly
-1280x720, which is exactly the case `configs/edgetam_768.yaml` was written for
-and what `docs/EXPERIMENT_LOG.md` §3.9 means by "768 is for the 1280x720
-recordings" -- there is more than 512x512 of real detail in the frame, so 768's
-2304 tokens are spent on pixels the sensor actually produced. The argument
-against 768 in that section is about 640x512 thermal sources, where it
-upsamples; it does not apply here. `src/trackers/adaptive.py` is the tool for
+**768 is the size, not a midpoint under evaluation.** The recordings are
+1280x768 -- confirmed by the user, not inferred, and not the 720p this file
+first said. The short side being exactly 768 is the whole point: `crop768`
+takes a **768x768 window in native pixels with no resampling at all**, where a
+720-tall source would be clamped to 768x720 and stretched 6.7% vertically. It
+is the case `configs/edgetam_768.yaml` was written for and what
+`docs/EXPERIMENT_LOG.md` §3.9 means by 768 being for the wide recordings --
+there is more than 512x512 of real detail in the frame, so 768's 2304 tokens
+are spent on pixels the sensor actually produced. The argument against 768 in
+that section is about 640x512 thermal sources, where it upsamples; it does not
+apply here. `src/trackers/adaptive.py` is the tool for
 those sources, not for this one.
 
 What follows from it:

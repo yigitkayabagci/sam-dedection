@@ -579,3 +579,27 @@ aynen eskisi gibidir.
 3. hücrenin kaynak sayımı hangi setlerin 768'i doğal veremediğini yazar:
 VTUAV / VTUAV-VIS (1920x1080) ve segfly (4000x3000) verir, 640x512 termal
 setler vermez.
+
+## 32'nin bütçesi: 30 epoch, patience 10, bir basamak daha alçak LR
+
+Encoder kararsız olduğu için tam koşu bütçesi büyütüldü. Gerekçe `schedule.py`
+docstring'inde zaten yazılıydı: OneCycle `total_steps`'i stage'in epoch
+bütçesinden kuruyor, yani **bütçeyi büyütmek LR inişini yavaşlatmanın kendisi**.
+
+| knob | eski | yeni |
+|---|---|---|
+| `EPOCHS` | `[2, 12]` | `[2, 30]` |
+| `PATIENCE` | 0 (kapalı) | 10 |
+| `LR_PROFILES` | cautious / stable / thermal | **gentle** / cautious / stable / thermal |
+
+`gentle = (1e-5, 1e-5, 2e-6)` — trunk hızı `cautious`'ın yarısından da düşük.
+Pilot dört profili de aynı split ve seed ile deneyip en düşük encoder val
+loss'u seçer, non-finite olanı eler.
+
+`PATIENCE=10` bir ayar knob'u değil emniyet ağı: erken durmak LR'yi yüksek ve
+inişi yarım bırakır, o yüzden eşik bütçenin üçte biri. Gerçek bir plato
+kesilir, normal dalgalanma kesilmez.
+
+Uyarı: pilot 150 adımlık bir vekildir. Yüksek bir rate 150 adımda iyi görünüp
+30 epoch'ta patlayabilir; seçileni `lr_pilot.json`'dan okuyun. Zorla düşürmek
+isterseniz `RUN_LR_PILOT = False` + `LR_PROFILES["gentle"]`.

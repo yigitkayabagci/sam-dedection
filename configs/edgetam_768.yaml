@@ -34,8 +34,9 @@
 # carry no new information, and a 6-pixel drone becomes a 9-pixel one, still
 # under a single stride-16 cell. Use `src/trackers/adaptive.py` for that case:
 # it crops a window around the target and magnifies it 4-10x at the 512 price.
-# 768 is for sources that genuinely have the detail -- the 1280x720 recordings,
-# not the thermal set.
+# 768 is for sources that genuinely have the detail -- this project's own
+# recordings are 1280x768, a short side of exactly 768, so `crop768` is a
+# native window with no resampling on either axis. Not the thermal set.
 #
 # This is the baseline a 768 TensorRT run must be compared against, exactly as
 # edgetam_512.yaml is for the 512 engines. Comparing 768-TRT to a 512 or 1024
