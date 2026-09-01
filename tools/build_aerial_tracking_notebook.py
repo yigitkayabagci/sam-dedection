@@ -178,36 +178,50 @@ def main() -> None:
         ANTI_DATA = DATA / "AntiUAV410"
         TEMPORAL_POOL_ROOT = Path("/content/pool/aerial_stage_c")
         WORK = Path("/content/work/aerial_thermal_tracking")
-        CHECKPOINT = REPO / "checkpoints/edgetam_aerial_thermal_tracking_512.pt"
+        # CHECKPOINT ve MIRROR aşağıda, taban seçildikten sonra kurulur: ikisi
+        # de tabanın adını taşır.
         for directory in (DATA, VTUAV_DATA, VTUAV_VIS_DATA, BIRDSAI_DATA,
-                          TEMPORAL_POOL_ROOT, WORK, CHECKPOINT.parent):
+                          TEMPORAL_POOL_ROOT, WORK):
             directory.mkdir(parents=True, exist_ok=True)
 
         from google.colab import drive
         drive.mount("/content/drive")
         VTUAV_DRIVE = Path("/content/drive/MyDrive/VTUAV")
         POOL_DRIVE = Path("/content/drive/MyDrive/edgetam-pool")
+        STAGE_B_DRIVE = Path("/content/drive/MyDrive/edgetam-stage-b")
+        # 32'nin bir koşusunun tam yolu. Boş bırakılırsa aşağıdaki aday
+        # kullanılır. 32 pretrain tabanıyla koşulduğunda çıktısının adı
+        # `_from_<pretrain>` eki alır, yani bu satır o koşuya geçmenin yeridir:
+        #   aerial_thermal_stable_from_pretrain_thermal_aerial/
+        #     edgetam_pool_aerial_thermal_stable_from_pretrain_thermal_aerial_512.pt
+        BASE_STAGE_B_OVERRIDE = ""
         BASE_STAGE_B_CANDIDATES = [
-            Path("/content/drive/MyDrive/edgetam-stage-b/aerial_thermal_stable/"
-                 "edgetam_pool_aerial_thermal_stable_512.pt"),
-            Path("/content/drive/MyDrive/edgetam-stage-b/thermal_deep/"
-                 "edgetam_pool_thermal_deep_512.pt"),
+            STAGE_B_DRIVE / "aerial_thermal_stable"
+                          / "edgetam_pool_aerial_thermal_stable_512.pt",
         ]
-        BASE_STAGE_B = next(
-            (path for path in BASE_STAGE_B_CANDIDATES if path.is_file()),
-            BASE_STAGE_B_CANDIDATES[0])
-        MIRROR = Path(
-            "/content/drive/MyDrive/edgetam-stage-c/aerial_thermal_tracking")
-        MIRROR.mkdir(parents=True, exist_ok=True)
+        BASE_STAGE_B = (Path(BASE_STAGE_B_OVERRIDE) if BASE_STAGE_B_OVERRIDE
+                        else next((path for path in BASE_STAGE_B_CANDIDATES
+                                   if path.is_file()),
+                                  BASE_STAGE_B_CANDIDATES[0]))
         assert BASE_STAGE_B.is_file(), (
-            "Stage-B checkpoint yok. Önce notebook 32'yi bitirin; aranan yollar: "
-            f"{BASE_STAGE_B_CANDIDATES}")
+            f"Stage-B checkpoint yok: {BASE_STAGE_B}. Önce notebook 32'yi "
+            f"bitirin, ya da BASE_STAGE_B_OVERRIDE'a koşmak istediğiniz "
+            f"checkpoint'in tam yolunu yazın.")
+        # Her Stage C koşusu tabanının adını taşır. Taşımasaydı, iki farklı
+        # Stage B çıktısından koşulan iki Stage C aynı klasöre ve aynı
+        # checkpoint adına yazar ve ikincisi birincisini sessizce ezerdi --
+        # 32'nin `_from_` eki bunun için var, burada da aynısı gerekiyor.
+        BASE_TAG = (Path(BASE_STAGE_B).stem
+                    .replace("edgetam_pool_", "").replace(f"_{SIZE}", ""))[:48]
+        MIRROR = Path("/content/drive/MyDrive/edgetam-stage-c") / (
+            f"aerial_thermal_tracking_from_{BASE_TAG}")
+        MIRROR.mkdir(parents=True, exist_ok=True)
+        CHECKPOINT = REPO / (
+            f"checkpoints/edgetam_aerial_thermal_tracking_from_{BASE_TAG}"
+            f"_{SIZE}.pt")
+        CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
         print("Stage-B base:", BASE_STAGE_B)
-        if BASE_STAGE_B == BASE_STAGE_B_CANDIDATES[1]:
-            print("!! Eski thermal_deep checkpoint fallback olarak kullanılıyor. "
-                  "Drive'daki bilinen koşuda encoder non-finite olmuş ve dosya "
-                  "head-only en iyi aşamada kalmıştı. Üretim deneyi için önce "
-                  "notebook 32 önerilir.")
+        print("Stage-C output:", MIRROR)
         """),
         cell("markdown", r"""
         ## Veriyi getir
