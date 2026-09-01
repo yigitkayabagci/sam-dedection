@@ -262,6 +262,51 @@ def main() -> None:
             'print(f"  {len(SPLITS[\'train\'])} train frames "\n'
             '      f"({sum(len(v) for v in SPLITS.values())} indexed, the rest '
             'held out), "')
+    # A dead `source:class` key looked identical to a misspelling. It is not:
+    # SegFly's spec does carry `truck` (id 36), so `segfly:truck` matching
+    # nothing means the gates already removed those instances -- they are a
+    # ninth of a vehicle's area, and MIN_AREA cuts them before rebalance ever
+    # sees them. Printing what the source *did* carry answers that in the log
+    # instead of leaving it to a spec read.
+    replace(notebook,
+            'f"misspelt class looks exactly like a class that is already rare.")',
+            'f"misspelt class looks exactly like a class that is already rare.")\n'
+            '        for _key in _balance["unmatched"]:\n'
+            '            _src = _key.split(":")[0] if ":" in _key else _key\n'
+            '            _has = sorted({_spec.name_of(_i.class_id)\n'
+            '                           for _e in INDEX\n'
+            '                           for _spec in [_e.source.spec] if _e.source\n'
+            '                           and _e.source.name.split("/")[-1] == _src\n'
+            '                           for _i in _e.instances})\n'
+            '            print(f"      {_key}: {_src} carries {_has or \'nothing here\'}")')
+
+    # The epoch table went to the kernel's stdout, not the notebook: the run is
+    # a subprocess. Reading it back out of run.json is the difference between a
+    # run whose curve can be read and one whose only number is its last.
+    replace(notebook,
+            'print("wall clock", round((time.time() - _started) / 60, 1), "min")',
+            'for _row in RUN_LOG.get("history", []):\n'
+            '    print(f"  {_row.get(\'stage\',\'\'):<8} epoch {_row.get(\'epoch\',\'?\'):>3}  "\n'
+            '          f"train {_row.get(\'train_loss\', float(\'nan\')):.4f}  "\n'
+            '          f"val {_row.get(\'val_loss\', float(\'nan\')):.4f}"\n'
+            '          + ("  <- best" if _row.get("saved") else ""))\n'
+            'if RUN_LOG.get("stopped_early"):\n'
+            '    print("stopped early:", RUN_LOG["stopped_early"])\n'
+            'print("wall clock", round((time.time() - _started) / 60, 1), "min")')
+
+    # The whole by-class table, not its first twelve rows. The tail is where a
+    # class that was already rare lives, which is the half a reader needs.
+    replace(notebook,
+            'for _name, (_was, _now) in list(_balance["by_class"].items())[:12]:',
+            'for _name, (_was, _now) in _balance["by_class"].items():')
+
+    # Val had no source table while train and test did -- and val is what the
+    # LR pilot and the checkpoint choice are decided on.
+    replace(notebook,
+            'for _source, _count in TEST.sources.items():',
+            'for _source, _count in VAL.sources.items():\n'
+            '    print(f"  val   {_source:<34}{_count:>8}")\n'
+            'for _source, _count in TEST.sources.items():')
     # `save_splits` records only which *frames* survived, so the per-instance
     # thinning `rebalance` did two lines earlier was undone the moment
     # train_encoder re-indexed: measured on a synthetic pool, a train split the
