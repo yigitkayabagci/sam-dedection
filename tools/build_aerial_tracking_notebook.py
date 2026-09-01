@@ -535,7 +535,12 @@ def main() -> None:
             {"vtuav_thermal", "vtuav_lt_thermal"},
             min_box_iou=TEACHER_MIN_BOX_IOU) if USE_VTUAV else {}
         teacher_mask_frames = sum(len(store) for store in TEACHER_STORES.values())
-        assert not USE_VTUAV or teacher_mask_frames >= MIN_TEACHER_MASK_FRAMES, (
+        # Not on a precheck-only run: the teacher masks are training
+        # supervision, and the audit below never reads one. Demanding them
+        # before a measurement that does not use them turns "measure first"
+        # into a download.
+        assert (STOP_AFTER_PRECHECK or not USE_VTUAV
+                or teacher_mask_frames >= MIN_TEACHER_MASK_FRAMES), (
             f"Teacher pool eşleşmesi yalnız {teacher_mask_frames} kare verdi; "
             f"en az {MIN_TEACHER_MASK_FRAMES} bekleniyor. Training'i box-only "
             "başlatmak yerine edgetam-pool/vtuav_* arşivlerini kontrol edin.")
