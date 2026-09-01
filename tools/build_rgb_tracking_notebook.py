@@ -44,8 +44,15 @@ def cell(kind: str, text: str) -> dict:
     return item
 
 
-def replace(notebook: dict, old: str, new: str, *, count: int = 1) -> None:
-    """Replace exact notebook source and fail if 31 drifted underneath us."""
+def replace(notebook: dict, old: str, new: str, *, count=1) -> None:
+    """Replace exact notebook source and fail if 31 drifted underneath us.
+
+    `count="any"` accepts one or more. 31 writes the same record key into two
+    cells and other work moves the lines around it, so pinning a number there
+    breaks this build for a reason that has nothing to do with 37. Zero is
+    still a failure: a leftover 31 flag in this notebook is a NameError
+    minutes into a GPU session.
+    """
     found = 0
     for item in notebook["cells"]:
         text = "".join(item.get("source", []))
@@ -53,7 +60,7 @@ def replace(notebook: dict, old: str, new: str, *, count: int = 1) -> None:
         if hits:
             item["source"] = text.replace(old, new).splitlines(keepends=True)
             found += hits
-    if found != count:
+    if (found < 1) if count == "any" else (found != count):
         raise RuntimeError(f"expected {count} occurrence(s), found {found}: {old!r}")
 
 
@@ -113,8 +120,9 @@ SIZE, CLIP_LEN, CLIP_STRIDE = 512, 8, 1
 SEED = 0
 MODALITY = "rgb"
 
-VTUAV_VIS_TRAIN_PARTS = ["train_001"]
-VTUAV_VIS_HOLD_OUT_PARTS = ["test_001"]
+VTUAV_VIS_TRAIN_PARTS = ["train_001", "train_002", "train_003"]
+VTUAV_VIS_HOLD_OUT_PARTS = ["test_001", "test_002", "test_003",
+                            "test_004", "test_005"]
 
 SOURCE_WEIGHTS = {"vtuav_vis": 1.0}
 TRAIN_CLIP_POOL = 6000
@@ -273,6 +281,16 @@ for _part, _rows in SPLITS.items():
     print(f"{_part:<8}{len(_rows):>9}{sum(len(r) for r in _rows):>10}"
           f"{sum(len(VIS_STORES.get(r.name, {})) for r in _rows):>10}")
 assert all(SPLITS.values()), "split'lerden biri boş."
+
+# 31 turns the object-score term off when nothing in the mix is ever absent,
+# and this run is exactly that case: `vtuav_vis_sequences` sets
+# `exist=np.ones`, so every frame has its target. Counted rather than assumed,
+# because the switch downstream reads the count and a hard-coded zero here
+# would be a claim instead of a measurement.
+ABSENT_FRAMES = {"vtuav_vis": sum(len(row) - int(row.labels.exist.sum())
+                                  for row in sequences)}
+TOTAL_ABSENT = sum(ABSENT_FRAMES.values())
+print("absent (exist=False) frames per source:", ABSENT_FRAMES)
 """
 
 CLIPS = r"""
@@ -404,24 +422,23 @@ def main() -> None:
     keep = text[:text.index("CONTRAST = {row.name:")]
     cells[10]["source"] = source(keep + CLIPS.strip("\n"))
 
-    # The run records name what the run was made of, and 31's fields are for
-    # sources this notebook does not have. Replaced rather than dropped: a
-    # report that does not say which archives it read is the one nobody can
-    # reproduce.
-    replace(notebook,
-            '"sources": SOURCE_WEIGHTS, "use_antiuav410": USE_ANTIUAV410,\n'
-            '        "vtuav_archives": VTUAV_ARCHIVES,',
-            '"sources": SOURCE_WEIGHTS, "modality": MODALITY,\n'
-            '        "vtuav_vis_train_parts": VTUAV_VIS_TRAIN_PARTS,\n'
-            '        "vtuav_vis_hold_out_parts": VTUAV_VIS_HOLD_OUT_PARTS,')
-    replace(notebook,
-            '"use_antiuav410": USE_ANTIUAV410, "vtuav_archives": VTUAV_ARCHIVES,',
-            '"modality": MODALITY,\n'
-            '    "vtuav_vis_train_parts": VTUAV_VIS_TRAIN_PARTS,\n'
-            '    "vtuav_vis_hold_out_parts": VTUAV_VIS_HOLD_OUT_PARTS,')
-    replace(notebook,
-            '"vtuav_vis_parts": VTUAV_VIS_PARTS if USE_VTUAV_VIS else [],',
-            '"base_stage_b_tag": BASE_TAG,', count=2)
+    # 31's records name the sources it can be built from, and every one of
+    # those flags is 31's. Rewritten rather than dropped: a report that does
+    # not say which archives it read is the one nobody can reproduce. Anchored
+    # one key at a time on purpose -- 31 is edited by other work, and a
+    # whole-block anchor breaks this build every time a neighbouring line
+    # moves, for a reason that has nothing to do with 37.
+    for _old, _new in (
+        ('"use_antiuav410": USE_ANTIUAV410,', '"modality": MODALITY,'),
+        ('"use_vtuav": USE_VTUAV, "use_birdsai": USE_BIRDSAI,',
+         '"vtuav_vis_train_parts": VTUAV_VIS_TRAIN_PARTS,'),
+        ('"use_vtuav_vis": USE_VTUAV_VIS,',
+         '"vtuav_vis_hold_out_parts": VTUAV_VIS_HOLD_OUT_PARTS,'),
+        ('"vtuav_archives": VTUAV_ARCHIVES,', '"base_stage_b_tag": BASE_TAG,'),
+        ('"vtuav_vis_parts": VTUAV_VIS_PARTS if USE_VTUAV_VIS else [],',
+         '"mask_frames": MASK_FRAMES,'),
+    ):
+        replace(notebook, _old, _new, count="any")
     # The teacher pool is 31's, and with it go the two numbers the records
     # quoted from it. Recorded here instead: how much of the run was actually
     # supervised by a mask -- the same question, answered directly, because
