@@ -155,6 +155,14 @@ def main() -> None:
         PRECHECK_MAX_LOST_RATE = 0.10
         PRECHECK_MAX_LONGEST_DROPOUT = 24
         STOP_AFTER_PRECHECK = False  # True: yalnız audit yap, eğitim hücresine geçme
+        # Gözle kontrol. Kaynak başına birkaç dizi, her birinde `exist`
+        # değişimlerinin etrafına yerleşmiş kareler; sayfalar Drive'a
+        # (MIRROR/inspect) yazılır. Kayboluş/geri geliş anları uniform
+        # örneklemede neredeyse hiç görünmediği için pencereler oraya konur.
+        INSPECT_DATA = True
+        INSPECT_PER_SOURCE = 4
+        INSPECT_SPAN = 12
+        INSPECT_WINDOWS = 2
         RENDER_BEFORE_AFTER = True
         DEMO_FRAMES, DEMO_FPS, DEMO_PRE_ROLL = 400, 20, 80
 
@@ -424,6 +432,13 @@ def main() -> None:
             "başlatmak yerine edgetam-pool/vtuav_* arşivlerini kontrol edin.")
         STORES.update(TEACHER_STORES)
         STORES.update(VIS_STORES)
+
+        if INSPECT_DATA:
+            from tools.inspect_stage_c import render
+            print("\ncontact sheets -- what Stage C is about to train on:")
+            render(sequences, STORES, MIRROR / "inspect",
+                   per_source=INSPECT_PER_SOURCE, span=INSPECT_SPAN,
+                   windows=INSPECT_WINDOWS)
 
         print("\nmask supervision")
         for source in sorted({source_name(row) for row in sequences}):
