@@ -116,7 +116,13 @@ import torch
 import yaml
 from tqdm.auto import tqdm
 
-SIZE, CLIP_LEN, CLIP_STRIDE = 512, 8, 1
+# 768 is the deployment size for the RGB line as well as the thermal one, and
+# unlike the thermal sources VTUAV-VIS can actually supply it: its frames are
+# 1920x1080, so `_window_for` takes a NATIVE 768 crop with no resampling at
+# all. Training at 512 and deploying at 768 leaves an unmeasured variable that
+# a 768 run simply does not have. The cost is 2.25x the tokens, so the probe
+# finds a smaller batch.
+SIZE, CLIP_LEN, CLIP_STRIDE = 768, 8, 1
 SEED = 0
 MODALITY = "rgb"
 
@@ -187,7 +193,7 @@ assert BASE_STAGE_B.is_file(), (
 BASE_TAG = (Path(BASE_STAGE_B).stem
             .replace("edgetam_pool_", "").replace(f"_{SIZE}", ""))[:48]
 MIRROR = Path("/content/drive/MyDrive/edgetam-stage-c") / (
-    f"aerial_rgb_tracking_from_{BASE_TAG}")
+    f"aerial_rgb_tracking_from_{BASE_TAG}_{SIZE}")
 MIRROR.mkdir(parents=True, exist_ok=True)
 CHECKPOINT = REPO / (
     f"checkpoints/edgetam_aerial_rgb_tracking_from_{BASE_TAG}_{SIZE}.pt")
