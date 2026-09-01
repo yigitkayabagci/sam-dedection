@@ -238,6 +238,56 @@ SPECS: dict[str, DatasetSpec] = {
         # simulate a sensor failure. See `excluded_keys`.
         exclude="broken_in_*.txt",
     ),
+    # SegFly after a hand audit: 3 439 frames / 10 751 `vehicle` instances,
+    # against the raw export's 15 007 frames. Produced outside this repository
+    # and read here as it ships.
+    #
+    # **The masks are instance ids, not a palette**, which is why `mode` is
+    # `labels` and not `components`: the audit did the decomposition itself
+    # (watershed, because 4/8-connectivity and a 3 px erosion did not separate
+    # two cars the publisher had merged into one block), so re-decomposing here
+    # would undo it. `classes` exists only to name the one thing class; the
+    # values in a mask are 1..N per frame.
+    #
+    # What the audit removed, with its own measurements:
+    #
+    #   `truck`            dropped entirely -- median area 246 px against
+    #                      `vehicle`'s 2 225, so the class is not what it says
+    #   1 162 "ghosts"     no vehicle under the mask; median edge density 0.000
+    #                      on 495 verified examples against 1.242 on real ones
+    #   1 914 "fusions"    two cars annotated as one block
+    #
+    # **What it could not remove, and the reason this spec carries `exclude`.**
+    # 706 frames (20.5 % of the set) have masks shifted 25-50 px off the
+    # vehicle, in a random direction per frame -- which is why an aggregate
+    # measurement missed it twice and a per-frame one found 37 % of a 484-frame
+    # sample past 8 px. An automatic correction was written, passed an
+    # injection test, and was reverted: inspected by eye it damaged all 8
+    # sampled cases, pulling a correct mask onto brighter nearby ground. The
+    # injection test only asks "can it undo a shift", never "does it leave a
+    # correct mask alone".
+    #
+    # So the frames are flagged rather than fixed, and
+    # `tools/segfly_clean_manifest.py` turns the flags into the `atlanan_*.txt`
+    # this glob reads. Dropping them is a choice with a cost -- 20.5 % of the
+    # set, and a further 50.5 % of frames could not be measured at all, so the
+    # real rate is a floor, not an estimate.
+    "segfly_temiz": DatasetSpec(
+        name="segfly_temiz",
+        palette_source=(
+            "not a palette: the audit writes one instance id per object and "
+            "`mode=labels` reads each distinct value as one instance"),
+        thermal="**/images/*.png",
+        masks="**/masks/*.png",
+        classes={"background": 0, "vehicle": 13},
+        things=("vehicle",),
+        ignore=(0,),
+        # Recursive on purpose: `excluded_keys` globs from the root the
+        # `--dataset` flag names, and an archive that unpacks into a folder of
+        # its own puts the manifest a level below it. A non-recursive glob
+        # would find nothing there and drop nothing, silently.
+        exclude="**/atlanan_*.txt",
+    ),
     # >15 000 geometrically aligned RGB-T pairs at 640x512 thermal, plus
     # >20 000 RGB-only frames, over three altitudes (30/40/50 m). ECCV 2026.
     # Thermal exists for scenes 3, 4, 5 and 9 only.

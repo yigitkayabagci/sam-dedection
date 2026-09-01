@@ -206,6 +206,68 @@ def main() -> None:
             '"gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,\n'
             '    "neighbour_weight": NEIGHBOUR_WEIGHT,')
 
+    # SegFly, hand-audited: 3 439 frames / 10 751 `vehicle` instances against
+    # the raw export's 15 007, with `truck` dropped as a class, 1 162 masks
+    # with no vehicle under them removed and 1 914 merged pairs split. The
+    # masks are instance ids, so `labels` and not `components` -- see
+    # SPECS["segfly_temiz"]. `SEGFLY_DROP` decides what to do with the one
+    # finding the audit could not fix: 706 frames whose masks sit 25-50 px off
+    # the vehicle. "none" trains on them, "shift" excludes them, and cell 3
+    # prints the census either way.
+    replace(notebook,
+            'EXTRA_DATASETS = ["segfly:/content/data/SegFly:thermal:components:train"]',
+            'SEGFLY_CLEAN = True\n'
+            'SEGFLY_DROP  = "shift"\n'
+            'EXTRA_DATASETS = (["segfly_temiz:/content/data/SegFly_temiz:'
+            'thermal:labels"] if SEGFLY_CLEAN else\n'
+            '                  ["segfly:/content/data/SegFly:thermal:'
+            'components:train"])')
+    replace(notebook,
+            '["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", "SegFly"],',
+            '(["/content/drive/MyDrive/edgetam-pool/segfly_temiz/'
+            'SegFly_temiz.zip", "SegFly_temiz"]\n'
+            '     if SEGFLY_CLEAN else\n'
+            '     ["/content/drive/MyDrive/edgetam-pool/segfly/segfly.zip", '
+            '"SegFly"]),')
+    # The weight is keyed by source name, so the rename has to carry it or the
+    # arm silently trains SegFly at 1.0 while the report still lists the key.
+    replace(notebook, '"segfly": 0.85,\n',
+            '"segfly": 0.85, "segfly_temiz": 0.85,\n')
+
+    # The exclusion manifest has to exist before anything globs the set, so
+    # this runs before the first `build_indexes` and after `GATES`, which is
+    # where the cell stops being configuration and starts reading the disk.
+    replace(notebook,
+            'GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE, '
+            'max_area=MAX_AREA,\n                      fill=FILL)',
+            'GATES = InstanceGates(min_area=MIN_AREA, min_side=MIN_SIDE, '
+            'max_area=MAX_AREA,\n                      fill=FILL)\n'
+            '\n'
+            'if SEGFLY_CLEAN:\n'
+            '    import json as _json\n'
+            '    from tools.segfly_clean_manifest import (census as _census,\n'
+            '                                             report as _report,\n'
+            '                                             write_manifests as '
+            '_write_manifests)\n'
+            '    _seg_found = sorted(Path("/content/data/SegFly_temiz")'
+            '.rglob("index.json"))\n'
+            '    assert _seg_found, ("SEGFLY_CLEAN is on and no index.json was '
+            'unpacked under "\n'
+            '                        "/content/data/SegFly_temiz -- check that '
+            'SegFly_temiz.zip "\n'
+            '                        "reached Drive and that cell 2 staged '
+            'it.")\n'
+            '    _seg_root = _seg_found[0].parent\n'
+            '    _seg_index = _json.loads(_seg_found[0]'
+            '.read_text(encoding="utf-8"))\n'
+            '    print("SegFly, hand-audited:")\n'
+            '    for _line in _report(_census(_seg_index)):\n'
+            '        print("   ", _line)\n'
+            '    for _line in _write_manifests(_seg_root, _seg_index, '
+            'SEGFLY_DROP):\n'
+            '        print("   ", _line)\n'
+            '    print()')
+
     replace(notebook, 'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"',
             'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"\n'
             'BASE_CHECKPOINT = ""')

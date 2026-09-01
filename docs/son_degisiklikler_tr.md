@@ -689,3 +689,81 @@ ettiğidir.
 veya `fill`'in elediği bir bileşen komşu değil, arka plan sayılıyor — yani
 tek bir dev bloba çöken bir cluster bu terimin görüş alanında yok. Terim
 *etiketli* nesneler arasındaki ayrımı ölçer.
+
+## Temizlenmiş SegFly notebook'a bağlandı
+
+Drive'daki `SegFly_mentor/` (rapor + kanıt) ve
+`edgetam-pool/segfly_temiz/SegFly_temiz.zip` (1.34 GB, asıl veri) okundu.
+Temiz set: **3 439 kare / 10 751 `vehicle` instance**, ham dışa aktarımın
+15 007 karesine karşılık.
+
+Ham SegFly'a karşı kaldırılanlar, denetimin kendi ölçümleriyle:
+
+| bulgu | ölçüm | yapılan |
+|---|---|---|
+| `truck` sınıfı kamyon değil | alan medyanı 246 px · `vehicle` 2 225 px | sınıf tamamen düşürüldü |
+| "hayalet" — maskenin altında araç yok | 495 doğrulanmış örnekte kenar yoğunluğu medyanı 0,000 · gerçeklerde 1,242 | 1 162 maske elendi |
+| "kaynaşma" — iki araba tek blok | 4/8-komşu aynı, 3 px aşındırma ayırmıyor | 1 914 tanesi watershed ile bölündü |
+
+### Maskeler instance id taşıyor → `mode=labels`
+
+Denetim dekompozisyonu **kendisi** yaptı (watershed). Bu yüzden yeni spec
+`components` değil **`labels`** modunda okunuyor: her farklı sıfır-olmayan
+piksel değeri bir instance. `components` ile okumak, temizliğin satın aldığı
+tek şeyi geri alırdı. `vtuav_vis` ile aynı yol.
+
+```python
+SPECS["segfly_temiz"]   # thermal="**/images/*.png", masks="**/masks/*.png"
+                        # things=("vehicle",), ignore=(0,)
+```
+
+### Kayma: düzeltilmedi, artık dışlanabiliyor
+
+706 kare (%20,5) maskeleri araçtan 25-50 px kaymış, yönü kare başına rastgele.
+Otomatik düzeltme yazılmış, enjekte sınamasını geçmiş ve **geri alınmış** —
+gözle bakılan 8 vakanın hepsinde doğru maskeyi yakındaki parlak zemine
+çekmiş. Enjekte sınaması yalnız "kaymayı geri alabiliyor mu"yu ölçüyor,
+"doğru olanı yerinde bırakıyor mu"yu değil.
+
+Bunlar `index.json`'da işaretli ama pikselde değil, yani eğitim yolunun
+göremeyeceği bir şey. `InstanceGates`'in işi değil: kapılar hedefin eğitilmeye
+değer olup olmadığını sorar, anotasyonun doğru yerde olup olmadığını değil. O
+yüzden veri katmanının bunun için zaten sahip olduğu yoldan geçiyor:
+`DatasetSpec.exclude` (Kust4K'nın `broken_in_*.txt`'i ile aynı mekanizma).
+
+`tools/segfly_clean_manifest.py` işaretleri o dosyaya çeviriyor:
+
+```
+python tools/segfly_clean_manifest.py --set /content/data/SegFly_temiz --drop shift
+```
+
+`--drop none|shift|review|both`. `none` daha önce yazılmış dosyaları **siler** —
+kalsaydı, kararı geri aldıktan sonra da dışlamaya devam ederdi.
+
+### 32'de ne değişti
+
+```python
+SEGFLY_CLEAN = True        # 1. hücre
+SEGFLY_DROP  = "shift"
+```
+
+Açıkken `SOURCE_ZIPS` `SegFly_temiz.zip`'i, `EXTRA_DATASETS` da
+`segfly_temiz:...:thermal:labels` bayrağını alıyor; `CLASS_WEIGHTS`'e
+`"segfly_temiz": 0.85` eklendi (ağırlık kaynak adına göre anahtarlanıyor,
+yeniden adlandırma taşınmasaydı SegFly sessizce 1.0'da eğitilirdi). 3. hücre
+indeksi kurmadan **önce** sayımı basıp manifesti yazıyor.
+
+### Dürüstlük bölümü — denetimin kendi ifadesiyle
+
+- **Kayma oranı bir taban, tahmin değil.** Karelerin **%50,5'i ölçülemedi**
+  bile (ölçüm karede 800 px üstü en az iki hedef istiyor). `--drop shift`
+  setin beşte birini atarken aynı sorunun bilinmeyen bir kısmını içeride
+  bırakıyor.
+- **Kaynaşma kapısı silinenlerin ~1/3'ünde yanlış** — tepeden kare görünen tek
+  arabaları da almış. Üst sınır, kesin sayım değil.
+- **Hayalet kapısı ~%12 gerçek araba götürüyor** — termalde düz görünen koyu
+  araçlar kenar üretmiyor. Bilinçli takas.
+- **RGB tamamen devre dışı.** Termal-RGB hizası doğrulanamadı (karşılıklı bilgi
+  probu enjekte edilen 6 px'i ters yönde raporladı), o yüzden spec'te
+  `rgb=None` ve hiçbir ölçüm RGB'den okunmuyor.
+- **Etiketsiz gerçek araçlar var.** Silmeyle çözülmez; eksik etiket sorunu.
