@@ -43,7 +43,7 @@ from tools.run_records import main as run_records_main  # noqa: E402
 from tools.run_records import (MODES, ab_table, account_flags, POLICIES,  # noqa: E402
                                POLICY_KEYS, POLICY_NOTE, roots,
                                suggest_pattern,
-                               TRAINED_AT, WEIGHTS, config_for, digest,
+                               TORCH, TRAINED_AT, WEIGHTS, config_for, digest,
                                cache_for, engines_missing, folder,
                                overlay_for, pointers_missing, provenance,
                                staged_config)
@@ -112,6 +112,46 @@ class Tables(unittest.TestCase):
         self.assertNotIn(1024, WEIGHTS["pool_deep"],
                          "a 512-trained checkpoint at 1024 measures the "
                          "resolution, not the training")
+
+    def test_aerial_stable_is_notebook_32_at_its_own_size(self):
+        """32 re-ran 22's training; the two are one `--weights` apart.
+
+        Pinned separately from `pool_deep` because the thing that makes them
+        comparable is that both are 512 and both take their engines from their
+        own directory -- and because the reason 32 exists is that 22's recorded
+        run diverged, so a reader finding one has to be able to find the other.
+        """
+        self.assertEqual(TRAINED_AT["aerial_stable"], 512)
+        self.assertIn("aerial_thermal_stable",
+                      body(WEIGHTS["aerial_stable"][512])["checkpoint"])
+        self.assertEqual(sorted(WEIGHTS["aerial_stable"]), [512],
+                         "no run has taken these weights off 512 on purpose, "
+                         "and an entry here would be that measurement made by "
+                         "accident")
+        self.assertNotEqual(body(WEIGHTS["aerial_stable"][512])["checkpoint"],
+                            body(WEIGHTS["pool_deep"][512])["checkpoint"])
+
+    def test_every_weights_set_has_a_torch_config_for_the_sizes_it_serves(self):
+        """`--backend torch` has to answer for every pair `--weights` offers.
+
+        The policies are the reason: they are training-free and export-free, so
+        the question they answer must not wait on an engine build. A weights set
+        present in one table and missing from the other would fail at the end of
+        `config_for`, after the records were indexed.
+        """
+        for weights, table in WEIGHTS.items():
+            self.assertEqual(sorted(TORCH.get(weights, {})), sorted(table),
+                             f"{weights}: TensorRT and PyTorch tables disagree")
+            for size, config in TORCH[weights].items():
+                self.assertTrue((ROOT / config).is_file(),
+                                f"{weights}/{size} -> {config} is not there")
+                self.assertNotIn("image_encoder_engine", body(config),
+                                 f"{config} is a TensorRT config")
+                self.assertEqual(int(body(config).get("image_size", 1024)), size)
+                self.assertEqual(body(config)["checkpoint"],
+                                 body(table[size])["checkpoint"],
+                                 f"{weights}/{size}: the two backends would run "
+                                 f"different weights under one label")
 
 
 class ConfigFor(unittest.TestCase):

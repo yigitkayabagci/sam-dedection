@@ -36,10 +36,13 @@ Each mode needs its own engine set; `--modes` runs the subset you have built.
 `--weights` is the second axis, and it is a different question from the modes:
 they vary the *input*, it varies the *model*. `stock` is EdgeTAM as shipped;
 `pool_deep` is notebooks/22_thermal_deep.ipynb's checkpoint, trained at 512 on
-the thermal mask pools. Weights are traced into the ONNX graphs and baked into
-the engines, so this selects a different models*/ directory rather than a
-runtime setting -- each (weights, size) pair is its own export, and a pair with
-no engines built fails immediately with the two commands that build them.
+the thermal mask pools; `aerial_stable` is notebooks/32's, the same pools at the
+same size after that run's encoder stage diverged -- so it is read against
+`pool_deep` as well as against `stock`. Weights are traced into the ONNX graphs
+and baked into the engines, so this selects a different models*/ directory
+rather than a runtime setting -- each (weights, size) pair is its own export,
+and a pair with no engines built fails immediately with the two commands that
+build them.
 
 Results go to `<mode>_<weights>/`, so a stock run and a pool_deep one sit side
 by side off one saved prompt: same target, same frames, one variable. A plain
@@ -154,12 +157,22 @@ WEIGHTS = {
         768: "configs/edgetam_trt_768_pool_deep.yaml",
         512: "configs/edgetam_trt_512_pool_deep.yaml",
     },
+    # notebooks/32_aerial_thermal_stage_b_stable.ipynb, trained at 512 on the
+    # same thermal pools with VTUAV-LT made mandatory and the low-contrast,
+    # polarity, gamma and sensor-noise hardening on. It is `pool_deep`'s own
+    # question re-asked after that run's encoder stage diverged (validation
+    # 0.2723 -> 21.84 -> NaN), so the row it has to be read against is
+    # `pool_deep` at the same size, not only `stock`. 512 alone, for the reason
+    # above -- no run has yet asked what these weights do at 768.
+    "aerial_stable": {
+        512: "configs/edgetam_trt_512_aerial_stable.yaml",
+    },
 }
 
 # The size each weights set was actually trained at, for the note the summary
 # carries. None means "not one of ours" -- stock EdgeTAM was trained at 1024
 # before this repository existed and records nothing about it.
-TRAINED_AT = {"stock": 1024, "pool_deep": 512}
+TRAINED_AT = {"stock": 1024, "pool_deep": 512, "aerial_stable": 512}
 
 # --backend torch -> the plain PyTorch YAML for a size. The TensorRT tables
 # above are the default and stay the measurement of record; this exists for the
@@ -175,6 +188,7 @@ TORCH = {
               512: "configs/edgetam_512.yaml"},
     "pool_deep": {768: "configs/edgetam_768_pool_deep.yaml",
                   512: "configs/edgetam_512_pool_deep.yaml"},
+    "aerial_stable": {512: "configs/edgetam_512_aerial_stable.yaml"},
 }
 
 # --policy -> the overlay merged onto whichever backend YAML the (weights,
@@ -774,12 +788,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--weights", default="stock", choices=tuple(WEIGHTS),
                    help="Which trained weights the modes run on. `stock` is "
                         "EdgeTAM as shipped; `pool_deep` is the checkpoint from "
-                        "notebooks/22_thermal_deep.ipynb. Each is a separate set "
-                        "of engines -- weights are baked into an engine at export "
+                        "notebooks/22_thermal_deep.ipynb; `aerial_stable` is "
+                        "notebooks/32's, which re-ran that training after its "
+                        "encoder stage diverged. Each is a separate set of "
+                        "engines -- weights are baked into an engine at export "
                         "time, so this picks a different models*/ directory, not "
                         "a different runtime setting. Results land in "
                         "<mode>_<weights>/ so a stock run is never overwritten "
-                        "and the two share one saved prompt.")
+                        "and the runs share one saved prompt.")
     p.add_argument("--pattern", default="*.tif*", help="Frame glob inside a record.")
     p.add_argument("--cache-dir", default=None,
                    help="Where the decoded frames are staged, per record. The "

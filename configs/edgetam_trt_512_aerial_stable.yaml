@@ -1,0 +1,69 @@
+# 32_aerial_thermal_stage_b_stable.ipynb's checkpoint on TensorRT at 512x512 --
+# its training resolution. See configs/edgetam_512_aerial_stable.yaml for what
+# that run was and why it exists beside 22's.
+#
+# A NEW CHECKPOINT MEANS A NEW EXPORT. Weights are traced into the ONNX graphs
+# and baked into the engines built from them; there is no runtime checkpoint
+# load on the TensorRT path. Pointing an existing models512_pool_deep/ engine
+# set at a new `checkpoint:` here changes nothing about what runs -- the
+# `checkpoint` key below feeds the PyTorch modules that back the engines (the
+# fallback path, the memory bookkeeping that never left PyTorch, and the parity
+# check), not the engines themselves. Build these into their own directory,
+# which is also what keeps 22's set intact for the A/B:
+#
+#   1) python tools/export_edgetam_onnx.py --outdir models512_aerial_stable/ \
+#          --image-size 512 \
+#          --checkpoint checkpoints/edgetam_pool_aerial_thermal_stable_512.pt \
+#          --all-pointers --verify
+#      (--all-pointers costs nothing at run time and is what
+#      `--policy samurai` / `ego` / `guard` need from the sam_head engine. An
+#      export without it runs those policies at half strength behind one
+#      warning line -- see pointers_missing() in tools/run_records.py.)
+#   2) python tools/build_trt_engines.py   --outdir models512_aerial_stable/ --max-batch 4
+#   3) python tools/check_trt_parity.py    --outdir models512_aerial_stable/ \
+#          --image-size 512 \
+#          --checkpoint checkpoints/edgetam_pool_aerial_thermal_stable_512.pt
+#      (--checkpoint is NOT optional here: it defaults to the stock
+#      edgetam.pt, and parity against the wrong weights fails every module for
+#      a reason that has nothing to do with TensorRT. It will not catch the
+#      opposite mistake either -- a wrong checkpoint in *both* sides compares
+#      one wrong build against the same wrong build and passes.)
+#   4) python tools/run_experiment.py --outdir results/512_aerial_stable \
+#          --engines models512_aerial_stable/ \
+#          --config configs/edgetam_trt_512_aerial_stable.yaml \
+#          --baseline-config configs/edgetam_512_aerial_stable.yaml --image-size 512
+#
+# Step 4's baseline is the PyTorch run of the *same* weights at the *same*
+# size, which is what makes the result "what TensorRT changed". Two other
+# comparisons are worth taking and are different questions:
+#
+#   configs/edgetam_trt_512.yaml             stock weights, TensorRT, 512
+#                                            -> what the training changed on device
+#   configs/edgetam_trt_512_pool_deep.yaml   22's weights, TensorRT, 512
+#                                            -> what 32's stability work changed
+#
+# On the records, all three are one flag apart:
+#   python tools/run_records.py --records frames --out frame_output \
+#       --modes full512 --weights aerial_stable
+#
+# Never score this against numbers taken at 768 or 1024.
+image_encoder_engine:    models512_aerial_stable/edgetam_image_encoder.engine
+memory_attention_engine: models512_aerial_stable/edgetam_memory_attention.engine
+memory_encoder_engine:   models512_aerial_stable/edgetam_memory_encoder.engine
+sam_head_engine:         models512_aerial_stable/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_aerial_thermal_stable_512.pt
+image_size: 512                           # must match how the engines were exported
+device: cuda
+precision: float16                        # matches the fp16 engines
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
+
+strict: false                             # true = refuse silent PyTorch fallback
+use_cuda_graph: true                      # replay engines from a captured graph
+# null  -> keep EdgeTAM's default (8), but disable it automatically when the
+#          sam2._C extension is missing, since it would raise every frame.
+# 0     -> off. Any int -> that hole area.
+fill_hole_area: null

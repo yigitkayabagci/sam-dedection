@@ -293,6 +293,7 @@ neither.
 | 22 | `edgetam-stage-b/thermal_deep` | `edgetam_pool_thermal_deep_512.pt` | `configs/edgetam_512_pool_deep.yaml` |
 | 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
 | 27 | `edgetam-stage-b/thermal_deep_rgb_aerovis` | `edgetam_pool_thermal_deep_rgb_aerovis_512.pt` | the same, checkpoint swapped |
+| 32 | `edgetam-stage-b/aerial_thermal_stable` | `edgetam_pool_aerial_thermal_stable_512.pt` | `configs/edgetam_512_aerial_stable.yaml` |
 
 Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
 repository) and the config runs it. Nothing else has to change:
@@ -316,10 +317,19 @@ deliberately, and says in its own header what that does and does not measure.
 **On TensorRT the checkpoint is not a runtime choice.** Weights are traced into
 the ONNX graphs and baked into the engines, so a new checkpoint means a new
 export into its own directory — `models512_pool_deep/`, not `models512/`.
-`configs/edgetam_trt_512_pool_deep.yaml` and its 768 twin carry the four
-commands. `check_trt_parity.py` will not catch a wrong checkpoint or a wrong
-size: it compares the engine against the PyTorch module built the same way, so
-both are wrong together and it passes.
+`configs/edgetam_trt_512_pool_deep.yaml`, its 768 twin and
+`configs/edgetam_trt_512_aerial_stable.yaml` carry the four commands.
+`check_trt_parity.py` will not catch a wrong checkpoint or a wrong size: it
+compares the engine against the PyTorch module built the same way, so both are
+wrong together and it passes.
+
+**Once the engines exist, `tools/run_records.py --weights` runs the checkpoint
+on the recorded clips.** `stock`, `pool_deep` (22) and `aerial_stable` (32) are
+the three sets it knows; each names its own engine directory, and results land
+in `<mode>_<weights>/` off one saved prompt, so two checkpoints sit side by side
+with the input held fixed. A pair with no engines built fails immediately with
+the commands that build it, rather than falling back to stock and labelling the
+row with weights it did not run.
 
 ## Three things to know before starting
 
