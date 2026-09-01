@@ -275,11 +275,20 @@ def main() -> None:
             'LR_SCALE       = 1.0\n'
             'RUN_LR_PILOT   = True\n'
             'LR_PILOT_STEPS = 150\n'
+            # `thermal` (trunk 2e-5) is not here any more, and it was
+            # measured out rather than argued out. The 12-epoch run
+            # this notebook already took picked it in the pilot and
+            # then came apart on it: encoder validation 0.1968 ->
+            # 0.1944 -> 0.1949 -> 0.1908 (best, epoch 6) -> 0.1929 ->
+            # 0.1958 -> 0.2721 -> 0.2261 -> 0.2155, never recovering.
+            # A 150-step pilot cannot see an epoch-9 divergence, so
+            # keeping the rung as a candidate for a 30-epoch budget is
+            # buying the same failure at 2.5x the cost. `gentle` is the
+            # new bottom rung for the same reason.
             'LR_PROFILES = {\n'
             '    "gentle":   (1e-5, 1e-5, 2e-6),\n'
             '    "cautious": (2e-5, 2e-5, 5e-6),\n'
             '    "stable":   (5e-5, 5e-5, 1e-5),\n'
-            '    "thermal":  (5e-5, 5e-5, 2e-5),\n'
             '}\n'
             'LR_HEAD, LR_NECK, LR_TRUNK = LR_PROFILES["stable"]')
     replace(notebook, 'NOTEBOOK = "22_thermal_deep.ipynb"',
@@ -413,13 +422,18 @@ def main() -> None:
         yüksek ve inişi yarım bırakır, o yüzden eşik bütçenin üçte biri: gerçek
         bir plato kesilir, normal dalgalanma kesilmez.
 
-        Pilot dört profili aynı split, aynı augmentasyon ve aynı seed ile
+        Pilot üç profili aynı split, aynı augmentasyon ve aynı seed ile
         `1 head + 2 encoder`, epoch başına 150 adımda sınar. `gentle` en alt
-        basamaktır (trunk 2e-6) ve kararsızlık için oradadır. Herhangi bir
-        non-finite encoder loss profili elenir. Bu kısa pilot nihai accuracy
-        ölçümü değildir; kararsız LR'yi pahalı tam koşudan önce elemek içindir
-        -- ve 150 adımda yüksek bir rate iyi görünüp 30 epoch'ta patlayabilir,
-        o yüzden pilot sonucunu `lr_pilot.json`'dan okuyun.
+        basamaktır (trunk 2e-6) ve kararsızlık için oradadır.
+
+        `thermal` (trunk 2e-5) listede yok, çünkü **ölçüldü**: bu notebook'un
+        12 epoch'luk koşusu pilotta onu seçti ve encoder validation'ı
+        0.1908'de (epoch 6) dip yapıp epoch 9'da **0.2721**'e fırladı, 12'ye
+        kadar da toparlamadı. 150 adımlık bir pilot epoch 9'daki bir
+        dağılmayı göremez; 30 epoch'luk bütçede o basamağı aday tutmak aynı
+        arızayı 2.5 kat pahalıya almaktır.
+
+        Pilot sonucunu yine de `lr_pilot.json`'dan okuyun.
     """))
     notebook["cells"].insert(train_index + 1, code(r"""
         import math

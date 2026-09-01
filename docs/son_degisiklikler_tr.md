@@ -590,7 +590,7 @@ bütçesinden kuruyor, yani **bütçeyi büyütmek LR inişini yavaşlatmanın k
 |---|---|---|
 | `EPOCHS` | `[2, 12]` | `[2, 30]` |
 | `PATIENCE` | 0 (kapalı) | 10 |
-| `LR_PROFILES` | cautious / stable / thermal | **gentle** / cautious / stable / thermal |
+| `LR_PROFILES` | cautious / stable / thermal | **gentle** / cautious / stable |
 
 `gentle = (1e-5, 1e-5, 2e-6)` — trunk hızı `cautious`'ın yarısından da düşük.
 Pilot dört profili de aynı split ve seed ile deneyip en düşük encoder val
@@ -603,3 +603,33 @@ kesilir, normal dalgalanma kesilmez.
 Uyarı: pilot 150 adımlık bir vekildir. Yüksek bir rate 150 adımda iyi görünüp
 30 epoch'ta patlayabilir; seçileni `lr_pilot.json`'dan okuyun. Zorla düşürmek
 isterseniz `RUN_LR_PILOT = False` + `LR_PROFILES["gentle"]`.
+
+### `thermal` basamağı neden kaldırıldı — 32'nin kendi run.json'u
+
+Drive'daki `aerial_thermal_stable/run.json` okundu. Biten koşu pilotta
+`thermal`'i seçmiş (`encoder_stage` hızları `5e-5 / 5e-5 / 2e-5`) ve encoder
+validation'ı şöyle gitmiş:
+
+```
+head     0.2487  0.2256
+encoder  0.2072  0.2033  0.1995  0.1968  0.1944  0.1949
+         0.1908  <- en iyi, epoch 6
+         0.1929  0.1958  0.2721  0.2261  0.2155   <- toparlamadı
+```
+
+`patience: 0` olduğu için 12 epoch'un tamamı koştu ve kaydedilen ağırlık
+epoch 6'nınki. 150 adımlık pilot epoch 9'daki dağılmayı göremez, o yüzden
+30 epoch'luk bütçede bu basamağı aday tutmak aynı arızayı 2.5 kat pahalıya
+almak olurdu.
+
+Aynı dosyadan çıkan diğer sayılar:
+
+| | |
+|---|---|
+| `batch × accum` | **128 × 1** — 768 koşusunda `EFFECTIVE_BATCH = 128` |
+| süre | 11 890 s = **3.30 saat** (2 head + 12 encoder) |
+| tepe bellek | 40.6 GiB |
+| train | 67 199 kare / 213 698 instance |
+| taban | stock `edgetam.pt` |
+
+30 epoch aynı hızda kabaca `3.30 × 32/14 ≈ 7.5 saat`; 768'de bunun ~2.25 katı.
