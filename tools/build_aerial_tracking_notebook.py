@@ -119,9 +119,25 @@ def main() -> None:
             "train_LT_003.zip",
             "train_LT_004.zip",
         ]
-        USE_VTUAV_VIS = True
-        VTUAV_VIS_PARTS = ["train_001"]
+        # Hangi kaynak açık. Hepsi kapatılabilir olmasının sebebi ölçüm:
+        # üç kaynaklı karışım bir kolun sonucunu diğerine karıştırıyor, ve
+        # VTUAV tracking arşivleri başkasının Drive'ındaki kısayollar olduğu
+        # için koşuyu en sık düşüren parça onlar. `weighted_clip_sample`
+        # kaynağı olmayan ağırlığı zaten düşürüp yeniden normalize ediyor,
+        # yani SOURCE_WEIGHTS'e dokunmadan kol seçilebiliyor.
+        USE_VTUAV      = False
+        USE_VTUAV_VIS  = True
+        USE_BIRDSAI    = False
         USE_ANTIUAV410 = False
+        # Sekiz resmî VTUAV-VIS arşivi. Boyutlar toplam ~126 GB, ama
+        # `--frames masked` yalnız maskeli kareleri ve eşleniklerini açıyor,
+        # yani diske inen bunun %4'ü kadarı. Pahalı olan okuma, disk değil.
+        # Recipe'nin ölçülmüş sayıları: train_001 14 dizi / 875 maske ve
+        # **hiç pedestrian yok**, train_002 18 / 1408, train_003 18 / 1778.
+        # test_001..005 yazarların held-out'u; maske sayıları ölçülmedi.
+        VTUAV_VIS_PARTS = ["train_001", "train_002", "train_003",
+                           "test_001", "test_002", "test_003",
+                           "test_004", "test_005"]
         ANTIUAV_LIMIT = 24
         SOURCE_WEIGHTS = {"vtuav": 0.40, "vtuav_vis": 0.30,
                           "birdsai": 0.30,
@@ -235,7 +251,7 @@ def main() -> None:
         from tools.fetch_datasets import extract
 
         missing_archives = [name for name in VTUAV_ARCHIVES
-                            if not (VTUAV_DRIVE / name).is_file()]
+                            if USE_VTUAV and not (VTUAV_DRIVE / name).is_file()]
         if missing_archives:
             print("Drive mount bu shortcut/dosyaları çözemedi; resmî kimliklerden "
                   "sırayla indirilecek:", missing_archives)
@@ -247,7 +263,7 @@ def main() -> None:
 
         staged = VTUAV_DATA / "_staged"
         staged.mkdir(exist_ok=True)
-        for archive_name in VTUAV_ARCHIVES:
+        for archive_name in (VTUAV_ARCHIVES if USE_VTUAV else []):
             marker = staged / f"{archive_name}.done"
             if marker.is_file():
                 print("already staged", archive_name)
@@ -287,9 +303,12 @@ def main() -> None:
             marker.write_text("ok\n")
 
         # 17/25'in küçük mask-only arşivlerini aç. Kaynak görüntüler kopyalanmaz.
+        # Bu havuz yalnız VTUAV tracking karelerini maskeleyebilir -- kutu
+        # eşleşmesi o dizilere karşı yapılıyor -- yani vtuav kapalıyken
+        # indirmenin bir alıcısı yok.
         pool_markers = TEMPORAL_POOL_ROOT / ".unpacked"
         pool_markers.mkdir(exist_ok=True)
-        for pool_name in ("vtuav_thermal", "vtuav_lt_thermal"):
+        for pool_name in (("vtuav_thermal", "vtuav_lt_thermal") if USE_VTUAV else ()):
             folder = POOL_DRIVE / pool_name
             archives = sorted(folder.glob("*.zip")) if folder.is_dir() else []
             if not archives:
@@ -322,15 +341,22 @@ def main() -> None:
                 if vis_marker.is_file():
                     print("already staged", vis_part)
                     continue
+                # Her parça kendi klasörüne. VTUAV dizilerini hedefin türüne
+                # göre adlandırıyor -- `train_003` üçüncü *tren* videosudur,
+                # train split'i değil -- ve o yüzden `test_001.zip` içinden
+                # `train_003/` çıkıyor. Sekizi tek klasöre açmak, iki arşivde
+                # aynı ada rastlanırsa kareleri diskte sessizce birleştirir ve
+                # ortaya hiçbir yerde olmayan bir dizi çıkarırdı.
                 subprocess.run([
                     sys.executable, "tools/fetch_datasets.py", "vtuav_vis",
-                    "--dest", str(VTUAV_VIS_DATA), "--parts", vis_part,
+                    "--dest", str(VTUAV_VIS_DATA / vis_part), "--parts", vis_part,
                     "--frames", "masked"], check=True)
                 vis_marker.write_text("ok\n")
 
-        subprocess.run([
-            sys.executable, "tools/fetch_datasets.py", "birdsai",
-            "--dest", str(BIRDSAI_DATA), "--parts", "train_real"], check=True)
+        if USE_BIRDSAI:
+            subprocess.run([
+                sys.executable, "tools/fetch_datasets.py", "birdsai",
+                "--dest", str(BIRDSAI_DATA), "--parts", "train_real"], check=True)
 
         if USE_ANTIUAV410:
             subprocess.run([
@@ -342,9 +368,17 @@ def main() -> None:
 
         BIRDSAI'da bir uçuş içindeki bütün track ID'ler aynı split'te kalır.
         Kaynaklar kendi içinde bölünür; büyük VTUAV küçük BIRDSAI validation'ını
-        yok edemez. Anti-UAV kapalıyken clip bütçesi VTUAV tracking %40,
-        VTUAV-VIS %30 ve BIRDSAI %30'dur. Açılırsa ağırlıklar yeniden normalize
-        edilir ve Anti-UAV yaklaşık %9 düzenleyici pay alır.
+        yok edemez. Ağırlıklar `SOURCE_WEIGHTS`'ten gelir ama **kapalı kaynağın
+        payı düşürülüp kalanlar yeniden normalize edilir**
+        (`weighted_clip_sample`), yani kolu `USE_*` anahtarları seçer. Üçü de
+        açıkken pay VTUAV %40 / VTUAV-VIS %30 / BIRDSAI %30, yalnız VTUAV-VIS
+        açıkken %100.
+
+        Kaynak başına **absent** (kaybolma) sayısı burada basılır. Bu bir
+        raporlama süsü değil: aşağıdaki `object_score` ağırlığı doğrudan ona
+        bakıyor, çünkü üç kaynaktan yalnız VTUAV tracking gerçek `exist`
+        taşıyor -- diğer ikisi `np.ones`. Yalnız VTUAV-VIS ile koşulan bir
+        Stage C'de hiç kayboluş karesi yoktur ve terim kapanır.
         """),
         cell("code", r"""
         from src.training import (
@@ -355,15 +389,25 @@ def main() -> None:
         )
 
         sequences = []
-        vtuav = vtuav_sequences(VTUAV_DATA, modality="ir")
+        vtuav = vtuav_sequences(VTUAV_DATA, modality="ir") if USE_VTUAV else []
         sequences += vtuav
         VIS_STORES = {}
         if USE_VTUAV_VIS:
             vis_sequences, VIS_STORES = vtuav_vis_sequences(
                 VTUAV_VIS_DATA, modality="ir")
+            _vis_names = [row.name for row in vis_sequences]
+            _clashing = sorted({name for name in _vis_names
+                                if _vis_names.count(name) > 1})
+            assert not _clashing, (
+                f"iki VTUAV-VIS parçası aynı dizi adını taşıyor: {_clashing}. "
+                f"Parçalar ayrı klasörlere açıldığı için bu diskte birleşme "
+                f"değil, ama `STORES` ada göre anahtarlı: biri diğerinin "
+                f"maskelerini gölgeler. Hangi parçaların çakıştığını "
+                f"`tools/inspect_vtuav_vis.py` ile bulun.")
             sequences += vis_sequences
-        sequences += birdsai_sequences(
-            BIRDSAI_DATA, split="TrainReal", min_run=(CLIP_LEN - 1) * 2 + 1)
+        if USE_BIRDSAI:
+            sequences += birdsai_sequences(
+                BIRDSAI_DATA, split="TrainReal", min_run=(CLIP_LEN - 1) * 2 + 1)
         if USE_ANTIUAV410:
             anti = list_sequences(ANTI_DATA, "train")[:ANTIUAV_LIMIT]
             sequences += [Sequence(
@@ -372,6 +416,26 @@ def main() -> None:
                 labels=SequenceLabels(
                     exist=item.labels.exist.copy(), boxes=item.labels.boxes.copy()))
                 for item in anti]
+
+        assert sequences, (
+            "hiçbir kaynak açık değil ya da hiçbiri inmedi: USE_VTUAV, "
+            "USE_VTUAV_VIS, USE_BIRDSAI hepsi boş sonuç verdi.")
+
+        # Kaç karede hedef gerçekten yok. `object_score` başlığı yalnız
+        # burada bir şey öğrenebilir, ve üç kaynaktan yalnız vtuav gerçek
+        # `exist` taşıyor (aerial_video.py: vtuav_sequences ir.txt'ten okuyor,
+        # vtuav_vis_sequences ve birdsai_sequences np.ones veriyor). Sayı
+        # burada ölçülüyor çünkü loss ağırlığı aşağıda ona bakacak: sabit 1'e
+        # karşı BCE, o başlığa koşulsuz ateşlemeyi öğretir.
+        ABSENT_FRAMES = {}
+        for _source in sorted({source_name(row) for row in sequences}):
+            _rows = [row for row in sequences if source_name(row) == _source]
+            _frames = sum(len(row) for row in _rows)
+            _visible = sum(int(np.count_nonzero(row.labels.exist))
+                           for row in _rows)
+            ABSENT_FRAMES[_source] = _frames - _visible
+        TOTAL_ABSENT = sum(ABSENT_FRAMES.values())
+        print("absent (exist=False) frames per source:", ABSENT_FRAMES)
 
         SPLITS = split_flights(
             sequences, seed=SEED, val_fraction=0.20, test_fraction=0.10)
@@ -455,12 +519,16 @@ def main() -> None:
         VAL_CLIPS = weighted_clip_sample(raw_val, SOURCE_WEIGHTS, VAL_CLIP_POOL, SEED + 1)
         TEST_CLIPS = weighted_clip_sample(raw_test, SOURCE_WEIGHTS, TEST_CLIP_POOL, SEED + 2)
         STORES = empty_stores(sequences)
+        # Teacher havuzu VTUAV tracking karelerini maskeler; vtuav kapalıysa
+        # eşleşecek dizi yok ve eşik "eksik veri" değil "istenmeyen kaynak"
+        # anlamına gelirdi. Kapı o yüzden kolun içinde duruyor: açıkken hâlâ
+        # box-only başlamayı reddediyor.
         TEACHER_STORES = pool_sequence_stores(
             TEMPORAL_POOL_ROOT, vtuav,
             {"vtuav_thermal", "vtuav_lt_thermal"},
-            min_box_iou=TEACHER_MIN_BOX_IOU)
+            min_box_iou=TEACHER_MIN_BOX_IOU) if USE_VTUAV else {}
         teacher_mask_frames = sum(len(store) for store in TEACHER_STORES.values())
-        assert teacher_mask_frames >= MIN_TEACHER_MASK_FRAMES, (
+        assert not USE_VTUAV or teacher_mask_frames >= MIN_TEACHER_MASK_FRAMES, (
             f"Teacher pool eşleşmesi yalnız {teacher_mask_frames} kare verdi; "
             f"en az {MIN_TEACHER_MASK_FRAMES} bekleniyor. Training'i box-only "
             "başlatmak yerine edgetam-pool/vtuav_* arşivlerini kontrol edin.")
@@ -714,8 +782,28 @@ def main() -> None:
         from src.training.losses import Weights
         from src.training.schedule import CLIPS, Loop
 
+        # `object_score` ölçülen kayboluş sayısına bakıyor, sabite değil.
+        # Terim `losses.frame_loss`'ta her kareye koşulsuz uygulanıyor
+        # (kaynağın gerçek `exist` taşıyıp taşımadığına bakan bir kapı yok),
+        # yani hiç `exist=False` kare yokken 2.0 ağırlık "her karede hedef
+        # var" diyen sabite karşı BCE demektir. `losses.py`'nin kendi modül
+        # docstring'i sonucunu yazıyor: öyle bir başlık koşulsuz ateşlemeyi
+        # öğrenir, `object_score_logits` negatife düşünce EdgeTAM bankaya
+        # `no_obj_ptr` yazdığı ve sonraki kareler onu geri okuduğu için kendi
+        # belleğini zehirler. Stage B aynı gerekçeyle terimi hiç kullanmıyor.
+        OBJECT_SCORE_WEIGHT = 2.0 if TOTAL_ABSENT else 0.0
+        print(f"object_score weight {OBJECT_SCORE_WEIGHT} "
+              f"({TOTAL_ABSENT} absent frames measured)")
+        if not TOTAL_ABSENT:
+            print("   Açık hiçbir kaynak `exist=False` kare taşımıyor, o yüzden "
+                  "terim kapatıldı.\n"
+                  "   Bunun anlamı: bu koşu 'hedef gerçekten orada mı' "
+                  "başlığına hiçbir şey öğretmiyor.\n"
+                  "   Gerçek kayboluş yalnız VTUAV tracking'in ir.txt'inden "
+                  "gelir (USE_VTUAV=True).")
         TRACK_WEIGHTS = Weights(focal=20.0, dice=1.0, iou=2.0,
-                                object_score=2.0, box_projection=1.0)
+                                object_score=OBJECT_SCORE_WEIGHT,
+                                box_projection=1.0)
 
         def uniform(shape, limits, device, generator):
             low, high = (float(value) for value in limits)
@@ -849,6 +937,10 @@ def main() -> None:
                 "method": "aerial_temporal_contrast_finetune",
                 "base": str(BASE_STAGE_B), "image_size": SIZE,
                 "sources": SOURCE_WEIGHTS, "use_antiuav410": USE_ANTIUAV410,
+                "use_vtuav": USE_VTUAV, "use_birdsai": USE_BIRDSAI,
+                "use_vtuav_vis": USE_VTUAV_VIS,
+                "absent_frames": ABSENT_FRAMES,
+                "object_score_weight": OBJECT_SCORE_WEIGHT,
                 "vtuav_archives": VTUAV_ARCHIVES,
                 "vtuav_vis_parts": VTUAV_VIS_PARTS if USE_VTUAV_VIS else [],
                 "teacher_mask_frames": teacher_mask_frames,
@@ -983,6 +1075,9 @@ def main() -> None:
             "stage_c_precheck": PRECHECK_REPORT,
             "selected_on_val": SELECTED_LABEL, "source_weights": SOURCE_WEIGHTS,
             "use_antiuav410": USE_ANTIUAV410, "vtuav_archives": VTUAV_ARCHIVES,
+            "use_vtuav": USE_VTUAV, "use_birdsai": USE_BIRDSAI,
+            "use_vtuav_vis": USE_VTUAV_VIS,
+            "absent_frames": ABSENT_FRAMES,
             "vtuav_vis_parts": VTUAV_VIS_PARTS if USE_VTUAV_VIS else [],
             "teacher_mask_frames": teacher_mask_frames,
             "drawn_mask_frames": sum(len(store) for store in VIS_STORES.values()),

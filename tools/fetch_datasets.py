@@ -733,12 +733,35 @@ def staged(name: str, search: SequenceABC[str]) -> Path | None:
     the Colab mount is an ordinary authenticated read with no shared-file quota
     attached. Three clicks in the Drive web UI ("Make a copy") turn the one
     into the other.
+
+    Those three clicks do not produce `<name>.zip`. Drive names the copy in the
+    account's own language -- `Copy of train_001.zip` in English,
+    `train_001.zip adlı dosyanın kopyası` in Turkish -- and drops the extension
+    off the end in the process, so an exact-name lookup misses the very file
+    this function exists to find and the run goes back to the network it was
+    trying to avoid. Anything holding `<name><suffix>` inside its own name is
+    therefore accepted too, largest first: a locale that phrases the copy some
+    third way still lands on the same rule, and the size ordering prefers the
+    real archive over a truncated earlier attempt sitting beside it.
     """
     for folder in search:
+        directory = Path(folder).expanduser()
         for suffix in (".zip", ".tar.gz", ".tgz"):
-            candidate = Path(folder).expanduser() / f"{name}{suffix}"
+            candidate = directory / f"{name}{suffix}"
             if candidate.is_file() and candidate.stat().st_size > 1 << 20:
                 return candidate
+        if not directory.is_dir():
+            continue
+        copies = [
+            path for path in directory.iterdir()
+            if path.is_file() and path.stat().st_size > 1 << 20
+            and any(f"{name}{suffix}" in path.name
+                    for suffix in (".zip", ".tar.gz", ".tgz"))
+        ]
+        if copies:
+            found = max(copies, key=lambda path: path.stat().st_size)
+            print(f"   using {found.name} -- a Drive copy of {name}")
+            return found
     return None
 
 

@@ -284,6 +284,48 @@ class TestStagedCopy(unittest.TestCase):
     def test_a_missing_folder_is_not_an_error(self):
         self.assertIsNone(staged("train_001", ["/nowhere/at/all"]))
 
+    def test_a_drive_copy_is_found_under_the_name_drive_gave_it(self):
+        # "Make a copy" is what the docstring tells the user to do, and Drive
+        # names the result in the account's own language -- neither form is
+        # `train_001.zip`, and both lose the extension off the end.
+        for copied in ("Copy of train_001.zip",
+                       "train_001.zip adlı dosyanın kopyası",
+                       "Copie de train_001.zip"):
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / copied).write_bytes(b"x" * (2 << 20))
+                self.assertEqual(staged("train_001", [tmp]), Path(tmp) / copied,
+                                 f"{copied} was not recognised")
+
+    def test_the_exact_name_beats_a_copy_sitting_beside_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Copy of train_001.zip").write_bytes(b"x" * (4 << 20))
+            (Path(tmp) / "train_001.zip").write_bytes(b"x" * (2 << 20))
+            self.assertEqual(staged("train_001", [tmp]),
+                             Path(tmp) / "train_001.zip")
+
+    def test_the_largest_copy_wins_over_a_truncated_attempt(self):
+        # A copy that died halfway is still over the 1 MiB floor, so the floor
+        # alone does not separate it from the real archive.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Copy of train_001.zip").write_bytes(b"x" * (2 << 20))
+            (Path(tmp) / "train_001.zip adlı dosyanın kopyası").write_bytes(
+                b"x" * (8 << 20))
+            self.assertEqual(
+                staged("train_001", [tmp]),
+                Path(tmp) / "train_001.zip adlı dosyanın kopyası")
+
+    def test_a_copy_of_a_different_part_is_not_taken(self):
+        # `train_001` must not match `train_0010`'s copy, and a copy of the
+        # wrong part is worse than no copy: it extracts silently.
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Copy of train_002.zip").write_bytes(b"x" * (2 << 20))
+            self.assertIsNone(staged("train_001", [tmp]))
+
+    def test_a_small_drive_copy_is_still_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Copy of train_001.zip").write_bytes(b"<html>quota</html>")
+            self.assertIsNone(staged("train_001", [tmp]))
+
     def test_the_default_search_starts_in_the_colab_drive_mount(self):
         self.assertTrue(STAGING[0].startswith("/content/drive/"))
 

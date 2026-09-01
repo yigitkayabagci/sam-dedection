@@ -14,7 +14,7 @@ kurallar bu dokümandan üstündür.
 ## 0. Zincirin tamamı
 
 ```
-34_pretrain_thermal_aerial      Stage A   encoder'ı etiketsiz termal havuzda hareket ettirir
+34_pretrain_thermal_aerial      geniş havuzda maske eğitimi (adı "pretrain", kendisi Stage B)
         │                                  çıktı: edgetam_pool_pretrain_thermal_aerial_512.pt
         ▼
 32_aerial_thermal_stage_b_stable  Stage B  tek promptlu KARE üzerinde maske eğitimi
@@ -25,6 +25,19 @@ kurallar bu dokümandan üstündür.
 31_aerial_thermal_tracking        Stage C  VİDEO: bellek bankası devrede
                                            BASE_STAGE_B = <32'nin çıktısı>
 ```
+
+**34 bir Stage A değil.** Adı öyle diyor ama notebook kendi ilk hücresinde
+`stage B only: no stage A, no distillation` basıyor: stock EdgeTAM'den
+başlıyor, `METHOD="finetune"`, ve etiketli maske havuzlarında eğitiyor. Aynısı
+35 (RGB kolu) için de geçerli. `LR_HEAD = 0` kafayı dondurmaz — `train_encoder`
+içindeki `scaled_rates` docstring'i yazıyor: *"A zero override means 'leave this
+part alone', so the flag's own default is inert"* — yani kafa tablodaki
+varsayılanla eğitilir (head aşamasında 1e-4, encoder aşamasında 5e-5). 35'in
+`run.json`'undaki `effective_rates` bunu doğruluyor.
+
+Pratik sonucu: zincir A→B→C değil, **geniş Stage B → dar Stage B → Stage C**.
+Bu meşru bir müfredat, ama "encoder'ı etiketsiz veriyle ısıttık" diye
+okunmamalı; 34'ün çıktısı da maskeyle eğitilmiş bir checkpoint'tir.
 
 **Stage B tek kare ölçer, Stage C ise takibi.** Bu ayrım bu projenin merkezinde:
 `image_loop.instance_iou` docstring'i açıkça söylüyor — tek promptlu bir kare
@@ -100,14 +113,45 @@ mask loss, yoksa box-projection + object-score. Teacher'ın reddettiği maske
 
 ## 2. Stage C hangi veriyi kullanıyor
 
-31'in 8. hücresi, tam liste:
+31'in 8. hücresi, tam liste. Her kaynağın bir `USE_*` anahtarı var ve
+**varsayılan kol artık yalnız vtuav_vis**:
 
-| kaynak | ne | denetim | `SOURCE_WEIGHTS` |
-|---|---|---|---|
-| **vtuav** — VTUAV ST/LT, `tracked_ir` | UAV üstünde termal tek-hedef tracking | kutu; maske yalnız 17/25 teacher havuzu `box_iou ≥ 0.80` ile eşleşen karelerde | **0.40** |
-| **vtuav_vis** — VTUAV-VIS, `--frames masked` | resmi instance maskeleri, ~her 30. kare | **gerçek maske** | **0.30** |
-| **birdsai** — `split="TrainReal"` | gece TIR, gerçek track id | kutu | **0.30** |
-| **antiuav410** | yer kamerası, yukarı bakıyor | — | **KAPALI** (`USE_ANTIUAV410=False`) |
+| kaynak | ne | denetim | `SOURCE_WEIGHTS` | varsayılan |
+|---|---|---|---|---|
+| **vtuav** — VTUAV ST/LT, `tracked_ir` | UAV üstünde termal tek-hedef tracking | kutu; maske yalnız 17/25 teacher havuzu `box_iou ≥ 0.80` ile eşleşen karelerde | 0.40 | `USE_VTUAV=False` |
+| **vtuav_vis** — VTUAV-VIS, `--frames masked` | resmi instance maskeleri, ~her 30. kare | **gerçek maske** | 0.30 | `USE_VTUAV_VIS=True` |
+| **birdsai** — `split="TrainReal"` | gece TIR, gerçek track id | kutu | 0.30 | `USE_BIRDSAI=False` |
+| **antiuav410** | yer kamerası, yukarı bakıyor | — | 0.10 | `USE_ANTIUAV410=False` |
+
+`weighted_clip_sample` kaynağı olmayan ağırlığı düşürüp kalanları yeniden
+normalize ediyor (`aerial_video.py:469-473`), yani kolu `SOURCE_WEIGHTS` değil
+bu anahtarlar seçiyor: yalnız vtuav_vis açıkken payı %100 olur.
+
+`VTUAV_VIS_PARTS` sekiz resmî arşivin hepsini sayıyor (`train_001..003`,
+`test_001..005`). **Her parça kendi alt klasörüne açılıyor.** VTUAV dizileri
+hedefin türüne göre adlandırılmış — `train_003` üçüncü *tren* videosudur,
+train split'i değil — ve bu yüzden `test_001.zip` içinden `train_003/` çıkar.
+Sekizi tek klasöre açmak, iki arşiv aynı ada rastlarsa kareleri diskte
+birleştirirdi. Ayrıca `STORES` ada göre anahtarlı olduğu için çakışan iki dizi
+maskeleri gölgeler; 8. hücre bunu ad tekrarı üzerinden assert ediyor.
+
+### Yalnız vtuav_vis koşmanın iki bedeli
+
+Bunlar ölçülmüş yapısal özellikler, ayar değil:
+
+1. **Hiç kayboluş yok.** `--frames masked` yalnız maskeli kareleri ve
+   eşleniklerini çıkarıyor (`fetch_datasets.masked_members`) ve maskeli kare
+   demek hedefin orada olduğu kare demek. `ir.txt` bu unpack'te hiç
+   çıkarılmıyor. Yani `exist` sabit True'dur ve bunu değiştirmenin yolu yok.
+   `object_score` ağırlığı bu yüzden ölçülen `absent` sayısına bağlandı; sıfırsa
+   terim kapanıyor.
+2. **Kareler ~30 kaynak kare arayla.** `CLIP_LEN = 8` olduğu için bir klip
+   ~240 kaynak kareye yayılıyor: bellek bankası 12 saniyelik sıçramalarla
+   eğitiliyor, deployment'taki hareketle değil. `vtuav_vis_sequences`
+   docstring'i bunu zaten söylüyor: *"not a substitute for the denser tracking
+   split"*.
+
+Gerçek kayboluş denetimi isteniyorsa tek yolu `USE_VTUAV=True`.
 
 Anti-UAV410 kapalı olması bir tercih değil, `CLAUDE.md`'nin kuralı: kamerası
 yerde, hedefi havada — bu projenin (dronedan aşağı bakan) tam tersi
