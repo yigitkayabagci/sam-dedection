@@ -3,7 +3,9 @@
 ## The target domain, and what it is not
 
 **The goal is AERIAL imagery: a camera on a drone looking down.** Thermal
-first; RGB is a second model beside it, not the main line.
+first; RGB is a second model beside it, not the main line. The RGB line is
+35 (stage B in all but name) -> 37 (stage C on VTUAV-VIS), and it never shares
+a checkpoint, a config or an output folder with the thermal one.
 
 **Do not reach for Anti-UAV410.** It is a ground camera looking *up* at a
 drone -- the opposite perspective -- so it answers a different problem, and
@@ -42,6 +44,13 @@ What follows from it:
 - **Build, measure and compare at 768.** A 768 run is scored against stock at
   768 (`configs/edgetam_768.yaml` / `configs/edgetam_trt_768.yaml`). A 512
   number is a different measurement and never the baseline for it.
+- **768 is the RGB line's size too.** The second model beside the thermal one
+  deploys at the same resolution, so notebook 37 trains at `SIZE = 768` rather
+  than training at 512 and being run at 768. It can: VTUAV-VIS frames are
+  1920x1080, so `_window_for` takes a **native 768 crop with no resampling**.
+  That is exactly what the thermal sources cannot do -- most of them are
+  640x512 -- which is why 31 and 32 are still 512 and this is not. The
+  asymmetry is about the data, not about a preference.
 - **`models768*/` is the product**; a 512 engine set is a comparison point.
 - **Stage B checkpoints so far were trained at 512** and run at 768 with no
   error -- EdgeTAM keeps no resolution in any parameter, so the mismatch is a

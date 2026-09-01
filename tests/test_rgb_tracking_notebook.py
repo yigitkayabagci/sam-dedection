@@ -123,6 +123,17 @@ class TestNotebook37(unittest.TestCase):
         self.assertIn("aerial_rgb_tracking_from_", body)
         self.assertNotIn("aerial_thermal_tracking", body)
 
+    def test_it_trains_at_the_size_it_deploys_at(self):
+        """VTUAV-VIS is 1920x1080, so `_window_for` takes a native 768 crop
+        with no resampling -- the thermal sources cannot, which is why 31 is
+        512 and this is not. Training at 512 and deploying at 768 would leave a
+        variable nobody measured."""
+        self.assertIn("SIZE, CLIP_LEN, CLIP_STRIDE = 768", code(4))
+
+    def test_two_sizes_do_not_write_to_one_folder(self):
+        """A 512 run and a 768 run of this notebook are different models."""
+        self.assertIn('f"aerial_rgb_tracking_from_{BASE_TAG}_{SIZE}"', code(4))
+
     def test_the_stock_arm_is_on(self):
         """Stock EdgeTAM is in-domain on RGB, which makes this the comparison
         that matters most here -- and the one it is easiest to lose."""
