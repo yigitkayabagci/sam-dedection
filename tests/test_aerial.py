@@ -254,15 +254,38 @@ class TestWindows(unittest.TestCase):
             self.assertEqual(len(sample.instances), 2)
             self.assertIn(anchor.label, [i.label for i in sample.instances])
 
-    def test_a_frame_smaller_than_the_window_resizes_rather_than_running_off_it(self):
+    def test_a_frame_smaller_than_the_window_gives_its_largest_square(self):
         # crop_window clamps an origin to 0 on an axis it cannot satisfy, which
-        # would hand back a rectangle extending past the image. The whole frame
-        # is the only window a 400x300 image has.
+        # would hand back a rectangle extending past the image. So the crop is
+        # taken down to the largest square the frame has -- upsampled to `size`
+        # afterwards, but never stretched unevenly, which the whole 400x300
+        # frame would be at 1.28x across and 1.71x down.
         entry = self.entry(size=(400, 300), boxes=((10, 10, 30, 30),))
         sample = windows_for(entry, size=512, rng=np.random.default_rng(0))[0]
 
-        self.assertEqual((sample.origin, sample.window), ((0, 0), (400, 300)))
+        self.assertEqual(sample.window, (300, 300))
+        self.assertTrue(sample.instances[0].inside(sample.origin, sample.window))
         self.assertFalse(sample.native)
+
+    def test_a_768_window_on_a_640x512_frame_stays_square(self):
+        """The case that decides what a 768 stage B trains on.
+
+        Most of the thermal sets are 640x512, so at `size=768` none of them can
+        supply a native window. A 512 square upsampled to 768 pays the
+        interpolation and keeps a target's shape; the whole frame would deform
+        every one of them by 1.2x against 1.5x, and shape is what the mask head
+        is being taught.
+        """
+        entry = self.entry(size=(640, 512), boxes=((300, 200, 340, 260),))
+        sample = windows_for(entry, size=768, rng=np.random.default_rng(0))[0]
+
+        self.assertEqual(sample.window, (512, 512))
+        self.assertEqual(sample.size, 768)
+        self.assertFalse(sample.native)
+        # 40x60 source pixels magnified by 768/512, and the two axes agree.
+        box = sample.boxes[0]
+        self.assertAlmostEqual(float(box[2] - box[0]), 40 * 1.5, places=4)
+        self.assertAlmostEqual(float(box[3] - box[1]), 60 * 1.5, places=4)
 
     def test_boxes_are_mapped_into_model_input_coordinates(self):
         entry = self.entry(size=(128, 128), boxes=((32, 32, 64, 64),))
@@ -299,16 +322,17 @@ class TestWindows(unittest.TestCase):
         self.assertEqual((default.origin, default.window),
                          (spelled.origin, spelled.window))
 
-    def test_a_window_wider_than_the_frame_falls_back_to_the_whole_frame(self):
-        # `fits` is decided against the crop, not the model input -- otherwise
-        # a 1536 window on a 640x512 frame would ask crop_window for a
-        # rectangle running off the sensor.
+    def test_a_window_wider_than_the_frame_is_taken_down_to_what_it_has(self):
+        # A 1536 window on a 640x512 frame would ask crop_window for a
+        # rectangle running off the sensor. The source cannot deliver the
+        # reduction asked for, so it delivers the largest square it has and
+        # `Sample.window` records what was actually taken -- 512, not 1536.
         entry = self.entry(size=(640, 512), boxes=((10, 10, 30, 30),))
         sample = windows_for(entry, size=512, window=1536,
                              rng=np.random.default_rng(0))[0]
 
-        self.assertEqual((sample.origin, sample.window), ((0, 0), (640, 512)))
-        self.assertFalse(sample.native)
+        self.assertEqual(sample.window, (512, 512))
+        self.assertTrue(sample.instances[0].inside(sample.origin, sample.window))
 
     def test_sample_windows_passes_the_window_through(self):
         entries = [self.entry(size=(640, 512), boxes=((100, 100, 140, 140),))]

@@ -529,3 +529,53 @@ gelir — 4-10 kat büyütme, 512 fiyatına. Bedeli, pencere her yer değiştird
 memory bank'in sıfırlanıp son maskeden yeniden prompt edilmesi (SAM 2 memory'yi
 *girdi* koordinatlarında tutar), o yüzden pencere bir segment sınırı gibi
 davranır ve nadiren oynar. Sürücüsü `tools/track_adaptive.py`.
+
+## 1280x768 kaynak: 768 artık meşru, iki ayar eklendi
+
+Kayıtlar **1280x768** olduğu için `crop768` gerçek bir doğal pencere alır
+(kısa kenar tam 768) — yukarıdaki 640x512 uyarısı bu kayıtlar için geçerli
+değil. Hedef 768'de geliştirmekse eğitim tarafında iki şey değişti.
+
+### 1. Pencere kareyi dolduramıyorsa artık kare kalıyor
+
+`windows_for` doğal kırpmayı kare iki eksende de `SIZE` kadarken alıyordu;
+altında **tüm kareyi** alıp `size x size`'a geriyordu. 640x512 bir kare 768'e
+giderken yatayda 1.2, dikeyde 1.5 geriliyordu — maske kafasına öğretilen şey
+tam olarak hedefin şekli olduğu için bu ucuz bir hata değil.
+
+Artık kırpma, karenin verebildiği **en büyük kareye** iniyor: 640x512 için 512
+kare, çapa üstünde ortalanmış, sonra 768'e büyütülüyor. Aynı interpolasyon
+maliyeti, sıfır deformasyon. Çapa hiçbir kareye sığmıyorsa eski tüm-kare
+yedeği hâlâ devrede. **512 eğitimlerinde hiçbir şey değişmez** (640x512 zaten
+512 pencereyi doğal veriyor), yani alınmış koşular etkilenmiyor.
+
+`Sample.window` ne alındığını yazar: `window=1536` isteyip 1080'lik kaynakta
+1080 alınmışsa kayıtta 1080 görünür.
+
+### 2. `EFFECTIVE_BATCH` — hız tablosu batch'e bağlı
+
+32'de `ACCUM` 1'e sabitti ve `--lr-scale 1` hız tablosunu sabit tutuyor. `SIZE`
+768 olunca token sayısı 2.25 kat artıyor, otomatik prob daha küçük bir batch
+buluyor ve **aynı hızlar daha gürültülü bir gradyanda** koşuyor — hiçbir şey
+söylemeden. Yeni knob:
+
+```python
+EFFECTIVE_BATCH = 0     # 0 = kapalı, bugüne kadarki her koşu
+```
+
+512 koşusunun `run.json`'daki `batch x accum` değerini buraya yazarsan 768
+koşusu farkı biriktirmeyle kapatır ve ne yaptığını basar. Kapalıyken davranış
+aynen eskisi gibidir.
+
+### 768 stage B için ayar listesi
+
+| knob | 512 | 768 |
+|---|---|---|
+| `SIZE` | 512 | 768 |
+| `MAX_AREA` 0.06 karşılığı | 125x125 | **188x188** |
+| `EFFECTIVE_BATCH` | 0 | 512 koşusunun `batch x accum`'ı |
+| `RUN` | çakışmaması için elle | checkpoint adı `SIZE`'ı taşır, çakışmaz |
+
+3. hücrenin kaynak sayımı hangi setlerin 768'i doğal veremediğini yazar:
+VTUAV / VTUAV-VIS (1920x1080) ve segfly (4000x3000) verir, 640x512 termal
+setler vermez.

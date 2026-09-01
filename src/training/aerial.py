@@ -1648,7 +1648,10 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
 
     **`window` is the crop in source pixels; `size` is what the model sees.**
     They are the same number by default, and that is the case the training
-    runs use -- a 512 crop fed at 512, no resampling. Passing a larger `window`
+    runs use -- a 512 crop fed at 512, no resampling. A frame too small for the
+    crop gives the largest square it has instead, so the aspect ratio survives
+    a `size` the source cannot fill; only an anchor that fits in no square at
+    all falls back to the whole frame. Passing a larger `window`
     takes a wider crop and shrinks it to `size`, which divides every target's
     apparent side by `window / size` without touching the annotation. That is
     the only way to reach the small-target regime out of a set that has none:
@@ -1662,18 +1665,22 @@ def windows_for(entry: FrameIndex, size: int = 512, per_image: int = 1,
     if not entry.instances:
         return []
 
-    crop = int(window or size)
-    fits = min(entry.size) >= crop
+    # A frame smaller than the requested window cannot supply it, and the
+    # largest square it *can* supply is a better answer than the whole
+    # rectangle: a 640x512 frame resized to 768x768 stretches 1.2x across and
+    # 1.5x down, and a target's shape is exactly what the mask head is being
+    # taught. A 512 square upsampled to 768 pays the same interpolation without
+    # deforming anything, and still centres on the anchor. Below the crop the
+    # frame already fills this is a no-op -- at `size=512` a 640x512 frame fits
+    # a 512 window outright -- so it changes nothing about the runs taken so
+    # far and only decides what happens above them.
+    crop = min(int(window or size), *entry.size)
     order = rng.permutation(len(entry.instances))[:max(per_image, 1)]
     samples: list[Sample] = []
     for i in order:
         anchor = entry.instances[int(i)]
         box = np.array([anchor.box], dtype=np.float32)
-        # A frame smaller than the window has no crop to take -- `crop_window`
-        # would clamp the origin to 0 and hand back a rectangle running off the
-        # edge. That case is the whole-frame resize, same as an oversized
-        # anchor.
-        origin = crop_window(box, entry.size, crop, jitter, rng) if fits else None
+        origin = crop_window(box, entry.size, crop, jitter, rng)
         if origin is None:
             # No crop contains the anchor, so fall back to resizing the whole
             # frame -- the same two input modes the deployment offers, and the

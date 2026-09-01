@@ -171,6 +171,25 @@ def main() -> None:
             '          f"interpolated pixels. If most of the pool is listed "\n'
             '          f"here, that is the answer about {SIZE}.")')
 
+    # The rate table is fixed and `--lr-scale 1` keeps it fixed, so the batch
+    # the probe measures is the batch the rates were chosen for. Raise SIZE and
+    # the probe finds a smaller one -- 768 is 2.25x the tokens of 512 -- and
+    # the same rates then run on a noisier gradient with nothing said about it.
+    # `EFFECTIVE_BATCH` is how a run at one size borrows another's: set it to
+    # the `batch x accum` the run being compared against recorded in its
+    # run.json, and accumulation makes up the difference. 0 is off, which is
+    # every run taken so far.
+    replace(notebook, 'BATCH_RESERVE  = 0.12',
+            'BATCH_RESERVE  = 0.12\nEFFECTIVE_BATCH = 0')
+    replace(notebook, 'ACCUM = 1\n',
+            'ACCUM = max(1, round(EFFECTIVE_BATCH / BATCH)) '
+            'if EFFECTIVE_BATCH else 1\n'
+            'if ACCUM > 1:\n'
+            '    print(f"effective batch held at {BATCH * ACCUM} "\n'
+            '          f"(asked {EFFECTIVE_BATCH}): the probe fits {BATCH} at "\n'
+            '          f"size {SIZE}, and the rate table was chosen for the "\n'
+            '          f"larger number, not this one.")\n')
+
     replace(notebook, 'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"',
             'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"\n'
             'BASE_CHECKPOINT = ""')
