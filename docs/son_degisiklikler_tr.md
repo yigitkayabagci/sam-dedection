@@ -633,3 +633,59 @@ Aynı dosyadan çıkan diğer sayılar:
 | taban | stock `edgetam.pt` |
 
 30 epoch aynı hızda kabaca `3.30 × 32/14 ≈ 7.5 saat`; 768'de bunun ~2.25 katı.
+
+## Yoğun cluster'da maskenin patlaması: eğitime komşu terimi eklendi
+
+Hedef kalabalığa girince maskenin komşu nesneleri yutması, yayınlanmış hedefin
+(focal + dice) doğrudan cezalandırmadığı bir şey **değil** — komşunun
+pikselleri zaten target'ta sıfır. Sorun şu: focal ve dice her sıfır pikseline
+aynı şekilde bastırıyor ve komşu, kolay arka planla dolu bir pencerede bir avuç
+piksel. Kalabalığı yutan maske, yutmayan maskeden yayınlanmış hedefe göre
+neredeyse daha kötü değil. **Pikselleri isimlendirmek** bunu değiştiriyor.
+
+Denetim zaten batch'in içindeydi: `windows_for` pencereye düşen *diğer* her
+indeksli instance'ı aynı sample'a koyuyor. `image_loop.neighbour_masks` bundan
+her slot için "benim olmayan komşu maskeler birleşimi"ni kuruyor
+(kendi pikselleri çıkarılmış, örtüşmeler dahil), `losses.neighbour_terms` de
+iki sayı veriyor:
+
+| | |
+|---|---|
+| `claimed` | komşuların piksellerinin **yüzde kaçını** talep etti — okunacak sayı |
+| `penalty` | aynı pikseller üzerinde sıfıra karşı BCE — **loss'a giren** terim |
+
+İkisinin ayrı olmasının sebebi gradyan: `claimed` sigmoid üstüne kurulu ve logit
+doyunca türevi sıfırlanıyor, yani **kendinden emin şekilde** yutan maske —
+tam olarak arıza — neredeyse hiç eğitilmiyordu. BCE'nin gradyanı
+`sigmoid(logit)`, yani en büyük değerini tam orada alıyor. Bu test tarafından
+yakalandı (`test_the_trained_term_still_has_gradient_when_the_mask_is_confident`).
+
+Komşusu olmayan instance'lar ortalamaya **sıfır olarak girmiyor**; girseydi
+yalnız hedeflerin çok olduğu bir set, iyi ayrıştıran bir model gibi okunurdu.
+
+### Nasıl kullanılır
+
+```python
+NEIGHBOUR_WEIGHT = 0.0     # 1. hücre, varsayılan
+```
+
+**0.0'da bile leak ölçülüp yazdırılıyor.** İlerleme çubuğunda `neighbour=` ve
+`crowded=` görürsünüz: sırasıyla komşuların ne kadarının talep edildiği ve
+instance'ların yüzde kaçının komşusu olduğu. Sıra bu repo'nun kuralı:
+önce ölç, sonra ona karşı eğit.
+
+Ağırlık verirseniz terim **sadece eğitime** girer; validation yayınlanmış
+ağırlıklandırmayı korur, çünkü checkpoint'i seçen ve önceki koşularla
+karşılaştırılan sayı odur (`prompt` ile aynı gerekçe).
+
+`neighbour_weight` hem `run.json`'a hem 32'nin raporuna yazılıyor ve
+`compare_stage_a.py`'nin adil-sayılan ayarlar listesinde: hedefi değiştiren bir
+terim, koşunun nasıl gittiğine dair bir detay değil, koşunun ne optimize
+ettiğidir.
+
+### Göremediği şey
+
+`others` yalnızca **kapılardan geçen** instance'lardan kuruluyor. `max_area`
+veya `fill`'in elediği bir bileşen komşu değil, arka plan sayılıyor — yani
+tek bir dev bloba çöken bir cluster bu terimin görüş alanında yok. Terim
+*etiketli* nesneler arasındaki ayrımı ölçer.

@@ -138,7 +138,7 @@ CLIPS = Loop(stream=_clip_stream, loss=_clip_loss)
 def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
            jitter: float = 0.0,
            generator: "torch.Generator | None" = None,
-           augment=None) -> Loop:
+           augment=None, neighbour_weight: float = 0.0) -> Loop:
     """The image-mode `Loop`, imported lazily.
 
     `image_loop` pulls in `aerial`, which pulls in nothing heavy but does bind
@@ -161,16 +161,27 @@ def images(anchor=None, anchor_weight: float = 0.0, prompt: str = "box",
     `augment` hardens the *training* windows only -- `photometric.augmenter`
     builds one -- and `val_stream` is deliberately the plain stream, for the
     reason `Loop.batches` gives.
+
+    `neighbour_weight` is a **training** term for the same reason `prompt` is
+    a training setting: it changes the objective, and the validation number is
+    what selects checkpoints and what every earlier run is compared against.
+    So validation keeps the published weighting whatever training uses, and
+    the leak itself is reported on both sides regardless -- see
+    `losses.neighbour_terms`.
     """
     from .image_loop import image_losses, stream
+    from .losses import Weights
 
     def training_stream(*args, **kwargs):
         return stream(*args, augment=augment, **kwargs)
 
+    training_weights = (Weights(neighbour=neighbour_weight)
+                        if neighbour_weight else None)
     return Loop(stream=training_stream if augment is not None else stream,
                 val_stream=stream,
                 loss=lambda model, batch: image_losses(
-                    model, batch, anchor=anchor, anchor_weight=anchor_weight,
+                    model, batch, weights=training_weights, anchor=anchor,
+                    anchor_weight=anchor_weight,
                     prompt=prompt, jitter=jitter, generator=generator),
                 val_loss=lambda model, batch: image_losses(
                     model, batch, anchor=anchor, anchor_weight=anchor_weight))

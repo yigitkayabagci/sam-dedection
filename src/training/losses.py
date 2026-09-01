@@ -117,6 +117,61 @@ def box_projection_loss(logits: torch.Tensor, boxes: torch.Tensor) -> torch.Tens
             + _projection_dice(prob.amax(dim=-1), target_y))
 
 
+def neighbour_terms(
+    logits: torch.Tensor,
+    others: torch.Tensor,
+    eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The dense-cluster failure, as a number to read and a term to train on.
+
+    Focal and dice already push the mask off a neighbour -- those pixels are
+    zeros in the target -- but they push on every zero pixel equally, and a
+    neighbour is a handful of them among a window of easy background. The mask
+    that swallows the cluster is therefore barely worse by the published
+    objective than the mask that does not, which is why the objective does not
+    prevent it. Naming the pixels is what changes that.
+
+    `others` is the union of every *other* indexed instance in the same
+    window, with the target's own mask removed. Two quantities come back over
+    those pixels, and they are deliberately not the same thing:
+
+    `claimed`   the share of the neighbours' pixels this mask covers: 0.0
+                claims nothing, 1.0 claims all of it. A fraction, so it is
+                comparable across window sizes and target sizes and can be
+                read directly -- "this run's masks claim 31% of the objects
+                beside them". This is the diagnostic, and it is what gets
+                reported whether or not anything is trained against it.
+
+    `penalty`   the same pixels as binary cross-entropy against zero
+                (`softplus(logit)` is exactly `-log(1 - sigmoid(logit))`).
+                This is what enters the loss, and the reason is gradient:
+                `claimed` is built on `sigmoid`, whose derivative vanishes
+                once a logit saturates, so a mask that is *confidently*
+                swallowing the cluster -- precisely the failure -- would be
+                trained on almost nothing. The cross-entropy's gradient is
+                `sigmoid(logit)`, which is largest exactly there.
+
+    The third value says which instances actually have a neighbour. An
+    instance alone in its window has nothing to leak onto and must not be
+    averaged in as a zero, which would report the problem as smaller the more
+    isolated targets the set contains.
+
+    **What this cannot see.** `others` is built from the instances the gates
+    kept. A component `max_area` or `fill` rejected is not in it, so a cluster
+    that decomposed into one big blob is background here, not a neighbour. The
+    term measures separation between *labelled* objects and says nothing about
+    the ones the index dropped.
+    """
+    if logits.dim() == 4:
+        logits = logits.squeeze(1)
+    others = others.to(logits.dtype)
+    area = others.sum(dim=(-2, -1))
+    scale = area.clamp(min=eps)
+    claimed = (logits.sigmoid() * others).sum(dim=(-2, -1)) / scale
+    penalty = (F.softplus(logits) * others).sum(dim=(-2, -1)) / scale
+    return claimed, penalty, area > 0
+
+
 @dataclass(frozen=True)
 class Weights:
     """SAM 2's published weighting, plus the two terms this domain adds.
@@ -133,12 +188,19 @@ class Weights:
     iou: float = 1.0
     object_score: float = 1.0
     box_projection: float = 1.0
+    # `neighbour` is off by default because every run before it existed was
+    # taken on the published objective, and a term that changes the loss
+    # changes what the validation number means. `instance_loss` reports the
+    # leak whatever the weight, so a run measures the problem before anyone
+    # decides to train against it.
+    neighbour: float = 0.0
 
 
 def instance_loss(
     outputs: dict,
     masks: torch.Tensor,
     weights: Weights = Weights(),
+    others: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Promptable segmentation on a still image: the mask terms, and only those.
 
@@ -159,6 +221,13 @@ def instance_loss(
     `box_projection` is gone for the opposite reason: it is the fallback for
     frames whose teacher mask failed a quality gate, and here the mask *is* the
     ground truth. There is nothing to fall back to.
+
+    **`others` is reported whether or not it is trained on.** Passing it always
+    computes `neighbour_terms` into the returned terms; it enters the loss only
+    where `weights.neighbour` is non-zero. That split is deliberate: the first
+    thing a run should establish is how much of the dense-cluster failure it
+    actually has, and a term that is in the loss from the start makes its own
+    measurement unreadable.
     """
     logits = outputs["pred_masks_high_res"]
     if logits.dim() == 3:
@@ -169,11 +238,26 @@ def instance_loss(
     dice = dice_loss(logits, targets)
     iou = iou_head_loss(outputs["ious"], logits, targets)
     total = weights.focal * focal + weights.dice * dice + weights.iou * iou
-    return total.mean(), {
+    loss = total.mean()
+    terms = {
         "focal": float(focal.mean().detach()),
         "dice": float(dice.mean().detach()),
         "iou": float(iou.mean().detach()),
     }
+
+    if others is not None:
+        claimed, penalty, crowded = neighbour_terms(logits, others)
+        # Only instances that have a neighbour carry the term. Averaging the
+        # isolated ones in as zeros would make a set of lonely targets look
+        # like a model that separates well.
+        terms["crowded"] = float(crowded.to(claimed.dtype).mean().detach())
+        if bool(crowded.any()):
+            terms["neighbour"] = float(claimed[crowded].mean().detach())
+            if weights.neighbour:
+                loss = loss + weights.neighbour * penalty[crowded].mean()
+        else:
+            terms["neighbour"] = 0.0
+    return loss, terms
 
 
 def frame_loss(

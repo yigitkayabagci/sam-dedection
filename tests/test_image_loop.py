@@ -54,6 +54,7 @@ from src.training.image_loop import (  # noqa: E402
     collate,
     image_losses,
     instance_iou,
+    neighbour_masks,
     propagate_image,
     stream,
 )
@@ -455,7 +456,10 @@ class TestInstanceLoss(unittest.TestCase):
         # fire unconditionally. That head is trained on video, where the label
         # is real, or not at all.
         _, terms = image_losses(FakeSam2(SIZE).eval(), fake_batch())
-        self.assertEqual(set(terms), {"focal", "dice", "iou"})
+        self.assertEqual(set(terms),
+                         {"focal", "dice", "iou", "neighbour", "crowded"})
+        self.assertNotIn("object_score", terms)
+        self.assertNotIn("box_projection", terms)
 
     def test_loss_is_finite_and_reaches_the_encoder(self):
         model = FakeSam2(SIZE).eval()
@@ -481,6 +485,94 @@ class TestInstanceLoss(unittest.TestCase):
         # how few pixels an aerial vehicle occupies.
         self.assertEqual((Weights().focal, Weights().dice, Weights().iou),
                          (20.0, 1.0, 1.0))
+
+
+def crowded_batch() -> ImageBatch:
+    """Two windows, two *separate* instances each -- what `fake_batch` is not.
+
+    `fake_batch` gives every slot the same rectangle, so the union minus the
+    target's own pixels is empty and nothing has a neighbour. The dense-cluster
+    term needs objects that are actually beside one another.
+    """
+    masks = torch.zeros(2, 2, SIZE, SIZE, dtype=torch.bool)
+    masks[:, 0, 8:16, 4:12] = True
+    masks[:, 1, 8:16, 18:26] = True
+    boxes = torch.tensor([[[4.0, 8.0, 12.0, 16.0], [18.0, 8.0, 26.0, 16.0]]])
+    return ImageBatch(images=torch.zeros(2, 3, SIZE, SIZE),
+                      boxes=boxes.expand(2, 2, 4).clone(), masks=masks,
+                      valid=torch.ones(2, 2, dtype=torch.bool))
+
+
+class TestNeighbourWeight(unittest.TestCase):
+    """The dense-cluster term is a training setting, like `prompt`."""
+
+    def test_it_raises_the_training_loss_and_leaves_validation_alone(self):
+        """Validation selects checkpoints and is what earlier runs are read
+        against, so a term that changes the objective must not change it."""
+        model = FakeSam2(SIZE).eval()
+        batch = crowded_batch()
+        plain, weighted = images(), images(neighbour_weight=5.0)
+
+        self.assertGreater(float(weighted.loss(model, batch)[0].detach()),
+                           float(plain.loss(model, batch)[0].detach()))
+        self.assertAlmostEqual(float(weighted.val_loss(model, batch)[0].detach()),
+                               float(plain.val_loss(model, batch)[0].detach()),
+                               places=5)
+
+    def test_the_leak_is_reported_even_at_weight_zero(self):
+        model = FakeSam2(SIZE).eval()
+        loss, terms = images().loss(model, crowded_batch())
+        self.assertIn("neighbour", terms)
+        self.assertEqual(terms["crowded"], 1.0)
+        self.assertEqual(float(loss.detach()),
+                         float(image_losses(model, crowded_batch())[0].detach()))
+
+
+class TestNeighbourMasks(unittest.TestCase):
+    """What every instance must NOT claim: the other objects sharing its window."""
+
+    def window(self, valid=(True, True, True)):
+        masks = torch.zeros(1, 3, SIZE, SIZE, dtype=torch.bool)
+        masks[0, 0, 4:8, 4:8] = True
+        masks[0, 1, 4:8, 20:24] = True
+        masks[0, 2, 20:24, 4:8] = True
+        return ImageBatch(images=torch.zeros(1, 3, SIZE, SIZE),
+                          boxes=torch.zeros(1, 3, 4), masks=masks,
+                          valid=torch.tensor([list(valid)]))
+
+    def test_each_slot_sees_the_others_and_not_itself(self):
+        batch = self.window()
+        others = neighbour_masks(batch)
+        for slot in range(3):
+            self.assertFalse(bool((others[0, slot] & batch.masks[0, slot]).any()),
+                             f"slot {slot} lists its own pixels as a neighbour")
+            for neighbour in range(3):
+                if neighbour == slot:
+                    continue
+                self.assertTrue(
+                    bool(others[0, slot][batch.masks[0, neighbour]].all()),
+                    f"slot {slot} does not see slot {neighbour}")
+
+    def test_a_padded_slot_is_not_a_neighbour(self):
+        """Padded rows hold zeros, and a zero mask unioned in is harmless --
+        but a slot marked invalid must not contribute, because `valid` is what
+        says which annotations exist and nothing else may reinterpret it."""
+        batch = self.window(valid=(True, False, True))
+        others = neighbour_masks(batch)
+        self.assertFalse(bool((others[0, 0] & batch.masks[0, 1]).any()))
+        self.assertTrue(bool(others[0, 0][batch.masks[0, 2]].all()))
+
+    def test_overlapping_annotations_do_not_count_against_the_target(self):
+        masks = torch.zeros(1, 2, SIZE, SIZE, dtype=torch.bool)
+        masks[0, 0, 4:12, 4:12] = True
+        masks[0, 1, 8:16, 8:16] = True          # overlaps the first
+        batch = ImageBatch(images=torch.zeros(1, 3, SIZE, SIZE),
+                           boxes=torch.zeros(1, 2, 4), masks=masks,
+                           valid=torch.ones(1, 2, dtype=torch.bool))
+        others = neighbour_masks(batch)
+        shared = masks[0, 0] & masks[0, 1]
+        self.assertFalse(bool((others[0, 0] & shared).any()))
+        self.assertFalse(bool((others[0, 1] & shared).any()))
 
 
 class TestInstanceIou(unittest.TestCase):
@@ -562,7 +654,8 @@ class TestEndToEnd(unittest.TestCase):
             self.assertTrue(batch.valid.all())
             loss, terms = image_losses(FakeSam2(SIZE).eval(), batch)
             self.assertTrue(torch.isfinite(loss))
-            self.assertEqual(set(terms), {"focal", "dice", "iou"})
+            self.assertEqual(set(terms),
+                             {"focal", "dice", "iou", "neighbour", "crowded"})
 
     def test_run_stages_drives_the_static_loop_end_to_end(self):
         torch.manual_seed(0)

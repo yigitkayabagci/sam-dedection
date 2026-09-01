@@ -327,6 +327,17 @@ def main(argv: list[str] | None = None) -> int:
                         "encoder over a large unlabelled set and stage B can "
                         "undo that on a set two orders of magnitude smaller. "
                         "0.1-1.0 is the range to try; costs no extra forward.")
+    p.add_argument("--neighbour-weight", type=float, default=0.0,
+                   help="Penalise the share of the OTHER labelled objects in "
+                        "the same window that a mask claims -- the dense "
+                        "cluster failure, where the target enters a crowd and "
+                        "the mask swallows it. Focal and dice already push on "
+                        "those pixels, but as ordinary zeros among a window of "
+                        "easy background; this names them. 0 trains on the "
+                        "published objective and still REPORTS the leak, which "
+                        "is how to find out whether the run has the problem "
+                        "before training against it. Validation always keeps "
+                        "the published weighting.")
     p.add_argument("--batch", type=int, default=0, help="0 measures it on this GPU.")
     p.add_argument("--batch-ceiling", type=int, default=64,
                    help="Upper bound on the measured batch. The default is a "
@@ -459,7 +470,8 @@ def main(argv: list[str] | None = None) -> int:
             "stage": "instances", "train_frames": len(splits["train"]),
             "train_instances": instances, "sources": train.sources,
             "per_image": args.per_image, "max_instances": args.max_instances,
-            "anchor_weight": args.anchor_weight, "seed": args.seed,
+            "anchor_weight": args.anchor_weight,
+            "neighbour_weight": args.neighbour_weight, "seed": args.seed,
             "prompt": args.prompt,
             "prompt_jitter": (args.prompt_jitter
                               if args.prompt in ("jitter", "mix") else 0.0)}
@@ -547,7 +559,8 @@ def main(argv: list[str] | None = None) -> int:
                                     prompt=args.prompt,
                                     jitter=args.prompt_jitter,
                                     generator=prompts,
-                                    augment=harden))
+                                    augment=harden,
+                                    neighbour_weight=args.neighbour_weight))
     result |= {"seconds": round(time.time() - started, 1),
                "checkpoint": str(args.out),
                "peak_gib": (torch.cuda.max_memory_allocated() / 2**30

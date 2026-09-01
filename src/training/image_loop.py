@@ -304,6 +304,25 @@ def propagate_image(model, images: torch.Tensor, boxes: torch.Tensor,
     }
 
 
+def neighbour_masks(batch: ImageBatch) -> torch.Tensor:
+    """For every instance slot, the union of the *other* real instances in it.
+
+    `[B, K, S, S]` like `batch.masks`, and the target's own pixels are removed
+    so an overlap between two annotations is never counted as a leak. Padded
+    slots are excluded by `valid` -- a zero mask unioned in would be harmless,
+    but a padded slot's *own* row must not read as "no neighbours" for a
+    reason that only shows up once `valid` stops being contiguous.
+
+    This is the whole supervision the dense-cluster term needs, and it was
+    already in the batch: `windows_for` puts every other indexed instance that
+    falls inside the window into the same sample, which is why a window is
+    worth more than a crop around one object.
+    """
+    real = batch.masks & batch.valid[..., None, None]
+    union = real.any(dim=1, keepdim=True)
+    return union & ~batch.masks
+
+
 def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
                  anchor_weight: float = 0.0, prompt: str = "box",
                  jitter: float = 0.0,
@@ -342,8 +361,10 @@ def image_losses(model, batch: ImageBatch, weights=None, anchor=None,
     weights = weights or Weights()
     outputs = propagate_image(model, batch.images, batch.boxes, batch.valid,
                               prompt, jitter, generator)
-    targets = batch.masks.reshape(-1, *batch.masks.shape[-2:])[outputs["rows"]]
-    loss, terms = instance_loss(outputs, targets, weights)
+    shape = batch.masks.shape[-2:]
+    targets = batch.masks.reshape(-1, *shape)[outputs["rows"]]
+    others = neighbour_masks(batch).reshape(-1, *shape)[outputs["rows"]]
+    loss, terms = instance_loss(outputs, targets, weights, others)
 
     if anchor is not None and anchor_weight:
         from .distill import distill_loss, encoder_features

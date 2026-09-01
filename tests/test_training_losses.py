@@ -21,7 +21,9 @@ from src.training.losses import (  # noqa: E402
     dice_loss,
     focal_loss,
     frame_loss,
+    instance_loss,
     iou_head_loss,
+    neighbour_terms,
     object_score_loss,
 )
 
@@ -222,3 +224,127 @@ class TestFrameLoss(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def two_objects(size=16):
+    """One window, two separated blobs: the target and the neighbour."""
+    target = torch.zeros(size, size, dtype=torch.bool)
+    other = torch.zeros(size, size, dtype=torch.bool)
+    target[4:8, 2:6] = True
+    other[4:8, 10:14] = True
+    return target, other
+
+
+def logits_over(*masks, size=16):
+    out = torch.full((size, size), -BIG)
+    for mask in masks:
+        out[mask] = BIG
+    return out[None]
+
+
+class TestNeighbourLeak(unittest.TestCase):
+    """The dense-cluster term: what share of the objects beside it it claims."""
+
+    def test_a_clean_mask_leaks_nothing(self):
+        target, other = two_objects()
+        claimed, penalty, crowded = neighbour_terms(logits_over(target),
+                                                    other[None])
+        self.assertTrue(bool(crowded[0]))
+        self.assertAlmostEqual(float(claimed[0]), 0.0, places=5)
+        self.assertAlmostEqual(float(penalty[0]), 0.0, places=5)
+
+    def test_swallowing_the_neighbour_leaks_everything(self):
+        target, other = two_objects()
+        claimed, penalty, _ = neighbour_terms(logits_over(target, other),
+                                              other[None])
+        self.assertAlmostEqual(float(claimed[0]), 1.0, places=4)
+        self.assertAlmostEqual(float(penalty[0]), BIG, places=3)
+
+    def test_it_is_a_fraction_of_the_neighbour_not_of_the_window(self):
+        """Half the neighbour is 0.5 whatever the window around it is.
+
+        A term measured against the window would report the same failure as
+        smaller on a bigger crop, which is exactly the comparison this project
+        makes when it changes SIZE.
+        """
+        for size in (16, 64):
+            target = torch.zeros(size, size, dtype=torch.bool)
+            other = torch.zeros(size, size, dtype=torch.bool)
+            target[4:8, 2:6] = True
+            other[4:8, 10:14] = True
+            half = torch.zeros(size, size, dtype=torch.bool)
+            half[4:6, 10:14] = True
+            claimed, _, _ = neighbour_terms(
+                logits_over(target, half, size=size), other[None])
+            self.assertAlmostEqual(float(claimed[0]), 0.5, places=4,
+                                   msg=str(size))
+
+    def test_an_instance_with_no_neighbour_is_flagged_not_scored_as_zero(self):
+        """Isolated targets must not average the problem away.
+
+        A set of lonely objects would otherwise report a leak of 0 and read as
+        a model that separates well, when nothing has been asked of it.
+        """
+        target, _ = two_objects()
+        empty = torch.zeros(16, 16, dtype=torch.bool)
+        claimed, _, crowded = neighbour_terms(logits_over(target), empty[None])
+        self.assertFalse(bool(crowded[0]))
+        self.assertAlmostEqual(float(claimed[0]), 0.0, places=5)
+
+    def test_the_trained_term_still_has_gradient_when_the_mask_is_confident(self):
+        """Why the penalty is cross-entropy and not the fraction itself.
+
+        A mask that is *confidently* swallowing the cluster is the failure. At
+        a saturated logit `sigmoid` is flat, so the fraction hands back
+        essentially no gradient exactly there; the cross-entropy's gradient is
+        `sigmoid(logit)`, which is ~1.
+        """
+        target, other = two_objects()
+        logits = logits_over(target, other).clone().requires_grad_(True)
+        claimed, penalty, _ = neighbour_terms(logits, other[None])
+
+        claimed.sum().backward(retain_graph=True)
+        from_fraction = logits.grad[0][other].abs().max()
+        logits.grad = None
+        penalty.sum().backward()
+        from_penalty = logits.grad[0][other].abs().max()
+
+        self.assertLess(float(from_fraction), 1e-6)
+        self.assertGreater(float(from_penalty), 1e-3)
+        self.assertTrue(bool((logits.grad[0][target] == 0).all()))
+
+
+class TestInstanceLossNeighbour(unittest.TestCase):
+    def outputs(self, logits):
+        return {"pred_masks_high_res": logits[:, None],
+                "ious": torch.zeros(logits.shape[0], 1)}
+
+    def test_the_leak_is_reported_at_weight_zero(self):
+        """Measure before training against it -- the term is a diagnostic first."""
+        target, other = two_objects()
+        logits = logits_over(target, other)
+        loss, terms = instance_loss(self.outputs(logits), target[None].float(),
+                                    Weights(), other[None])
+        without, _ = instance_loss(self.outputs(logits), target[None].float(),
+                                   Weights())
+        self.assertAlmostEqual(terms["neighbour"], 1.0, places=4)
+        self.assertAlmostEqual(float(loss), float(without), places=6)
+
+    def test_a_non_zero_weight_makes_the_swallowing_mask_cost_more(self):
+        target, other = two_objects()
+        weights = Weights(neighbour=5.0)
+        swallowed, _ = instance_loss(
+            self.outputs(logits_over(target, other)), target[None].float(),
+            weights, other[None])
+        clean, _ = instance_loss(
+            self.outputs(logits_over(target)), target[None].float(),
+            weights, other[None])
+        self.assertGreater(float(swallowed) - float(clean), 4.9)
+
+    def test_omitting_others_leaves_the_published_objective_untouched(self):
+        """Every run before this term exists has to be reproducible."""
+        target, _ = two_objects()
+        logits = logits_over(target)
+        loss, terms = instance_loss(self.outputs(logits), target[None].float())
+        self.assertNotIn("neighbour", terms)
+        self.assertTrue(torch.isfinite(loss))

@@ -190,6 +190,22 @@ def main() -> None:
             '          f"size {SIZE}, and the rate table was chosen for the "\n'
             '          f"larger number, not this one.")\n')
 
+    # The dense-cluster term. `windows_for` already puts every other indexed
+    # instance inside the window into the same sample, so the supervision for
+    # "do not claim the object beside you" was in the batch and unused. 0.0
+    # keeps the published objective and still prints the leak, which is the
+    # order this repository asks for: find out how much of the failure the run
+    # has before training against it.
+    replace(notebook, 'ANCHOR_WEIGHT  = 0.0',
+            'ANCHOR_WEIGHT  = 0.0\nNEIGHBOUR_WEIGHT = 0.0')
+    # The report is what `tools/compare_stage_a.py` reads to decide whether two
+    # arms are comparable, and a term added to the objective is not a detail
+    # about how a run went -- it is what the run optimised.
+    replace(notebook,
+            '"gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,',
+            '"gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,\n'
+            '    "neighbour_weight": NEIGHBOUR_WEIGHT,')
+
     replace(notebook, 'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"',
             'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"\n'
             'BASE_CHECKPOINT = ""')
@@ -514,6 +530,14 @@ def main() -> None:
         raise RuntimeError("training result marker not found")
     notebook["cells"][train_index]["source"] = text.replace(
         needle, guard, 1).splitlines(keepends=True)
+
+    # Both training calls -- the pilot's and the full run's -- take the flag,
+    # and the pilot cell is inserted above, so this runs once both exist.
+    replace(notebook,
+            '"--anchor-weight", str(ANCHOR_WEIGHT), "--device", "cuda",',
+            '"--anchor-weight", str(ANCHOR_WEIGHT),\n'
+            '     "--neighbour-weight", str(NEIGHBOUR_WEIGHT), "--device", "cuda",',
+            count=2)
 
     raw = json.dumps(notebook["cells"], ensure_ascii=False, sort_keys=True)
     stamp = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
