@@ -206,7 +206,17 @@ def vtuav_vis_sequences(
                 rows.append((image_path, mask_path, box))
         if len(rows) < 2:
             continue
-        name = f"{prefix}__{sequence_dir.name}"
+        # The part goes in the name whenever the archives were unpacked into
+        # directories of their own. VTUAV-VIS names a sequence by target kind
+        # and a counter that restarts per archive, so `train_003` is a train
+        # sequence inside `test_001.zip` *and* the name of a training archive;
+        # two of them under one prefix would be one key in the store dict and
+        # one of the two would silently replace the other. A flat extraction
+        # keeps the old names, so nothing already measured moves.
+        part = sequence_dir.parent
+        stem = (f"{part.name}_{sequence_dir.name}"
+                if part != root and part.parent == root else sequence_dir.name)
+        name = f"{prefix}__{stem}"
         sequences.append(Sequence(
             name=name,
             split="unsplit",

@@ -143,11 +143,17 @@ class TestLayoutAgreesWithTheSpec(unittest.TestCase):
         self.assertEqual(len(folders), len(set(folders)))
         self.assertTrue(all(folders), "a flat archive needs a folder of its own")
 
-    def test_vtuav_keeps_the_archives_own_sequence_layout(self):
-        # Its zips already contain `bike_009/rgb/000000.jpg`, so imposing a
-        # folder would bury the sequence names one level deeper than the globs.
-        for part in VTUAV_VIS.parts:
-            self.assertEqual(part.into, "")
+    def test_every_vtuav_vis_part_gets_a_folder_of_its_own(self):
+        """This used to pin `into == ""`, on the reading that a folder would
+        bury the sequence names below the globs. It does not: both readers use
+        `**`/`rglob`, so depth is free -- and flat extraction is not, because
+        VTUAV-VIS names a sequence by target kind and a counter that restarts
+        per archive. `test_001.zip` holds a sequence called `train_003` while
+        `train_003.zip` is a different archive, and unpacked into one directory
+        their frames interleave."""
+        folders = [part.into for part in VTUAV_VIS.parts]
+        self.assertEqual(folders, [part.name for part in VTUAV_VIS.parts])
+        self.assertEqual(len(folders), len(set(folders)))
 
 
 class TestMaskedMembers(unittest.TestCase):
@@ -434,14 +440,16 @@ class TestOneRefusedPartDoesNotCostTheOthers(unittest.TestCase):
         self.refuse("train_002")
         with self.assertRaises(PartsFailed):
             self.fetch_three()
-        self.assertTrue((self.dest / "pedestrian_2" / "rgb").is_dir(),
-                        "train_003 was never attempted after train_002 failed")
+        self.assertTrue(
+            (self.dest / "train_003" / "pedestrian_2" / "rgb").is_dir(),
+            "train_003 was never attempted after train_002 failed")
 
     def test_the_parts_that_landed_before_it_are_kept(self):
         self.refuse("train_002")
         with self.assertRaises(PartsFailed):
             self.fetch_three()
-        self.assertTrue((self.dest / "bike_009" / "mask" / "rgb").is_dir())
+        self.assertTrue(
+            (self.dest / "train_001" / "bike_009" / "mask" / "rgb").is_dir())
         self.assertFalse((self.dest / "car_010").exists())
 
     def test_the_failure_names_the_part_and_carries_both_lists(self):
@@ -555,3 +563,71 @@ class TestHuman(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStagedCopies(unittest.TestCase):
+    """Drive renames a file when you copy it, and the copy is the escape hatch.
+
+    "Make a copy" is what `drive_download` tells a user to do when the quota
+    refuses a shared archive. Drive hands back `test_001.zip adlı dosyanın
+    kopyası`, `Copy of test_001.zip` or `test_001 (1).zip` -- never the name
+    the lookup was built from. Missing them meant the escape hatch did not
+    exist for the person who took it: the run went back to the network and hit
+    the same quota again.
+    """
+
+    def folder(self, *names):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        for name in names:
+            (root / name).write_bytes(b"\0" * (2 << 20))
+        return root
+
+    def test_the_plain_name_is_found(self):
+        root = self.folder("test_001.zip")
+        self.assertEqual(staged("test_001", [str(root)]).name, "test_001.zip")
+
+    def test_drives_turkish_copy_is_found(self):
+        root = self.folder("test_001.zip adlı dosyanın kopyası")
+        found = staged("test_001", [str(root)])
+        self.assertIsNotNone(found)
+        self.assertTrue(found.name.startswith("test_001.zip"))
+
+    def test_drives_english_copy_is_found(self):
+        root = self.folder("Copy of test_001.zip")
+        self.assertIsNotNone(staged("test_001", [str(root)]))
+
+    def test_a_numbered_copy_is_found(self):
+        root = self.folder("test_001 (1).zip")
+        self.assertIsNotNone(staged("test_001", [str(root)]))
+
+    def test_the_exact_name_wins_over_a_copy(self):
+        """A deliberate copy must never shadow the real archive."""
+        root = self.folder("test_001.zip", "Copy of test_001.zip")
+        self.assertEqual(staged("test_001", [str(root)]).name, "test_001.zip")
+
+    def test_a_longer_name_is_not_mistaken_for_this_one(self):
+        """`test_0010.zip` starts with `test_001`; matching on the name alone
+        rather than on name-plus-suffix would answer the wrong lookup."""
+        root = self.folder("test_0010.zip")
+        self.assertIsNone(staged("test_001", [str(root)]))
+
+    def test_a_tiny_file_is_still_ignored(self):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        root = Path(holder.name)
+        (root / "test_001.zip adlı dosyanın kopyası").write_bytes(b"x")
+        self.assertIsNone(staged("test_001", [str(root)]))
+
+    def test_a_missing_folder_is_skipped_not_raised(self):
+        self.assertIsNone(staged("test_001", ["/nowhere/at/all"]))
+
+
+class TestVtuavVisParts(unittest.TestCase):
+    def test_every_part_unpacks_into_a_directory_of_its_own(self):
+        """The sequence counters restart per archive: `test_001.zip` holds a
+        sequence called `train_003` and `train_003.zip` is a different archive.
+        Extracted flat they would merge into one directory."""
+        for part in VTUAV_VIS.parts:
+            self.assertEqual(part.into, part.name, part.name)
