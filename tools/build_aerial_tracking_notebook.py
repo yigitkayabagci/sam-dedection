@@ -101,7 +101,7 @@ def main() -> None:
         eğitim dağılımında outvote etmesine izin vermiyoruz.
         """),
         cell("code", r"""
-        import gc, json, math, shutil, subprocess, zipfile
+        import errno, gc, json, math, shutil, subprocess, zipfile
         import cv2
         import matplotlib.pyplot as plt
         import numpy as np
@@ -228,7 +228,33 @@ def main() -> None:
             archive = VTUAV_DRIVE / archive_name
             if archive.is_file():
                 print("extracting labelled thermal frames from", archive_name)
-                extract(archive, VTUAV_DATA, frames="tracked_ir", workers=16)
+                staged_ok = False
+                for threads in (16, 8, 4, 1):
+                    try:
+                        extract(archive, VTUAV_DATA, frames="tracked_ir",
+                                workers=threads)
+                        staged_ok = True
+                        break
+                    except OSError as dropped:
+                        if dropped.errno != errno.ENOTCONN:
+                            raise
+                        print(f"   !! the Drive mount dropped mid-read "
+                              f"(errno 107) on {threads} threads. "
+                              f"`tracked_ir` keeps a twentieth of the part, so "
+                              f"the read is thousands of random seeks and each "
+                              f"thread holds its own handle -- remounting and "
+                              f"retrying with fewer.")
+                        drive.flush_and_unmount()
+                        drive.mount("/content/drive", force_remount=True)
+                if not staged_ok:
+                    raise RuntimeError(
+                        f"{archive_name}: the Drive mount dropped on every "
+                        f"attempt down to a single thread. The archives are "
+                        f"shortcuts to files this account does not own, which "
+                        f"is the fragile case; copy the part to local disk "
+                        f"first (`!cp {archive} /content/`) and point "
+                        f"VTUAV_DRIVE at /content, or run the part on its own "
+                        f"in a fresh runtime.")
             else:
                 print("downloaded directly and extracted:", archive_name)
             marker.write_text("ok\n")
