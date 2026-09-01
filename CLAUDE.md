@@ -22,6 +22,33 @@ training, a real tracking sequence -- use these instead:
 | long-interval instance masks | VTUAV-VIS |
 | free negatives | crop windows with no target in them |
 
+## The deployment target: 1280x720 in, **768** into the model
+
+**768 is the size, not a midpoint under evaluation.** The camera is roughly
+1280x720, which is exactly the case `configs/edgetam_768.yaml` was written for
+and what `docs/EXPERIMENT_LOG.md` §3.9 means by "768 is for the 1280x720
+recordings" -- there is more than 512x512 of real detail in the frame, so 768's
+2304 tokens are spent on pixels the sensor actually produced. The argument
+against 768 in that section is about 640x512 thermal sources, where it
+upsamples; it does not apply here. `src/trackers/adaptive.py` is the tool for
+those sources, not for this one.
+
+What follows from it:
+
+- **Build, measure and compare at 768.** A 768 run is scored against stock at
+  768 (`configs/edgetam_768.yaml` / `configs/edgetam_trt_768.yaml`). A 512
+  number is a different measurement and never the baseline for it.
+- **`models768*/` is the product**; a 512 engine set is a comparison point.
+- **Stage B checkpoints so far were trained at 512** and run at 768 with no
+  error -- EdgeTAM keeps no resolution in any parameter, so the mismatch is a
+  printed warning from `src/checkpoint_meta.py` and never a crash. That is a
+  real cost and an unmeasured one. A stage B run meant for deployment should
+  train at `--size 768` (notebook 32's `SIZE`), which removes the variable;
+  whether it pays is still a measurement, taken against the same weights at 512.
+- **Engines are not portable.** They are built for one GPU architecture and one
+  TensorRT version, so they are built on the machine that will run them. A
+  desktop build is for measuring, not for shipping to the Orin.
+
 ## Ground rules this repo already holds itself to
 
 - **Measure before claiming.** Every threshold in `docs/` names the number it
