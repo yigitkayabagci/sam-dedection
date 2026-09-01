@@ -56,6 +56,7 @@ from src.training.aerial import (  # noqa: E402
     split_frames,
     apply_splits,
     drop_merge_profile,
+    keep_only,
     rebalance,
     resolve_quantiles,
     size_bands,
@@ -1041,6 +1042,73 @@ class TestSizeBands(unittest.TestCase):
         self.assertEqual(report["dropped"], {})
 
 
+class TestKeepOnly(unittest.TestCase):
+    """"This run sees these three things and nothing else."
+
+    A weight of 0.0 can exclude, but saying it that way means enumerating
+    everything unwanted, and a pool that grows a class later starts training on
+    it silently. An allowlist cannot widen by accident.
+    """
+
+    def frame(self, spec, names, key="s/000000"):
+        source = Source(SPECS[spec], InstanceGates(), role="train")
+        return FrameIndex(
+            frame=Frame(name=key, image=Path("i"), mask=Path("m")),
+            instances=tuple(
+                Instance(label=i, class_id=source.spec.classes[n],
+                         box=(0.0, 0.0, 8.0, 8.0), area=64)
+                for i, n in enumerate(names)),
+            size=(64, 64), rejects={}, source=source)
+
+    def test_a_source_and_class_key_keeps_only_that_pair(self):
+        index = [self.frame("kust4k", ["car", "truck", "human"])]
+        kept, report = keep_only(index, ["kust4k:car"])
+        self.assertEqual(report["instances"], {"before": 3, "after": 1})
+        self.assertEqual([i.class_id for i in kept[0].instances],
+                         [SPECS["kust4k"].classes["car"]])
+
+    def test_a_source_alone_keeps_all_of_its_classes(self):
+        # How "all of HIT-UAV" is written.
+        index = [self.frame("kust4k", ["car", "truck", "human"])]
+        _, report = keep_only(index, ["kust4k"])
+        self.assertEqual(report["instances"], {"before": 3, "after": 3})
+
+    def test_what_is_not_named_is_dropped(self):
+        index = [self.frame("kust4k", ["car"]),
+                 self.frame("segfly_temiz", ["vehicle"])]
+        kept, report = keep_only(index, ["kust4k:car"])
+        self.assertEqual(report["instances"], {"before": 2, "after": 1})
+        self.assertEqual([e.source.spec.name for e in kept], ["kust4k"])
+
+    def test_a_frame_left_with_nothing_is_dropped(self):
+        index = [self.frame("kust4k", ["truck"])]
+        kept, report = keep_only(index, ["kust4k:car"])
+        self.assertEqual(kept, [])
+        self.assertEqual(report["frames"], {"before": 1, "after": 0})
+
+    def test_a_misspelt_key_is_named_rather_than_silently_emptying(self):
+        # The failure this has to be loud about: a typo does not thin slightly
+        # too much here, it trains on nothing.
+        index = [self.frame("kust4k", ["car"])]
+        kept, report = keep_only(index, ["kust4k:Car"])
+        self.assertEqual(kept, [])
+        self.assertEqual(report["unmatched"], ["kust4k:Car"])
+
+    def test_the_report_says_what_each_class_lost(self):
+        index = [self.frame("kust4k", ["car", "car", "truck"])]
+        _, report = keep_only(index, ["kust4k:car"])
+        self.assertEqual(report["by_class"]["car"], (2, 2))
+        self.assertEqual(report["by_class"]["truck"], (1, 0))
+
+    def test_an_empty_allowlist_keeps_nothing(self):
+        # Not "keeps everything": an allowlist that names nothing allows
+        # nothing, and the caller asserts on the count rather than discovering
+        # it after an epoch.
+        index = [self.frame("kust4k", ["car"])]
+        kept, _ = keep_only(index, [])
+        self.assertEqual(kept, [])
+
+
 class TestQuantileBands(unittest.TestCase):
     """A cut that names the number it came from, without a second run.
 
@@ -1181,6 +1249,29 @@ class TestASavedSplitIsTheSplitTheRunUses(unittest.TestCase):
                  for e in back["train"] for i in e.instances]
         self.assertTrue(all(s <= 96 for s in sides), sides)
         self.assertLess(len(sides), 12, "the weight thinned as well")
+
+    def test_the_allowlist_narrows_train_and_leaves_the_grade_whole(self):
+        """The grade has to stay whole or the run cannot see what it cost.
+
+        Narrowing the val split with the train split makes the loss fall
+        because the hard sources left, and the run reports an improvement it
+        did not make.
+        """
+        source = Source(SPECS["kust4k"], InstanceGates(), role="train")
+        def frame(key):
+            return FrameIndex(
+                frame=Frame(name=key, image=Path("i"), mask=Path("m")),
+                instances=tuple(
+                    Instance(label=i, class_id=source.spec.classes[n],
+                             box=(0.0, 0.0, 8.0, 8.0), area=64)
+                    for i, n in enumerate(["car", "truck"])),
+                size=(64, 64), rejects={}, source=source)
+        full = [frame(f"{i:06d}") for i in range(4)]
+        save_splits(self.path, {"train": full[:2], "val": full[2:], "test": []},
+                    allow=["kust4k:car"])
+        back = apply_splits(full, self.path)
+        self.assertEqual([len(e.instances) for e in back["train"]], [1, 1])
+        self.assertEqual([len(e.instances) for e in back["val"]], [2, 2])
 
     def test_a_file_with_neither_keeps_the_flat_shape(self):
         # Every file written before either could travel is this shape, and it

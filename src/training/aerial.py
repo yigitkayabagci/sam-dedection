@@ -913,6 +913,61 @@ def _most_specific(table: Mapping[str, object], source: str, short: str,
                              source, short, name) if k in table), None)
 
 
+def keep_only(index: SequenceABC[FrameIndex],
+              allow: SequenceABC[str]) -> tuple[list[FrameIndex], dict]:
+    """`index` cut down to the instances an allowlist names, and what survived.
+
+    `rebalance` thins and `size_bands` trims a tail; neither can say "this run
+    sees these three things and nothing else". A weight of 0.0 can exclude, but
+    saying it that way means enumerating every source and class that is *not*
+    wanted, and a set that grows a class later silently starts training on it.
+    An allowlist inverts that: what is not named is not trained on, and adding
+    a source to the pool cannot quietly widen the run.
+
+    Entries are keyed exactly like `rebalance`'s weights -- `"car"`,
+    `"pool/hituav_thermal"`, `"pool/vtuav_thermal:car"` -- and an instance is
+    kept when any of those forms names it. A source alone therefore keeps all
+    of that source's classes, which is how "all of HIT-UAV" is written.
+
+    **The report is the safety.** A misspelt key here does not thin a little
+    too much, it empties the run: the caller is expected to assert on
+    `unmatched` and on the surviving counts rather than trust the spelling.
+    Class names are the ones the harvest recorded, which is why they differ in
+    case between sets -- HIT-UAV writes `Car` and Kust4K writes `car`.
+    """
+    allow = list(allow)
+    table = {key: True for key in allow}
+    kept: list[FrameIndex] = []
+    used: set[str] = set()
+    by_source: dict[str, tuple[int, int]] = {}
+    by_class: dict[str, tuple[int, int]] = {}
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        source = spec.name if spec is not None else "?"
+        short = source.split("/", 1)[1] if source.startswith("pool/") else source
+        survivors = []
+        for instance in entry.instances:
+            name = (spec.name_of(instance.class_id) if spec is not None
+                    else str(instance.class_id))
+            was, now = by_class.get(name, (0, 0))
+            key = _most_specific(table, source, short, name)
+            if key is not None:
+                used.add(key)
+                survivors.append(instance)
+            by_class[name] = (was + 1, now + (1 if key is not None else 0))
+        was, now = by_source.get(source, (0, 0))
+        by_source[source] = (was + len(entry.instances), now + len(survivors))
+        if survivors:
+            kept.append(replace(entry, instances=tuple(survivors)))
+    return kept, {
+        "frames": {"before": len(index), "after": len(kept)},
+        "instances": {"before": sum(v[0] for v in by_source.values()),
+                      "after": sum(v[1] for v in by_source.values())},
+        "by_source": dict(sorted(by_source.items(), key=lambda kv: -kv[1][1])),
+        "by_class": dict(sorted(by_class.items(), key=lambda kv: -kv[1][1])),
+        "unmatched": [key for key in allow if key not in used]}
+
+
 def _sides_by_key(index: SequenceABC[FrameIndex],
                   table: Mapping[str, object] | None = None
                   ) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
@@ -1127,7 +1182,9 @@ def save_splits(path: str | Path,
                 splits: Mapping[str, SequenceABC[FrameIndex]],
                 weights: Mapping[str, float] | None = None,
                 seed: int = 0,
-                bands: Mapping[str, tuple[float, float]] | None = None) -> Path:
+                bands: Mapping[str, tuple[float, float]] | None = None,
+                allow: SequenceABC[str] | None = None,
+                allow_splits: SequenceABC[str] = ("train",)) -> Path:
     """Which frames each split holds, as `source -> [frame key]`.
 
     A notebook that indexes a run, caps a pool, drops the frames a drawn grade
@@ -1159,6 +1216,13 @@ def save_splits(path: str | Path,
     per instance, so a frame list alone brings the large ones back, and a run
     whose argument was "the small and medium ones of this class" would train on
     all of them while the notebook printed otherwise.
+
+    `allow` is `keep_only`'s list, and `allow_splits` says which splits it
+    applies to -- **`train` alone by default, deliberately.** A run narrowed to
+    three sources whose grade is narrowed with it cannot see what the narrowing
+    cost: the val loss falls because the hard sources left, and the run reports
+    an improvement it did not make. Leaving the grade whole is what makes
+    forgetting show up as a number in the same run that caused it.
     """
     payload: dict[str, dict[str, list[str]]] = {}
     for name, entries in splits.items():
@@ -1168,7 +1232,7 @@ def save_splits(path: str | Path,
             by_source.setdefault(key, []).append(entry.frame.name)
         payload[name] = by_source
     body: dict = payload
-    if weights or bands:
+    if weights or bands or allow:
         # A nested shape only when there is something to nest. The flat one is
         # what every file written before this carried, and `apply_splits` still
         # reads it.
@@ -1178,6 +1242,9 @@ def save_splits(path: str | Path,
         if bands:
             body["size_bands"] = {
                 "bands": {k: [float(v[0]), float(v[1])] for k, v in bands.items()}}
+        if allow:
+            body["keep_only"] = {"allow": list(allow),
+                                 "splits": list(allow_splits)}
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(body, indent=1) + "\n")
@@ -1203,6 +1270,7 @@ def apply_splits(index: SequenceABC[FrameIndex],
     # names the weights it was thinned under.
     thinning = body.get("rebalance") if "frames" in body else None
     banding = body.get("size_bands") if "frames" in body else None
+    allowing = body.get("keep_only") if "frames" in body else None
     payload = body["frames"] if "frames" in body else body
     wanted = {name: {source: set(keys) for source, keys in by_source.items()}
               for name, by_source in payload.items()}
@@ -1223,6 +1291,14 @@ def apply_splits(index: SequenceABC[FrameIndex],
             f"them. The two were built from different flags or different "
             f"pools -- re-index, or drop --splits and let the split be made "
             f"here.")
+    if allowing:
+        # First, because it decides what the other two then act within -- the
+        # order the notebook applied them. Only the splits it names: the grade
+        # stays whole so the narrowing's cost is visible (see `save_splits`).
+        chosen = set(allowing.get("splits") or ("train",))
+        out = {name: (keep_only(entries, allowing["allow"])[0]
+                      if name in chosen else entries)
+               for name, entries in out.items()}
     if thinning:
         # The same function, the same weights, the same seed: `rebalance`'s
         # keep decision is a hash of the frame's identity and the instance's

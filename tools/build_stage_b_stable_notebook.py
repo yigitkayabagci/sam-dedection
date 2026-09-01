@@ -101,8 +101,9 @@ def main() -> None:
             '                                 save_splits, split_index)',
             'from src.training.aerial import (InstanceGates, drop_merge_profile,\n'
             '                                 rebalance, sample_windows,\n'
-            '                                 resolve_quantiles, save_splits,\n'
-            '                                 size_bands, split_index)')
+            '                                 keep_only, resolve_quantiles,\n'
+            '                                 save_splits, size_bands,\n'
+            '                                 split_index)')
     replace(notebook,
             'if CLASS_WEIGHTS:\n'
             '    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)',
@@ -362,7 +363,8 @@ def main() -> None:
     # is 19 661 px in HIT-UAV and 124 416 px in VTUAV -- six times apart, for a
     # target the same size on the ground.
     replace(notebook, 'MAX_AREA       = 0.9',
-            'MAX_AREA       = 0.2\nSIZE_BANDS     = {}\nSIZE_QUANTILES = {}')
+            'MAX_AREA       = 0.2\nSIZE_BANDS     = {}\nSIZE_QUANTILES = {}\n'
+            'KEEP_ONLY      = []')
     # 50 a side instead of 6. Six tiles show the extremes and nothing about
     # the shape of the tail, and the tail is where a regression that is not a
     # single broken frame lives. A 2-by-50 strip would be 155 inches wide, so
@@ -550,9 +552,26 @@ def main() -> None:
     # and the seed lets it re-apply the same decision downstream.
     replace(notebook,
             'SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS))',
+            'if KEEP_ONLY:\n'
+            '    SPLITS["train"], _allowed = keep_only(SPLITS["train"], KEEP_ONLY)\n'
+            '    print(f"\\nkeep-only: train {_allowed[\'instances\'][\'before\']} "\n'
+            '          f"instances -> {_allowed[\'instances\'][\'after\']}, "\n'
+            '          f"{_allowed[\'frames\'][\'after\']} frames left")\n'
+            '    print(f"{\'source\':<34}{\'was\':>10}{\'now\':>10}")\n'
+            '    for _src, (_was, _now) in _allowed["by_source"].items():\n'
+            '        print(f"{_src:<34}{_was:>10}{_now:>10}")\n'
+            '    assert not _allowed["unmatched"], (\n'
+            '        f"KEEP_ONLY names {_allowed[\'unmatched\']} and nothing "\n'
+            '        f"matched them. An allowlist that misses is not a smaller "\n'
+            '        f"run, it is an empty one -- read the tables above for the "\n'
+            '        f"exact source and class spellings (HIT-UAV writes `Car`, "\n'
+            '        f"Kust4K writes `car`).")\n'
+            '    assert SPLITS["train"], "KEEP_ONLY left no training frames."\n'
+            '    print("   val/test were left whole on purpose: a grade narrowed "\n'
+            '          "with the training set cannot show what the narrowing cost.")\n'
             'SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS,\n'
             '                             CLASS_WEIGHTS, seed=SEED,\n'
-            '                             bands=SIZE_BANDS))')
+            '                             bands=SIZE_BANDS, allow=KEEP_ONLY))')
     replace(notebook,
             'COMMON += ["--splits", SPLIT_FILE]',
             'COMMON += ["--splits", SPLIT_FILE]\n'
