@@ -59,14 +59,43 @@ değil. Doğru soru budur.
 ### Path C — Stage B + Stage C (takip)
 
 ```
-Path A veya B  →  29  →  30  →  31
+Path A veya B  →  31                    <- havadan hedef için doğru olan
+                  (29 → 30 ayrı bir kol, aşağıya bakın)
 ```
 
 | | notebook | ne yapar | ön koşul |
 |---|---|---|---|
-| 29 | `29_thermal_contrast_tracking.ipynb` | 32'nin checkpoint'ini düşük-kontrast temporal kliplerle devam eğitir; stage B / temporal / temporal+SAMURAI A/B'si | 32 |
-| 30 | `30_tracking_before_after_demo.ipynb` | **eğitim yok.** Senkron before/after MP4, IoU eğrisi, State Accuracy, kayıp episode'ları — ve en iyi iyileşmenin yanında **en kötü gerileme** | 29, aynı runtime |
-| 31 | `31_aerial_thermal_tracking.ipynb` | VTUAV ST/LT + VTUAV-VIS + BIRDSAI kimlikleriyle temporal eğitim. Anti-UAV410 varsayılan **kapalı** | 32 + `MyDrive/VTUAV` |
+| **31** | `31_aerial_thermal_tracking.ipynb` | VTUAV ST/LT + VTUAV-VIS + BIRDSAI kimlikleriyle temporal eğitim. Anti-UAV410 varsayılan **kapalı** (kodda doğrulandı: hücre 4, `USE_ANTIUAV410 = False`) | 32; `MyDrive/VTUAV`'da altı arşiv; **notebook 17 ve 25'in maske havuzları** (`edgetam-pool/vtuav_thermal`, `vtuav_lt_thermal`) — hücre 10 en az 1000 maskeli kare için **hard assert**; ayrıca VTUAV-VIS `train_001` (~9.1 GiB) ve BIRDSAI indirmesi |
+| 29 | `29_thermal_contrast_tracking.ipynb` | 32'nin checkpoint'ini düşük-kontrast temporal kliplerle devam eğitir | 32 + **Anti-UAV410** |
+| 30 | `30_tracking_before_after_demo.ipynb` | **eğitim yok.** Senkron before/after MP4, IoU eğrisi, kayıp episode'ları — ve en iyi iyileşmenin yanında **en kötü gerileme** | 29, aynı runtime |
+
+**Sıra neden 31 ile başlıyor.** Bu tablo eskiden `29 → 30 → 31` diyordu, ve bu
+`CLAUDE.md` ile çelişiyordu. Kodda doğrulandı: **29'un tüm eğitim/validation/test
+seti Anti-UAV410'dur** ve kapatma anahtarı yoktur — hücre 7 tek satır,
+`!python tools/fetch_antiuav410.py ...`. 30 da onun çıktısını gösterir.
+Anti-UAV410 yerden yukarı bakan bir kamera, yani ters perspektif; hedef alan
+havadan aşağı. Dolayısıyla **havadan hedef için sıradaki adım 31'dir**; 29/30
+başka bir problemi cevaplayan ayrı bir koldur.
+
+**Checkpoint'i elle vermene gerek yok.** 29 ve 31, 32'nin yazdığı yolu
+kendileri buluyor:
+
+```python
+BASE_STAGE_B_CANDIDATES = [
+    Path(".../edgetam-stage-b/aerial_thermal_stable/edgetam_pool_aerial_thermal_stable_512.pt"),
+    Path(".../edgetam-stage-b/thermal_deep/edgetam_pool_thermal_deep_512.pt"),
+]
+```
+
+Birincisi varsa o seçilir (31 hücre 4, 29 hücre 5). Değişkenin adı
+`BASE_STAGE_B`'dir — bu iki notebook'ta **`BASE_CHECKPOINT` diye bir şey
+yoktur**. Ve bu ağırlıktır, referans değil: `build_sam2_video_predictor` ona
+veriliyor. Koşu başında basılan `base stage B: ...` satırını oku — birincisi
+yoksa sessizce `thermal_deep`'e düşer.
+
+**30'daki `BASE_CHECKPOINT` ise gerçekten referanstır** — 30 hiçbir şey
+eğitmiyor, o değişken yalnızca before/after karşılaştırmasının "before"
+kolunu seçiyor. Adı aynı, anlamı değil.
 
 **Stage C ne kadar kritik?** Stage B en kritik evre — tek kare maskesini o
 öğretir. Ama senin bildirdiğin hata (benzer kontrastta hedefi bırakma) **tek
