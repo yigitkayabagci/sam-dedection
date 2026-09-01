@@ -333,6 +333,27 @@ def main() -> None:
             '    return "thermal"')
     replace(notebook, 'MIN_AREA       = 48', 'MIN_AREA       = 64')
     replace(notebook, 'MIN_SIDE       = 4', 'MIN_SIDE       = 6')
+    # The panel calls the "before" arm stock, and it is not stock whenever
+    # BASE_CHECKPOINT is set: `BASE_CKPT = BASE_CHECKPOINT` above, so red is
+    # the pretrain's prediction and the top row reads "this run beat the
+    # pretrain", not "this run beat EdgeTAM". Naming the file the arm actually
+    # came from is the difference between reading the panel and misreading it.
+    replace(notebook,
+            'plt.suptitle(f"top row: stage B gained   |   '
+            'bottom row: stage B lost   "\n'
+            '             f"(prompt: {PANEL_PROMPT})", y=1.0)',
+            '_BASE_NAME = Path(BASE_CKPT).stem\n'
+            'plt.suptitle(f"top row: this run gained   |   '
+            'bottom row: this run lost   "\n'
+            '             f"(prompt: {PANEL_PROMPT}, base: {_BASE_NAME})", y=1.0)')
+    replace(notebook,
+            'print("yellow = the target\'s outline | green = only stage B found it | "\n'
+            '      "red = only stock found it | blue = both agreed")',
+            'print(f"yellow = the target\'s outline (this is the annotation; "\n'
+            '      f"everything else is a prediction)\\n"\n'
+            '      f"green = only this run found it | red = only the base '
+            '({_BASE_NAME}) found it | "\n'
+            '      f"blue = both agreed")')
     replace(notebook, 'MAX_AREA       = 0.9', 'MAX_AREA       = 0.2')
     replace(notebook,
             'PROMPT_JITTER  = 0.3\nMETHOD',
