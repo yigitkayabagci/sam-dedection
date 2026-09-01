@@ -767,3 +767,51 @@ indeksi kurmadan **önce** sayımı basıp manifesti yazıyor.
   probu enjekte edilen 6 px'i ters yönde raporladı), o yüzden spec'te
   `rgb=None` ve hiçbir ölçüm RGB'den okunmuyor.
 - **Etiketsiz gerçek araçlar var.** Silmeyle çözülmez; eksik etiket sorunu.
+
+---
+
+## `fetch_datasets` çok parçalı indirmede: reddedilen parça adıyla söyleniyor
+
+**Belirti.** Notebook 31'in 6. hücresinde `VTUAV_VIS_PARTS` `["train_001"]`'den
+`["train_001","train_002","train_003"]`'e çıkarıldıktan sonra
+
+```
+python tools/fetch_datasets.py vtuav_vis --dest ... \
+    --parts train_001 train_002 train_003 --frames masked
+```
+
+1 ile çıktı ve hücrede yalnız `CalledProcessError` göründü — hangi parçanın,
+neden düştüğü yazmıyordu.
+
+**Ölçüldü, varsayılmadı.** İlk şüpheli "train_002/train_003 kayıtlı değil ya da
+Drive kimliği yanlış" idi. **Değil.** Üç kimlik de 2026-09'da canlı Drive'a
+soruldu; üçü de virüs-tarama ara sayfasını döndürüyor ve dosya adlarını
+veriyor: `train_001.zip` 8.5G, `train_002.zip` 15G, `train_003.zip` 17G.
+Kayıt defteri doğru; `Recipe.chosen` bu çağrıda hiç hata vermiyor.
+
+**Gerçek çıkış yolu.** `fetch()` içindeki döngü parçaları sırayla çekiyordu:
+
+```python
+for part in chosen:
+    fetch_part(part, dest, work, frames, keep, quiet, staging)
+```
+
+Bir parça reddedilince (Drive kuyruk/kota hatası `drive_download`'dan
+`RuntimeError` olarak geliyor) istisna `main`'in dışına çıkıyor, süreç
+traceback ile 1 döndürüyordu. Sonucu: **sonraki parça hiç denenmiyor**, inen
+parçaların raporu hiç basılmıyor, ve arayan tarafta parça adı geçmeyen bir
+`CalledProcessError` kalıyordu. Tek parçalı çağrıda bu yol hiç görünmüyordu,
+çünkü kaybedilecek "diğer parçalar" yoktu.
+
+**Ne değişti.**
+
+- Döngü her parçayı deniyor. Düşen parçanın tam nedeni **oracıkta**, stdout'a
+  basılıyor (`!! train_002 did not land:` + nedenin tamamı).
+- Yeni `PartsFailed`: inenlerin ve inmeyenlerin listesini taşıyor. `main` bunu
+  yakalayıp özeti basıyor, **inen veriyi yine raporluyor**, sonra 1 döndürüyor.
+  Özet çalıştırılabilir satırı da veriyor: `--parts train_002 train_003`.
+- `Recipe.chosen`'ın reddi artık bilinen parçaları ve listenin nerede
+  tutulduğunu (`VTUAV_VIS_PARTS`) söylüyor.
+
+İnen parçalar diskte kalır; burada hiçbir şey "zaten açılmış arşivi atlamaz",
+o yüzden ikinci koşuda yalnız eksik parça istenmelidir.

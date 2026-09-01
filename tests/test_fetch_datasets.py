@@ -16,6 +16,8 @@ thermal image. `into` is what prevents both, and it has to keep matching
 """
 from __future__ import annotations
 
+import io
+import contextlib
 import sys
 import tempfile
 import unittest
@@ -37,10 +39,13 @@ from tools.fetch_datasets import (  # noqa: E402
     RECIPES,
     VTUAVDET,
     VTUAV_VIS,
+    PartsFailed,
     drive_download,
     extract,
+    fetch,
     fetch_extra,
     human,
+    main,
     masked_members,
     staged,
 )
@@ -74,6 +79,43 @@ class TestRegistry(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             VTUAV_VIS.chosen(("train_009",))
         self.assertIn("train_009", str(caught.exception))
+
+    def test_the_refusal_lists_the_known_parts_and_what_to_do(self):
+        """A wrong `--parts` name is refused before anything downloads, so the
+        message is the only thing the caller gets. It has to carry three
+        facts: which name is wrong, which names are right, and where the list
+        it came from lives -- notebook 31 builds it from VTUAV_VIS_PARTS, and
+        a reader who is not told that goes looking for a missing Drive id
+        instead of a typo. All three ids under `train_*` were checked live in
+        2026-09 and resolve, so the id is never the thing to suspect first.
+        """
+        with self.assertRaises(SystemExit) as caught:
+            VTUAV_VIS.chosen(("train_001", "train_00b"))
+        text = str(caught.exception)
+        self.assertIn("train_00b", text)
+        self.assertIn("train_001", text)            # the known names
+        self.assertIn("test_005", text)
+        self.assertIn("VTUAV_VIS_PARTS", text)     # where the list lives
+        self.assertIn("Nothing was downloaded", text)
+
+    def test_the_three_training_parts_all_name_a_drive_id(self):
+        """The hypothesis this test exists to close.
+
+        When `VTUAV_VIS_PARTS` went from one part to three and the fetch
+        started exiting 1, the obvious explanation was that train_002 and
+        train_003 were half-registered -- no id, or an id copied wrong. They
+        are not: each of the three carries a 33-character Drive id, and all
+        three were resolved against Drive in 2026-09 (the interstitial names
+        `train_001.zip` 8.5G, `train_002.zip` 15G, `train_003.zip` 17G). A
+        part that loses its id would make the fetch fail for a reason that has
+        nothing to do with the network, so the registry is pinned here.
+        """
+        parts = {p.name: p for p in VTUAV_VIS.parts}
+        for name in ("train_001", "train_002", "train_003"):
+            self.assertIn(name, parts)
+            self.assertTrue(parts[name].drive, name)
+            self.assertEqual(len(parts[name].drive), 33, name)
+            self.assertIsNone(parts[name].url, name)
 
     def test_a_named_part_is_returned_in_the_order_asked_for(self):
         names = [p.name for p in VTUAV_VIS.chosen(("test_001", "train_001"))]
@@ -328,6 +370,131 @@ class TestBoxLabelledSets(unittest.TestCase):
         # These sets are prompts for the teacher, not ground truth for J&F.
         for recipe in (RGBTDRONEPERSON, VTUAVDET, BIRDSAI, AIRESQ):
             self.assertIn("box", recipe.note.lower(), recipe.name)
+
+
+class TestOneRefusedPartDoesNotCostTheOthers(unittest.TestCase):
+    """Fetching three archives when the second one is refused.
+
+    Notebook 31 runs the fetch through `subprocess.run([...], check=True)`.
+    Before this, one archive failing let the exception out of `main`, so the
+    command died with a traceback on stderr the moment the *second* of three
+    parts was refused: the third was never attempted, the report of what had
+    landed never ran, and the caller was left with a bare
+    `CalledProcessError` naming no part and no reason. The parts that had
+    already extracted were still on disk, but nothing said so.
+
+    What is pinned here is the shape of the recovery: every requested part is
+    attempted, whatever extracted stays, the summary names each part that
+    failed and the reason, and the exit code is 1 only after all of that has
+    been printed -- on **stdout**, so it lands in the notebook cell rather
+    than in whichever stream a Jupyter kernel happens to forward.
+
+    No network: `drive_download` is replaced with one that writes a small
+    VTUAV-shaped zip, or raises for the parts a test wants refused.
+    """
+
+    REFUSED = "Drive would not serve this file (test)"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dest = Path(self.tmp.name) / "VTUAV_VIS"
+        self.original = fetch_datasets.drive_download
+        self.addCleanup(setattr, fetch_datasets, "drive_download",
+                        self.original)
+
+    def refuse(self, *names):
+        """Every part but `names`; those raise the way a quota refusal does."""
+        sequences = {"train_001": "bike_009", "train_002": "car_010",
+                     "train_003": "pedestrian_2"}
+
+        def fake_drive(file_id, path, **kwargs):
+            part = Path(path).stem
+            if part in names:
+                raise RuntimeError(self.REFUSED)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sequence = sequences.get(part, part)
+            with zipfile.ZipFile(path, "w") as handle:
+                for index in range(0, 60, 30):
+                    handle.writestr(
+                        f"{sequence}/mask/rgb/{index:06d}.png", b"x")
+                for index in range(60):
+                    handle.writestr(f"{sequence}/rgb/{index:06d}.jpg", b"x")
+                    handle.writestr(f"{sequence}/ir/{index:06d}.jpg", b"x")
+            return path
+
+        fetch_datasets.drive_download = fake_drive
+
+    def fetch_three(self):
+        return fetch("vtuav_vis", self.dest,
+                     ("train_001", "train_002", "train_003"),
+                     frames="masked", quiet=True, staging=())
+
+    def test_the_part_after_the_refused_one_is_still_fetched(self):
+        self.refuse("train_002")
+        with self.assertRaises(PartsFailed):
+            self.fetch_three()
+        self.assertTrue((self.dest / "pedestrian_2" / "rgb").is_dir(),
+                        "train_003 was never attempted after train_002 failed")
+
+    def test_the_parts_that_landed_before_it_are_kept(self):
+        self.refuse("train_002")
+        with self.assertRaises(PartsFailed):
+            self.fetch_three()
+        self.assertTrue((self.dest / "bike_009" / "mask" / "rgb").is_dir())
+        self.assertFalse((self.dest / "car_010").exists())
+
+    def test_the_failure_names_the_part_and_carries_both_lists(self):
+        self.refuse("train_002")
+        with self.assertRaises(PartsFailed) as caught:
+            self.fetch_three()
+        self.assertEqual(caught.exception.done, ["train_001", "train_003"])
+        self.assertEqual([name for name, _ in caught.exception.failed],
+                         ["train_002"])
+        text = caught.exception.summary()
+        self.assertIn("train_002", text)
+        self.assertIn(self.REFUSED, text)
+        self.assertIn("train_001", text)                # what was kept
+        self.assertIn("VTUAV_VIS_PARTS", text)          # how to drop it
+
+    def test_every_refused_part_is_named_not_just_the_first(self):
+        self.refuse("train_002", "train_003")
+        with self.assertRaises(PartsFailed) as caught:
+            self.fetch_three()
+        text = caught.exception.summary()
+        self.assertIn("train_002", text)
+        self.assertIn("train_003", text)
+        self.assertIn("--parts train_002 train_003", text)   # a runnable line
+
+    def test_a_whole_set_that_landed_raises_nothing(self):
+        self.refuse()
+        self.assertEqual(self.fetch_three(), self.dest)
+
+    def test_main_says_which_part_failed_on_stdout_then_exits_one(self):
+        # The notebook reads the child's streams, not its exception. If the
+        # only account of the failure were a traceback, `check=True` would
+        # surface a CalledProcessError with no part name in it -- which is
+        # exactly the report this fix exists to prevent.
+        self.refuse("train_002")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            code = main(["vtuav_vis", "--dest", str(self.dest), "--parts",
+                         "train_001", "train_002", "train_003",
+                         "--frames", "masked", "--quiet"])
+        text = printed.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("train_002", text)
+        self.assertIn(self.REFUSED, text)
+        self.assertIn("exiting 1", text)
+
+    def test_main_still_reports_what_landed_before_it_gives_up(self):
+        self.refuse("train_002")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            main(["vtuav_vis", "--dest", str(self.dest), "--parts",
+                  "train_001", "train_002", "train_003",
+                  "--frames", "masked", "--quiet"])
+        self.assertIn("labelled rgb frames", printed.getvalue())
 
 
 class TestTheCliKnowsEveryRecipe(unittest.TestCase):

@@ -113,10 +113,70 @@ class Recipe:
         known = {p.name: p for p in self.parts}
         unknown = [n for n in names if n not in known]
         if unknown:
+            # This is the first thing `fetch` does, so nothing has been
+            # downloaded yet and the whole command is refused. Say which name
+            # is wrong, which ones are right, and where the caller's list
+            # lives -- a bare `have [...]` sent the last reader looking for a
+            # missing Drive id that was never missing.
+            where = (" -- notebook 31 builds that list from VTUAV_VIS_PARTS"
+                     if self.name == "vtuav_vis" else "")
             raise SystemExit(
-                f"{self.name}: no part named {unknown} -- have "
-                f"{sorted(known)}")
+                f"{self.name}: no part named "
+                + ", ".join(repr(n) for n in unknown)
+                + f".\n  Known parts: {', '.join(p.name for p in self.parts)}."
+                + "\n  Nothing was downloaded. Either ask for a name off that "
+                  "list, or drop\n  the unknown one from --parts"
+                + where + ".")
         return [known[n] for n in names]
+
+
+class PartsFailed(RuntimeError):
+    """Some archives landed and some did not, with the reason for each.
+
+    A dataset here is several multi-gigabyte archives fetched one after the
+    other, and the failure that actually happens is one of them being refused
+    -- Drive's quota, a mount that dropped -- long after the earlier ones
+    extracted. Letting that exception escape reported it as a traceback and
+    said nothing about the parts that *did* land, which is the whole of what
+    the caller needs in order to decide what to run next. So the loop carries
+    on to the remaining parts, and this carries both lists out.
+    """
+
+    def __init__(self, dataset: str, dest: Path, done: SequenceABC[str],
+                 failed: SequenceABC[tuple[str, str]]) -> None:
+        self.dataset = dataset
+        self.dest = Path(dest)
+        self.done = list(done)
+        self.failed = [(name, reason) for name, reason in failed]
+        super().__init__(self.summary())
+
+    def summary(self) -> str:
+        names = ", ".join(name for name, _ in self.failed)
+        total = len(self.failed) + len(self.done)
+        lines = [f"!! {self.dataset}: {len(self.failed)} of {total} part(s) "
+                 f"did not land: {names}"]
+        for name, reason in self.failed:
+            lines.append(f"   {name}: {reason.strip().splitlines()[0]}")
+        lines.append("   (the full reason for each was printed above, where "
+                     "it happened)")
+        if self.done:
+            lines.append(
+                f"   Kept: {', '.join(self.done)} -- extracted under "
+                f"{self.dest} and not touched by this failure. Nothing here "
+                f"skips an archive that is already unpacked, so ask for the "
+                f"missing part(s) alone rather than re-running all of them.")
+        else:
+            lines.append("   Nothing landed: not one part of this set "
+                         "extracted.")
+        where = (" (notebook 31 builds it from VTUAV_VIS_PARTS)"
+                 if self.dataset == "vtuav_vis" else "")
+        lines.append(
+            "   To continue: re-run with `--parts "
+            + " ".join(name for name, _ in self.failed)
+            + "` alone once the\n   reason above is gone, or drop those "
+            + f"name(s) from the --parts list{where}\n   and train on what "
+              "landed.")
+        return "\n".join(lines)
 
 
 # Verified 2026-08: `GET https://api.figshare.com/v2/articles/29476610/files`.
@@ -1325,12 +1385,31 @@ def fetch(name: str, dest: Path, parts: tuple[str, ...] | None = None,
 
     work = dest / "_archives"
     work.mkdir(parents=True, exist_ok=True)
+    done: list[str] = []
+    failed: list[tuple[str, str]] = []
     try:
         for part in chosen:
-            fetch_part(part, dest, work, frames, keep, quiet, staging)
+            try:
+                fetch_part(part, dest, work, frames, keep, quiet, staging)
+            except Exception as failure:    # noqa: BLE001 - see PartsFailed
+                # One refused archive must not cost the ones after it, and it
+                # must not cost the ones before it either: those are already
+                # extracted and usable. Say why here, where the context is,
+                # and collect the name for the summary at the end.
+                reason = str(failure).strip() or type(failure).__name__
+                failed.append((part.name, reason))
+                print(f"   !! {part.name} did not land:")
+                for line in reason.splitlines():
+                    print(f"      {line}")
+                if part is not chosen[-1]:
+                    print("   carrying on with the next part.", flush=True)
+            else:
+                done.append(part.name)
     finally:
         if not keep and work.exists() and not any(work.iterdir()):
             work.rmdir()
+    if failed:
+        raise PartsFailed(recipe.name, dest, done, failed)
     return dest
 
 
@@ -1406,17 +1485,32 @@ def main(argv: list[str] | None = None) -> int:
                "rgbtdroneperson": "RGBTDronePerson", "vtuavdet": "VTUAV_det",
                "birdsai": "BIRDSAI", "airesq": "AIResQ",
                "vtuav_track": "VTUAV_track"}
+    incomplete: list[PartsFailed] = []
     for name in names:
         dest = Path(args.dest) if args.dest else Path(args.root) / folders[name]
-        fetch(name, dest, tuple(args.parts) if args.parts else None,
-              frames=args.frames, keep=args.keep, quiet=args.quiet,
-              limit=args.limit, stage=args.stage, sequences=args.sequences)
+        try:
+            fetch(name, dest, tuple(args.parts) if args.parts else None,
+                  frames=args.frames, keep=args.keep, quiet=args.quiet,
+                  limit=args.limit, stage=args.stage, sequences=args.sequences)
+        except PartsFailed as partial:
+            # Not a traceback: a named, printed refusal on stdout, followed by
+            # the report of what *is* on disk. A caller that runs this through
+            # `subprocess.run(..., check=True)` sees the same non-zero exit
+            # either way, and this way it sees which part and why.
+            incomplete.append(partial)
+            print("\n" + partial.summary(), flush=True)
         print(report(name, dest,
                      "rgb" if name in ("vtuav_vis", "segfly_rgb", "visdrone")
                      else "thermal"))
 
     free = shutil.disk_usage(args.root if not args.dest else args.dest).free
     print(f"\n{human(free)} of disk left.")
+    if incomplete:
+        missing = ", ".join(f"{p.dataset}/{name}"
+                            for p in incomplete for name, _ in p.failed)
+        print(f"\nexiting 1: {missing} did not land. Everything else above is "
+              f"on disk.")
+        return 1
     return 0
 
 
