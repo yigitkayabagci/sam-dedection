@@ -148,6 +148,9 @@ INSPECT_DATA = True
 INSPECT_PER_SOURCE = 6
 INSPECT_SPAN = 12
 INSPECT_WINDOWS = 2
+PREVIEW_RUN = True
+PREVIEW_FRAMES = 100
+PREVIEW_FPS = 6
 RENDER_BEFORE_AFTER = True
 DEMO_FRAMES, DEMO_FPS, DEMO_PRE_ROLL = 400, 20, 80
 
@@ -306,6 +309,20 @@ if INSPECT_DATA:
     render(sequences, STORES, MIRROR / "inspect",
            per_source=INSPECT_PER_SOURCE, span=INSPECT_SPAN,
            windows=INSPECT_WINDOWS)
+
+if PREVIEW_RUN:
+    from tools.preview_sequence import pick_sequence, preview
+    _watch = pick_sequence(sequences, STORES)
+    if _watch is not None:
+        print(f"\nizlenecek dizi: {_watch.name} "
+              f"({len(STORES.get(_watch.name, {}))} maskeli kare)")
+        PREVIEW_REPORT = preview(_watch, STORES[_watch.name],
+                                 MIRROR / "preview", count=PREVIEW_FRAMES,
+                                 fps=PREVIEW_FPS)
+        from IPython.display import Video, display
+        _mp4 = Path(PREVIEW_REPORT["video"]) if PREVIEW_REPORT.get("video") else None
+        if _mp4 is not None and _mp4.is_file():
+            display(Video(str(_mp4), embed=True, width=900))
 
 MASK_FRAMES = sum(len(STORES[row.name]) for row in sequences)
 VISIBLE_FRAMES = sum(int(row.labels.exist.sum()) for row in sequences)
