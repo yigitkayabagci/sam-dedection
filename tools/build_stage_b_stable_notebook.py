@@ -136,6 +136,41 @@ def main() -> None:
     # The weights this arm starts from. Empty keeps stock EdgeTAM, which is
     # what 22 always did; pointing it at 34's output is what makes a
     # pretrain -> stage B chain a chain rather than two unrelated runs.
+    # `windows_for` takes a native crop only while the frame is at least SIZE
+    # on both axes; below that it resizes the whole frame, aspect ratio and
+    # all. At the default 512 that boundary is exactly where the thermal sets
+    # sit -- a 640x512 frame is a 512 crop with no resampling -- so raising
+    # SIZE silently turns every one of them into an upsample. Nothing warns,
+    # because both paths are legitimate; this counts them so the choice is made
+    # on the census rather than on the number looking bigger.
+    replace(notebook,
+            'TRAIN, VAL, TEST = windows("train", JITTER), windows("val", 0), '
+            'windows("test", 0)',
+            'TRAIN, VAL, TEST = windows("train", JITTER), windows("val", 0), '
+            'windows("test", 0)\n'
+            '\n'
+            '_native = {}\n'
+            'for _entry in SPLITS["train"]:\n'
+            '    _key = _entry.source.name if _entry.source else "?"\n'
+            '    _fits, _seen = _native.get(_key, (0, 0))\n'
+            '    _native[_key] = (_fits + int(min(_entry.size) >= SIZE), '
+            '_seen + 1)\n'
+            '_small = {k: v for k, v in _native.items() if v[0] < v[1]}\n'
+            'if _small:\n'
+            '    print(f"\\n!! too small for a native {SIZE} window -- these '
+            'frames are resized\\n"\n'
+            '          f"   whole, aspect ratio and all, instead of cropped:")\n'
+            '    for _key, (_fits, _seen) in sorted(_small.items()):\n'
+            '        print(f"     {_key:<28}{_seen - _fits:>7} of {_seen} '
+            'frames")\n'
+            '    print(f"   `windows_for` falls back to the whole frame when "\n'
+            '          f"min(width, height) < {SIZE}. At 512 a 640x512 thermal "\n'
+            '          f"frame is a crop with no resampling at all; every size "\n'
+            '          f"above it turns the same frame into an upsample paying "\n'
+            '          f"{(SIZE / 512) ** 2:.2f}x the token count for "\n'
+            '          f"interpolated pixels. If most of the pool is listed "\n'
+            '          f"here, that is the answer about {SIZE}.")')
+
     replace(notebook, 'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"',
             'DRIVE_POOLS = "/content/drive/MyDrive/edgetam-pool"\n'
             'BASE_CHECKPOINT = ""')

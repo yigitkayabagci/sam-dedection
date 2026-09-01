@@ -485,3 +485,47 @@ Aynı tag ile tekrar koşarsan üstüne yazar (bir deneme = bir klasör). Sayac�
 çevirirsin: `--tag vis3_deneme2`. **Hedef seçimi tag'lenmez** —
 `frame_output/<record>/prompts.json`'da kalır, yeni tag seni tekrar seçiciye
 göndermez.
+
+## 768'de çalışmak: iki ayrı 768 var
+
+`crop768`, kaydın içinden **768x768 doğal piksel** pencere alır ve modele 768
+olarak verir. `crop512` de 512 alıp 512 verir. Yani ikisinde de yeniden
+örnekleme yok: N piksellik bir hedef her ikisinde de N pikseldir. 768'in aldığı
+şey **detay değil, görüş alanı** — 2.25 kat sahne, 2.25 kat token (stride 16'da
+32x32 yerine 48x48). Kaynak 768'i taşımıyorsa (640x512 termalde olduğu gibi)
+kırpma kareye kenetlenir, tüm kare 768'e gerilir ve o 2.25 kat maliyet
+interpolasyona ödenir.
+
+### Dağıtım tarafı
+
+`--weights aerial_stable` 768'i reddediyordu, çünkü tabloda 512'den başka
+girdi yoktu. Artık var:
+
+* `configs/edgetam_768_aerial_stable.yaml` (PyTorch)
+* `configs/edgetam_trt_768_aerial_stable.yaml` (TensorRT, kendi export dizini)
+
+Bu, 512'de eğitilmiş ağırlıkları **bilerek** kendi boyutunun 1.5 katında
+koşturur; `run_records` özeti eğitim boyutunu satırın yanına yazdığı için sayı
+"eğitim işe yaradı mı" sorusuna değil, "bu ağırlıklar 768'de ne yapıyor"
+sorusuna cevap verir. Motorlar şekle özgüdür: 768 için ayrı export gerekir,
+komutlar TRT config'inin başlığında.
+
+### Eğitim tarafı
+
+32'nin `SIZE` değeri pencereyi **kaynak piksel** olarak keser. `windows_for`
+doğal kırpmayı yalnız kare her iki eksende de `SIZE` kadarken alır; altında
+tüm kareyi en-boy oranıyla birlikte yeniden boyutlandırır. 512'de sınır tam
+termal setlerin oturduğu yerdir (640x512 → yeniden örnekleme yok); `SIZE`'ı
+yükseltmek hepsini sessizce upsample'a çevirir. 32'nin 3. hücresi artık bunu
+kaynak kaynak sayıp yazdırıyor — varsayılan 512'de hiçbir şey basmaz.
+
+### Üçüncü seçenek: 768 yerine uyarlanır pencere
+
+Hedef küçük olduğu için 768 istiyorsan, 768 bunu vermez — kırpma modları
+ölçek değiştirmez, sadece görüş alanını büyütür. Küçük hedefi büyüten şey
+`src/trackers/adaptive.py`: pencereyi hedefin kendi boyutunun sabit bir katına
+kırpar ve **512 olarak** besler, yani 10 piksellik bir dron modele 100 piksel
+gelir — 4-10 kat büyütme, 512 fiyatına. Bedeli, pencere her yer değiştirdiğinde
+memory bank'in sıfırlanıp son maskeden yeniden prompt edilmesi (SAM 2 memory'yi
+*girdi* koordinatlarında tutar), o yüzden pencere bir segment sınırı gibi
+davranır ve nadiren oynar. Sürücüsü `tools/track_adaptive.py`.
