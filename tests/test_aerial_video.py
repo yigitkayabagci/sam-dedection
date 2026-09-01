@@ -16,6 +16,7 @@ from src.training.aerial_video import (
     vtuav_vis_sequences,
     weighted_clip_sample,
 )
+from src.training.antiuav import Sequence, SequenceLabels
 from src.training.labels import save_masks
 
 
@@ -25,6 +26,15 @@ def image(path: Path, shape=(32, 48)) -> None:
     # exercised by the existing clip-loader tests. Keeping this fixture as an
     # opaque file makes the dataset contract testable without OpenCV installed.
     path.write_bytes(b"fixture")
+
+
+def fake_sequence(name: str, frames: int) -> Sequence:
+    """A sequence with paths that are never opened -- split tests read names."""
+    return Sequence(
+        name=name, split="unsplit",
+        frames=tuple(Path(f"/nowhere/{name}/{i}.jpg") for i in range(frames)),
+        labels=SequenceLabels(exist=np.ones(frames, bool),
+                              boxes=np.zeros((frames, 4), np.float32)))
 
 
 class AerialVideoTest(unittest.TestCase):
@@ -126,6 +136,32 @@ class AerialVideoTest(unittest.TestCase):
                 loaded.labels.boxes, [[2, 3, 8, 9], [5, 4, 11, 10]])
             self.assertEqual(list(stores[loaded.name]), [0, 1])
             self.assertEqual(int(stores[loaded.name][1].sum()), 36)
+
+    def test_a_given_hold_out_replaces_the_sampled_test_split(self):
+        """A dataset that ships its own held-out split has already decided.
+
+        Sampling on top of it would grade on a mixture of the authors' choice
+        and a hash, and which half a number came from would not be recoverable
+        from the number.
+        """
+        train = [fake_sequence(f"vtuav_vis__train_001_car_{i}", 8)
+                 for i in range(6)]
+        held = [fake_sequence("vtuav_vis__test_001_train_003", 8)]
+        splits = split_flights(train, seed=0, val_fraction=0.2,
+                               test_fraction=0.0, hold_out=held)
+        self.assertEqual([row.name for row in splits["test"]],
+                         ["vtuav_vis__test_001_train_003"])
+        self.assertTrue(splits["train"] and splits["val"])
+        self.assertTrue(all(row.name.startswith("vtuav_vis__train_001")
+                            for row in splits["train"] + splits["val"]))
+
+    def test_without_a_hold_out_nothing_about_the_split_changes(self):
+        rows = [fake_sequence(f"vtuav_vis__train_001_car_{i}", 8)
+                for i in range(10)]
+        before = split_flights(rows, seed=3)
+        after = split_flights(rows, seed=3, hold_out=None)
+        self.assertEqual({k: [r.name for r in v] for k, v in before.items()},
+                         {k: [r.name for r in v] for k, v in after.items()})
 
     def test_two_archives_sharing_a_sequence_name_stay_apart(self):
         """The collision this project would otherwise walk into.
