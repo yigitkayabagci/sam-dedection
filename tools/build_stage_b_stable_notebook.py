@@ -101,7 +101,8 @@ def main() -> None:
             '                                 save_splits, split_index)',
             'from src.training.aerial import (InstanceGates, drop_merge_profile,\n'
             '                                 rebalance, sample_windows,\n'
-            '                                 save_splits, split_index)')
+            '                                 save_splits, size_bands,\n'
+            '                                 split_index)')
     replace(notebook,
             'if CLASS_WEIGHTS:\n'
             '    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)',
@@ -354,7 +355,63 @@ def main() -> None:
             '      f"green = only this run found it | red = only the base '
             '({_BASE_NAME}) found it | "\n'
             '      f"blue = both agreed")')
-    replace(notebook, 'MAX_AREA       = 0.9', 'MAX_AREA       = 0.2')
+    # A band is on the instance's longer side in source pixels, keyed like
+    # CLASS_WEIGHTS -- `"pool/vtuav_thermal:car"`, most specific wins. It says
+    # what MAX_AREA cannot: that gate is one fraction of the frame for every
+    # source at once, and a frame here runs from 640x512 to 1920x1080, so 0.06
+    # is 19 661 px in HIT-UAV and 124 416 px in VTUAV -- six times apart, for a
+    # target the same size on the ground.
+    replace(notebook, 'MAX_AREA       = 0.9',
+            'MAX_AREA       = 0.2\nSIZE_BANDS     = {}')
+    # 50 a side instead of 6. Six tiles show the extremes and nothing about
+    # the shape of the tail, and the tail is where a regression that is not a
+    # single broken frame lives. A 2-by-50 strip would be 155 inches wide, so
+    # the two blocks are laid out as grids: gained on top, lost below.
+    replace(notebook, 'PANEL_CASES    = 6',
+            'PANEL_CASES    = 50\nPANEL_COLUMNS  = 10')
+    replace(notebook,
+            '_fig, _axes = plt.subplots(2, _half, figsize=(3.1 * _half, 7.0), '
+            'squeeze=False)\n'
+            'for _ax, _case in zip(_axes.ravel(), SHOWN):',
+            'import math\n'
+            '_cols = max(1, min(PANEL_COLUMNS, _half))\n'
+            '_block = math.ceil(_half / _cols)\n'
+            '_fig, _axes = plt.subplots(2 * _block, _cols,\n'
+            '                           figsize=(3.1 * _cols, 3.5 * 2 * _block),\n'
+            '                           squeeze=False)\n'
+            'for _blank in _axes.ravel():\n'
+            '    _blank.axis("off")\n'
+            'for _n, _case in enumerate(SHOWN):\n'
+            '    _side, _within = divmod(_n, max(_half, 1))\n'
+            '    _ax = _axes[_side * _block + _within // _cols, _within % _cols]')
+
+    # The report is printed whether or not a band applies, which is the same
+    # rule `neighbour_weight` follows: the number that would justify a cut is
+    # measured before anyone cuts on it. Applied after the thinning and before
+    # the split, because that is the order `apply_splits` replays them in.
+    replace(notebook,
+            'SPLITS = split_index(INDEX, seed=SEED)',
+            'INDEX, _sizes = size_bands(INDEX, SIZE_BANDS, seed=SEED)\n'
+            'print("\\ninstance size by source and class -- longer side in "\n'
+            '      "source pixels; the grade calls under 32 small")\n'
+            'print(f"{\'source:class\':<40}{\'n\':>8}{\'p10\':>7}{\'p50\':>7}"\n'
+            '      f"{\'p90\':>7}{\'p99\':>7}{\'max\':>7}")\n'
+            'for _key, _row in list(_sizes["sides"].items())[:18]:\n'
+            '    print(f"{_key:<40}{_row[\'n\']:>8}{_row[\'p10\']:>7.0f}"\n'
+            '          f"{_row[\'p50\']:>7.0f}{_row[\'p90\']:>7.0f}"\n'
+            '          f"{_row[\'p99\']:>7.0f}{_row[\'max\']:>7.0f}")\n'
+            'if SIZE_BANDS:\n'
+            '    print(f"\\nsize bands: {_sizes[\'instances\'][\'before\']} instances "\n'
+            '          f"-> {_sizes[\'instances\'][\'after\']}   dropped {_sizes[\'dropped\']}")\n'
+            '    assert not _sizes["unmatched"], (\n'
+            '        f"SIZE_BANDS names {_sizes[\'unmatched\']} and nothing matched "\n'
+            '        f"any of them. A key is a class, a source, or `source:class` "\n'
+            '        f"-- read the table above and use those names.")\n'
+            'else:\n'
+            '    print("\\nSIZE_BANDS is empty, so nothing was dropped by size. "\n'
+            '          "The table above is what a band gets chosen from.")\n'
+            'SPLITS = split_index(INDEX, seed=SEED)')
+
     replace(notebook,
             'PROMPT_JITTER  = 0.3\nMETHOD',
             'PROMPT_JITTER  = 0.3\n'
@@ -488,7 +545,8 @@ def main() -> None:
     replace(notebook,
             'SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS))',
             'SPLIT_FILE = str(save_splits(Path(WORK) / "splits.json", SPLITS,\n'
-            '                             CLASS_WEIGHTS, seed=SEED))')
+            '                             CLASS_WEIGHTS, seed=SEED,\n'
+            '                             bands=SIZE_BANDS))')
     replace(notebook,
             'COMMON += ["--splits", SPLIT_FILE]',
             'COMMON += ["--splits", SPLIT_FILE]\n'

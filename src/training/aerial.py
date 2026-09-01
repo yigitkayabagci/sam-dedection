@@ -901,6 +901,91 @@ def drop_merge_profile(index: SequenceABC[FrameIndex],
                   "frames": {"before": len(index), "after": len(kept)}}
 
 
+def _most_specific(table: Mapping[str, object], source: str, short: str,
+                   name: str) -> str | None:
+    """The one key in `table` that speaks for this instance, or None.
+
+    Source-and-class first, then source, then class. Nothing compounds: the
+    winner *replaces* the looser keys rather than multiplying with them, so
+    each entry in a table is one statement that can be read on its own.
+    """
+    return next((k for k in (f"{source}:{name}", f"{short}:{name}",
+                             source, short, name) if k in table), None)
+
+
+def size_bands(index: SequenceABC[FrameIndex],
+               bands: Mapping[str, tuple[float, float]] | None = None,
+               seed: int = 0) -> tuple[list[FrameIndex], dict]:
+    """`index` with instances outside their band dropped, and the sizes seen.
+
+    A band is `(min_side, max_side)` on the instance's **longer side in source
+    pixels**, keyed exactly like `rebalance`'s weights -- `"car"`,
+    `"pool/vtuav_thermal"`, `"pool/vtuav_thermal:car"`, most specific wins.
+
+    Why the longer side and not the area: it is the quantity the grade already
+    splits on. `tools/eval_instances.SMALL_SIDE` is 32 px in the window, and
+    with the default `window == size` a source pixel is a window pixel, so a
+    band reads directly against the small-object row the run already prints.
+    Area would need a second mental conversion at every reading.
+
+    Why this is separate from `InstanceGates.max_area`: that gate is one
+    fraction of the frame for every source at once, and a frame's size differs
+    by more than six times across this repo's sets -- 640x512 for HIT-UAV
+    against 1920x1080 for VTUAV -- so one fraction means two very different
+    pixel sizes. A band is absolute and per source, which is what "drop the
+    large cars in VTUAV and leave HIT-UAV alone" actually asks for.
+
+    **The report is the point even when `bands` is empty.** It carries each
+    source-and-class's side-length percentiles, so a threshold is picked off a
+    measured distribution rather than guessed and then defended. An empty
+    `bands` drops nothing and still reports.
+    """
+    sides: dict[str, list[float]] = {}
+    kept: list[FrameIndex] = []
+    dropped: dict[str, int] = {}
+    used: set[str] = set()
+    bands = dict(bands or {})
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        source = spec.name if spec is not None else "?"
+        short = source.split("/", 1)[1] if source.startswith("pool/") else source
+        survivors = []
+        for instance in entry.instances:
+            name = (spec.name_of(instance.class_id) if spec is not None
+                    else str(instance.class_id))
+            side = float(max(instance.width, instance.height))
+            sides.setdefault(f"{source}:{name}", []).append(side)
+            key = _most_specific(bands, source, short, name)
+            if key is None:
+                survivors.append(instance)
+                continue
+            used.add(key)
+            low, high = (float(v) for v in bands[key])
+            if low <= side <= high:
+                survivors.append(instance)
+            else:
+                dropped[key] = dropped.get(key, 0) + 1
+        if survivors:
+            kept.append(replace(entry, instances=tuple(survivors)))
+
+    percentiles = {}
+    for key, values in sorted(sides.items(), key=lambda kv: -len(kv[1])):
+        column = np.asarray(values, dtype=np.float64)
+        percentiles[key] = {
+            "n": int(column.size),
+            "p10": float(np.percentile(column, 10)),
+            "p50": float(np.percentile(column, 50)),
+            "p90": float(np.percentile(column, 90)),
+            "p99": float(np.percentile(column, 99)),
+            "max": float(column.max()),
+        }
+    return kept, {"frames": {"before": len(index), "after": len(kept)},
+                  "instances": {"before": sum(len(e.instances) for e in index),
+                                "after": sum(len(e.instances) for e in kept)},
+                  "sides": percentiles, "dropped": dropped,
+                  "unmatched": sorted(set(bands) - used)}
+
+
 def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
               seed: int = 0) -> tuple[list[FrameIndex], dict]:
     """`index` with over-represented classes thinned, and what that cost.
@@ -951,8 +1036,7 @@ def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
             # *replaces* a class weight for that source rather than
             # multiplying it, so two entries can be reasoned about one at a
             # time instead of as a product.
-            key = next((k for k in (f"{source}:{name}", f"{short}:{name}",
-                                    source, short, name) if k in weights), None)
+            key = _most_specific(weights, source, short, name)
             weight = 1.0 if key is None else float(weights[key])
             if key is not None:
                 used.add(key)
@@ -985,7 +1069,8 @@ def rebalance(index: SequenceABC[FrameIndex], weights: Mapping[str, float],
 def save_splits(path: str | Path,
                 splits: Mapping[str, SequenceABC[FrameIndex]],
                 weights: Mapping[str, float] | None = None,
-                seed: int = 0) -> Path:
+                seed: int = 0,
+                bands: Mapping[str, tuple[float, float]] | None = None) -> Path:
     """Which frames each split holds, as `source -> [frame key]`.
 
     A notebook that indexes a run, caps a pool, drops the frames a drawn grade
@@ -1012,6 +1097,11 @@ def save_splits(path: str | Path,
     identity and the instance's own label, so re-applying it downstream on the
     same entries reproduces the same set exactly, and a million instances cost
     a dozen lines instead of thirty megabytes.
+
+    `bands` rides along for exactly the same reason. `size_bands` also drops
+    per instance, so a frame list alone brings the large ones back, and a run
+    whose argument was "the small and medium ones of this class" would train on
+    all of them while the notebook printed otherwise.
     """
     payload: dict[str, dict[str, list[str]]] = {}
     for name, entries in splits.items():
@@ -1021,12 +1111,16 @@ def save_splits(path: str | Path,
             by_source.setdefault(key, []).append(entry.frame.name)
         payload[name] = by_source
     body: dict = payload
-    if weights:
+    if weights or bands:
         # A nested shape only when there is something to nest. The flat one is
         # what every file written before this carried, and `apply_splits` still
         # reads it.
-        body = {"frames": payload,
-                "rebalance": {"weights": dict(weights), "seed": int(seed)}}
+        body = {"frames": payload}
+        if weights:
+            body["rebalance"] = {"weights": dict(weights), "seed": int(seed)}
+        if bands:
+            body["size_bands"] = {
+                "bands": {k: [float(v[0]), float(v[1])] for k, v in bands.items()}}
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(body, indent=1) + "\n")
@@ -1051,6 +1145,7 @@ def apply_splits(index: SequenceABC[FrameIndex],
     # before instance thinning could travel, and the nested one that also
     # names the weights it was thinned under.
     thinning = body.get("rebalance") if "frames" in body else None
+    banding = body.get("size_bands") if "frames" in body else None
     payload = body["frames"] if "frames" in body else body
     wanted = {name: {source: set(keys) for source, keys in by_source.items()}
               for name, by_source in payload.items()}
@@ -1079,6 +1174,15 @@ def apply_splits(index: SequenceABC[FrameIndex],
         # emptied here and the count above stays true.
         out = {name: rebalance(entries, thinning["weights"],
                                seed=int(thinning.get("seed", 0)))[0]
+               for name, entries in out.items()}
+    if banding:
+        # After the thinning, in the order the notebook applied them, because
+        # both drop instances and a count printed there has to be reachable
+        # here. Unlike `rebalance` this one can empty a frame the file names,
+        # so the resolved count above is checked before it runs, not after.
+        bands = {k: (float(v[0]), float(v[1]))
+                 for k, v in banding["bands"].items()}
+        out = {name: size_bands(entries, bands)[0]
                for name, entries in out.items()}
     return out
 

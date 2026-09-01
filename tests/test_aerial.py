@@ -12,6 +12,7 @@ so the suite skips itself cleanly when it is absent.
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -56,6 +57,7 @@ from src.training.aerial import (  # noqa: E402
     apply_splits,
     drop_merge_profile,
     rebalance,
+    size_bands,
     save_splits,
     split_index,
     summarise,
@@ -940,6 +942,104 @@ class TestThinningAnOverRepresentedClass(unittest.TestCase):
                          report["instances"]["after"])
 
 
+class TestSizeBands(unittest.TestCase):
+    """Dropping the large cars in one source without touching another.
+
+    `InstanceGates.max_area` cannot express this: it is one fraction of the
+    frame for every source at once, and a frame is 640x512 in HIT-UAV against
+    1920x1080 in VTUAV, so the same fraction is two very different pixel sizes.
+    """
+
+    def index(self, sides, name=None, frames=4):
+        gates = InstanceGates()
+        source = Source(SPECS["kust4k"], gates, role="train")
+        spec = source.spec
+        name = name or list(spec.classes)[0]
+        out = []
+        for f in range(frames):
+            instances = tuple(
+                Instance(label=i, class_id=spec.classes[name],
+                         box=(0.0, 0.0, float(side), float(side)),
+                         area=int(side * side))
+                for i, side in enumerate(sides))
+            out.append(FrameIndex(
+                frame=Frame(name=f"seq/{f:06d}", image=Path("i"), mask=Path("m")),
+                instances=instances, size=(2048, 2048), rejects={}, source=source))
+        return out
+
+    def test_an_empty_band_table_drops_nothing_and_still_measures(self):
+        # The report is what a threshold is chosen from, so it has to exist
+        # before anyone has picked one.
+        kept, report = size_bands(self.index([10, 40, 200]), {})
+        self.assertEqual(report["instances"], {"before": 12, "after": 12})
+        self.assertEqual(len(kept), 4)
+        row = next(iter(report["sides"].values()))
+        self.assertEqual(row["n"], 12)
+        self.assertEqual(row["max"], 200.0)
+
+    def test_the_band_keeps_what_is_inside_it(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        kept, report = size_bands(self.index([10, 40, 200], name),
+                                  {f"kust4k:{name}": (0, 96)})
+        self.assertEqual(report["instances"]["after"], 8)   # 10 and 40 survive
+        self.assertEqual(report["dropped"][f"kust4k:{name}"], 4)
+        for entry in kept:
+            for instance in entry.instances:
+                self.assertLessEqual(max(instance.width, instance.height), 96)
+
+    def test_a_floor_drops_the_ones_below_it_too(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        _, report = size_bands(self.index([10, 40, 200], name),
+                               {f"kust4k:{name}": (32, 96)})
+        self.assertEqual(report["instances"]["after"], 4)   # only 40 survives
+
+    def test_the_longer_side_decides_not_the_area(self):
+        # A thin sliver and a square of the same area are different targets,
+        # and the grade's own small-object row splits on the side.
+        gates = InstanceGates()
+        source = Source(SPECS["kust4k"], gates, role="train")
+        name = list(SPECS["kust4k"].classes)[0]
+        entry = FrameIndex(
+            frame=Frame(name="s/0", image=Path("i"), mask=Path("m")),
+            instances=(Instance(label=1, class_id=source.spec.classes[name],
+                                box=(0.0, 0.0, 200.0, 4.0), area=800),),
+            size=(2048, 2048), rejects={}, source=source)
+        _, report = size_bands([entry], {f"kust4k:{name}": (0, 96)})
+        self.assertEqual(report["instances"]["after"], 0)
+
+    def test_a_band_on_one_source_leaves_another_alone(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        mine = self.index([200], name)
+        theirs = [replace(e, source=Source(SPECS["dronevehicle"], InstanceGates(),
+                                           role="train"))
+                  for e in self.index([200], name)]
+        # The other source's class ids belong to another spec, so key it by
+        # source alone -- which is the form "leave that set alone" takes.
+        _, report = size_bands(mine + theirs, {"kust4k": (0, 96)})
+        self.assertEqual(report["dropped"]["kust4k"], 4)
+        self.assertEqual(report["instances"]["after"], 4)
+
+    def test_a_frame_left_with_nothing_is_dropped(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        kept, report = size_bands(self.index([200], name),
+                                  {f"kust4k:{name}": (0, 96)})
+        self.assertEqual(kept, [])
+        self.assertEqual(report["frames"], {"before": 4, "after": 0})
+
+    def test_a_key_nothing_matched_is_named(self):
+        # A misspelt source looks exactly like a source that is already rare.
+        _, report = size_bands(self.index([10]), {"unicorn:car": (0, 96)})
+        self.assertEqual(report["unmatched"], ["unicorn:car"])
+
+    def test_the_most_specific_key_wins_and_nothing_compounds(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        _, report = size_bands(
+            self.index([200], name),
+            {"kust4k": (0, 96), f"kust4k:{name}": (0, 1000)})
+        self.assertEqual(report["instances"]["after"], 4)   # the class band won
+        self.assertEqual(report["dropped"], {})
+
+
 class TestASavedSplitIsTheSplitTheRunUses(unittest.TestCase):
     """A caller that caps a pool and drops overlapping frames has decided the
     run's data, and handing the CLI the same *flags* re-derives all of it. The
@@ -977,6 +1077,55 @@ class TestASavedSplitIsTheSplitTheRunUses(unittest.TestCase):
         back = apply_splits(both, self.path)
         self.assertEqual({e.source.spec.name for e in back["train"]}, {"kust4k"})
         self.assertEqual({e.source.spec.name for e in back["test"]}, {"segfly"})
+
+    def sized(self, source, sides, count=6):
+        name = list(source.spec.classes)[0]
+        return [FrameIndex(
+            frame=Frame(name=f"{i:06d}", image=Path("i"), mask=Path("m")),
+            instances=tuple(
+                Instance(label=k, class_id=source.spec.classes[name],
+                         box=(0.0, 0.0, float(s), float(s)), area=int(s * s))
+                for k, s in enumerate(sides)),
+            size=(2048, 2048), rejects={}, source=source) for i in range(count)]
+
+    def test_a_size_band_survives_the_trip_to_the_cli(self):
+        """The half a frame list cannot keep, for the second reason.
+
+        `size_bands` drops per instance like `rebalance` does, so a file that
+        recorded only the surviving frames would bring every large one back --
+        the run would train on exactly what the notebook said it had excluded.
+        """
+        full = self.sized(self.kust, [10, 40, 200])
+        bands = {"kust4k": (0.0, 96.0)}
+        kept, _ = size_bands(full, bands)
+        save_splits(self.path, {"train": kept, "val": [], "test": []},
+                    bands=bands)
+        back = apply_splits(full, self.path)
+        sides = [max(i.width, i.height)
+                 for e in back["train"] for i in e.instances]
+        self.assertEqual(len(sides), 12, "two of three per frame survive")
+        self.assertTrue(all(s <= 96 for s in sides), sides)
+
+    def test_a_band_and_a_weight_both_travel(self):
+        full = self.sized(self.kust, [10, 40, 200])
+        save_splits(self.path, {"train": full, "val": [], "test": []},
+                    weights={"kust4k": 0.5}, seed=0, bands={"kust4k": (0.0, 96.0)})
+        body = json.loads(self.path.read_text())
+        self.assertIn("rebalance", body)
+        self.assertIn("size_bands", body)
+        back = apply_splits(full, self.path)
+        sides = [max(i.width, i.height)
+                 for e in back["train"] for i in e.instances]
+        self.assertTrue(all(s <= 96 for s in sides), sides)
+        self.assertLess(len(sides), 12, "the weight thinned as well")
+
+    def test_a_file_with_neither_keeps_the_flat_shape(self):
+        # Every file written before either could travel is this shape, and it
+        # still has to read.
+        full = self.entries(self.kust, 4)
+        save_splits(self.path, {"train": full, "val": [], "test": []})
+        self.assertEqual(sorted(json.loads(self.path.read_text())),
+                         ["test", "train", "val"])
 
     def test_an_index_missing_a_named_frame_refuses(self):
         full = self.entries(self.kust, 6)
