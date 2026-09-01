@@ -101,8 +101,8 @@ def main() -> None:
             '                                 save_splits, split_index)',
             'from src.training.aerial import (InstanceGates, drop_merge_profile,\n'
             '                                 rebalance, sample_windows,\n'
-            '                                 save_splits, size_bands,\n'
-            '                                 split_index)')
+            '                                 resolve_quantiles, save_splits,\n'
+            '                                 size_bands, split_index)')
     replace(notebook,
             'if CLASS_WEIGHTS:\n'
             '    INDEX, _balance = rebalance(INDEX, CLASS_WEIGHTS, seed=SEED)',
@@ -362,7 +362,7 @@ def main() -> None:
     # is 19 661 px in HIT-UAV and 124 416 px in VTUAV -- six times apart, for a
     # target the same size on the ground.
     replace(notebook, 'MAX_AREA       = 0.9',
-            'MAX_AREA       = 0.2\nSIZE_BANDS     = {}')
+            'MAX_AREA       = 0.2\nSIZE_BANDS     = {}\nSIZE_QUANTILES = {}')
     # 50 a side instead of 6. Six tiles show the extremes and nothing about
     # the shape of the tail, and the tail is where a regression that is not a
     # single broken frame lives. A 2-by-50 strip would be 155 inches wide, so
@@ -391,6 +391,12 @@ def main() -> None:
     # the split, because that is the order `apply_splits` replays them in.
     replace(notebook,
             'SPLITS = split_index(INDEX, seed=SEED)',
+            'if SIZE_QUANTILES:\n'
+            '    _from_data = resolve_quantiles(INDEX, SIZE_QUANTILES)\n'
+            '    for _key, (_lo, _hi) in sorted(_from_data.items()):\n'
+            '        print(f"quantile band {_key}: "\n'
+            '              f"{SIZE_QUANTILES[_key]} -> {_lo:.0f}..{_hi:.0f} px")\n'
+            '    SIZE_BANDS = {**_from_data, **SIZE_BANDS}\n'
             'INDEX, _sizes = size_bands(INDEX, SIZE_BANDS, seed=SEED)\n'
             'print("\\ninstance size by source and class -- longer side in "\n'
             '      "source pixels; the grade calls under 32 small")\n'

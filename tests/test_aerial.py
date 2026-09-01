@@ -57,6 +57,7 @@ from src.training.aerial import (  # noqa: E402
     apply_splits,
     drop_merge_profile,
     rebalance,
+    resolve_quantiles,
     size_bands,
     save_splits,
     split_index,
@@ -1038,6 +1039,68 @@ class TestSizeBands(unittest.TestCase):
             {"kust4k": (0, 96), f"kust4k:{name}": (0, 1000)})
         self.assertEqual(report["instances"]["after"], 4)   # the class band won
         self.assertEqual(report["dropped"], {})
+
+
+class TestQuantileBands(unittest.TestCase):
+    """A cut that names the number it came from, without a second run.
+
+    `(0, 96)` typed by hand is a guess until the distribution is measured.
+    The 90th percentile of what is actually there is the measurement, and it
+    resolves to a pixel band that `save_splits` can record.
+    """
+
+    def index(self, sides, name=None, spec="kust4k", frames=1):
+        source = Source(SPECS[spec], InstanceGates(), role="train")
+        name = name or list(source.spec.classes)[0]
+        return [FrameIndex(
+            frame=Frame(name=f"s/{f:06d}", image=Path("i"), mask=Path("m")),
+            instances=tuple(
+                Instance(label=i, class_id=source.spec.classes[name],
+                         box=(0.0, 0.0, float(s), float(s)), area=int(s * s))
+                for i, s in enumerate(sides)),
+            size=(2048, 2048), rejects={}, source=source) for f in range(frames)]
+
+    def test_a_quantile_becomes_the_pixel_band_it_measured(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        index = self.index(list(range(1, 101)), name)      # sides 1..100
+        got = resolve_quantiles(index, {f"kust4k:{name}": (0.0, 0.90)})
+        low, high = got[f"kust4k:{name}"]
+        self.assertEqual(low, 1.0)
+        self.assertAlmostEqual(high, 90.1, places=6)
+
+    def test_the_resolved_band_is_what_size_bands_then_applies(self):
+        name = list(SPECS["kust4k"].classes)[0]
+        index = self.index(list(range(1, 101)), name)
+        bands = resolve_quantiles(index, {f"kust4k:{name}": (0.0, 0.90)})
+        _, report = size_bands(index, bands)
+        self.assertEqual(report["instances"], {"before": 100, "after": 90})
+
+    def test_a_source_key_sees_every_class_it_speaks_for(self):
+        # A quantile of "kust4k" must be taken over the source's instances,
+        # not over one class's column, or the cut is not the one asked for.
+        first, second = list(SPECS["kust4k"].classes)[:2]
+        index = (self.index([10] * 90, first) + self.index([500] * 10, second))
+        source_p90 = resolve_quantiles(index, {"kust4k": (0.0, 0.90)})["kust4k"][1]
+        class_p90 = resolve_quantiles(
+            index, {f"kust4k:{first}": (0.0, 0.90)})[f"kust4k:{first}"][1]
+        self.assertEqual(class_p90, 10.0, "one class's column is only its own")
+        self.assertGreater(source_p90, 10.0,
+                           "the source key must have seen the other class too")
+        self.assertLess(source_p90, 500.0)
+
+    def test_a_key_nothing_matched_is_left_out_not_defaulted(self):
+        # Left out so `size_bands` reports it as unmatched, rather than
+        # quietly banding nothing under a key that looks applied.
+        self.assertEqual(resolve_quantiles(self.index([10]), {"unicorn": (0, 0.9)}),
+                         {})
+
+    def test_the_two_keys_do_not_pool_their_sizes(self):
+        # Each source names its own classes, so let each index use its own.
+        index = self.index([10] * 10) + self.index([500] * 10, spec="segfly")
+        got = resolve_quantiles(index, {"kust4k": (0.0, 1.0),
+                                        "segfly": (0.0, 1.0)})
+        self.assertEqual(got["kust4k"][1], 10.0)
+        self.assertEqual(got["segfly"][1], 500.0)
 
 
 class TestASavedSplitIsTheSplitTheRunUses(unittest.TestCase):

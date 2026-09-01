@@ -913,6 +913,64 @@ def _most_specific(table: Mapping[str, object], source: str, short: str,
                              source, short, name) if k in table), None)
 
 
+def _sides_by_key(index: SequenceABC[FrameIndex],
+                  table: Mapping[str, object] | None = None
+                  ) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+    """Longer sides per `source:class`, and per key of `table` when given.
+
+    One pass for both, because the second is the first regrouped: a key like
+    `"kust4k"` speaks for several classes and `"car"` for several sources, so
+    a quantile of it has to see every instance the key would act on rather
+    than one class's column.
+    """
+    per_pair: dict[str, list[float]] = {}
+    per_key: dict[str, list[float]] = {}
+    for entry in index:
+        spec = entry.source.spec if entry.source else None
+        source = spec.name if spec is not None else "?"
+        short = source.split("/", 1)[1] if source.startswith("pool/") else source
+        for instance in entry.instances:
+            name = (spec.name_of(instance.class_id) if spec is not None
+                    else str(instance.class_id))
+            side = float(max(instance.width, instance.height))
+            per_pair.setdefault(f"{source}:{name}", []).append(side)
+            if table:
+                key = _most_specific(table, source, short, name)
+                if key is not None:
+                    per_key.setdefault(key, []).append(side)
+    return per_pair, per_key
+
+
+def resolve_quantiles(index: SequenceABC[FrameIndex],
+                      quantiles: Mapping[str, tuple[float, float]]
+                      ) -> dict[str, tuple[float, float]]:
+    """Absolute side bands from quantiles of the sizes actually present.
+
+    `{"pool/vtuav_thermal:car": (0.0, 0.90)}` means "keep the smallest 90 % of
+    that source's cars by longer side", and comes back as the pixel band that
+    turned out to be -- which is what `size_bands` then applies and what
+    `save_splits` records.
+
+    The point is that a cut still names the number it came from. A band typed
+    as `(0, 96)` is a guess until someone measures the distribution; a band
+    computed as the 90th percentile *is* the measurement, and the pixels it
+    resolved to get printed beside it so the next run can read them back.
+
+    A key nothing matched is left out rather than defaulted, so it surfaces in
+    `size_bands`' own `unmatched` list instead of silently banding nothing.
+    """
+    _, per_key = _sides_by_key(index, quantiles)
+    out: dict[str, tuple[float, float]] = {}
+    for key, (low, high) in quantiles.items():
+        column = per_key.get(key)
+        if not column:
+            continue
+        values = np.asarray(column, dtype=np.float64)
+        out[key] = (float(np.quantile(values, float(low))),
+                    float(np.quantile(values, float(high))))
+    return out
+
+
 def size_bands(index: SequenceABC[FrameIndex],
                bands: Mapping[str, tuple[float, float]] | None = None,
                seed: int = 0) -> tuple[list[FrameIndex], dict]:
@@ -940,7 +998,6 @@ def size_bands(index: SequenceABC[FrameIndex],
     measured distribution rather than guessed and then defended. An empty
     `bands` drops nothing and still reports.
     """
-    sides: dict[str, list[float]] = {}
     kept: list[FrameIndex] = []
     dropped: dict[str, int] = {}
     used: set[str] = set()
@@ -954,7 +1011,6 @@ def size_bands(index: SequenceABC[FrameIndex],
             name = (spec.name_of(instance.class_id) if spec is not None
                     else str(instance.class_id))
             side = float(max(instance.width, instance.height))
-            sides.setdefault(f"{source}:{name}", []).append(side)
             key = _most_specific(bands, source, short, name)
             if key is None:
                 survivors.append(instance)
@@ -968,6 +1024,7 @@ def size_bands(index: SequenceABC[FrameIndex],
         if survivors:
             kept.append(replace(entry, instances=tuple(survivors)))
 
+    sides, _ = _sides_by_key(index)
     percentiles = {}
     for key, values in sorted(sides.items(), key=lambda kv: -len(kv[1])):
         column = np.asarray(values, dtype=np.float64)
