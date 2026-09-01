@@ -125,10 +125,13 @@ def main() -> None:
         # için koşuyu en sık düşüren parça onlar. `weighted_clip_sample`
         # kaynağı olmayan ağırlığı zaten düşürüp yeniden normalize ediyor,
         # yani SOURCE_WEIGHTS'e dokunmadan kol seçilebiliyor.
-        USE_VTUAV      = False
+        USE_VTUAV      = True
         USE_VTUAV_VIS  = True
         USE_BIRDSAI    = False
         USE_ANTIUAV410 = False
+        # A VTUAV part that will not come off the Drive mount downgrades the
+        # run instead of ending it; True makes it raise. See the fetch cell.
+        USE_VTUAV_STRICT = False
         # Sekiz resmî VTUAV-VIS arşivi. Boyutlar toplam ~126 GB, ama
         # `--frames masked` yalnız maskeli kareleri ve eşleniklerini açıyor,
         # yani diske inen bunun %4'ü kadarı. Pahalı olan okuma, disk değil.
@@ -184,6 +187,13 @@ def main() -> None:
         INSPECT_PER_SOURCE = 4
         INSPECT_SPAN = 12
         INSPECT_WINDOWS = 2
+        # The sheets sample around the disappearances; this plays the longest
+        # run of consecutive supervised frames instead. Different question: the
+        # sheets show the transition, this shows whether the masks hold
+        # together between two of them.
+        PREVIEW_RUN = True
+        PREVIEW_FRAMES = 100
+        PREVIEW_FPS = 6
         RENDER_BEFORE_AFTER = True
         DEMO_FRAMES, DEMO_FPS, DEMO_PRE_ROLL = 400, 20, 80
 
@@ -210,7 +220,9 @@ def main() -> None:
         # `_from_<pretrain>` eki alır, yani bu satır o koşuya geçmenin yeridir:
         #   aerial_thermal_stable_from_pretrain_thermal_aerial/
         #     edgetam_pool_aerial_thermal_stable_from_pretrain_thermal_aerial_512.pt
-        BASE_STAGE_B_OVERRIDE = ""
+        BASE_STAGE_B_ARM = "aerial_thermal_stable_from_aerial_thermal_stable"
+        BASE_STAGE_B_OVERRIDE = str(STAGE_B_DRIVE / BASE_STAGE_B_ARM
+                                    / f"edgetam_pool_{BASE_STAGE_B_ARM}_512.pt")
         BASE_STAGE_B_CANDIDATES = [
             STAGE_B_DRIVE / "aerial_thermal_stable"
                           / "edgetam_pool_aerial_thermal_stable_512.pt",
@@ -264,65 +276,110 @@ def main() -> None:
         cell("markdown", r"""
         ## Veriyi getir
 
-        BIRDSAI'nin yalnız gerçek gece videoları indirilir; 42 GiB AirSim sentetik
-        kol varsayılan tarifte kapalıdır. Tracking zip'leri ağdan sessizce çekilmez:
-        seçilen büyük arşivlerin Drive'da bulunması zorunludur. VTUAV-VIS ise
-        resmî Drive kimlikleri üzerinden yalnız seçilen parçayı indirir.
+        Her kaynak kendi `USE_*` anahtarına bakar; kapalı olan indirilmez.
+        Tracking zip'leri ağdan sessizce çekilmez: seçilen büyük arşivlerin
+        Drive'da bulunması zorunludur. VTUAV-VIS resmî Drive kimlikleri
+        üzerinden yalnız seçilen parçayı çeker, BIRDSAI'nin de yalnız gerçek
+        gece videoları iner (42 GiB AirSim sentetik kol kapalı).
+
+        **VTUAV tracking bu hücrenin kendi başına düşebilen tek adımı.**
+        Parçalar başka bir hesabın dosyalarına kısayol ve `tracked_ir` onları
+        binlerce rastgele seek olarak okuyor. Mount düşerse thread sayısı
+        16→8→4→1 azaltılarak yeniden bağlanılıp denenir; hepsi başarısız
+        olursa koşu **durmaz**, `VTUAV_OK` False'a düşer ve neyin
+        kaybedildiği yazılır — gerçek `exist` sütunu yalnız oradan gelir, o
+        yüzden aşağıdaki object-score terimi kendini kapatır. Durmasını
+        istiyorsanız `USE_VTUAV_STRICT = True`.
         """),
         cell("code", r"""
         from tools.fetch_datasets import extract
 
-        missing_archives = [name for name in VTUAV_ARCHIVES
-                            if USE_VTUAV and not (VTUAV_DRIVE / name).is_file()]
-        if missing_archives:
-            print("Drive mount bu shortcut/dosyaları çözemedi; resmî kimliklerden "
-                  "sırayla indirilecek:", missing_archives)
-            subprocess.run([
-                sys.executable, "tools/fetch_datasets.py", "vtuav_track",
-                "--dest", str(VTUAV_DATA), "--parts",
-                *[Path(name).stem for name in missing_archives],
-                "--frames", "tracked_ir"], check=True)
+        # `VTUAV_OK` is what the rest of the run reads, and it is `USE_VTUAV`
+        # only while the data actually lands. The VTUAV parts are shortcuts to
+        # another account's files and `tracked_ir` reads them as thousands of
+        # random seeks, which is the one step here that fails on its own -- and
+        # an unattended run that dies at it has thrown away the night for a
+        # source the other two can stand in for. So a failure downgrades and
+        # says so, loudly, in the record as well as on stdout. Set
+        # `USE_VTUAV_STRICT = True` to make it raise instead, which is what a
+        # run whose whole point is the disappearance labels should do.
+        VTUAV_OK = USE_VTUAV
 
-        staged = VTUAV_DATA / "_staged"
-        staged.mkdir(exist_ok=True)
-        for archive_name in (VTUAV_ARCHIVES if USE_VTUAV else []):
-            marker = staged / f"{archive_name}.done"
-            if marker.is_file():
-                print("already staged", archive_name)
-                continue
-            archive = VTUAV_DRIVE / archive_name
-            if archive.is_file():
-                print("extracting labelled thermal frames from", archive_name)
-                staged_ok = False
-                for threads in (16, 8, 4, 1):
-                    try:
-                        extract(archive, VTUAV_DATA, frames="tracked_ir",
-                                workers=threads)
-                        staged_ok = True
-                        break
-                    except OSError as dropped:
-                        if dropped.errno != errno.ENOTCONN:
-                            raise
-                        print(f"   !! the Drive mount dropped mid-read "
-                              f"(errno 107) on {threads} threads. "
-                              f"`tracked_ir` keeps a twentieth of the part, so "
-                              f"the read is thousands of random seeks and each "
-                              f"thread holds its own handle -- remounting and "
-                              f"retrying with fewer.")
-                        drive.flush_and_unmount()
-                        drive.mount("/content/drive", force_remount=True)
-                if not staged_ok:
-                    raise RuntimeError(
-                        f"{archive_name}: the Drive mount dropped on every "
-                        f"attempt down to a single thread. The archives are "
-                        f"shortcuts to files this account does not own, which "
-                        f"is the fragile case; copy the part to local disk "
-                        f"first (`!cp {archive} /content/`) and point "
-                        f"VTUAV_DRIVE at /content, or run the part on its own "
-                        f"in a fresh runtime.")
-            else:
-                print("downloaded directly and extracted:", archive_name)
-            marker.write_text("ok\n")
+        def stage_vtuav():
+            missing_archives = [name for name in VTUAV_ARCHIVES
+                                if not (VTUAV_DRIVE / name).is_file()]
+            if missing_archives:
+                print("Drive mount bu shortcut/dosyaları çözemedi; resmî "
+                      "kimliklerden sırayla indirilecek:", missing_archives)
+                subprocess.run([
+                    sys.executable, "tools/fetch_datasets.py", "vtuav_track",
+                    "--dest", str(VTUAV_DATA), "--parts",
+                    *[Path(name).stem for name in missing_archives],
+                    "--frames", "tracked_ir"], check=True)
+            _stage_vtuav_archives()
+
+        def _stage_vtuav_archives():
+            staged = VTUAV_DATA / "_staged"
+            staged.mkdir(exist_ok=True)
+            for archive_name in VTUAV_ARCHIVES:
+                marker = staged / f"{archive_name}.done"
+                if marker.is_file():
+                    print("already staged", archive_name)
+                    continue
+                archive = VTUAV_DRIVE / archive_name
+                if archive.is_file():
+                    print("extracting labelled thermal frames from", archive_name)
+                    staged_ok = False
+                    for threads in (16, 8, 4, 1):
+                        try:
+                            extract(archive, VTUAV_DATA, frames="tracked_ir",
+                                    workers=threads)
+                            staged_ok = True
+                            break
+                        except OSError as dropped:
+                            if dropped.errno != errno.ENOTCONN:
+                                raise
+                            print(f"   !! the Drive mount dropped mid-read "
+                                  f"(errno 107) on {threads} threads. "
+                                  f"`tracked_ir` keeps a twentieth of the part, so "
+                                  f"the read is thousands of random seeks and each "
+                                  f"thread holds its own handle -- remounting and "
+                                  f"retrying with fewer.")
+                            drive.flush_and_unmount()
+                            drive.mount("/content/drive", force_remount=True)
+                    if not staged_ok:
+                        raise RuntimeError(
+                            f"{archive_name}: the Drive mount dropped on every "
+                            f"attempt down to a single thread. The archives are "
+                            f"shortcuts to files this account does not own, which "
+                            f"is the fragile case; copy the part to local disk "
+                            f"first (`!cp {archive} /content/`) and point "
+                            f"VTUAV_DRIVE at /content, or run the part on its own "
+                            f"in a fresh runtime.")
+                else:
+                    print("downloaded directly and extracted:", archive_name)
+                marker.write_text("ok\n")
+
+        if USE_VTUAV:
+            try:
+                stage_vtuav()
+            except Exception as vtuav_failure:
+                if USE_VTUAV_STRICT:
+                    raise
+                VTUAV_OK = False
+                print(f"\n!! VTUAV tracking did not land: "
+                      f"{type(vtuav_failure).__name__}: {vtuav_failure}")
+                print("   Continuing without it. What that costs, exactly: "
+                      "VTUAV is the only\n"
+                      "   source here whose `exist` column is read from an "
+                      "annotation rather than\n"
+                      "   set to all-True, so this run has no disappearance "
+                      "frames and the\n"
+                      "   object-score term switches itself off below. The "
+                      "mask supervision and\n"
+                      "   the tracking A/B are unaffected. Re-run with "
+                      "USE_VTUAV_STRICT=True to\n"
+                      "   make this stop the run instead.")
 
         # 17/25'in küçük mask-only arşivlerini aç. Kaynak görüntüler kopyalanmaz.
         # Bu havuz yalnız VTUAV tracking karelerini maskeleyebilir -- kutu
@@ -330,7 +387,7 @@ def main() -> None:
         # indirmenin bir alıcısı yok.
         pool_markers = TEMPORAL_POOL_ROOT / ".unpacked"
         pool_markers.mkdir(exist_ok=True)
-        for pool_name in (("vtuav_thermal", "vtuav_lt_thermal") if USE_VTUAV else ()):
+        for pool_name in (("vtuav_thermal", "vtuav_lt_thermal") if VTUAV_OK else ()):
             folder = POOL_DRIVE / pool_name
             archives = sorted(folder.glob("*.zip")) if folder.is_dir() else []
             if not archives:
@@ -405,7 +462,13 @@ def main() -> None:
         )
 
         sequences = []
-        vtuav = vtuav_sequences(VTUAV_DATA, modality="ir") if USE_VTUAV else []
+        try:
+            vtuav = vtuav_sequences(VTUAV_DATA, modality="ir") if VTUAV_OK else []
+        except FileNotFoundError as nothing_extracted:
+            if USE_VTUAV_STRICT:
+                raise
+            VTUAV_OK, vtuav = False, []
+            print("!! no VTUAV sequence on disk:", nothing_extracted)
         sequences += vtuav
         VIS_STORES = {}
         if USE_VTUAV_VIS:
@@ -459,7 +522,14 @@ def main() -> None:
 
         Her kaynak kendi içinde kontrast sırasına sokulur; alt %40 iki kez aday
         havuzuna girer. Ardından kaynak ağırlığı uygulanır. Böylece “VTUAV büyük
-        olduğu için BIRDSAI ve düşük-kontrast örnekler hiç seçilmedi” durumu olmaz.
+        olduğu için küçük kaynak ve düşük-kontrast örnekler hiç seçilmedi”
+        durumu olmaz.
+
+        Bu hücreden sonra iki görsel çıkar: `INSPECT_DATA` kaynak başına
+        contact sheet'leri (kayboluşların *etrafına* örneklenmiş), `PREVIEW_RUN`
+        ise en uzun kesintisiz denetimli koşuyu oynatan bir MP4. İkisi farklı
+        soruya bakıyor — biri geçişi gösterir, diğeri maskelerin iki geçiş
+        arasında bir arada durup durmadığını.
         """),
         cell("code", r"""
         def frame_local_contrast(sequence, index):
@@ -533,13 +603,13 @@ def main() -> None:
         TEACHER_STORES = pool_sequence_stores(
             TEMPORAL_POOL_ROOT, vtuav,
             {"vtuav_thermal", "vtuav_lt_thermal"},
-            min_box_iou=TEACHER_MIN_BOX_IOU) if USE_VTUAV else {}
+            min_box_iou=TEACHER_MIN_BOX_IOU) if VTUAV_OK else {}
         teacher_mask_frames = sum(len(store) for store in TEACHER_STORES.values())
         # Not on a precheck-only run: the teacher masks are training
         # supervision, and the audit below never reads one. Demanding them
         # before a measurement that does not use them turns "measure first"
         # into a download.
-        assert (STOP_AFTER_PRECHECK or not USE_VTUAV
+        assert (STOP_AFTER_PRECHECK or not VTUAV_OK
                 or teacher_mask_frames >= MIN_TEACHER_MASK_FRAMES), (
             f"Teacher pool eşleşmesi yalnız {teacher_mask_frames} kare verdi; "
             f"en az {MIN_TEACHER_MASK_FRAMES} bekleniyor. Training'i box-only "
@@ -553,6 +623,27 @@ def main() -> None:
             render(sequences, STORES, MIRROR / "inspect",
                    per_source=INSPECT_PER_SOURCE, span=INSPECT_SPAN,
                    windows=INSPECT_WINDOWS)
+
+        PREVIEW_REPORT = {}
+        if PREVIEW_RUN:
+            from tools.preview_sequence import pick_sequence, preview
+            _watch = pick_sequence(sequences, STORES)
+            _watched_masks = len(STORES.get(_watch.name, {})) if _watch else 0
+            if not _watched_masks:
+                # `pick_sequence` ranks by mask count and returns the best one
+                # even when that is zero, so the count is the guard, not None.
+                print("\nno sequence carries a supervised frame to play.")
+            else:
+                print(f"\nplaying {_watch.name} -- "
+                      f"{len(STORES.get(_watch.name, {}))} supervised frames")
+                PREVIEW_REPORT = preview(_watch, STORES[_watch.name],
+                                         MIRROR / "preview",
+                                         count=PREVIEW_FRAMES, fps=PREVIEW_FPS)
+                from IPython.display import Video, display
+                _mp4 = (Path(PREVIEW_REPORT["video"])
+                        if PREVIEW_REPORT.get("video") else None)
+                if _mp4 is not None and _mp4.is_file():
+                    display(Video(str(_mp4), embed=True, width=900))
 
         print("\nmask supervision")
         for source in sorted({source_name(row) for row in sequences}):
@@ -949,7 +1040,8 @@ def main() -> None:
                 "method": "aerial_temporal_contrast_finetune",
                 "base": str(BASE_STAGE_B), "image_size": SIZE,
                 "sources": SOURCE_WEIGHTS, "use_antiuav410": USE_ANTIUAV410,
-                "use_vtuav": USE_VTUAV, "use_birdsai": USE_BIRDSAI,
+                "use_vtuav": USE_VTUAV, "vtuav_landed": VTUAV_OK,
+                "use_birdsai": USE_BIRDSAI,
                 "use_vtuav_vis": USE_VTUAV_VIS,
                 "absent_frames": ABSENT_FRAMES,
                 "object_score_weight": OBJECT_SCORE_WEIGHT,
@@ -1087,7 +1179,8 @@ def main() -> None:
             "stage_c_precheck": PRECHECK_REPORT,
             "selected_on_val": SELECTED_LABEL, "source_weights": SOURCE_WEIGHTS,
             "use_antiuav410": USE_ANTIUAV410, "vtuav_archives": VTUAV_ARCHIVES,
-            "use_vtuav": USE_VTUAV, "use_birdsai": USE_BIRDSAI,
+            "use_vtuav": USE_VTUAV, "vtuav_landed": VTUAV_OK,
+                "use_birdsai": USE_BIRDSAI,
             "use_vtuav_vis": USE_VTUAV_VIS,
             "absent_frames": ABSENT_FRAMES,
             "vtuav_vis_parts": VTUAV_VIS_PARTS if USE_VTUAV_VIS else [],
@@ -1104,9 +1197,10 @@ def main() -> None:
         print("saved to", MIRROR)
         """),
         cell("markdown", r"""
-        ## VTUAV ve BIRDSAI before / after videoları
+        ## Before / after videoları
 
-        Her kaynak için validation'da ölçülmüş dizilerden iki vaka seçilir:
+        **Açık olan her kaynak için** validation'da ölçülmüş dizilerden iki vaka
+        seçilir:
         düşük-kontrast alt grubunda en iyi kazanç ve kaydedilmiş en kötü gerileme.
         Yeşil ground truth, kırmızı Stage B, camgöbeği seçilmiş final koldur. İki
         model aynı ilk kutuyu ve aynı sabit crop'u kullanır.

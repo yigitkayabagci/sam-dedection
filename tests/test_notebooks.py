@@ -373,6 +373,106 @@ def settings_of(path: Path) -> dict[str, str]:
     return found
 
 
+class TestStageCSurvivesAVtuavThatWillNotLand(unittest.TestCase):
+    """Notebook 31, left to run unattended, must not lose the night to a fetch.
+
+    The VTUAV parts are shortcuts to another account's files and `tracked_ir`
+    reads them as thousands of random seeks; that step has failed on its own
+    before. Everything after it -- the mask supervision, the training, the A/B,
+    the videos -- works without VTUAV. What is lost is the `exist` column, and
+    the object-score weight already follows the measured absent count, so a
+    downgraded run stays correct rather than training a head on a constant.
+    """
+
+    def setUp(self):
+        self.cells = [
+            "".join(cell["source"])
+            for cell in json.loads(
+                (ROOT / "notebooks" / "31_aerial_thermal_tracking.ipynb")
+                .read_text())["cells"] if cell["cell_type"] == "code"]
+        self.fetch = next(c for c in self.cells if "VTUAV_OK = USE_VTUAV" in c)
+
+    def test_a_failed_stage_downgrades_instead_of_raising(self):
+        namespace = {
+            "USE_VTUAV": True, "USE_VTUAV_STRICT": False,
+            "stage_vtuav": lambda: (_ for _ in ()).throw(
+                RuntimeError("the Drive mount dropped on every attempt")),
+        }
+        exec(compile(self.flow(), "<fetch>", "exec"), namespace)
+        self.assertFalse(namespace["VTUAV_OK"])
+
+    def test_strict_still_raises(self):
+        namespace = {
+            "USE_VTUAV": True, "USE_VTUAV_STRICT": True,
+            "stage_vtuav": lambda: (_ for _ in ()).throw(RuntimeError("nope")),
+        }
+        with self.assertRaises(RuntimeError):
+            exec(compile(self.flow(), "<fetch>", "exec"), namespace)
+
+    def test_a_successful_stage_leaves_it_on(self):
+        namespace = {"USE_VTUAV": True, "USE_VTUAV_STRICT": False,
+                     "stage_vtuav": lambda: None}
+        exec(compile(self.flow(), "<fetch>", "exec"), namespace)
+        self.assertTrue(namespace["VTUAV_OK"])
+
+    def flow(self):
+        """The cell's `VTUAV_OK` assignment and its guarded call, alone.
+
+        Extracted rather than rewritten here: a test that restates the control
+        flow would keep passing after the notebook stopped having it.
+        """
+        lines = self.fetch.splitlines()
+        start = next(i for i, l in enumerate(lines)
+                     if l.startswith("VTUAV_OK = USE_VTUAV"))
+        begin = next(i for i, l in enumerate(lines[start:], start)
+                     if l.startswith("if USE_VTUAV:"))
+        end = next((i for i, l in enumerate(lines[begin + 1:], begin + 1)
+                    if l.strip() and not l.startswith((" ", "\t"))), len(lines))
+        return "\n".join([lines[start]] + lines[begin:end])
+
+    def test_everything_downstream_reads_the_landed_flag(self):
+        """`USE_VTUAV` is the intent; `VTUAV_OK` is what happened.
+
+        A consumer left on the intent would build sequences, or demand teacher
+        masks, for data the downgrade just decided is not there.
+        """
+        after = "".join(self.cells[self.cells.index(self.fetch) + 1:])
+        for claim in ("vtuav_sequences(VTUAV_DATA, modality=\"ir\") if VTUAV_OK",
+                      "min_box_iou=TEACHER_MIN_BOX_IOU) if VTUAV_OK",
+                      "or not VTUAV_OK"):
+            self.assertIn(claim, after, claim)
+
+
+class TestStageCIsReadyToRunUnattended(unittest.TestCase):
+    """The settings a *Run all* depends on, pinned so an edit cannot drop one."""
+
+    def setUp(self):
+        self.settings = settings_of(
+            ROOT / "notebooks" / "31_aerial_thermal_tracking.ipynb")
+
+    def test_the_base_names_a_stage_b_output_and_not_stock(self):
+        # Read from the source rather than `settings_of`: the override is built
+        # from `STAGE_B_DRIVE` so the Drive root is stated once, and a
+        # line-based reader only sees the first line of that.
+        source = "".join(
+            "".join(cell["source"]) for cell in json.loads(
+                (ROOT / "notebooks" / "31_aerial_thermal_tracking.ipynb")
+                .read_text())["cells"] if cell["cell_type"] == "code")
+        self.assertIn("BASE_STAGE_B_OVERRIDE = str(STAGE_B_DRIVE", source)
+        self.assertIn("aerial_thermal_stable_from_aerial_thermal_stable", source)
+        self.assertNotIn('BASE_STAGE_B_OVERRIDE = ""', source)
+
+    def test_the_audit_runs_and_does_not_stop_the_run(self):
+        # Both halves matter: the precheck is the measurement the run exists to
+        # take, and stopping after it would leave the morning with no model.
+        self.assertEqual(self.settings.get("PRECHECK_AGAINST_STOCK"), "True")
+        self.assertEqual(self.settings.get("STOP_AFTER_PRECHECK"), "False")
+
+    def test_the_pictures_a_presentation_needs_are_all_on(self):
+        for name in ("INSPECT_DATA", "PREVIEW_RUN", "RENDER_BEFORE_AFTER"):
+            self.assertEqual(self.settings.get(name), "True", name)
+
+
 class TestTheTwoTeacherArms(unittest.TestCase):
     """07 and 10 are one experiment with one variable, and have to stay so.
 
