@@ -124,12 +124,31 @@ class Tables(unittest.TestCase):
         self.assertEqual(TRAINED_AT["aerial_stable"], 512)
         self.assertIn("aerial_thermal_stable",
                       body(WEIGHTS["aerial_stable"][512])["checkpoint"])
-        self.assertEqual(sorted(WEIGHTS["aerial_stable"]), [512],
-                         "no run has taken these weights off 512 on purpose, "
-                         "and an entry here would be that measurement made by "
-                         "accident")
+        self.assertNotIn(1024, WEIGHTS["aerial_stable"],
+                         "a 512-trained checkpoint at 1024 measures the "
+                         "resolution, not the training")
         self.assertNotEqual(body(WEIGHTS["aerial_stable"][512])["checkpoint"],
                             body(WEIGHTS["pool_deep"][512])["checkpoint"])
+
+    def test_an_off_size_entry_declares_that_size_and_a_separate_engine_set(self):
+        """768 on a 512-trained checkpoint is a measurement, not a fallback.
+
+        Both `pool_deep` and `aerial_stable` offer it, and the way it goes wrong
+        is not a crash: the weights load at any size, so the two sizes would run
+        the same engines and report two rows off one build. What is pinned is
+        that each size is its own directory and its own declared `image_size` --
+        the rest is the header of the config the reader is sent to.
+        """
+        for weights in ("pool_deep", "aerial_stable"):
+            self.assertIn(768, WEIGHTS[weights], weights)
+            trained = TRAINED_AT[weights]
+            off = body(WEIGHTS[weights][768])
+            at = body(WEIGHTS[weights][trained])
+            self.assertEqual(off["checkpoint"], at["checkpoint"],
+                             f"{weights}: the two sizes are not one checkpoint")
+            self.assertNotEqual(Path(off["image_encoder_engine"]).parent,
+                                Path(at["image_encoder_engine"]).parent,
+                                f"{weights}: one engine set cannot serve two sizes")
 
     def test_every_weights_set_has_a_torch_config_for_the_sizes_it_serves(self):
         """`--backend torch` has to answer for every pair `--weights` offers.

@@ -311,8 +311,15 @@ always written and prints a warning when the two disagree; it is wired into
 `src/trackers/edgetam_tracker.py` and `tools/export_edgetam_onnx.py`, the two
 places a mismatch reaches a measurement. Take the "did the training help"
 number at the training size, against stock weights at that same size.
-`configs/edgetam_768_pool_deep.yaml` exists to run the 512 checkpoint at 768
-deliberately, and says in its own header what that does and does not measure.
+`configs/edgetam_768_pool_deep.yaml` and
+`configs/edgetam_768_aerial_stable.yaml` exist to run those 512 checkpoints at
+768 deliberately, and say in their own headers what that does and does not
+measure. Running there needs no retraining — the weights load at any size — but
+a 768 number is only comparable against stock at 768, and on a 640×512 thermal
+frame 768 upsamples: 2.25× the token count for interpolated pixels, where
+`src/trackers/adaptive.py` buys the magnification at the 512 price instead. If
+768 is the permanent deployment size and the footage carries it, training there
+(`tools/train_encoder.py --size 768`) is the clean fix and a new run of its own.
 
 **On TensorRT the checkpoint is not a runtime choice.** Weights are traced into
 the ONNX graphs and baked into the engines, so a new checkpoint means a new

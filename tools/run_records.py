@@ -162,9 +162,13 @@ WEIGHTS = {
     # polarity, gamma and sensor-noise hardening on. It is `pool_deep`'s own
     # question re-asked after that run's encoder stage diverged (validation
     # 0.2723 -> 21.84 -> NaN), so the row it has to be read against is
-    # `pool_deep` at the same size, not only `stock`. 512 alone, for the reason
-    # above -- no run has yet asked what these weights do at 768.
+    # `pool_deep` at the same size, not only `stock`. 768 is off its training
+    # size and is here for the same reason pool_deep's is -- to measure what the
+    # resolution costs on footage that carries it, deliberately; see that
+    # config's header. Still no 1024: two doublings off 512 measures nothing but
+    # the resize.
     "aerial_stable": {
+        768: "configs/edgetam_trt_768_aerial_stable.yaml",
         512: "configs/edgetam_trt_512_aerial_stable.yaml",
     },
 }
@@ -188,7 +192,8 @@ TORCH = {
               512: "configs/edgetam_512.yaml"},
     "pool_deep": {768: "configs/edgetam_768_pool_deep.yaml",
                   512: "configs/edgetam_512_pool_deep.yaml"},
-    "aerial_stable": {512: "configs/edgetam_512_aerial_stable.yaml"},
+    "aerial_stable": {768: "configs/edgetam_768_aerial_stable.yaml",
+                      512: "configs/edgetam_512_aerial_stable.yaml"},
 }
 
 # --policy -> the overlay merged onto whichever backend YAML the (weights,
