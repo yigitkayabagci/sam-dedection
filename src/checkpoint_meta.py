@@ -52,6 +52,33 @@ def trained_size(checkpoint: str | Path | None) -> int | None:
     return int(size)
 
 
+def recorded_meta(checkpoint: str | Path | None) -> dict:
+    """Everything `save_checkpoint` recorded about the run that wrote this file.
+
+    `{}` for the cases where there is nothing to read: no path, a missing file,
+    a blob that is not a dict, and stock EdgeTAM -- which carries no `meta` at
+    all. An empty dict is the honest answer to "what produced this?", and it is
+    a different answer from "stock produced it".
+
+    The field worth reading first is `base`, the checkpoint the run started
+    from. A stage that continues another one has no other way to tell whether
+    it is continuing the arm it meant to: the weights load strictly and score
+    normally whichever base they came from, so the wrong one costs a full run
+    before anything looks odd.
+    """
+    if not checkpoint:
+        return {}
+
+    import torch
+
+    try:
+        blob = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+    meta = blob.get("meta") if isinstance(blob, dict) else None
+    return dict(meta) if isinstance(meta, dict) else {}
+
+
 def size_mismatch_note(checkpoint: str | Path | None,
                        image_size: int | None) -> str | None:
     """One line to print when a checkpoint is being run off its trained size.

@@ -237,6 +237,28 @@ def main() -> None:
             f"_{SIZE}.pt")
         CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
         print("Stage-B base:", BASE_STAGE_B)
+        # Tabanın kendi kaydı. `assert BASE_STAGE_B.is_file()` yalnız dosyanın
+        # orada olduğuna bakıyor, hangi koşudan geldiğine değil -- ve ağırlıklar
+        # hangi tabandan gelirse gelsin strict yükleniyor, normal puan veriyor.
+        # Yani yanlış Stage B'yi devam ettirmek üç saat GPU'ya mal olur ve
+        # hiçbir yerde tuhaf görünmez. `meta["base"]` bunu koşudan önce söyler.
+        from src.checkpoint_meta import recorded_meta
+
+        BASE_META = recorded_meta(BASE_STAGE_B)
+        if not BASE_META:
+            print("   !! bu checkpoint hiç meta taşımıyor: onu neyin ürettiği "
+                  "dosyadan okunamıyor.")
+        else:
+            print("   trained from:", BASE_META.get("base", "<kayıt yok>"))
+            print("   frames:", BASE_META.get("train_frames", "?"),
+                  "| size:", BASE_META.get("image_size", "?"),
+                  "| method:", BASE_META.get("method", "?"))
+            if str(BASE_META.get("base", "")).endswith("edgetam.pt"):
+                print("   !! Bu Stage B stock EdgeTAM'den eğitilmiş, bir "
+                      "pretrain'den DEĞİL.\n"
+                      "      Pretrain'li kolu koşmak istiyorsanız "
+                      "BASE_STAGE_B_OVERRIDE'a 32'nin\n"
+                      "      `_from_<pretrain>` ekli çıktısının yolunu yazın.")
         print("Stage-C output:", MIRROR)
         """),
         cell("markdown", r"""

@@ -30,8 +30,8 @@ try:
 except ImportError:                          # pragma: no cover - CPU-only CI
     torch = None
 
-from src.checkpoint_meta import (size_mismatch_note, trained_size,  # noqa: E402
-                                 warn_size_mismatch)
+from src.checkpoint_meta import (recorded_meta, size_mismatch_note,  # noqa: E402
+                                 trained_size, warn_size_mismatch)
 
 
 class FakeTorch:
@@ -54,6 +54,51 @@ def read(blob, checkpoint="ckpt.pt"):
 def note(blob, size, checkpoint="ckpt.pt"):
     with mock.patch.dict(sys.modules, {"torch": FakeTorch(blob)}):
         return size_mismatch_note(checkpoint, size)
+
+
+def meta(blob, checkpoint="ckpt.pt"):
+    with mock.patch.dict(sys.modules, {"torch": FakeTorch(blob)}):
+        return recorded_meta(checkpoint)
+
+
+class RecordedMeta(unittest.TestCase):
+    """What produced a checkpoint, which strict loading will never tell you.
+
+    A stage that continues another one loads its base with `strict=True` and
+    scores normally whichever run wrote it, so continuing the wrong arm is
+    invisible until the run is over. `meta["base"]` is the only thing on disk
+    that answers it.
+    """
+
+    def test_reads_the_base_the_run_started_from(self):
+        self.assertEqual(
+            meta({"model": {}, "meta": {"base": "/x/edgetam.pt",
+                                        "train_frames": 67199}}),
+            {"base": "/x/edgetam.pt", "train_frames": 67199})
+
+    def test_stock_edgetam_gives_an_empty_dict_not_a_guess(self):
+        # No `meta` is a different answer from "stock was its base", and the
+        # caller has to be able to tell those apart.
+        self.assertEqual(meta({"model": {"trunk.weight": 1}}), {})
+
+    def test_a_file_that_is_not_there_is_empty_not_an_error(self):
+        self.assertEqual(meta(FileNotFoundError("nope")), {})
+
+    def test_a_blob_that_is_not_a_dict_is_empty(self):
+        self.assertEqual(meta(["not", "a", "checkpoint"]), {})
+
+    def test_a_meta_that_is_not_a_dict_is_empty(self):
+        self.assertEqual(meta({"model": {}, "meta": "corrupted"}), {})
+
+    def test_no_path_never_touches_torch(self):
+        self.assertEqual(recorded_meta(None), {})
+        self.assertEqual(recorded_meta(""), {})
+
+    def test_the_caller_cannot_mutate_what_the_file_holds(self):
+        blob = {"meta": {"base": "/x/edgetam.pt"}}
+        got = meta(blob)
+        got["base"] = "/tampered"
+        self.assertEqual(blob["meta"]["base"], "/x/edgetam.pt")
 
 
 class TrainedSize(unittest.TestCase):
