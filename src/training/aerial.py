@@ -669,7 +669,7 @@ def group_of(item) -> str:
 
 
 def split_frames(items: SequenceABC, fractions=(0.8, 0.1, 0.1),
-                 seed: int = 0, group=group_of) -> dict[str, list]:
+                 seed: int = 0, group=group_of, label: str = "") -> dict[str, list]:
     """train / val / test, cut between **sequences** rather than between frames.
 
     These sets ship no official split, and the file order is the wrong thing to
@@ -711,7 +711,13 @@ def split_frames(items: SequenceABC, fractions=(0.8, 0.1, 0.1),
     # because a leaky split that runs beats a crash only if you know it leaked.
     if group is not None and len(names) < len(fractions) < len(items):
         warnings.warn(
-            f"{len(names)} sequence(s) for a {len(fractions)}-way split: "
+            # `label` is the source's name, and it is the whole point of the
+            # warning: a run mixing ten datasets prints this once -- Python
+            # deduplicates identical messages -- so without the name nobody
+            # can tell which one leaked, and the leak is a number reading
+            # high for a reason that has nothing to do with generalisation.
+            f"{label or 'this set'}: {len(names)} sequence(s) for a "
+            f"{len(fractions)}-way split: "
             f"falling back to splitting frames, so held-out frames share their "
             f"sequence with training ones and the score will read high. "
             f"Download another sequence to fix it.", stacklevel=2)
@@ -1070,14 +1076,15 @@ def split_index(index: SequenceABC[FrameIndex], fractions=(0.8, 0.1, 0.1),
             val, test = fractions[1], fractions[2]
             share = val / max(val + test, 1e-9)
             parts = split_frames(entries, (share, 1.0 - share, 0.0),
-                                 seed + offset)
+                                 seed + offset, label=name)
             out["val"].extend(parts["train"])
             out["test"].extend(parts["val"])
             continue
         # Seeded by name (see `_seed_for`), so two datasets of the same length
         # do not receive the identical permutation -- and so a set's own split
         # does not move when a different dataset joins the run.
-        parts = split_frames(entries, fractions, seed + offset)
+        parts = split_frames(entries, fractions, seed + offset,
+                             label=name)
         for name in out:
             out[name].extend(parts[name])
     return out

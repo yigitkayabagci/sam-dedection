@@ -253,6 +253,15 @@ def main() -> None:
             'print("work dir", WORK, "-- named after the run so two arms do not "\n'
             '      "share splits.json or the score cache; a shared score cache "\n'
             '      "hands the second arm the first one\'s before/after.")')
+    # "WHAT THIS RUN TRAINED ON" printed train+val+test. The run trained on
+    # `train` -- 67199 frames where the header said 79687 -- and a summary that
+    # overstates its own training set by a fifth is the one line a reader
+    # quotes.
+    replace(notebook,
+            'print(f"  {sum(len(v) for v in SPLITS.values())} frames, "',
+            'print(f"  {len(SPLITS[\'train\'])} train frames "\n'
+            '      f"({sum(len(v) for v in SPLITS.values())} indexed, the rest '
+            'held out), "')
     # `save_splits` records only which *frames* survived, so the per-instance
     # thinning `rebalance` did two lines earlier was undone the moment
     # train_encoder re-indexed: measured on a synthetic pool, a train split the
