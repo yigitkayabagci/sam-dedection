@@ -87,6 +87,26 @@ class CompareTest(unittest.TestCase):
         self.assertIn("did not run the same way", text)
         self.assertIn("seed is 7", text)
 
+    def test_a_tighter_area_gate_is_caught_too(self):
+        """The gate that drops big targets changes what the arm trained on.
+
+        `MAX_AREA` decides which instances the index keeps, so an arm run with
+        a tighter one saw a different training set. Ranking it against the
+        control measures the gate as well as the base, which is the thing this
+        tool exists to refuse.
+        """
+        folder = self.folder()
+        loose = {"min_area": 64, "min_side": 6, "max_area": 0.2, "fill": 0.25}
+        paths = self.four(folder, gates=dict(loose, max_area=0.06))
+        for path in paths:
+            body = json.loads(path.read_text())
+            body.setdefault("gates", loose)
+            path.write_text(json.dumps(body))
+        code, text = self.run_on(paths)
+        self.assertEqual(code, 1)
+        self.assertIn("did not run the same way", text)
+        self.assertIn("gates is", text)
+
     def test_a_different_split_is_caught_too(self):
         folder = self.folder()
         paths = self.four(folder)

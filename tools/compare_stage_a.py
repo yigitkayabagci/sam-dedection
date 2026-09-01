@@ -31,7 +31,7 @@ from pathlib import Path
 # What has to match across arms for a ranking to mean anything. Each is
 # something stage B varies and something that moves the grade on its own.
 FAIR = ("seed", "epochs", "steps", "batch", "min_box_iou", "prompt",
-        "image_size", "method")
+        "image_size", "method", "gates")
 # The score `eval_instances` writes, in the order they are worth reading. The
 # mean is the headline; the small-instance mean is the one this project is
 # actually about, because a drone is small.
