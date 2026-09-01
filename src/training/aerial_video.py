@@ -206,7 +206,17 @@ def vtuav_vis_sequences(
                 rows.append((image_path, mask_path, box))
         if len(rows) < 2:
             continue
-        name = f"{prefix}__{sequence_dir.name}"
+        # The part goes in the name whenever the archives were unpacked into
+        # directories of their own. VTUAV-VIS names a sequence by target kind
+        # and a counter that restarts per archive, so `train_003` is a train
+        # sequence inside `test_001.zip` *and* the name of a training archive;
+        # two of them under one prefix would be one key in the store dict and
+        # one of the two would silently replace the other. A flat extraction
+        # keeps the old names, so nothing already measured moves.
+        part = sequence_dir.parent
+        stem = (f"{part.name}_{sequence_dir.name}"
+                if part != root and part.parent == root else sequence_dir.name)
+        name = f"{prefix}__{stem}"
         sequences.append(Sequence(
             name=name,
             split="unsplit",
@@ -400,12 +410,28 @@ def split_flights(
     seed: int = 0,
     val_fraction: float = 0.2,
     test_fraction: float = 0.1,
+    hold_out: SequenceABC[Sequence] | None = None,
 ) -> dict[str, list[Sequence]]:
     """Whole-flight, per-source train/val/test split.
 
     BIRDSAI identities from the same physical video share pixels and must not
     straddle splits.  Sources are allocated separately so a small source does
     not accidentally disappear from validation behind a much larger one.
+
+    **`hold_out` is a test set that was decided elsewhere**, and it replaces
+    the sampled one rather than joining it. The case is a dataset that ships
+    its own held-out split: VTUAV-VIS's `test_00x` archives are the authors'
+    choice of which sequences nobody trains on, and a hash-ordered sample over
+    everything would put some of them in `train` and some training sequences in
+    `test` -- a grade that measures the sampler as much as the model. Passing
+    them here keeps `test_fraction` out of it: the fractions then divide only
+    what is left, and `test_fraction=0` is the honest setting beside a
+    `hold_out`.
+
+    Nothing checks that the two sets are disjoint, because nothing here can:
+    the sequences carry no provenance beyond their names. `Part.into` and the
+    part-qualified names from `vtuav_vis_sequences` are what make two archives'
+    identically-named sequences distinguishable in the first place.
     """
     if val_fraction < 0 or test_fraction < 0 or val_fraction + test_fraction >= 1:
         raise ValueError("val/test fractions must be non-negative and sum below one.")
@@ -432,6 +458,11 @@ def split_flights(
         for part, flight_names in allocation.items():
             for name in flight_names:
                 result[part].extend(flights[name])
+    if hold_out is not None:
+        # Replaces rather than joins: a sampled test set beside a given one
+        # would grade on a mixture, and which half a number came from would
+        # not be recoverable from the number.
+        result["test"] = list(hold_out)
     return result
 
 

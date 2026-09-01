@@ -237,6 +237,13 @@ def main() -> int:
     parser.add_argument("--vtuav", type=Path)
     parser.add_argument("--vtuav-vis", type=Path)
     parser.add_argument("--birdsai", type=Path)
+    parser.add_argument("--modality", choices=("ir", "rgb"), default="ir",
+                        help="Which half of VTUAV-VIS to read. `mask/ir` and "
+                             "`mask/rgb` are separate directories with a mask "
+                             "each, so this picks the pixels AND the labels "
+                             "together -- reading one modality's frames "
+                             "against the other's masks is the mistake it "
+                             "exists to make impossible.")
     parser.add_argument("--pool", type=Path,
                         help="The teacher-mask pool root, so VTUAV's accepted "
                              "17/25 masks are drawn as masks and not as boxes.")
@@ -255,10 +262,13 @@ def main() -> int:
     sequences, stores = [], {}
     vtuav = []
     if args.vtuav:
+        # VTUAV tracking is read as thermal whatever --modality says: its RGB
+        # half is a different registration and this project's line is thermal.
         vtuav = vtuav_sequences(args.vtuav, modality="ir")
         sequences += vtuav
     if args.vtuav_vis:
-        vis, vis_stores = vtuav_vis_sequences(args.vtuav_vis, modality="ir")
+        vis, vis_stores = vtuav_vis_sequences(args.vtuav_vis,
+                                              modality=args.modality)
         sequences += vis
         stores.update(vis_stores)
     if args.birdsai:

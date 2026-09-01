@@ -341,15 +341,9 @@ def main() -> None:
                 if vis_marker.is_file():
                     print("already staged", vis_part)
                     continue
-                # Her parça kendi klasörüne. VTUAV dizilerini hedefin türüne
-                # göre adlandırıyor -- `train_003` üçüncü *tren* videosudur,
-                # train split'i değil -- ve o yüzden `test_001.zip` içinden
-                # `train_003/` çıkıyor. Sekizi tek klasöre açmak, iki arşivde
-                # aynı ada rastlanırsa kareleri diskte sessizce birleştirir ve
-                # ortaya hiçbir yerde olmayan bir dizi çıkarırdı.
                 subprocess.run([
                     sys.executable, "tools/fetch_datasets.py", "vtuav_vis",
-                    "--dest", str(VTUAV_VIS_DATA / vis_part), "--parts", vis_part,
+                    "--dest", str(VTUAV_VIS_DATA), "--parts", vis_part,
                     "--frames", "masked"], check=True)
                 vis_marker.write_text("ok\n")
 
@@ -395,15 +389,6 @@ def main() -> None:
         if USE_VTUAV_VIS:
             vis_sequences, VIS_STORES = vtuav_vis_sequences(
                 VTUAV_VIS_DATA, modality="ir")
-            _vis_names = [row.name for row in vis_sequences]
-            _clashing = sorted({name for name in _vis_names
-                                if _vis_names.count(name) > 1})
-            assert not _clashing, (
-                f"iki VTUAV-VIS parçası aynı dizi adını taşıyor: {_clashing}. "
-                f"Parçalar ayrı klasörlere açıldığı için bu diskte birleşme "
-                f"değil, ama `STORES` ada göre anahtarlı: biri diğerinin "
-                f"maskelerini gölgeler. Hangi parçaların çakıştığını "
-                f"`tools/inspect_vtuav_vis.py` ile bulun.")
             sequences += vis_sequences
         if USE_BIRDSAI:
             sequences += birdsai_sequences(

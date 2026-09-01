@@ -236,26 +236,35 @@ VTUAV_VIS = Recipe(
     # It also decides how much a held-out number is worth: 14 sequences split
     # 11/2/1, so the test set is a single flight and its quirks dominate any
     # comparison between two runs. All three give 50 sequences and a 40/5/5.
+    #
+    # **Every part extracts into a directory of its own** (`into=`), and that
+    # is not tidiness. The archives' sequence folders are named by target kind
+    # and counter -- `pedestrian_192`, `ship_001`, `train_003` -- and those
+    # counters restart per archive, so `test_001.zip` contains a sequence
+    # called `train_003` while `train_003.zip` is a different archive
+    # entirely. Extracted flat, two archives' sequences of the same name merge
+    # into one directory and the frames interleave. `vtuav_vis_sequences`
+    # carries the part into the sequence name for the same reason.
     parts=(
         Part("train_001", drive="1LW1jyldaHmFolmcNzbnWFtzGr4gdfTiX",
-             size=9_080_000_000),
+             size=9_080_000_000, into="train_001"),
         Part("train_002", drive="1wKffvGkpALbtXibnj-F-erSuu2CvamYo",
-             size=16_100_000_000, default=False),
+             size=16_100_000_000, default=False, into="train_002"),
         Part("train_003", drive="17h2zBfmOwHFllw40Zln7fuhSFs0vXvvf",
-             size=17_900_000_000, default=False),
+             size=17_900_000_000, default=False, into="train_003"),
         # The authors' own held-out sequences. `split_frames` already holds
         # whole sequences out of `train_001`, so these are only worth the disk
         # when the canonical split is the point.
         Part("test_001", drive="1LLYlNlV-V1jUcjT4kbhHSMDoQGSBs8LU",
-             size=16_449_400_000, default=False),
+             size=16_449_400_000, default=False, into="test_001"),
         Part("test_002", drive="1bUflxddDafrUZOweTt7jGP0icY41Afwg",
-             size=16_000_000_000, default=False),
+             size=16_000_000_000, default=False, into="test_002"),
         Part("test_003", drive="15o5AM9Qo1kjnJq1PTcd2x4VOLT48dVWT",
-             size=16_000_000_000, default=False),
+             size=16_000_000_000, default=False, into="test_003"),
         Part("test_004", drive="1UwA4mPpNjkbYtMMgI0gpzQQjkJ5QRkjX",
-             size=14_000_000_000, default=False),
+             size=14_000_000_000, default=False, into="test_004"),
         Part("test_005", drive="1A5o4zm3sSqR-wFmqmxC7gdAngAQOkYAc",
-             size=15_000_000_000, default=False),
+             size=15_000_000_000, default=False, into="test_005"),
     ),
 )
 
@@ -734,35 +743,51 @@ def staged(name: str, search: SequenceABC[str]) -> Path | None:
     attached. Three clicks in the Drive web UI ("Make a copy") turn the one
     into the other.
 
-    Those three clicks do not produce `<name>.zip`. Drive names the copy in the
-    account's own language -- `Copy of train_001.zip` in English,
-    `train_001.zip adlı dosyanın kopyası` in Turkish -- and drops the extension
-    off the end in the process, so an exact-name lookup misses the very file
-    this function exists to find and the run goes back to the network it was
-    trying to avoid. Anything holding `<name><suffix>` inside its own name is
-    therefore accepted too, largest first: a locale that phrases the copy some
-    third way still lands on the same rule, and the size ordering prefers the
-    real archive over a truncated earlier attempt sitting beside it.
+    **And those three clicks rename the file.** Drive does not hand back
+    `test_001.zip`; it hands back `test_001.zip adlı dosyanın kopyası` in
+    Turkish, `Copy of test_001.zip` in English, or `test_001 (1).zip` when a
+    name is already taken. An exact-name lookup finds none of them, so the
+    escape hatch silently did not exist for the person who took it -- the run
+    went back to the network and hit the same quota that sent them there. All
+    three shapes are accepted, and an exact match still wins so a deliberate
+    copy never shadows the real thing.
     """
     for folder in search:
         directory = Path(folder).expanduser()
-        for suffix in (".zip", ".tar.gz", ".tgz"):
-            candidate = directory / f"{name}{suffix}"
-            if candidate.is_file() and candidate.stat().st_size > 1 << 20:
-                return candidate
         if not directory.is_dir():
             continue
-        copies = [
-            path for path in directory.iterdir()
-            if path.is_file() and path.stat().st_size > 1 << 20
-            and any(f"{name}{suffix}" in path.name
-                    for suffix in (".zip", ".tar.gz", ".tgz"))
-        ]
-        if copies:
-            found = max(copies, key=lambda path: path.stat().st_size)
-            print(f"   using {found.name} -- a Drive copy of {name}")
-            return found
+        for suffix in (".zip", ".tar.gz", ".tgz"):
+            found = [path for path in sorted(directory.iterdir())
+                     if path.is_file()
+                     and path.stat().st_size > 1 << 20
+                     and _names_the_archive(path.name, name, suffix)]
+            if found:
+                # Exact first, then the shortest name -- the closest thing to
+                # the original among several copies.
+                found.sort(key=lambda path: (path.name != f"{name}{suffix}",
+                                             len(path.name), path.name))
+                return found[0]
     return None
+
+
+def _names_the_archive(filename: str, name: str, suffix: str) -> bool:
+    """Whether `filename` is `<name><suffix>`, or Drive's copy of one.
+
+    Matched on the whole `<name><suffix>` rather than on `name` alone, so
+    `train_001.zip` never answers a lookup for `train_0010.zip` and a folder
+    holding both `test_001.zip` and `test_0010.zip` cannot confuse them.
+    """
+    target = f"{name}{suffix}"
+    if filename == target:
+        return True
+    if filename.startswith(target):        # test_001.zip adlı dosyanın kopyası
+        return True
+    if filename.endswith(target):          # Copy of test_001.zip
+        return True
+    stem, _, extension = filename.rpartition(".")
+    # test_001 (1).zip -- the stem is the name plus a parenthesised counter.
+    return (f".{extension}" == suffix or extension == suffix.lstrip(".")) and \
+        stem.startswith(name) and stem[len(name):].strip().startswith("(")
 
 
 def archive_to(dest: Path, name: str, folder: str | Path) -> Path | None:

@@ -128,12 +128,19 @@ normalize ediyor (`aerial_video.py:469-473`), yani kolu `SOURCE_WEIGHTS` değil
 bu anahtarlar seçiyor: yalnız vtuav_vis açıkken payı %100 olur.
 
 `VTUAV_VIS_PARTS` sekiz resmî arşivin hepsini sayıyor (`train_001..003`,
-`test_001..005`). **Her parça kendi alt klasörüne açılıyor.** VTUAV dizileri
-hedefin türüne göre adlandırılmış — `train_003` üçüncü *tren* videosudur,
-train split'i değil — ve bu yüzden `test_001.zip` içinden `train_003/` çıkar.
-Sekizi tek klasöre açmak, iki arşiv aynı ada rastlarsa kareleri diskte
-birleştirirdi. Ayrıca `STORES` ada göre anahtarlı olduğu için çakışan iki dizi
-maskeleri gölgeler; 8. hücre bunu ad tekrarı üzerinden assert ediyor.
+`test_001..005`). **Her parça kendi alt klasörüne açılıyor** — bu 31'in değil,
+`VTUAV_VIS` Recipe'sinin işi (`Part(..., into="<parça>")`), yani `fetch_datasets`
+her çağıranda ayırıyor. Gerekçe: VTUAV dizileri hedefin türüne ve arşiv başına
+yeniden başlayan bir sayaca göre adlandırılmış — `train_003` üçüncü *tren*
+videosudur, train split'i değil — ve bu yüzden `test_001.zip` içinden
+`train_003/` çıkar. Düz açılsalardı iki arşivin aynı adlı dizileri tek klasörde
+birleşir, kareleri iç içe geçerdi.
+
+`vtuav_vis_sequences` de parçayı dizi adına taşıyor
+(`vtuav_vis__test_001_train_003`), çünkü `STORES` ada göre anahtarlı ve iki
+`train_003` tek anahtar olurdu: biri diğerinin maskelerini sessizce
+değiştirirdi. Düz bir çıkarım eski adları koruyor, yani daha önce ölçülmüş
+hiçbir şey kaymıyor.
 
 ### Yalnız vtuav_vis koşmanın iki bedeli
 
