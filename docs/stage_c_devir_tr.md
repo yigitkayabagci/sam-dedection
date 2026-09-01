@@ -49,6 +49,18 @@ STAGES = {"head": HEAD_MODULES, "encoder": HEAD_MODULES + ("image_encoder",), ..
 sam_mask_decoder + sam_prompt_encoder + obj_ptr_proj**. Eğitilmeyen: **bellek
 yolunun tamamı** — ve bu koşullu değil, `FROZEN_MODULES` her aşamada geçerli.
 
+Eğitim bunu tek adımda açmıyor; 19. hücrenin `Schedule`'ı iki aşamalı:
+
+```python
+stages=(("head",    2, Rates(head=5e-5)),
+        ("encoder", 4, Rates(head=2e-5, neck=2e-5, trunk=5e-6)))
+```
+
+Yani önce 2 epoch **yalnız kafa** (image encoder de donuk), sonra 4 epoch
+encoder açık ve trunk 5e-6 gibi çok düşük hızda. Toplam 6 epoch, `patience=2`.
+Trunk'ın bu kadar yavaş olması §4'teki mekanizma B'ye karşı örtük bir frendir —
+ama ölçülmüş bir fren değil.
+
 Donmuş olmasının repoda yazılı üç gerekçesi var (aynı dosyanın modül
 docstring'i):
 
@@ -199,9 +211,13 @@ bozulur**. Bu, §1'deki 3. gerekçeyle doğrudan çelişir.
 **aynı segmentler üzerinde iki kol** koşuyor:
 
 ```python
-PRECHECK_AGAINST_STOCK = True     # 4. hücre
-STOP_AFTER_PRECHECK    = True     # yalnız audit, eğitime geçme
+PRECHECK_AGAINST_STOCK = True      # 4. hücre, varsayılan True
+STOP_AFTER_PRECHECK    = False     # 4. hücre, varsayılan False
 ```
+
+`STOP_AFTER_PRECHECK`'in varsayılanı **`False`**'tur, yani notebook precheck'ten
+sonra eğitime devam eder. Yalnız audit isteyen bir koşuda bu satırı elle `True`
+yapın; o zaman 12. hücre raporu yazdıktan sonra `SystemExit` ile durur.
 
 Segmentler iki tracker kurulmadan **önce bir kez** hesaplanır, yani karşılaştırma
 birebir aynı karelerde. Ortalama delta basılır; stage_b stock'tan kötüyse açık
@@ -212,6 +228,17 @@ gerekli mi", stock kıyası değil. Rapor: `MIRROR/stage_c_precheck.json`
 
 **Bu ölçüm eğitim gerektirmiyor, bir GPU geçişi.** Yeni sohbetin ilk işi bu
 olmalı.
+
+İki uyarı, sonucu okurken:
+
+- **Ölçüm 512'de alınıyor**, çünkü 31'in `SIZE`'ı 512. İki kol da aynı boyutta
+  koştuğu için *karşılaştırma* adildir, ama çıkan sayılar dağıtım sayısı
+  değildir: `CLAUDE.md`'ye göre bir 768 koşusu yalnız 768'deki stock'a karşı
+  puanlanır.
+- **Örneklem altı dizi** (`PRECHECK_PER_SOURCE = 2` × üç kaynak), her biri 240
+  kare. `PRECHECK_STOCK_WINS = _sa < 0 or _lost > 0` bir tolerans bandı
+  taşımıyor, yani −0.0001'lik bir ortalama delta da uyarıyı bastırır. Tek
+  ortalamaya değil, `arm_rows` içindeki altı satırın dağılımına bakın.
 
 ### Eğer stock kazanıyorsa — sıradaki adımlar, ucuzdan pahalıya
 
