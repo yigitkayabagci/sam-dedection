@@ -338,5 +338,44 @@ class TestRunStages(unittest.TestCase):
         self.assertEqual(list(saved["model"]), list(FakeSam2(SIZE).state_dict()))
 
 
+class TestClock(unittest.TestCase):
+    """How long is left. A per-epoch bar cannot answer that across 30 epochs."""
+
+    def setUp(self):
+        patch_pixels(self)
+        torch.manual_seed(0)
+        self.model = FakeSam2(SIZE).eval()
+        self.train, self.val = make_split(), make_split(sequences=2)
+
+    def lines(self, epochs):
+        printed = []
+        plan = Schedule(stages=(("head", epochs, Rates(head=1e-3)),),
+                        batch=2, steps_per_epoch=2, val_batches=1,
+                        workers=2, depth=1)
+        run_stages(self.model, self.train, self.val, plan, freeze=apply_freeze,
+                   save=lambda m, meta: None, device="cpu",
+                   log=lambda *a: printed.append(" ".join(str(x) for x in a)))
+        return [line for line in printed if "val clip loss" in line]
+
+    def test_the_first_epoch_reports_elapsed_and_no_estimate(self):
+        """The first epoch pays for compilation, caches and the batch probe, so
+        folding it into a mean would promise a finish time that is too late."""
+        first, = self.lines(1)
+        self.assertIn("min elapsed", first)
+        self.assertNotIn("min left", first)
+
+    def test_a_later_epoch_estimates_what_is_left(self):
+        rows = self.lines(3)
+        self.assertIn("min elapsed", rows[-1])
+        self.assertIn("min left", rows[-1])
+        self.assertIn("min/epoch", rows[-1])
+
+    def test_every_epoch_line_still_carries_its_score(self):
+        """The clock is an addition; the number that selects the checkpoint
+        must stay on the same line."""
+        for row in self.lines(2):
+            self.assertIn("val clip loss", row)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -128,6 +128,16 @@ class TestNotebook37(unittest.TestCase):
         that matters most here -- and the one it is easiest to lose."""
         self.assertIn("PRECHECK_AGAINST_STOCK = True", code(4))
 
+    def test_it_previews_a_real_run_of_frames_not_only_sheets(self):
+        """The contact sheets sample around transitions; they cannot show
+        whether the masks hold together in between. Watching a consecutive run
+        is the only thing that does, and it has to be in the notebook where
+        the data actually is."""
+        body = code(10)
+        self.assertIn("PREVIEW_RUN", body)
+        self.assertIn("preview(", body)
+        self.assertIn("PREVIEW_RUN = True", code(4))
+
     def test_it_says_this_run_has_no_disappearances(self):
         """`vtuav_vis_sequences` sets `exist=np.ones`. Nothing here trains or
         measures the object-score head, and a reader must not have to derive

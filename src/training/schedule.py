@@ -20,6 +20,7 @@ functions that differ; `CLIPS` and `IMAGES` are the two of them that exist.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -245,6 +246,27 @@ def run_stages(
     """
     best, history, stopped = float("inf"), [], []
 
+    # What is left, in minutes. A per-epoch tqdm bar says how long *this*
+    # epoch has to run and nothing about the other twenty-nine, so a run whose
+    # budget is 2 + 30 epochs is unwatchable: the only honest answer to "how
+    # long" is a wall clock and a guess. The estimate is the mean of the epochs
+    # that have finished, which is right once the first one has -- the first is
+    # slower (compile, cache, the batch probe) and is therefore reported as
+    # elapsed rather than folded into the estimate until a second one exists.
+    _budget = sum(count for _, count, _ in schedule.stages)
+    _started = time.time()
+    _epoch_times: list[float] = []
+
+    def _clock(done: int) -> str:
+        elapsed = time.time() - _started
+        if len(_epoch_times) < 2:
+            return f"{elapsed / 60:.1f} min elapsed"
+        mean = sum(_epoch_times[1:]) / len(_epoch_times[1:])
+        left = max(_budget - done, 0) * mean
+        return (f"{elapsed / 60:.1f} min elapsed, ~{left / 60:.0f} min left "
+                f"({mean / 60:.1f} min/epoch)")
+
+    _done = 0
     for stage, epochs, rates in schedule.stages:
         stale = 0
         failed_nonfinite = False
@@ -262,6 +284,7 @@ def run_stages(
         ema = EMA(model, decay=schedule.ema_decay)
 
         for epoch in range(epochs):
+            _epoch_started = time.time()
             stream = loop.stream(train, schedule.batch,
                                  schedule.seed + 100 * epoch,
                                  schedule.steps_per_epoch, device,
@@ -324,8 +347,11 @@ def run_stages(
             history.append({"stage": stage, "epoch": epoch, "val_loss": score,
                             "saved": improved})
             stale = 0 if improved else stale + 1
+            _epoch_times.append(time.time() - _epoch_started)
+            _done += 1
             log(f"  epoch {epoch}: val clip loss {score:.4f}"
-                f"{'  <- saved' if improved else f'  ({stale} without one)'}")
+                f"{'  <- saved' if improved else f'  ({stale} without one)'}"
+                f"  |  {_clock(_done)}")
             if schedule.patience and stale >= schedule.patience:
                 stopped.append({"stage": stage, "after_epoch": epoch,
                                 "of": epochs, "patience": schedule.patience})
