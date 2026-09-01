@@ -166,3 +166,17 @@ class TestManifests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRole(unittest.TestCase):
+    def test_the_cleaned_set_still_trains_only(self):
+        """The audit is not a reason to let SegFly score.
+
+        `role="train"` was there because a reconstructed target cannot grade a
+        model. The audit fixed that where it could measure, and left 706 frames
+        whose masks sit 25-50 px off the vehicle plus 50.5 % it could not
+        measure -- and a label in the wrong *place* is the worst kind of
+        validation error when validation selects the checkpoint.
+        """
+        request = parse("segfly_temiz:/data/SegFly_temiz:thermal:labels:train")
+        self.assertEqual(request.source.role, "train")

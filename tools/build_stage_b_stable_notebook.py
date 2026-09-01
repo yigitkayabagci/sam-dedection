@@ -206,6 +206,16 @@ def main() -> None:
             '"gates": GATES.__dict__, "batch": BATCH, "lr_scale": LR_SCALE,\n'
             '    "neighbour_weight": NEIGHBOUR_WEIGHT,')
 
+    # The role stays `train`, and the audit is not a reason to change it. It
+    # was `train` because a *reconstructed* target cannot score a model -- where
+    # the decomposition fused two cars its ground truth says one blob and a
+    # model that separates them is marked wrong. The audit fixed that for the
+    # instances it could measure, and left 706 frames whose masks sit 25-50 px
+    # off the vehicle, with a further 50.5 % it could not measure at all. A
+    # label in the wrong *place* is the worst kind of validation error, and the
+    # validation number here selects the checkpoint. So SegFly still trains and
+    # still does not score.
+    #
     # SegFly, hand-audited: 3 439 frames / 10 751 `vehicle` instances against
     # the raw export's 15 007, with `truck` dropped as a class, 1 162 masks
     # with no vehicle under them removed and 1 914 merged pairs split. The
@@ -219,7 +229,7 @@ def main() -> None:
             'SEGFLY_CLEAN = True\n'
             'SEGFLY_DROP  = "shift"\n'
             'EXTRA_DATASETS = (["segfly_temiz:/content/data/SegFly_temiz:'
-            'thermal:labels"] if SEGFLY_CLEAN else\n'
+            'thermal:labels:train"] if SEGFLY_CLEAN else\n'
             '                  ["segfly:/content/data/SegFly:thermal:'
             'components:train"])')
     replace(notebook,
