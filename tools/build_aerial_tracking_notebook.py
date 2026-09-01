@@ -154,6 +154,11 @@ def main() -> None:
         PRECHECK_MIN_STATE_ACCURACY = 0.65
         PRECHECK_MAX_LOST_RATE = 0.10
         PRECHECK_MAX_LONGEST_DROPOUT = 24
+        # Precheck'i stock EdgeTAM ile de koş. Aynı kliplerin üstünde iki kol:
+        # "Stage C'ye ihtiyaç var mı" ile "Stage B takibi bozmuş mu" farklı
+        # sorular, ve ikincisi ancak stock satırı yanında dururken okunur.
+        # Maliyeti bir GPU geçişi daha, eğitim değil.
+        PRECHECK_AGAINST_STOCK = True
         STOP_AFTER_PRECHECK = False  # True: yalnız audit yap, eğitim hücresine geçme
         # Gözle kontrol. Kaynak başına birkaç dizi, her birinde `exist`
         # değişimlerinin etrafına yerleşmiş kareler; sayfalar Drive'a
@@ -502,33 +507,98 @@ def main() -> None:
                 chosen += rows[:PRECHECK_PER_SOURCE]
             return chosen
 
-        _precheck_config = {
-            "model_cfg": "configs/edgetam.yaml", "checkpoint": str(BASE_STAGE_B),
-            "image_size": SIZE, "device": "cuda", "precision": "bfloat16",
-            "mask_threshold": 0.0, "offload_video_to_cpu": False,
-            "offload_state_to_cpu": False,
-        }
-        _precheck_tracker = build_tracker("edgetam", **_precheck_config)
-        PRECHECK_ROWS = []
-        try:
-            for _sequence in tqdm(precheck_candidates(), desc="Stage-B video precheck"):
-                _segment = precheck_segment(_sequence)
-                _pred, _gt = track_sequence(_precheck_tracker, _segment, "crop", SIZE)
-                _score = score_sequence(_segment.name, _pred, _gt)
-                _lost = sum(_score.dropouts.lengths)
-                PRECHECK_ROWS.append({
-                    "name": _sequence.name, "source": source_name(_sequence),
-                    "frames": _score.frames,
-                    "state_accuracy": _score.state_accuracy,
-                    "success_auc": _score.success_auc,
-                    "lost_frames": _lost,
-                    "lost_rate": _lost / max(_score.frames, 1),
-                    "longest_dropout": max(_score.dropouts.lengths, default=0),
-                    "sequence_contrast": CONTRAST[_sequence.name],
+        STOCK_CKPT = REPO / "third_party/EdgeTAM/checkpoints/edgetam.pt"
+        PRECHECK_ARMS = [("stage_b", BASE_STAGE_B)]
+        if PRECHECK_AGAINST_STOCK and STOCK_CKPT.is_file():
+            PRECHECK_ARMS.insert(0, ("stock", STOCK_CKPT))
+        elif PRECHECK_AGAINST_STOCK:
+            print("!! stock checkpoint yok:", STOCK_CKPT,
+                  "-- yalnız stage_b ölçülecek.")
+
+        _segments = [precheck_segment(_row) for _row in precheck_candidates()]
+
+        def run_precheck(label, checkpoint):
+            config = {
+                "model_cfg": "configs/edgetam.yaml", "checkpoint": str(checkpoint),
+                "image_size": SIZE, "device": "cuda", "precision": "bfloat16",
+                "mask_threshold": 0.0, "offload_video_to_cpu": False,
+                "offload_state_to_cpu": False,
+            }
+            tracker = build_tracker("edgetam", **config)
+            rows = []
+            try:
+                for segment in tqdm(_segments, desc=f"{label} video precheck"):
+                    pred, gt = track_sequence(tracker, segment, "crop", SIZE)
+                    score = score_sequence(segment.name, pred, gt)
+                    lost = sum(score.dropouts.lengths)
+                    name = segment.name.replace("__stage_c_precheck", "")
+                    rows.append({
+                        "arm": label, "name": name, "source": source_name(name),
+                        "frames": score.frames,
+                        "state_accuracy": score.state_accuracy,
+                        "success_auc": score.success_auc,
+                        "lost_frames": lost,
+                        "lost_rate": lost / max(score.frames, 1),
+                        "longest_dropout": max(score.dropouts.lengths, default=0),
+                        "sequence_contrast": CONTRAST[name],
+                    })
+            finally:
+                tracker.reset(); del tracker
+                gc.collect(); torch.cuda.empty_cache()
+            return rows
+
+        PRECHECK_ARM_ROWS = {label: run_precheck(label, checkpoint)
+                             for label, checkpoint in PRECHECK_ARMS}
+        PRECHECK_ROWS = PRECHECK_ARM_ROWS["stage_b"]
+
+        # Bir kol diğerini yenmiş mi: `state_accuracy` hedefin var/yok
+        # durumunu ne kadar doğru bildiğidir, yani kaybolup geri gelmenin
+        # ölçüsü; `longest_dropout` da geri gelene kadar geçen en uzun süre.
+        PRECHECK_DELTAS = []
+        if "stock" in PRECHECK_ARM_ROWS:
+            _stock_by_name = {row["name"]: row for row in PRECHECK_ARM_ROWS["stock"]}
+            for _row in PRECHECK_ROWS:
+                _base = _stock_by_name.get(_row["name"])
+                if _base is None:
+                    continue
+                PRECHECK_DELTAS.append({
+                    "name": _row["name"], "source": _row["source"],
+                    "state_accuracy": _row["state_accuracy"] - _base["state_accuracy"],
+                    "success_auc": _row["success_auc"] - _base["success_auc"],
+                    "lost_rate": _row["lost_rate"] - _base["lost_rate"],
+                    "longest_dropout": _row["longest_dropout"] - _base["longest_dropout"],
                 })
-        finally:
-            _precheck_tracker.reset(); del _precheck_tracker
-            gc.collect(); torch.cuda.empty_cache()
+            print(f"\n{'source':<14}{'arm':<9}{'SA':>8}{'AUC':>8}{'lost%':>9}"
+                  f"{'longest':>10}")
+            for _row in PRECHECK_ROWS:
+                for _label in ("stock", "stage_b"):
+                    _one = (_stock_by_name[_row["name"]] if _label == "stock"
+                            else _row)
+                    print(f"{_one['source'] if _label == 'stock' else '':<14}"
+                          f"{_label:<9}{_one['state_accuracy']:>8.3f}"
+                          f"{_one['success_auc']:>8.3f}{_one['lost_rate']:>9.1%}"
+                          f"{_one['longest_dropout']:>10}")
+            _mean = lambda key: (sum(row[key] for row in PRECHECK_DELTAS)
+                                 / max(len(PRECHECK_DELTAS), 1))
+            _sa, _lost = _mean("state_accuracy"), _mean("lost_rate")
+            print(f"\nstage_b - stock:  state_accuracy {_sa:+.4f}   "
+                  f"lost_rate {_lost:+.1%}")
+            PRECHECK_STOCK_WINS = _sa < 0 or _lost > 0
+            if PRECHECK_STOCK_WINS:
+                print("!! Stage B, bu klipler üzerinde stock'tan DAHA KÖTÜ takip "
+                      "ediyor.\n"
+                      "   Bu, 'Stage C'ye ihtiyaç var mı' sorusundan farklı bir "
+                      "bulgudur: eğitim\n"
+                      "   tek-kare maskeyi iyileştirirken video sürekliliğini "
+                      "bozmuş demektir.\n"
+                      "   Beklenen mekanizma: memory_attention/memory_encoder "
+                      "donuk (finetune.py\n"
+                      "   FROZEN_MODULES) ve stock encoder özelliklerine göre "
+                      "eğitilmiş; encoder\n"
+                      "   o dağılımdan uzaklaştıkça bellek eğitilmediği "
+                      "özellikleri okuyor.")
+        else:
+            PRECHECK_STOCK_WINS = None
 
         PRECHECK_REASONS = []
         for _row in PRECHECK_ROWS:
@@ -542,12 +612,13 @@ def main() -> None:
             if _flags:
                 PRECHECK_REASONS.append({"name": _row["name"], "flags": _flags})
         PRECHECK_RECOMMEND_STAGE_C = bool(PRECHECK_REASONS)
-        print(f"\n{'source':<14}{'SA':>8}{'AUC':>8}{'lost%':>9}{'longest':>10}")
-        for _row in PRECHECK_ROWS:
-            print(f"{_row['source']:<14}{_row['state_accuracy']:>8.3f}"
-                  f"{_row['success_auc']:>8.3f}{_row['lost_rate']:>9.1%}"
-                  f"{_row['longest_dropout']:>10}")
-        print("Stage C recommendation:",
+        if "stock" not in PRECHECK_ARM_ROWS:
+            print(f"\n{'source':<14}{'SA':>8}{'AUC':>8}{'lost%':>9}{'longest':>10}")
+            for _row in PRECHECK_ROWS:
+                print(f"{_row['source']:<14}{_row['state_accuracy']:>8.3f}"
+                      f"{_row['success_auc']:>8.3f}{_row['lost_rate']:>9.1%}"
+                      f"{_row['longest_dropout']:>10}")
+        print("\nStage C recommendation:",
               "RUN — video continuity is below the gate"
               if PRECHECK_RECOMMEND_STAGE_C else
               "OPTIONAL — Stage B passed this small low-contrast audit")
@@ -555,6 +626,10 @@ def main() -> None:
             print("reasons:", PRECHECK_REASONS)
         PRECHECK_REPORT = {
             "base_stage_b": str(BASE_STAGE_B),
+            "arms": {label: str(path) for label, path in PRECHECK_ARMS},
+            "arm_rows": PRECHECK_ARM_ROWS,
+            "deltas": PRECHECK_DELTAS,
+            "stock_wins": PRECHECK_STOCK_WINS,
             "thresholds": {
                 "min_state_accuracy": PRECHECK_MIN_STATE_ACCURACY,
                 "max_lost_rate": PRECHECK_MAX_LOST_RATE,
