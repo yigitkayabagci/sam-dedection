@@ -123,6 +123,16 @@ class TestNotebook37(unittest.TestCase):
         self.assertIn("aerial_rgb_tracking_from_", body)
         self.assertNotIn("aerial_thermal_tracking", body)
 
+    def test_it_refuses_in_the_first_cell_when_edgetam_is_missing(self):
+        """The failure that cost a run: `import sam2` raised at the precheck,
+        after Drive was mounted, 126 GB of archives were staged and the split
+        was built. Nothing between cell 1 and there needs EdgeTAM, so the check
+        belongs in cell 1 where it costs seconds."""
+        runtime = code(1)
+        self.assertIn("import sam2", runtime)
+        self.assertIn("third_party", runtime)
+        self.assertIn("SystemExit", runtime)
+
     def test_it_trains_at_the_size_it_deploys_at(self):
         """VTUAV-VIS is 1920x1080, so `_window_for` takes a native 768 crop
         with no resampling -- the thermal sources cannot, which is why 31 is

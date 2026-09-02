@@ -31,6 +31,11 @@ from pathlib import Path
 # `!cmd --flag {NAME}` and `%%time` are not Python, but the braces in them are
 # evaluated by IPython, so the names inside are real uses.
 SHELL = re.compile(r"^\s*[!%]")
+# IPython's capture form: `log = !cmd` binds the command's output lines
+# to a name. It does not start with `!`, so SHELL misses it and the cell
+# fails to parse -- reported as a syntax error the notebook does not
+# have. The name has to survive, because later cells read it.
+CAPTURE = re.compile(r"^(\s*)([A-Za-z_]\w*)\s*=\s*[!%]")
 INTERPOLATED = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)")
 
 # Names Colab provides, plus the ones IPython puts in a notebook's namespace.
@@ -132,6 +137,14 @@ def strip_magics(source: str) -> tuple[str, list[tuple[str, int]]]:
     lines, interpolated = [], []
     continued = False
     for number, line in enumerate(source.split("\n"), start=1):
+        captured = None if continued else CAPTURE.match(line)
+        if captured is not None:
+            interpolated += [(name, number) for name in INTERPOLATED.findall(line)]
+            continued = line.rstrip().endswith("\\")
+            # `getoutput` hands back a list of lines, so binding an empty one
+            # keeps every later use of the name type-correct as well as defined.
+            lines.append(f"{captured.group(1)}{captured.group(2)} = []")
+            continue
         if continued or SHELL.match(line):
             interpolated += [(name, number) for name in INTERPOLATED.findall(line)]
             was_continuation, continued = continued, line.rstrip().endswith("\\")

@@ -612,6 +612,23 @@ class TestTheCheckerCatchesThings(unittest.TestCase):
         self.assertEqual(len(problems), 1)
         self.assertIn("LATER", problems[0])
 
+    def test_ipythons_capture_form_is_not_a_syntax_error(self):
+        """`log = !cmd` binds the command's output and does not start with `!`.
+
+        It parsed as Python, failed, and was reported as a syntax error the
+        notebook did not have -- which hides every real finding in that cell
+        behind one wrong line.
+        """
+        python, _ = strip_magics("_setup = !bash scripts/setup.sh 2>&1\n"
+                                 "print(_setup[-5:])")
+        self.assertEqual(check(self.notebook(
+            "_setup = !bash scripts/setup.sh\nprint(_setup[-5:])")), [])
+        self.assertIn("_setup = []", python)
+
+    def test_a_captured_name_counts_as_defined_for_later_cells(self):
+        self.assertEqual(
+            check(self.notebook("_log = !ls", "print(_log)")), [])
+
     def test_a_name_a_shell_line_interpolates_is_reported(self):
         problems = check(self.notebook("!python tool.py --out {MISSING}"))
         self.assertEqual(len(problems), 1)

@@ -72,9 +72,34 @@ def main() -> None:
             sys.path.insert(0, str(REPO))
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-        !bash scripts/setup_edgetam.sh 2>&1 | tail -5
+        _setup = !bash scripts/setup_edgetam.sh 2>&1
+        print("\n".join(_setup[-5:]))
         !pip install -q -r requirements.txt
         !pip install -q gdown tqdm matplotlib
+
+        # `pip install -e` writes a .pth that only a NEW interpreter reads, so
+        # `import sam2` can fail in the very session that just installed it.
+        # The EdgeTAM clone holds the `sam2/` package directly, so naming it on
+        # sys.path needs no install at all and costs nothing when the install
+        # did work.
+        EDGETAM = REPO / "third_party" / "EdgeTAM"
+        if EDGETAM.is_dir() and str(EDGETAM) not in sys.path:
+            sys.path.insert(0, str(EDGETAM))
+        import importlib
+        importlib.invalidate_caches()
+        try:
+            import sam2  # noqa: F401
+        except ImportError:
+            # The setup log was tailed to five lines because it is normally
+            # noise. It is not noise now.
+            print("\n".join(_setup[-40:]))
+            raise SystemExit(
+                "EdgeTAM kurulmadı: `import sam2` başarısız. Yukarıdaki kurulum "
+                "çıktısına bakın.\nBu hücrede durduruldu -- veri indirme ve "
+                "precheck'ten SONRA patlamasın diye. Çoğu durumda\n"
+                "Runtime > Restart session sonrası bu hücreyi tekrar koşmak "
+                "yeterlidir.")
+        print("sam2 ok:", Path(sam2.__file__).parent)
         !nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
         """),
         cell("code", r"""
