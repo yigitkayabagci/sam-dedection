@@ -818,15 +818,16 @@ o yüzden ikinci koşuda yalnız eksik parça istenmelidir.
 
 ## Kayıtların ham termal kareleri 8-bit'e: `tools/prep_thermal.py`
 
-`frames/<record>/vis/` sensörün yazdığı hâliyle duruyor: 16-bit mono TIFF,
-bazen başlıksız `.raw`. Bunları izleyiciye, notebook'a ya da bir görüntüleyiciye
-vermenin bugünkü yolu `to_rgb8`'in kare başına min/max germesi, ve o germede
-aralığı bir sıcak piksel ya da bir ölü piksel belirliyor: kare simsiyah çıkıyor
-ve kareden kareye titriyor. Script `vis/`'in yanına `<record>/prep/` yazıyor —
-her kaynak kare için aynı adla bir 8-bit PNG.
+`frames/<record>/etiketlenecek/` sensörün yazdığı hâliyle duruyor: 16-bit mono
+TIFF, bazen başlıksız `.raw`. Bunları izleyiciye, notebook'a ya da bir
+görüntüleyiciye vermenin bugünkü yolu `to_rgb8`'in kare başına min/max germesi,
+ve o germede aralığı bir sıcak piksel ya da bir ölü piksel belirliyor: kare
+simsiyah çıkıyor ve kareden kareye titriyor. Script ham klasörün yanına
+`<record>/prep/` yazıyor — her kaynak kare için aynı adla bir 8-bit PNG.
 
 ```bash
 python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames/record_s40
+python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames/record_s40/etiketlenecek
 python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames      # altındaki her kayıt
 python tools/prep_thermal.py <record> --scope frame                   # yalnız kare-başı 1-99 kırpma
 python tools/prep_thermal.py <record> --scope global                  # bütün kayıt için tek pencere
@@ -834,6 +835,11 @@ python tools/prep_thermal.py <record> --clahe 2.0 --gamma 0.8 --invert
 python tools/prep_thermal.py <record> --raw-shape 1280 768 --raw-dtype '<u2'   # başlıksız dump
 python tools/prep_thermal.py <record> --measure                       # hiçbir şey yazmadan ölç
 ```
+
+Ham klasör adıyla bulunuyor: `--src-name` varsayılanı `etiketlenecek`, sonra
+`vis` deneniyor. Ham klasörün kendisi verilirse adı ne olursa olsun o klasör
+kaynak sayılıyor ve `prep/` bir üst klasöre, yani kaydın altına yazılıyor —
+kayıtların kuralı bu, ham klasörün bir üstü.
 
 **Temel adım istenen şey:** karenin 1. ve 99. yüzdeliği 0 ve 255 oluyor, dışı
 doyuyor (`--lo/--hi`; `0.01 0.99` de kabul ediliyor, yüzde olarak okunuyor).
@@ -884,5 +890,6 @@ Aynı checkpoint üzerinde `vis/`'e karşı `prep/` koşulmadan hangisinin daha 
 izlendiği bir iddia değil, bir ölçüm konusu — `run_records.py`'ye
 `--pattern '*.png'` ile `prep/` klasörü verilerek yapılır.
 
-Test: `pytest tests/test_prep_thermal.py -q` — 25 test; pencere kenarları,
-EMA/slack/reset, global pencere, dump okuma, `vis/`→`prep/` yerleşimi, rapor.
+Test: `pytest tests/test_prep_thermal.py -q` — 26 test; pencere kenarları,
+EMA/slack/reset, global pencere, dump okuma, `etiketlenecek/`→`prep/`
+yerleşimi (ham klasör doğrudan verildiğinde de), rapor.

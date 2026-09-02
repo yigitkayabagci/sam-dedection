@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """Turn a record's raw thermal frames into 8-bit images the tracker can read.
 
-`frames/<record>/vis/` holds one recording as the sensor wrote it: 16-bit mono
-TIFFs, usually; sometimes a headerless `.raw` dump. Nothing downstream reads
-those well. `to_rgb8` stretches each frame between its own min and max, so one
-hot pixel or one dead one decides the contrast of the whole frame, and the
-result flickers from frame to frame. This writes `<record>/prep/` beside `vis/`
--- one 8-bit PNG per source frame, same file names -- so the tracker, the
-notebooks and a plain image viewer all see the same picture.
+`frames/<record>/etiketlenecek/` holds one recording as the sensor wrote it:
+16-bit mono TIFFs, usually; sometimes a headerless `.raw` dump. Nothing
+downstream reads those well. `to_rgb8` stretches each frame between its own
+min and max, so one hot pixel or one dead one decides the contrast of the
+whole frame, and the result flickers from frame to frame. This writes
+`<record>/prep/` beside the raw folder -- one 8-bit PNG per source frame, same
+file names -- so the tracker, the notebooks and a plain image viewer all see
+the same picture.
 
     python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames/record_s40
+    python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames/record_s40/etiketlenecek
     python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames    # every record
+
+The raw folder is found by name (`--src-name`, default `etiketlenecek`, with
+`vis` as a second try) when a record or a root of records is given; a folder
+of frames given directly is the raw folder whatever it is called, and `prep/`
+goes one level up, beside it.
 
 **The base step is a percentile clip.** The 1st and 99th percentile of the
 frame become 0 and 255, and everything outside is saturated. Two percent of
@@ -161,29 +168,48 @@ def has_frames(folder: Path) -> bool:
     return any(any(True for _ in folder.glob(pattern)) for pattern in SOURCE_PATTERNS)
 
 
-def find_records(path: str | Path, src_name: str = "vis") -> list[tuple[Path, Path]]:
-    """`(record, source)` pairs for a path that is a record, its `vis/`, a
-    folder of frames, or a root holding many records.
+SRC_NAMES = ("etiketlenecek", "vis")
+
+
+def _source_in(record: Path, src_names: Sequence[str]) -> Path | None:
+    """The first `<record>/<name>/` that exists, in the order given."""
+    for name in src_names:
+        if (record / name).is_dir():
+            return record / name
+    return None
+
+
+def find_records(path: str | Path, src_names: str | Sequence[str] = SRC_NAMES) -> list[tuple[Path, Path]]:
+    """`(record, source)` pairs for a path that is a record, its raw folder,
+    or a root holding many records.
 
     The output folder is always `<record>/<out-name>/`, so what has to be
-    settled here is which folder is the record. A folder with frames straight
-    in it is its own record, and `prep/` goes inside it.
+    settled here is which folder is the record: the one the raw folder is in.
+    A folder given directly that holds frames is the raw folder whatever its
+    name, so its parent is the record and `prep/` lands beside it -- which is
+    the rule the recordings follow, one folder up from the raws.
     """
+    if isinstance(src_names, str):
+        src_names = tuple(n.strip() for n in src_names.split(",") if n.strip())
     path = Path(path).expanduser().resolve()
     if not path.is_dir():
         raise SystemExit(f"[prep] {path} is not a directory.")
-    if (path / src_name).is_dir():
-        return [(path, path / src_name)]
-    if path.name == src_name:
-        return [(path.parent, path)]
+    source = _source_in(path, src_names)
+    if source is not None:
+        return [(path, source)]
     if has_frames(path):
-        return [(path, path)]
-    found = sorted((child, child / src_name) for child in path.iterdir()
-                   if child.is_dir() and (child / src_name).is_dir())
+        return [(path.parent, path)]
+    found = []
+    for child in sorted(path.iterdir()):
+        if child.is_dir():
+            source = _source_in(child, src_names)
+            if source is not None:
+                found.append((child, source))
     if found:
         return found
-    raise SystemExit(f"[prep] {path}: no '{src_name}/' in it, no frames in it, and no "
-                     f"'<record>/{src_name}/' below it.")
+    names = " or ".join(f"'{n}/'" for n in src_names)
+    raise SystemExit(f"[prep] {path}: no {names} in it, no frames in it, and no "
+                     f"'<record>/{src_names[0]}/' below it (--src-name names the raw folder).")
 
 
 def source_files(folder: Path, pattern: str) -> tuple[list[Path], str]:
@@ -646,9 +672,10 @@ def describe(report: dict) -> str:
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("path", nargs="+", help="A record, its vis/ folder, a folder of frames, "
+    p.add_argument("path", nargs="+", help="A record, its raw folder (any name), a folder of frames, "
                                           "or a root of records.")
-    p.add_argument("--src-name", default="vis", help="The raw folder's name inside a record.")
+    p.add_argument("--src-name", default=",".join(SRC_NAMES),
+                   help="The raw folder's name inside a record; several, comma-separated, are tried in order.")
     p.add_argument("--out-name", default="prep", help="The output folder's name inside a record.")
     p.add_argument("--out", default=None, help="Write here instead of <record>/<out-name>/ "
                                                "(with several records: <out>/<record name>/).")

@@ -5,8 +5,9 @@ nothing outside them survives; the running window really smooths from frame
 to frame and really snaps on a jump, because a window that fades over a scene
 cut is ten frames of a saturated target; one global window is one window; a
 headerless dump is read at the shape it was given; and a record laid out as
-`<record>/vis/` gets its `prep/` beside `vis/`, not inside it, with a report
-that says what every frame was mapped through.
+`<record>/etiketlenecek/` gets its `prep/` beside the raw folder, not inside
+it -- also when the raw folder itself is what was given -- with a report that
+says what every frame was mapped through.
 """
 from __future__ import annotations
 
@@ -140,7 +141,7 @@ class RecordTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
 
-    def record(self, name: str, levels, src="vis", suffix=".tiff", dtype=np.uint16) -> Path:
+    def record(self, name: str, levels, src="etiketlenecek", suffix=".tiff", dtype=np.uint16) -> Path:
         folder = self.root / name / src
         folder.mkdir(parents=True)
         for index, level in enumerate(levels):
@@ -149,33 +150,40 @@ class RecordTest(unittest.TestCase):
 
     def test_layouts_resolve_to_record_and_source(self):
         rec = self.record("record_a", [1000, 1000])
-        self.assertEqual(find_records(rec), [(rec, rec / "vis")])
-        self.assertEqual(find_records(rec / "vis"), [(rec, rec / "vis")])
-        other = self.record("record_b", [1000])
-        self.assertEqual(find_records(self.root), [(rec, rec / "vis"), (other, other / "vis")])
-        loose = self.record("loose", [1000], src=".")
-        self.assertEqual(find_records(loose), [(loose, loose)])
+        raw = rec / "etiketlenecek"
+        self.assertEqual(find_records(rec), [(rec, raw)])
+        self.assertEqual(find_records(raw), [(rec, raw)])
+        # An older record with the raws under vis/ is still found, after the default name.
+        other = self.record("record_b", [1000], src="vis")
+        self.assertEqual(find_records(self.root), [(rec, raw), (other, other / "vis")])
+        self.assertEqual(find_records(self.root, "vis"), [(other, other / "vis")])
+        self.assertEqual(find_records(other, "etiketlenecek,vis"), [(other, other / "vis")])
+        # A raw folder under any name, given directly: prep goes one level up.
+        odd = self.record("record_c", [1000], src="ham_kareler")
+        self.assertEqual(find_records(odd / "ham_kareler"), [(odd, odd / "ham_kareler")])
+        with self.assertRaises(SystemExit):
+            find_records(odd)                          # no known raw folder name in it
         with self.assertRaises(SystemExit):
             find_records(self.root / "record_a" / "nothing_here")
 
     def test_source_files_fall_back_to_the_suffix_that_is_there(self):
         rec = self.record("pngs", [1000, 1000], suffix=".png")
-        files, pattern = source_files(rec / "vis", "*.tif*")
+        files, pattern = source_files(rec / "etiketlenecek", "*.tif*")
         self.assertEqual(len(files), 2)
         self.assertEqual(pattern, "*.png")
-        (rec / "vis" / "frame_000000.png").unlink()
-        (rec / "vis" / "frame_000001.png").unlink()
+        (rec / "etiketlenecek" / "frame_000000.png").unlink()
+        (rec / "etiketlenecek" / "frame_000001.png").unlink()
         with self.assertRaises(SystemExit):
-            source_files(rec / "vis", "*.tif*")
+            source_files(rec / "etiketlenecek", "*.tif*")
 
-    def test_main_writes_prep_beside_vis_with_a_report_and_a_preview(self):
+    def test_main_writes_prep_beside_the_raw_folder_with_a_report_and_a_preview(self):
         rec = self.record("record_s40", [1000, 1010, 1020, 1030])
         self.assertEqual(main([str(rec), "--quiet"]), 0)
         prep = rec / "prep"
         self.assertTrue(prep.is_dir())
         outputs = sorted(p.name for p in prep.glob("frame_*.png"))
         self.assertEqual(outputs, [f"frame_{i:06d}.png" for i in range(4)])
-        self.assertFalse((rec / "vis" / "prep").exists())
+        self.assertFalse((rec / "etiketlenecek" / "prep").exists())
         written = cv2.imread(str(prep / "frame_000000.png"), cv2.IMREAD_UNCHANGED)
         self.assertEqual(written.dtype, np.uint8)
         self.assertEqual(written.shape, (96, 128))
@@ -195,6 +203,12 @@ class RecordTest(unittest.TestCase):
         self.assertLess(body["summary"]["saturated_max"], 0.05)
         self.assertGreater(body["summary"]["saturated_median"], 0.005)
 
+    def test_the_raw_folder_given_directly_puts_prep_one_level_up(self):
+        rec = self.record("direct", [1000, 1000])
+        self.assertEqual(main([str(rec / "etiketlenecek"), "--quiet", "--preview", "0"]), 0)
+        self.assertEqual(len(list((rec / "prep").glob("*.png"))), 2)
+        self.assertFalse((rec / "etiketlenecek" / "prep").exists())
+
     def test_a_second_run_is_a_no_op_unless_overwritten_or_changed(self):
         rec = self.record("again", [1000, 1000])
         main([str(rec), "--quiet", "--preview", "0"])
@@ -210,7 +224,7 @@ class RecordTest(unittest.TestCase):
         # the drift with less motion than the frames have, and reset once.
         levels = [1000 + 20 * i for i in range(10)] + [4000 + 20 * i for i in range(10)]
         rec = self.record("drift", levels)
-        report = prep_record(rec, rec / "vis", rec / "prep", Params(scope="ema", ema=0.9),
+        report = prep_record(rec, rec / "etiketlenecek", rec / "prep", Params(scope="ema", ema=0.9),
                              preview=0, progress=False)
         rows = report["rows"]
         raw = np.diff([r["raw_lo"] for r in rows[:10]])
@@ -227,7 +241,7 @@ class RecordTest(unittest.TestCase):
 
     def test_frame_scope_uses_each_frames_own_percentiles(self):
         rec = self.record("frame", [1000, 3000, 5000])
-        report = prep_record(rec, rec / "vis", rec / "prep", Params(scope="frame"),
+        report = prep_record(rec, rec / "etiketlenecek", rec / "prep", Params(scope="frame"),
                              preview=0, progress=False)
         for row in report["rows"]:
             self.assertEqual(row["lo"], round(row["raw_lo"], 2))
@@ -236,7 +250,7 @@ class RecordTest(unittest.TestCase):
 
     def test_global_scope_maps_every_frame_through_one_window(self):
         rec = self.record("global", [1000, 3000, 5000])
-        report = prep_record(rec, rec / "vis", rec / "prep", Params(scope="global"),
+        report = prep_record(rec, rec / "etiketlenecek", rec / "prep", Params(scope="global"),
                              preview=0, progress=False)
         windows = {(r["lo"], r["hi"]) for r in report["rows"]}
         self.assertEqual(len(windows), 1)
@@ -264,7 +278,7 @@ class RecordTest(unittest.TestCase):
         self.assertTrue(body["params"]["invert"])
 
     def test_eight_bit_three_channel_sources_are_taken_as_grey(self):
-        folder = self.root / "rgb" / "vis"
+        folder = self.root / "rgb" / "etiketlenecek"
         folder.mkdir(parents=True)
         grey = frame(120, 30, dtype=np.uint8)
         cv2.imwrite(str(folder / "frame_000000.png"), cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR))
@@ -325,7 +339,7 @@ class DumpTest(unittest.TestCase):
         self.assertIsNone(infer_raw_spec(self.root / "odd.raw"))
 
     def test_a_record_of_dumps_end_to_end(self):
-        folder = self.root / "rec" / "vis"
+        folder = self.root / "rec" / "etiketlenecek"
         folder.mkdir(parents=True)
         for index in range(3):
             (folder / f"frame_{index:06d}.raw").write_bytes(
