@@ -19,7 +19,7 @@
 #
 # Like 34 it is a stage B despite the word "pretrain" in its name -- run.json
 # records `"base": ".../edgetam.pt"` and `"stage": "instances"`. See
-# configs/edgetam_512_broad_thermal.yaml for that argument in full.
+# configs/edgetam_512_aerial_stable_only_pretrain.yaml for that argument in full.
 #
 # WHAT IT SAW, and it is the largest of the three: 82 240 frames and 495 012
 # instances over aerovis_train, aerovis_heldout, dronevehicle_rgb (+_only),
@@ -36,7 +36,7 @@
 #
 # THE MEMORY PATH IS STOCK. Stage B never trains it.
 #
-# TensorRT at this size: configs/edgetam_trt_768_broad_rgb.yaml, and the engines
+# TensorRT at this size: configs/edgetam_trt_768_aerial_stable_rgb.yaml, and the engines
 # have to be exported from *this* checkpoint at *this* size.
 model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
 checkpoint: checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt

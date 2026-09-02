@@ -37,14 +37,19 @@ Each mode needs its own engine set; `--modes` runs the subset you have built.
 they vary the *input*, it varies the *model*. Every set below except `stock` was
 trained at 512 on this project's thermal or RGB mask pools:
 
-    stock             EdgeTAM as shipped, trained at 1024
-    pool_deep         22_thermal_deep
-    aerial_stable     32, the stable re-run after 22's encoder stage diverged
-    aerial_stable_2   32 again on its own output -- its encoder never beat the
-                      base, so it is `aerial_stable` plus one head epoch
-    broad_thermal     34, every thermal pool at once, from stock
-    broad_rgb         35, the same on the RGB pools -- the second model, not a
-                      competitor to the thermal rows
+    stock                        EdgeTAM as shipped, trained at 1024
+    pool_deep                    22_thermal_deep
+    aerial_stable                32, the stable re-run after 22's encoder stage
+                                 diverged
+    aerial_stable_woc_final      32 again on its own output -- its encoder never
+                                 beat the base, so it is `aerial_stable` plus one
+                                 head epoch
+    aerial_stable_only_pretrain  34, every thermal pool at once, from stock. Its
+                                 name says "pretrain" and it is a stage B like
+                                 the rest; nothing has to run after it
+    aerial_stable_rgb            35, the same on the RGB pools -- the second model
+                                 beside the thermal line, not a competitor to the
+                                 rows above
 
 Weights are traced into the ONNX graphs and baked into the engines, so this
 selects a different models*/ directory rather than a runtime setting -- each
@@ -182,26 +187,26 @@ WEIGHTS = {
     # the base -- every encoder epoch scored worse than the head epoch that got
     # saved -- so what this set carries is `aerial_stable`'s encoder plus one
     # epoch of head training, and `aerial_stable` is the row it has to be read
-    # against. See configs/edgetam_512_aerial_stable_2.yaml.
-    "aerial_stable_2": {
-        768: "configs/edgetam_trt_768_aerial_stable_2.yaml",
-        512: "configs/edgetam_trt_512_aerial_stable_2.yaml",
+    # against. See configs/edgetam_512_aerial_stable_woc_final.yaml.
+    "aerial_stable_woc_final": {
+        768: "configs/edgetam_trt_768_aerial_stable_woc_final.yaml",
+        512: "configs/edgetam_trt_512_aerial_stable_woc_final.yaml",
     },
     # notebooks/34, the broad thermal stage B: stock EdgeTAM trained on every
     # thermal mask pool at once. Its name says "pretrain" and it is not one --
     # no distillation, no stage A, `"base": edgetam.pt` in its own run.json --
     # so it stands on its own here rather than only as 32's starting point.
-    "broad_thermal": {
-        768: "configs/edgetam_trt_768_broad_thermal.yaml",
-        512: "configs/edgetam_trt_512_broad_thermal.yaml",
+    "aerial_stable_only_pretrain": {
+        768: "configs/edgetam_trt_768_aerial_stable_only_pretrain.yaml",
+        512: "configs/edgetam_trt_512_aerial_stable_only_pretrain.yaml",
     },
     # notebooks/35, the same pass on the RGB pools. This is the second model
     # beside the thermal line (CLAUDE.md), not a competitor to the rows above:
     # a thermal row and an RGB row are two models on two modalities and neither
     # number is evidence about the other.
-    "broad_rgb": {
-        768: "configs/edgetam_trt_768_broad_rgb.yaml",
-        512: "configs/edgetam_trt_512_broad_rgb.yaml",
+    "aerial_stable_rgb": {
+        768: "configs/edgetam_trt_768_aerial_stable_rgb.yaml",
+        512: "configs/edgetam_trt_512_aerial_stable_rgb.yaml",
     },
 }
 
@@ -209,7 +214,7 @@ WEIGHTS = {
 # carries. None means "not one of ours" -- stock EdgeTAM was trained at 1024
 # before this repository existed and records nothing about it.
 TRAINED_AT = {"stock": 1024, "pool_deep": 512, "aerial_stable": 512,
-              "aerial_stable_2": 512, "broad_thermal": 512, "broad_rgb": 512}
+              "aerial_stable_woc_final": 512, "aerial_stable_only_pretrain": 512, "aerial_stable_rgb": 512}
 
 # --backend torch -> the plain PyTorch YAML for a size. The TensorRT tables
 # above are the default and stay the measurement of record; this exists for the
@@ -227,12 +232,12 @@ TORCH = {
                   512: "configs/edgetam_512_pool_deep.yaml"},
     "aerial_stable": {768: "configs/edgetam_768_aerial_stable.yaml",
                       512: "configs/edgetam_512_aerial_stable.yaml"},
-    "aerial_stable_2": {768: "configs/edgetam_768_aerial_stable_2.yaml",
-                        512: "configs/edgetam_512_aerial_stable_2.yaml"},
-    "broad_thermal": {768: "configs/edgetam_768_broad_thermal.yaml",
-                      512: "configs/edgetam_512_broad_thermal.yaml"},
-    "broad_rgb": {768: "configs/edgetam_768_broad_rgb.yaml",
-                  512: "configs/edgetam_512_broad_rgb.yaml"},
+    "aerial_stable_woc_final": {768: "configs/edgetam_768_aerial_stable_woc_final.yaml",
+                        512: "configs/edgetam_512_aerial_stable_woc_final.yaml"},
+    "aerial_stable_only_pretrain": {768: "configs/edgetam_768_aerial_stable_only_pretrain.yaml",
+                      512: "configs/edgetam_512_aerial_stable_only_pretrain.yaml"},
+    "aerial_stable_rgb": {768: "configs/edgetam_768_aerial_stable_rgb.yaml",
+                  512: "configs/edgetam_512_aerial_stable_rgb.yaml"},
 }
 
 # --policy -> the overlay merged onto whichever backend YAML the (weights,

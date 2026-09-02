@@ -1,4 +1,16 @@
-# EdgeTAM at 512x512 with 34's broad thermal stage B, trained from stock on every thermal mask pool.
+# EdgeTAM at 768x768 with 34's broad thermal stage B, trained from stock on every thermal mask pool -- WHICH WAS TRAINED AT 512.
+#
+# 768 IS THE DEPLOYMENT SIZE (CLAUDE.md: the camera is ~1280x720, so the frame
+# carries more than 512x512 of real detail). Running a 512-trained checkpoint
+# here needs no retraining and no error is raised -- EdgeTAM keeps no resolution
+# in any parameter and src/trackers/_hydra_overrides.py fixes the memory
+# attention's RoPE table to 48x48 = 2304. The mismatch is a printed warning from
+# src/checkpoint_meta.py and never a crash, which is exactly why it has to be
+# deliberate. configs/edgetam_768_aerial_stable.yaml carries that argument in
+# full; it applies here unchanged.
+#
+# So: score this against configs/edgetam_768.yaml -- stock weights, same size.
+# Never against a 512 number, this run's own before/after table included.
 #
 # ITS NAME SAYS "PRETRAIN" AND IT IS NOT ONE. `docs/stage_c_devir_tr.md` settled
 # this: 34 starts from stock `third_party/EdgeTAM/checkpoints/edgetam.pt`, runs
@@ -21,24 +33,13 @@
 # the checkpoint being the lowest point of that swing is a selection effect as
 # much as a result.
 #
-# 512 IS THE TRAINING RESOLUTION AND THIS IS THE HONEST COMPARISON. Score this
-# against configs/edgetam_512.yaml -- stock weights, same size. The deployment
-# size is 768 (CLAUDE.md), which is a different measurement: take it with
-# configs/edgetam_768_broad_thermal.yaml against configs/edgetam_768.yaml.
+# THE MEMORY PATH IS STOCK. Stage B never trains it.
 #
-# THE MEMORY PATH IS STOCK, as in every stage B config: src/training/image_loop.py
-# trains with no memory bank, so the notebook's numbers are one prompted frame
-# each and say nothing about tracking. Expect a better first mask and re-measure
-# the track.
-#
-# GET THE CHECKPOINT off your Drive at MyDrive/edgetam-stage-b/pretrain_thermal_aerial/, which also holds
-# run.json, verdict.json and the score_*.json rows. Put it under checkpoints/
-# here (that directory is gitignored -- weights never enter the repository).
-#
-# TensorRT at this size: configs/edgetam_trt_512_broad_thermal.yaml.
+# TensorRT at this size: configs/edgetam_trt_768_aerial_stable_only_pretrain.yaml, and the engines
+# have to be exported from *this* checkpoint at *this* size.
 model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
 checkpoint: checkpoints/edgetam_pool_pretrain_thermal_aerial_512.pt
-image_size: 512                           # the size 34 trained at
+image_size: 768                           # NOT the size this checkpoint trained at
 device: cuda
 precision: bfloat16                       # bfloat16 | float16 | float32
 mask_threshold: 0.0

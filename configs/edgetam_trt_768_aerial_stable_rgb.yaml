@@ -1,5 +1,5 @@
-# 32 run a second time on top of its own output, on TensorRT at 768x768. Read
-# configs/edgetam_768_aerial_stable_2.yaml first -- it says what this run was, and why running a 512-trained checkpoint here is
+# 35's broad RGB stage B -- the second model beside the thermal line, on TensorRT at 768x768. Read
+# configs/edgetam_768_aerial_stable_rgb.yaml first -- it says what this run was, and why running a 512-trained checkpoint here is
 # deliberate rather than an accident.
 #
 # A NEW CHECKPOINT MEANS A NEW EXPORT. Weights are traced into the ONNX graphs
@@ -10,14 +10,14 @@
 # Engines are shape- and weight-specific, so this set shares a directory with
 # nothing:
 #
-#   1) python tools/export_edgetam_onnx.py --outdir models768_aerial_stable_2/ \
-#          --image-size 768 --checkpoint checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt \
+#   1) python tools/export_edgetam_onnx.py --outdir models768_aerial_stable_rgb/ \
+#          --image-size 768 --checkpoint checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt \
 #          --all-pointers --verify
 #      (--all-pointers costs nothing at run time and is what `--policy samurai`
 #      / `ego` / `guard` need from the sam_head engine.)
-#   2) python tools/build_trt_engines.py   --outdir models768_aerial_stable_2/ --max-batch 4
-#   3) python tools/check_trt_parity.py    --outdir models768_aerial_stable_2/ \
-#          --image-size 768 --checkpoint checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt
+#   2) python tools/build_trt_engines.py   --outdir models768_aerial_stable_rgb/ --max-batch 4
+#   3) python tools/check_trt_parity.py    --outdir models768_aerial_stable_rgb/ \
+#          --image-size 768 --checkpoint checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt
 #      (--checkpoint is NOT optional: it defaults to the stock edgetam.pt, and
 #      parity against the wrong weights fails every module for a reason that has
 #      nothing to do with TensorRT. It will not catch the opposite mistake --
@@ -25,21 +25,21 @@
 #      pass.)
 #
 # WHICH COMPARISON ANSWERS WHAT:
-#   configs/edgetam_768_aerial_stable_2.yaml   same weights, PyTorch, 768
+#   configs/edgetam_768_aerial_stable_rgb.yaml   same weights, PyTorch, 768
 #                                         -> what TensorRT changed
 #   configs/edgetam_trt_768.yaml       stock weights, TensorRT, 768
 #                                         -> what the training changed
 #
 # On the records that is one flag:
 #   python tools/run_records.py --records frames --out frame_output \
-#       --modes full768 --weights aerial_stable_2
-image_encoder_engine:    models768_aerial_stable_2/edgetam_image_encoder.engine
-memory_attention_engine: models768_aerial_stable_2/edgetam_memory_attention.engine
-memory_encoder_engine:   models768_aerial_stable_2/edgetam_memory_encoder.engine
-sam_head_engine:         models768_aerial_stable_2/edgetam_sam_head.engine
+#       --modes full768 --weights aerial_stable_rgb
+image_encoder_engine:    models768_aerial_stable_rgb/edgetam_image_encoder.engine
+memory_attention_engine: models768_aerial_stable_rgb/edgetam_memory_attention.engine
+memory_encoder_engine:   models768_aerial_stable_rgb/edgetam_memory_encoder.engine
+sam_head_engine:         models768_aerial_stable_rgb/edgetam_sam_head.engine
 
 model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
-checkpoint: checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt
+checkpoint: checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt
 image_size: 768                           # must match how the engines were exported
 device: cuda
 precision: float16                        # matches the fp16 engines

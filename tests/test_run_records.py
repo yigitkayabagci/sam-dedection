@@ -134,8 +134,8 @@ class Tables(unittest.TestCase):
         """Two labels on one file would put the same model in two rows.
 
         The names are close enough to make it a live mistake -- `aerial_stable`
-        and `aerial_stable_2` differ by one head epoch, `broad_thermal` and
-        `broad_rgb` by a modality -- and the summary would read as a comparison
+        and `aerial_stable_woc_final` differ by one head epoch, `aerial_stable_only_pretrain` and
+        `aerial_stable_rgb` by a modality -- and the summary would read as a comparison
         either way.
         """
         seen: dict[str, str] = {}

@@ -294,9 +294,9 @@ neither.
 | 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
 | 27 | `edgetam-stage-b/thermal_deep_rgb_aerovis` | `edgetam_pool_thermal_deep_rgb_aerovis_512.pt` | the same, checkpoint swapped |
 | 32 | `edgetam-stage-b/aerial_thermal_stable` | `edgetam_pool_aerial_thermal_stable_512.pt` | `configs/edgetam_512_aerial_stable.yaml` |
-| 32′ | `edgetam-stage-b/aerial_thermal_stable_from_aerial_thermal_stable` | `edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt` | `configs/edgetam_512_aerial_stable_2.yaml` |
-| 34 | `edgetam-stage-b/pretrain_thermal_aerial` | `edgetam_pool_pretrain_thermal_aerial_512.pt` | `configs/edgetam_512_broad_thermal.yaml` |
-| 35 | `edgetam-stage-b/pretrain_rgb_aerial` | `edgetam_pool_pretrain_rgb_aerial_512.pt` | `configs/edgetam_512_broad_rgb.yaml` |
+| 32′ | `edgetam-stage-b/aerial_thermal_stable_from_aerial_thermal_stable` | `edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt` | `configs/edgetam_512_aerial_stable_woc_final.yaml` |
+| 34 | `edgetam-stage-b/pretrain_thermal_aerial` | `edgetam_pool_pretrain_thermal_aerial_512.pt` | `configs/edgetam_512_aerial_stable_only_pretrain.yaml` |
+| 35 | `edgetam-stage-b/pretrain_rgb_aerial` | `edgetam_pool_pretrain_rgb_aerial_512.pt` | `configs/edgetam_512_aerial_stable_rgb.yaml` |
 
 Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
 repository) and the config runs it. Nothing else has to change:
@@ -342,7 +342,7 @@ the wide pass 32 then narrows.
 
 **Once the engines exist, `tools/run_records.py --weights` runs the checkpoint
 on the recorded clips.** `stock`, `pool_deep` (22), `aerial_stable` (32),
-`aerial_stable_2` (32′), `broad_thermal` (34) and `broad_rgb` (35) are the sets
+`aerial_stable_woc_final` (32′), `aerial_stable_only_pretrain` (34) and `aerial_stable_rgb` (35) are the sets
 it knows; each names its own engine directory, and results land in
 `<mode>_<weights>/` off one saved prompt, so two checkpoints sit side by side
 with the input held fixed. A pair with no engines built fails immediately with

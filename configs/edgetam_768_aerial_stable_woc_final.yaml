@@ -37,13 +37,13 @@
 #   python tools/run_records.py --records frames --out frame_output \
 #       --modes full768 --weights aerial_stable
 #   python tools/run_records.py --records frames --out frame_output \
-#       --modes full768 --weights aerial_stable_2
+#       --modes full768 --weights aerial_stable_woc_final
 # Expect a small difference or none. A large one would mean the head epoch did
 # something the validation loss did not see, which is worth knowing either way.
 #
 # THE MEMORY PATH IS STOCK. Stage B never trains it.
 #
-# TensorRT at this size: configs/edgetam_trt_768_aerial_stable_2.yaml, and the engines
+# TensorRT at this size: configs/edgetam_trt_768_aerial_stable_woc_final.yaml, and the engines
 # have to be exported from *this* checkpoint at *this* size.
 model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
 checkpoint: checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt

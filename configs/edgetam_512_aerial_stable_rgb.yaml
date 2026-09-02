@@ -7,7 +7,7 @@
 #
 # Like 34 it is a stage B despite the word "pretrain" in its name -- run.json
 # records `"base": ".../edgetam.pt"` and `"stage": "instances"`. See
-# configs/edgetam_512_broad_thermal.yaml for that argument in full.
+# configs/edgetam_512_aerial_stable_only_pretrain.yaml for that argument in full.
 #
 # WHAT IT SAW, and it is the largest of the three: 82 240 frames and 495 012
 # instances over aerovis_train, aerovis_heldout, dronevehicle_rgb (+_only),
@@ -25,7 +25,7 @@
 # 512 IS THE TRAINING RESOLUTION AND THIS IS THE HONEST COMPARISON. Score this
 # against configs/edgetam_512.yaml -- stock weights, same size. The deployment
 # size is 768 (CLAUDE.md), which is a different measurement: take it with
-# configs/edgetam_768_broad_rgb.yaml against configs/edgetam_768.yaml.
+# configs/edgetam_768_aerial_stable_rgb.yaml against configs/edgetam_768.yaml.
 #
 # THE MEMORY PATH IS STOCK, as in every stage B config: src/training/image_loop.py
 # trains with no memory bank, so the notebook's numbers are one prompted frame
@@ -36,7 +36,7 @@
 # run.json, verdict.json and the score_*.json rows. Put it under checkpoints/
 # here (that directory is gitignored -- weights never enter the repository).
 #
-# TensorRT at this size: configs/edgetam_trt_512_broad_rgb.yaml.
+# TensorRT at this size: configs/edgetam_trt_512_aerial_stable_rgb.yaml.
 model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
 checkpoint: checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt
 image_size: 512                           # the size 35 trained at
