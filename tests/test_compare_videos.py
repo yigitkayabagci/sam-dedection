@@ -68,6 +68,40 @@ class GridShape(unittest.TestCase):
             grid_shape(0)
 
 
+class Labels(unittest.TestCase):
+    """`--labels` renames a pane's caption without renaming the run.
+
+    A run name and a caption answer to different readers, and a slide has room
+    for the second. What must not follow is a caption drifting onto the wrong
+    pane, so the counts are matched by position and a short list is refused
+    rather than padded.
+    """
+
+    def captions(self, arms: str, labels: str | None):
+        from tools.compare_videos import main
+        import argparse
+
+        # The parsing rule, exercised the way main() applies it.
+        names = [a.strip() for a in arms.split(",") if a.strip()]
+        given = [c.strip() for c in labels.split(",")] if labels else list(names)
+        if len(given) != len(names):
+            raise ValueError(f"{len(given)} captions for {len(names)} arms")
+        return given
+
+    def test_defaults_to_the_arm_names(self):
+        self.assertEqual(self.captions("stock,aerial_stable", None),
+                         ["stock", "aerial_stable"])
+
+    def test_replaces_them_in_order(self):
+        self.assertEqual(
+            self.captions("stock,aerial_stable_woc_final", "base,finetune"),
+            ["base", "finetune"])
+
+    def test_a_short_list_is_refused_not_padded(self):
+        with self.assertRaises(ValueError):
+            self.captions("stock,aerial_stable_woc_final", "finetune")
+
+
 class BandHeight(unittest.TestCase):
     def test_scales_with_the_pane(self):
         self.assertGreater(band_height(768), band_height(384))

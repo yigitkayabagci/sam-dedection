@@ -124,6 +124,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--arms", required=True,
                    help="Comma-separated --weights names, in the order they "
                         "should appear. A folder name is taken as given.")
+    p.add_argument("--labels", default=None,
+                   help="Comma-separated captions, one per arm and in the same "
+                        "order. Default: the arm names. A run name and a caption "
+                        "answer to different readers -- `aerial_stable_woc_final` "
+                        "identifies which checkpoint ran, `finetune` says what "
+                        "the slide is claiming -- and a projected pane has room "
+                        "for the second. The folder each pane came from is still "
+                        "printed here and still in provenance.json, so renaming "
+                        "the caption never loses which weights produced it.")
     p.add_argument("--out", default=None,
                    help="Output mp4 (default: <record>/compare_<mode>.mp4).")
     p.add_argument("--cols", type=int, default=None,
@@ -150,6 +159,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"{record} is not a directory.")
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    captions = ([c.strip() for c in args.labels.split(",")]
+                if args.labels else list(arms))
+    if len(captions) != len(arms):
+        raise SystemExit(
+            f"--labels has {len(captions)} captions for {len(arms)} arms. They "
+            f"are matched by position, so a short list would caption the wrong "
+            f"pane rather than leave one blank.")
     videos = []
     for arm in arms:
         path = record / folder_for(args.mode, arm) / "tracked.mp4"
@@ -195,19 +211,19 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f">> {len(caps)} arms, {frames} frames, {rows}x{cols} grid, "
               f"{sheet_size[0]}x{sheet_size[1]}, {fps:g} fps")
-        for arm, video in zip(arms, videos):
-            print(f"   {arm:<32} {video.parent.name}/")
+        for caption, video in zip(captions, videos):
+            print(f"   {caption:<32} {video.parent.name}/")
 
         with open_video_writer(out_path, fps, sheet_size) as write:
             for idx in range(frames):
                 panes = []
-                for cap, arm in zip(caps, arms):
+                for cap, caption in zip(caps, captions):
                     ok, bgr = cap.read()
                     if not ok:
                         bgr = np.zeros((src_h, src_w, 3), dtype=np.uint8)
                     pane = cv2.resize(bgr, (pane_w, pane_h),
                                       interpolation=cv2.INTER_AREA)
-                    panes.append(_label(pane, arm, cv2, np))
+                    panes.append(_label(pane, caption, cv2, np))
                 while len(panes) < rows * cols:   # a ragged last row stays black
                     panes.append(np.zeros_like(panes[0]))
                 sheet = _tile(panes, rows, cols, np)
