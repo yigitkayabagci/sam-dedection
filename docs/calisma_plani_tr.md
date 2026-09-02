@@ -163,6 +163,7 @@ Tek tek:
 | `pytest tests/test_stabiliser.py -q` | 27 test — ego-hareket, kapılar, yeniden yakalama |
 | `pytest tests/test_samurai.py -q` | 52 test — Kalman, bellek kapısı, ego-hareket bağlantısı |
 | `pytest tests/test_hydra_overrides.py -q` | 24 test — 640/896 reddi, 768 kabulü |
+| `pytest tests/test_prep_thermal.py -q` | 25 test — ham termal → 8-bit: yüzdelik penceresi, EMA/slack/reset, `vis/`→`prep/` |
 
 ### 3b. AeroVIS yol düzeltmesini gerçek veride görmek
 
