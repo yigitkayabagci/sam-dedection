@@ -294,6 +294,9 @@ neither.
 | 23 | `edgetam-stage-b/thermal_deep_lora` | `edgetam_pool_thermal_deep_lora_512.pt` | the same, checkpoint swapped |
 | 27 | `edgetam-stage-b/thermal_deep_rgb_aerovis` | `edgetam_pool_thermal_deep_rgb_aerovis_512.pt` | the same, checkpoint swapped |
 | 32 | `edgetam-stage-b/aerial_thermal_stable` | `edgetam_pool_aerial_thermal_stable_512.pt` | `configs/edgetam_512_aerial_stable.yaml` |
+| 32′ | `edgetam-stage-b/aerial_thermal_stable_from_aerial_thermal_stable` | `edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt` | `configs/edgetam_512_aerial_stable_2.yaml` |
+| 34 | `edgetam-stage-b/pretrain_thermal_aerial` | `edgetam_pool_pretrain_thermal_aerial_512.pt` | `configs/edgetam_512_broad_thermal.yaml` |
+| 35 | `edgetam-stage-b/pretrain_rgb_aerial` | `edgetam_pool_pretrain_rgb_aerial_512.pt` | `configs/edgetam_512_broad_rgb.yaml` |
 
 Drop the `.pt` under `checkpoints/` (gitignored — weights never enter the
 repository) and the config runs it. Nothing else has to change:
@@ -330,10 +333,18 @@ export into its own directory — `models512_pool_deep/`, not `models512/`.
 compares the engine against the PyTorch module built the same way, so both are
 wrong together and it passes.
 
+**34 and 35 are stage B, not stage A.** Their names say "pretrain" and their
+own `run.json` files say `"base": .../edgetam.pt` and `"stage": "instances"` —
+stock EdgeTAM, `METHOD="finetune"`, trained on labelled mask pools, with no
+distillation anywhere in them. `docs/stage_c_devir_tr.md` settled this. So
+neither needs a run after it to be usable; what "pretrain" meant was *broad*,
+the wide pass 32 then narrows.
+
 **Once the engines exist, `tools/run_records.py --weights` runs the checkpoint
-on the recorded clips.** `stock`, `pool_deep` (22) and `aerial_stable` (32) are
-the three sets it knows; each names its own engine directory, and results land
-in `<mode>_<weights>/` off one saved prompt, so two checkpoints sit side by side
+on the recorded clips.** `stock`, `pool_deep` (22), `aerial_stable` (32),
+`aerial_stable_2` (32′), `broad_thermal` (34) and `broad_rgb` (35) are the sets
+it knows; each names its own engine directory, and results land in
+`<mode>_<weights>/` off one saved prompt, so two checkpoints sit side by side
 with the input held fixed. A pair with no engines built fails immediately with
 the commands that build it, rather than falling back to stock and labelling the
 row with weights it did not run.

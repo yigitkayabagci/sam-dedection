@@ -1,0 +1,47 @@
+# EdgeTAM at 768x768 with 34's broad thermal stage B, trained from stock on every thermal mask pool -- WHICH WAS TRAINED AT 512.
+#
+# 768 IS THE DEPLOYMENT SIZE (CLAUDE.md: the camera is ~1280x720, so the frame
+# carries more than 512x512 of real detail). Running a 512-trained checkpoint
+# here needs no retraining and no error is raised -- EdgeTAM keeps no resolution
+# in any parameter and src/trackers/_hydra_overrides.py fixes the memory
+# attention's RoPE table to 48x48 = 2304. The mismatch is a printed warning from
+# src/checkpoint_meta.py and never a crash, which is exactly why it has to be
+# deliberate. configs/edgetam_768_aerial_stable.yaml carries that argument in
+# full; it applies here unchanged.
+#
+# So: score this against configs/edgetam_768.yaml -- stock weights, same size.
+# Never against a 512 number, this run's own before/after table included.
+#
+# ITS NAME SAYS "PRETRAIN" AND IT IS NOT ONE. `docs/stage_c_devir_tr.md` settled
+# this: 34 starts from stock `third_party/EdgeTAM/checkpoints/edgetam.pt`, runs
+# `METHOD="finetune"`, and trains on labelled mask pools. There is no
+# distillation and no stage A anywhere in it -- its own run.json records
+# `"base": ".../edgetam.pt"` and `"stage": "instances"`. So it is a stage B like
+# every other config here and needs nothing run after it to be usable. What
+# "pretrain" meant was *broad*: it is the wide pass that 32 then narrows.
+#
+# WHAT IT SAW: 58 508 frames and 210 747 instances across dronevehicle_thermal
+# (+_only), hituav_thermal, kaggle_uav_thermal, kust4k_thermal (+_broken),
+# vtuav_thermal, plus Kust4K and SegFly component labels. `prompt: mix`, batch
+# 128, 1000 steps an epoch, `anchor_weight 0`.
+#
+# READ ITS run.json BEFORE READING A NUMBER OFF IT. Best validation 0.18717,
+# saved at encoder epoch 6 of 40, stopped early at 11 on patience 5. The encoder
+# history is not a descent: 0.1912 at epoch 2, 0.2172 at 4, 0.2787 at 5, the
+# 0.1872 dip at 6, then 0.4200 at 7 and 0.3331 at 8. This file is that dip. A
+# run that swings by a factor of two between epochs is not a settled model, and
+# the checkpoint being the lowest point of that swing is a selection effect as
+# much as a result.
+#
+# THE MEMORY PATH IS STOCK. Stage B never trains it.
+#
+# TensorRT at this size: configs/edgetam_trt_768_broad_thermal.yaml, and the engines
+# have to be exported from *this* checkpoint at *this* size.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_pretrain_thermal_aerial_512.pt
+image_size: 768                           # NOT the size this checkpoint trained at
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

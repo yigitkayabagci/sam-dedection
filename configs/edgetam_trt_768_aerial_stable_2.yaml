@@ -1,0 +1,55 @@
+# 32 run a second time on top of its own output, on TensorRT at 768x768. Read
+# configs/edgetam_768_aerial_stable_2.yaml first -- it says what this run was, and why running a 512-trained checkpoint here is
+# deliberate rather than an accident.
+#
+# A NEW CHECKPOINT MEANS A NEW EXPORT. Weights are traced into the ONNX graphs
+# and baked into the engines built from them; there is no runtime checkpoint
+# load on the TensorRT path. The `checkpoint` key below feeds the PyTorch
+# modules that back the engines -- the fallback path, the memory bookkeeping
+# that never left PyTorch, and the parity check -- not the engines themselves.
+# Engines are shape- and weight-specific, so this set shares a directory with
+# nothing:
+#
+#   1) python tools/export_edgetam_onnx.py --outdir models768_aerial_stable_2/ \
+#          --image-size 768 --checkpoint checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt \
+#          --all-pointers --verify
+#      (--all-pointers costs nothing at run time and is what `--policy samurai`
+#      / `ego` / `guard` need from the sam_head engine.)
+#   2) python tools/build_trt_engines.py   --outdir models768_aerial_stable_2/ --max-batch 4
+#   3) python tools/check_trt_parity.py    --outdir models768_aerial_stable_2/ \
+#          --image-size 768 --checkpoint checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt
+#      (--checkpoint is NOT optional: it defaults to the stock edgetam.pt, and
+#      parity against the wrong weights fails every module for a reason that has
+#      nothing to do with TensorRT. It will not catch the opposite mistake --
+#      wrong weights on both sides compare one wrong build against itself and
+#      pass.)
+#
+# WHICH COMPARISON ANSWERS WHAT:
+#   configs/edgetam_768_aerial_stable_2.yaml   same weights, PyTorch, 768
+#                                         -> what TensorRT changed
+#   configs/edgetam_trt_768.yaml       stock weights, TensorRT, 768
+#                                         -> what the training changed
+#
+# On the records that is one flag:
+#   python tools/run_records.py --records frames --out frame_output \
+#       --modes full768 --weights aerial_stable_2
+image_encoder_engine:    models768_aerial_stable_2/edgetam_image_encoder.engine
+memory_attention_engine: models768_aerial_stable_2/edgetam_memory_attention.engine
+memory_encoder_engine:   models768_aerial_stable_2/edgetam_memory_encoder.engine
+sam_head_engine:         models768_aerial_stable_2/edgetam_sam_head.engine
+
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt
+image_size: 768                           # must match how the engines were exported
+device: cuda
+precision: float16                        # matches the fp16 engines
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
+
+strict: false                             # true = refuse silent PyTorch fallback
+use_cuda_graph: true                      # replay engines from a captured graph
+# null  -> keep EdgeTAM's default (8), but disable it automatically when the
+#          sam2._C extension is missing, since it would raise every frame.
+# 0     -> off. Any int -> that hole area.
+fill_hole_area: null

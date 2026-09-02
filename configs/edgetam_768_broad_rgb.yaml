@@ -1,0 +1,48 @@
+# EdgeTAM at 768x768 with 35's broad RGB stage B -- the second model beside the thermal line -- WHICH WAS TRAINED AT 512.
+#
+# 768 IS THE DEPLOYMENT SIZE (CLAUDE.md: the camera is ~1280x720, so the frame
+# carries more than 512x512 of real detail). Running a 512-trained checkpoint
+# here needs no retraining and no error is raised -- EdgeTAM keeps no resolution
+# in any parameter and src/trackers/_hydra_overrides.py fixes the memory
+# attention's RoPE table to 48x48 = 2304. The mismatch is a printed warning from
+# src/checkpoint_meta.py and never a crash, which is exactly why it has to be
+# deliberate. configs/edgetam_768_aerial_stable.yaml carries that argument in
+# full; it applies here unchanged.
+#
+# So: score this against configs/edgetam_768.yaml -- stock weights, same size.
+# Never against a 512 number, this run's own before/after table included.
+#
+# THIS IS THE RGB MODEL. CLAUDE.md puts it plainly: the goal is aerial thermal,
+# and RGB is a second model beside it rather than the main line. This config
+# exists so that model can be run and measured, not so its number can be set
+# against a thermal one.
+#
+# Like 34 it is a stage B despite the word "pretrain" in its name -- run.json
+# records `"base": ".../edgetam.pt"` and `"stage": "instances"`. See
+# configs/edgetam_512_broad_thermal.yaml for that argument in full.
+#
+# WHAT IT SAW, and it is the largest of the three: 82 240 frames and 495 012
+# instances over aerovis_train, aerovis_heldout, dronevehicle_rgb (+_only),
+# kust4k_rgb (+_broken), segfly_rgb and vtuav_rgb. `prompt: mix`, batch 128,
+# 1000 steps an epoch, `anchor_weight 0`.
+#
+# ITS RUN IS THE CLEAN ONE OF THE THREE. Best validation 0.14472, improving at
+# almost every epoch through encoder 10, stopped early at 15 of 40 on patience
+# 5 -- no swing of the kind 34's history shows.
+#
+# DO NOT READ 0.14472 AGAINST THE THERMAL RUNS' 0.187. Different pools, a
+# different validation split and a different modality: the two numbers are not
+# on one scale and neither is evidence about the other.
+#
+# THE MEMORY PATH IS STOCK. Stage B never trains it.
+#
+# TensorRT at this size: configs/edgetam_trt_768_broad_rgb.yaml, and the engines
+# have to be exported from *this* checkpoint at *this* size.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt
+image_size: 768                           # NOT the size this checkpoint trained at
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

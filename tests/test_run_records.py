@@ -130,6 +130,31 @@ class Tables(unittest.TestCase):
         self.assertNotEqual(body(WEIGHTS["aerial_stable"][512])["checkpoint"],
                             body(WEIGHTS["pool_deep"][512])["checkpoint"])
 
+    def test_no_two_weights_sets_are_the_same_checkpoint(self):
+        """Two labels on one file would put the same model in two rows.
+
+        The names are close enough to make it a live mistake -- `aerial_stable`
+        and `aerial_stable_2` differ by one head epoch, `broad_thermal` and
+        `broad_rgb` by a modality -- and the summary would read as a comparison
+        either way.
+        """
+        seen: dict[str, str] = {}
+        for weights, table in WEIGHTS.items():
+            checkpoint = body(table[TRAINED_AT[weights]])["checkpoint"]
+            self.assertNotIn(checkpoint, seen,
+                             f"{weights} and {seen.get(checkpoint)} are one file")
+            seen[checkpoint] = weights
+
+    def test_every_set_the_deployment_size_can_serve_offers_it(self):
+        """768 is the deployment size (CLAUDE.md), so a set without it is a
+        set that cannot be run on the real camera. `stock` is the exception
+        only in that its 768 config has always been there under its own name.
+        """
+        for weights in WEIGHTS:
+            self.assertIn(768, WEIGHTS[weights],
+                          f"{weights} has no 768 entry, so --modes full768 "
+                          f"cannot run under it")
+
     def test_an_off_size_entry_declares_that_size_and_a_separate_engine_set(self):
         """768 on a 512-trained checkpoint is a measurement, not a fallback.
 
@@ -139,8 +164,9 @@ class Tables(unittest.TestCase):
         that each size is its own directory and its own declared `image_size` --
         the rest is the header of the config the reader is sent to.
         """
-        for weights in ("pool_deep", "aerial_stable"):
-            self.assertIn(768, WEIGHTS[weights], weights)
+        for weights in (w for w in WEIGHTS if TRAINED_AT[w] != 768):
+            if 768 not in WEIGHTS[weights]:
+                continue
             trained = TRAINED_AT[weights]
             off = body(WEIGHTS[weights][768])
             at = body(WEIGHTS[weights][trained])

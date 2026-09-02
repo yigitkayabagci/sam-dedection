@@ -34,15 +34,22 @@ than 512x512 of real detail -- on a 640x512 thermal frame it upsamples and pays
 Each mode needs its own engine set; `--modes` runs the subset you have built.
 
 `--weights` is the second axis, and it is a different question from the modes:
-they vary the *input*, it varies the *model*. `stock` is EdgeTAM as shipped;
-`pool_deep` is notebooks/22_thermal_deep.ipynb's checkpoint, trained at 512 on
-the thermal mask pools; `aerial_stable` is notebooks/32's, the same pools at the
-same size after that run's encoder stage diverged -- so it is read against
-`pool_deep` as well as against `stock`. Weights are traced into the ONNX graphs
-and baked into the engines, so this selects a different models*/ directory
-rather than a runtime setting -- each (weights, size) pair is its own export,
-and a pair with no engines built fails immediately with the two commands that
-build them.
+they vary the *input*, it varies the *model*. Every set below except `stock` was
+trained at 512 on this project's thermal or RGB mask pools:
+
+    stock             EdgeTAM as shipped, trained at 1024
+    pool_deep         22_thermal_deep
+    aerial_stable     32, the stable re-run after 22's encoder stage diverged
+    aerial_stable_2   32 again on its own output -- its encoder never beat the
+                      base, so it is `aerial_stable` plus one head epoch
+    broad_thermal     34, every thermal pool at once, from stock
+    broad_rgb         35, the same on the RGB pools -- the second model, not a
+                      competitor to the thermal rows
+
+Weights are traced into the ONNX graphs and baked into the engines, so this
+selects a different models*/ directory rather than a runtime setting -- each
+(weights, size) pair is its own export, and a pair with no engines built fails
+immediately with the two commands that build them.
 
 Results go to `<mode>_<weights>/`, so a stock run and a pool_deep one sit side
 by side off one saved prompt: same target, same frames, one variable. A plain
@@ -171,12 +178,38 @@ WEIGHTS = {
         768: "configs/edgetam_trt_768_aerial_stable.yaml",
         512: "configs/edgetam_trt_512_aerial_stable.yaml",
     },
+    # notebooks/32 run a second time on its own output. Its encoder never beat
+    # the base -- every encoder epoch scored worse than the head epoch that got
+    # saved -- so what this set carries is `aerial_stable`'s encoder plus one
+    # epoch of head training, and `aerial_stable` is the row it has to be read
+    # against. See configs/edgetam_512_aerial_stable_2.yaml.
+    "aerial_stable_2": {
+        768: "configs/edgetam_trt_768_aerial_stable_2.yaml",
+        512: "configs/edgetam_trt_512_aerial_stable_2.yaml",
+    },
+    # notebooks/34, the broad thermal stage B: stock EdgeTAM trained on every
+    # thermal mask pool at once. Its name says "pretrain" and it is not one --
+    # no distillation, no stage A, `"base": edgetam.pt` in its own run.json --
+    # so it stands on its own here rather than only as 32's starting point.
+    "broad_thermal": {
+        768: "configs/edgetam_trt_768_broad_thermal.yaml",
+        512: "configs/edgetam_trt_512_broad_thermal.yaml",
+    },
+    # notebooks/35, the same pass on the RGB pools. This is the second model
+    # beside the thermal line (CLAUDE.md), not a competitor to the rows above:
+    # a thermal row and an RGB row are two models on two modalities and neither
+    # number is evidence about the other.
+    "broad_rgb": {
+        768: "configs/edgetam_trt_768_broad_rgb.yaml",
+        512: "configs/edgetam_trt_512_broad_rgb.yaml",
+    },
 }
 
 # The size each weights set was actually trained at, for the note the summary
 # carries. None means "not one of ours" -- stock EdgeTAM was trained at 1024
 # before this repository existed and records nothing about it.
-TRAINED_AT = {"stock": 1024, "pool_deep": 512, "aerial_stable": 512}
+TRAINED_AT = {"stock": 1024, "pool_deep": 512, "aerial_stable": 512,
+              "aerial_stable_2": 512, "broad_thermal": 512, "broad_rgb": 512}
 
 # --backend torch -> the plain PyTorch YAML for a size. The TensorRT tables
 # above are the default and stay the measurement of record; this exists for the
@@ -194,6 +227,12 @@ TORCH = {
                   512: "configs/edgetam_512_pool_deep.yaml"},
     "aerial_stable": {768: "configs/edgetam_768_aerial_stable.yaml",
                       512: "configs/edgetam_512_aerial_stable.yaml"},
+    "aerial_stable_2": {768: "configs/edgetam_768_aerial_stable_2.yaml",
+                        512: "configs/edgetam_512_aerial_stable_2.yaml"},
+    "broad_thermal": {768: "configs/edgetam_768_broad_thermal.yaml",
+                      512: "configs/edgetam_512_broad_thermal.yaml"},
+    "broad_rgb": {768: "configs/edgetam_768_broad_rgb.yaml",
+                  512: "configs/edgetam_512_broad_rgb.yaml"},
 }
 
 # --policy -> the overlay merged onto whichever backend YAML the (weights,
@@ -791,16 +830,14 @@ def main(argv: list[str] | None = None) -> int:
                         "because a policy measured on two runtimes is two "
                         "measurements.")
     p.add_argument("--weights", default="stock", choices=tuple(WEIGHTS),
-                   help="Which trained weights the modes run on. `stock` is "
-                        "EdgeTAM as shipped; `pool_deep` is the checkpoint from "
-                        "notebooks/22_thermal_deep.ipynb; `aerial_stable` is "
-                        "notebooks/32's, which re-ran that training after its "
-                        "encoder stage diverged. Each is a separate set of "
-                        "engines -- weights are baked into an engine at export "
-                        "time, so this picks a different models*/ directory, not "
-                        "a different runtime setting. Results land in "
-                        "<mode>_<weights>/ so a stock run is never overwritten "
-                        "and the runs share one saved prompt.")
+                   help="Which trained weights the modes run on -- see the "
+                        "table at the top of this file for what each one was "
+                        "trained on. Each is a separate set of engines: weights "
+                        "are baked into an engine at export time, so this picks "
+                        "a different models*/ directory, not a different runtime "
+                        "setting. Results land in <mode>_<weights>/ so a stock "
+                        "run is never overwritten and the runs share one saved "
+                        "prompt.")
     p.add_argument("--pattern", default="*.tif*", help="Frame glob inside a record.")
     p.add_argument("--cache-dir", default=None,
                    help="Where the decoded frames are staged, per record. The "

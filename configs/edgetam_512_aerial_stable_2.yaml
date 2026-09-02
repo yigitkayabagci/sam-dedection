@@ -1,0 +1,54 @@
+# EdgeTAM at 512x512 with 32 run a second time on top of its own output.
+#
+# A SECOND PASS OVER `aerial_stable`. Notebook 32 again, with `BASE_CHECKPOINT`
+# pointing at its own earlier output -- run.json records
+# `"base": ".../aerial_thermal_stable/edgetam_pool_aerial_thermal_stable_512.pt"`
+# -- plus `anchor_weight 0.5` to hold it near where it started, 500 steps an
+# epoch, and the eight thermal pools with SegFly's cleaned split.
+#
+# THE SAVED FILE IS A HEAD-STAGE CHECKPOINT, AND THAT IS THE MOST IMPORTANT
+# THING ABOUT IT. From its run.json: head epoch 0 scored 0.18728 and was saved;
+# then every encoder epoch was worse -- 0.20327, 0.20414, 0.20501, 0.20743,
+# 0.20977, 0.21269, 0.21526 -- none of them saved, and the run stopped early
+# after encoder epoch 6 of 30. So the image encoder in this file is
+# `aerial_stable`'s encoder unchanged. What differs is one epoch of head
+# training on top of it.
+#
+# This is the same failure shape 32 was written to avoid after 22's run
+# diverged (see configs/edgetam_512_aerial_stable.yaml), reached from the other
+# direction: nothing blew up, the encoder simply had nothing left to gain on
+# the pools it had already been trained on and every epoch spent moved it away
+# from a better place.
+#
+# SO THE COMPARISON THAT MEANS ANYTHING IS AGAINST `aerial_stable`, where the
+# only difference is that head epoch:
+#   python tools/run_records.py --records frames --out frame_output \
+#       --modes full768 --weights aerial_stable
+#   python tools/run_records.py --records frames --out frame_output \
+#       --modes full768 --weights aerial_stable_2
+# Expect a small difference or none. A large one would mean the head epoch did
+# something the validation loss did not see, which is worth knowing either way.
+#
+# 512 IS THE TRAINING RESOLUTION AND THIS IS THE HONEST COMPARISON. Score this
+# against configs/edgetam_512.yaml -- stock weights, same size. The deployment
+# size is 768 (CLAUDE.md), which is a different measurement: take it with
+# configs/edgetam_768_aerial_stable_2.yaml against configs/edgetam_768.yaml.
+#
+# THE MEMORY PATH IS STOCK, as in every stage B config: src/training/image_loop.py
+# trains with no memory bank, so the notebook's numbers are one prompted frame
+# each and say nothing about tracking. Expect a better first mask and re-measure
+# the track.
+#
+# GET THE CHECKPOINT off your Drive at MyDrive/edgetam-stage-b/aerial_thermal_stable_from_aerial_thermal_stable/, which also holds
+# run.json, verdict.json and the score_*.json rows. Put it under checkpoints/
+# here (that directory is gitignored -- weights never enter the repository).
+#
+# TensorRT at this size: configs/edgetam_trt_512_aerial_stable_2.yaml.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_aerial_thermal_stable_from_aerial_thermal_stable_512.pt
+image_size: 512                           # the size 32 trained at
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight

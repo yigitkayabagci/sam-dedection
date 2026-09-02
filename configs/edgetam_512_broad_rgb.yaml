@@ -1,0 +1,47 @@
+# EdgeTAM at 512x512 with 35's broad RGB stage B -- the second model beside the thermal line.
+#
+# THIS IS THE RGB MODEL. CLAUDE.md puts it plainly: the goal is aerial thermal,
+# and RGB is a second model beside it rather than the main line. This config
+# exists so that model can be run and measured, not so its number can be set
+# against a thermal one.
+#
+# Like 34 it is a stage B despite the word "pretrain" in its name -- run.json
+# records `"base": ".../edgetam.pt"` and `"stage": "instances"`. See
+# configs/edgetam_512_broad_thermal.yaml for that argument in full.
+#
+# WHAT IT SAW, and it is the largest of the three: 82 240 frames and 495 012
+# instances over aerovis_train, aerovis_heldout, dronevehicle_rgb (+_only),
+# kust4k_rgb (+_broken), segfly_rgb and vtuav_rgb. `prompt: mix`, batch 128,
+# 1000 steps an epoch, `anchor_weight 0`.
+#
+# ITS RUN IS THE CLEAN ONE OF THE THREE. Best validation 0.14472, improving at
+# almost every epoch through encoder 10, stopped early at 15 of 40 on patience
+# 5 -- no swing of the kind 34's history shows.
+#
+# DO NOT READ 0.14472 AGAINST THE THERMAL RUNS' 0.187. Different pools, a
+# different validation split and a different modality: the two numbers are not
+# on one scale and neither is evidence about the other.
+#
+# 512 IS THE TRAINING RESOLUTION AND THIS IS THE HONEST COMPARISON. Score this
+# against configs/edgetam_512.yaml -- stock weights, same size. The deployment
+# size is 768 (CLAUDE.md), which is a different measurement: take it with
+# configs/edgetam_768_broad_rgb.yaml against configs/edgetam_768.yaml.
+#
+# THE MEMORY PATH IS STOCK, as in every stage B config: src/training/image_loop.py
+# trains with no memory bank, so the notebook's numbers are one prompted frame
+# each and say nothing about tracking. Expect a better first mask and re-measure
+# the track.
+#
+# GET THE CHECKPOINT off your Drive at MyDrive/edgetam-stage-b/pretrain_rgb_aerial/, which also holds
+# run.json, verdict.json and the score_*.json rows. Put it under checkpoints/
+# here (that directory is gitignored -- weights never enter the repository).
+#
+# TensorRT at this size: configs/edgetam_trt_512_broad_rgb.yaml.
+model_cfg: configs/edgetam.yaml           # Hydra config name (sam2 package)
+checkpoint: checkpoints/edgetam_pool_pretrain_rgb_aerial_512.pt
+image_size: 512                           # the size 35 trained at
+device: cuda
+precision: bfloat16                       # bfloat16 | float16 | float32
+mask_threshold: 0.0
+offload_video_to_cpu: false               # set true for very long videos
+offload_state_to_cpu: false               # set true if GPU memory is tight
