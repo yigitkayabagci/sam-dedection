@@ -443,6 +443,54 @@ class TestStageCSurvivesAVtuavThatWillNotLand(unittest.TestCase):
             self.assertIn(claim, after, claim)
 
 
+class TestTheTrackingNotebooksCanImportEdgeTAM(unittest.TestCase):
+    """The runtime cell has to make `sam2` importable in *this* kernel.
+
+    `scripts/setup_edgetam.sh` installs EdgeTAM editable, and an editable
+    install writes a `.pth` that only takes effect when an interpreter starts.
+    The kernel running the cell started before it, so `import sam2` still
+    fails -- and the first thing to ask for it is the precheck's tracker, forty
+    minutes and a dataset download later, reporting "EdgeTAM is not installed"
+    on a runtime where it is. Notebook 32 has always put the checkout on
+    `sys.path` itself; these two now do the same, and the import here is what
+    makes the cell refuse rather than something downstream.
+    """
+
+    NOTEBOOKS = ("31_aerial_thermal_tracking.ipynb", "37_aerial_rgb_tracking.ipynb")
+
+    def runtime_cell(self, name):
+        cells = json.loads((ROOT / "notebooks" / name).read_text())["cells"]
+        code = [c for c in cells if c["cell_type"] == "code"]
+        return "".join(code[0]["source"])
+
+    def test_the_checkout_goes_on_the_path_after_the_setup_script(self):
+        for name in self.NOTEBOOKS:
+            with self.subTest(notebook=name):
+                cell = self.runtime_cell(name)
+                self.assertIn("setup_edgetam.sh", cell)
+                self.assertIn('EDGETAM = str(REPO / "third_party" / "EdgeTAM")', cell)
+                self.assertIn("sys.path.insert", cell)
+                self.assertLess(cell.index("setup_edgetam.sh"),
+                                cell.index("EDGETAM = str("),
+                                "the checkout has to exist before it is added")
+
+    def test_the_repo_still_comes_first_on_the_path(self):
+        # `src` and `tools` must resolve to the repo, not to anything the
+        # EdgeTAM checkout happens to carry.
+        for name in self.NOTEBOOKS:
+            with self.subTest(notebook=name):
+                self.assertIn("sys.path.insert(sys.path.index(str(REPO)) + 1, EDGETAM)",
+                              self.runtime_cell(name))
+
+    def test_the_cell_imports_it_rather_than_hoping(self):
+        for name in self.NOTEBOOKS:
+            with self.subTest(notebook=name):
+                cell = self.runtime_cell(name)
+                self.assertIn("import sam2", cell)
+                self.assertIn("invalidate_caches", cell)
+                self.assertIn("edgetam.pt", cell)
+
+
 class TestStageCIsReadyToRunUnattended(unittest.TestCase):
     """The settings a *Run all* depends on, pinned so an edit cannot drop one."""
 

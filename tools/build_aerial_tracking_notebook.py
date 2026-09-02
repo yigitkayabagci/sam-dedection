@@ -75,6 +75,30 @@ def main() -> None:
         !bash scripts/setup_edgetam.sh 2>&1 | tail -5
         !pip install -q -r requirements.txt
         !pip install -q gdown tqdm matplotlib
+
+        # `setup_edgetam.sh` pip-installs EdgeTAM editable, and an editable
+        # install drops a `.pth` into site-packages that only takes effect when
+        # an interpreter *starts*. This kernel started before it, so `import
+        # sam2` still fails -- forty minutes later, at the first tracker the
+        # precheck builds, with "EdgeTAM is not installed" on a runtime where
+        # it demonstrably is. Putting the checkout on the path here imports it
+        # from the source tree instead, which is what notebook 32 has always
+        # done, and turns a late failure into this cell refusing to finish.
+        EDGETAM = str(REPO / "third_party" / "EdgeTAM")
+        if EDGETAM not in sys.path:
+            sys.path.insert(sys.path.index(str(REPO)) + 1, EDGETAM)
+        import importlib
+
+        importlib.invalidate_caches()
+        import sam2
+
+        assert Path(sam2.__file__).resolve().parent.parent == Path(EDGETAM).resolve(), (
+            f"sam2 imported from {Path(sam2.__file__).parent} and not the "
+            f"EdgeTAM checkout. pip uninstall -y sam2 SAM-2, then re-run.")
+        assert (Path(EDGETAM) / "checkpoints/edgetam.pt").is_file(), (
+            "third_party/EdgeTAM/checkpoints/edgetam.pt did not download; the "
+            "stock arm of the precheck and the A/B both read it.")
+        print("sam2 (EdgeTAM):", Path(sam2.__file__).parent)
         !nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
         """),
         cell("code", r"""

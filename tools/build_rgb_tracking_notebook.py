@@ -436,10 +436,11 @@ def main() -> None:
     # moves, for a reason that has nothing to do with 37.
     for _old, _new in (
         ('"use_antiuav410": USE_ANTIUAV410,', '"modality": MODALITY,'),
-        ('"use_vtuav": USE_VTUAV, "use_birdsai": USE_BIRDSAI,',
+        ('"use_vtuav": USE_VTUAV, "vtuav_landed": VTUAV_OK,',
          '"vtuav_vis_train_parts": VTUAV_VIS_TRAIN_PARTS,'),
-        ('"use_vtuav_vis": USE_VTUAV_VIS,',
+        ('"use_birdsai": USE_BIRDSAI,',
          '"vtuav_vis_hold_out_parts": VTUAV_VIS_HOLD_OUT_PARTS,'),
+        ('"use_vtuav_vis": USE_VTUAV_VIS,', '"modality_note": "rgb only",'),
         ('"vtuav_archives": VTUAV_ARCHIVES,', '"base_stage_b_tag": BASE_TAG,'),
         ('"vtuav_vis_parts": VTUAV_VIS_PARTS if USE_VTUAV_VIS else [],',
          '"mask_frames": MASK_FRAMES,'),
