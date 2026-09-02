@@ -468,10 +468,10 @@ class TestTheTrackingNotebooksCanImportEdgeTAM(unittest.TestCase):
             with self.subTest(notebook=name):
                 cell = self.runtime_cell(name)
                 self.assertIn("setup_edgetam.sh", cell)
-                self.assertIn('EDGETAM = str(REPO / "third_party" / "EdgeTAM")', cell)
+                self.assertIn('EDGETAM = REPO / "third_party" / "EdgeTAM"', cell)
                 self.assertIn("sys.path.insert", cell)
                 self.assertLess(cell.index("setup_edgetam.sh"),
-                                cell.index("EDGETAM = str("),
+                                cell.index('EDGETAM = REPO /'),
                                 "the checkout has to exist before it is added")
 
     def test_the_repo_still_comes_first_on_the_path(self):
@@ -479,8 +479,9 @@ class TestTheTrackingNotebooksCanImportEdgeTAM(unittest.TestCase):
         # EdgeTAM checkout happens to carry.
         for name in self.NOTEBOOKS:
             with self.subTest(notebook=name):
-                self.assertIn("sys.path.insert(sys.path.index(str(REPO)) + 1, EDGETAM)",
-                              self.runtime_cell(name))
+                self.assertIn(
+                    "sys.path.insert(sys.path.index(str(REPO)) + 1, str(EDGETAM))",
+                    self.runtime_cell(name))
 
     def test_the_cell_imports_it_rather_than_hoping(self):
         for name in self.NOTEBOOKS:

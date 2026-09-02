@@ -77,39 +77,17 @@ def main() -> None:
         !pip install -q -r requirements.txt
         !pip install -q gdown tqdm matplotlib
 
-<<<<<<< HEAD
-        # `setup_edgetam.sh` pip-installs EdgeTAM editable, and an editable
-        # install drops a `.pth` into site-packages that only takes effect when
-        # an interpreter *starts*. This kernel started before it, so `import
-        # sam2` still fails -- forty minutes later, at the first tracker the
-        # precheck builds, with "EdgeTAM is not installed" on a runtime where
-        # it demonstrably is. Putting the checkout on the path here imports it
-        # from the source tree instead, which is what notebook 32 has always
-        # done, and turns a late failure into this cell refusing to finish.
-        EDGETAM = str(REPO / "third_party" / "EdgeTAM")
-        if EDGETAM not in sys.path:
-            sys.path.insert(sys.path.index(str(REPO)) + 1, EDGETAM)
-        import importlib
-
-        importlib.invalidate_caches()
-        import sam2
-
-        assert Path(sam2.__file__).resolve().parent.parent == Path(EDGETAM).resolve(), (
-            f"sam2 imported from {Path(sam2.__file__).parent} and not the "
-            f"EdgeTAM checkout. pip uninstall -y sam2 SAM-2, then re-run.")
-        assert (Path(EDGETAM) / "checkpoints/edgetam.pt").is_file(), (
-            "third_party/EdgeTAM/checkpoints/edgetam.pt did not download; the "
-            "stock arm of the precheck and the A/B both read it.")
-        print("sam2 (EdgeTAM):", Path(sam2.__file__).parent)
-=======
         # `pip install -e` writes a .pth that only a NEW interpreter reads, so
         # `import sam2` can fail in the very session that just installed it.
         # The EdgeTAM clone holds the `sam2/` package directly, so naming it on
         # sys.path needs no install at all and costs nothing when the install
-        # did work.
+        # did work. It goes *after* the repo, not at position 0: `src` and
+        # `tools` have to keep resolving here, and the assert below names which
+        # `sam2` actually arrived -- transformers ships one of its own, and
+        # notebook 29's comment says the two coexist deliberately.
         EDGETAM = REPO / "third_party" / "EdgeTAM"
         if EDGETAM.is_dir() and str(EDGETAM) not in sys.path:
-            sys.path.insert(0, str(EDGETAM))
+            sys.path.insert(sys.path.index(str(REPO)) + 1, str(EDGETAM))
         import importlib
         importlib.invalidate_caches()
         try:
@@ -124,8 +102,13 @@ def main() -> None:
                 "precheck'ten SONRA patlamasın diye. Çoğu durumda\n"
                 "Runtime > Restart session sonrası bu hücreyi tekrar koşmak "
                 "yeterlidir.")
+        assert Path(sam2.__file__).resolve().parent.parent == EDGETAM.resolve(), (
+            f"sam2 imported from {Path(sam2.__file__).parent}, not the EdgeTAM "
+            f"checkout. pip uninstall -y sam2 SAM-2, then re-run this cell.")
+        assert (EDGETAM / "checkpoints/edgetam.pt").is_file(), (
+            "third_party/EdgeTAM/checkpoints/edgetam.pt did not download; the "
+            "stock arm of the precheck and the A/B both read it.")
         print("sam2 ok:", Path(sam2.__file__).parent)
->>>>>>> origin/claude/thermal-stage-b-training-43ktcl
         !nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
         """),
         cell("code", r"""
