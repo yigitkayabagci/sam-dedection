@@ -108,6 +108,14 @@ do, which is the one question that does not have to wait for a run to finish:
     python tools/run_records.py --records frames --out frame_output \\
         --modes full512 --weights pool_deep --policy guard
 
+Once several arms have run, `tools/compare_videos.py` tiles their mp4s into
+one labelled grid off the folders named below -- the difference between two
+checkpoints is a handful of frames somewhere in the middle of two files nobody
+scrubs through in parallel, and this puts them where the eye already is:
+
+    python tools/compare_videos.py --record <out>/<tag>/<record> \\
+        --mode full768 --arms stock,aerial_stable,aerial_stable_rgb --stills 3
+
 Read `--policy guard`'s dropout count expecting it to go **up** where the
 tracker was previously reporting a mask covering a field: the guard refuses
 those and reports an empty mask, which `accuracy.dropout_episodes` counts as

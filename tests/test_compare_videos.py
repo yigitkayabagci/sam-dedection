@@ -1,0 +1,82 @@
+"""Tiling several arms of one clip into one picture, and the ways it lies.
+
+The tool reads mp4s and writes an mp4, so most of it is not worth a test. Three
+things are: that an arm resolves to the folder `run_records.py` actually wrote
+(`stock` keeps the bare mode name there, and looking for `full768_stock/` would
+report the one always-present arm as missing), that the grid keeps two and three
+arms in a row where a slide can read them, and that a mode's worth of panes is
+tiled in the order given rather than in whatever order a set iterates.
+"""
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.compare_videos import band_height, folder_for, grid_shape  # noqa: E402
+
+
+class FolderFor(unittest.TestCase):
+    def test_stock_keeps_the_bare_mode_name(self):
+        """run_records.folder() omits the weights for stock, so this must too."""
+        self.assertEqual(folder_for("full768", "stock"), "full768")
+
+    def test_any_other_arm_is_suffixed(self):
+        self.assertEqual(folder_for("full768", "aerial_stable"),
+                         "full768_aerial_stable")
+        self.assertEqual(folder_for("crop768", "aerial_stable_rgb"),
+                         "crop768_aerial_stable_rgb")
+
+    def test_a_folder_name_is_taken_as_given(self):
+        """A policy rung is named by its folder, not by a --weights value, and
+        joining it to a grid must not suffix it a second time."""
+        self.assertEqual(folder_for("full768", "full768_aerial_stable_guard"),
+                         "full768_aerial_stable_guard")
+        self.assertEqual(folder_for("full768", "full768"), "full768")
+
+    def test_a_mode_is_not_confused_with_a_longer_one(self):
+        """`full76` must not swallow `full768`: the prefix test is on the
+        separator, not on the letters."""
+        self.assertEqual(folder_for("full76", "full768"), "full76_full768")
+
+
+class GridShape(unittest.TestCase):
+    def test_up_to_three_arms_stay_in_one_row(self):
+        self.assertEqual(grid_shape(1), (1, 1))
+        self.assertEqual(grid_shape(2), (1, 2))
+        self.assertEqual(grid_shape(3), (1, 3))
+
+    def test_four_arms_become_two_by_two(self):
+        """Four in a row on a 16:9 slide leaves each pane too small to see a
+        mask edge, which is the only reason the picture exists."""
+        self.assertEqual(grid_shape(4), (2, 2))
+
+    def test_five_and_six_fill_two_rows(self):
+        self.assertEqual(grid_shape(5), (2, 3))
+        self.assertEqual(grid_shape(6), (2, 3))
+
+    def test_an_explicit_column_count_wins(self):
+        self.assertEqual(grid_shape(4, cols=4), (1, 4))
+        self.assertEqual(grid_shape(5, cols=2), (3, 2))
+
+    def test_nothing_to_tile_is_an_error_not_an_empty_video(self):
+        with self.assertRaises(ValueError):
+            grid_shape(0)
+
+
+class BandHeight(unittest.TestCase):
+    def test_scales_with_the_pane(self):
+        self.assertGreater(band_height(768), band_height(384))
+
+    def test_never_collapses_on_a_small_pane(self):
+        """A one-pixel band is a label nobody can read; the floor keeps the
+        caption legible when six arms share a 1920 grid."""
+        self.assertGreaterEqual(band_height(10), 22)
+
+
+if __name__ == "__main__":
+    unittest.main()
