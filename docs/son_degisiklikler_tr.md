@@ -815,3 +815,81 @@ parçaların raporu hiç basılmıyor, ve arayan tarafta parça adı geçmeyen b
 
 İnen parçalar diskte kalır; burada hiçbir şey "zaten açılmış arşivi atlamaz",
 o yüzden ikinci koşuda yalnız eksik parça istenmelidir.
+
+## Kayıtların ham termal kareleri 8-bit'e: `tools/prep_thermal.py`
+
+`frames/<record>/etiketlenecek/` sensörün yazdığı hâliyle duruyor: 16-bit mono
+TIFF, bazen başlıksız `.raw`. Bunları izleyiciye, notebook'a ya da bir
+görüntüleyiciye vermenin bugünkü yolu `to_rgb8`'in kare başına min/max germesi,
+ve o germede aralığı bir sıcak piksel ya da bir ölü piksel belirliyor: kare
+simsiyah çıkıyor ve kareden kareye titriyor. Script ham klasörün yanına
+`<record>/prep/` yazıyor — her kaynak kare için aynı adla bir 8-bit PNG.
+
+```bash
+python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames/record_s40
+python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames/record_s40/etiketlenecek
+python tools/prep_thermal.py /media/sedatc/SSD_disk/yigit/frames      # altındaki her kayıt
+python tools/prep_thermal.py <record> --scope frame                   # yalnız kare-başı 1-99 kırpma
+python tools/prep_thermal.py <record> --scope global                  # bütün kayıt için tek pencere
+python tools/prep_thermal.py <record> --clahe 2.0 --gamma 0.8 --invert
+python tools/prep_thermal.py <record> --raw-shape 1280 768 --raw-dtype '<u2'   # başlıksız dump
+python tools/prep_thermal.py <record> --measure                       # hiçbir şey yazmadan ölç
+```
+
+Ham klasör adıyla bulunuyor: `--src-name` varsayılanı `etiketlenecek`, sonra
+`vis` deneniyor. Ham klasörün kendisi verilirse adı ne olursa olsun o klasör
+kaynak sayılıyor ve `prep/` bir üst klasöre, yani kaydın altına yazılıyor —
+kayıtların kuralı bu, ham klasörün bir üstü.
+
+**Temel adım istenen şey:** karenin 1. ve 99. yüzdeliği 0 ve 255 oluyor, dışı
+doyuyor (`--lo/--hi`; `0.01 0.99` de kabul ediliyor, yüzde olarak okunuyor).
+Piksellerin yüzde ikisi bilerek feda ediliyor — sıcak/ölü pikseller ve tek
+güneşli çatı tam da min/max germesinin aralığı harcadığı yer.
+
+**Üstüne konanlar, ve neden:**
+
+* **`--scope ema` (varsayılan):** kırpma penceresi her karede yeniden seçilmek
+  yerine diziyi izliyor; karenin kendi yüzdelikleri koşan çifte `--ema 0.9`
+  ağırlığıyla karışıyor (≈10 karelik zaman sabiti). Bu, §12'de "kare-başı
+  kontrast yerine denenecek" diye yazılan *percentile normalization + zamansal
+  EMA* kolunun kendisi. İki koruma var, ikisi de ölçüldükten sonra kondu:
+  - Düz bir EMA sabit bir kaymanın `ema/(1-ema)` kare gerisinde kalır.
+    Sentetik bir rampada (pencerenin karede %4'ü) bu, her karenin **%27**'sini
+    doyurdu. `--slack 0.1`: pencere karenin kendi yüzdeliklerinden karenin
+    genişliğinin onda birinden fazla uzaklaşamıyor. Aynı rampada doyma
+    **%4.9**'a indi; sabit bir sahnede sınır hiç devreye girmiyor, EMA
+    olduğu gibi kalıyor.
+  - Bir kenar pencerenin `--reset 0.5`'inden fazla sıçrarsa (sahne kesmesi,
+    çekirdeğin birkaç dakikada bir yaptığı kalibrasyon) pencere on kare
+    boyunca kaymak yerine yeni kareye oturuyor; rapor hangi karelerde
+    olduğunu yazıyor.
+* **`--scope frame`:** her kare kendi yüzdelikleriyle — karşılaştırma kolu.
+* **`--scope global`:** bütün kaydın histogramından tek pencere (dosyalar
+  üzerinden iki geçiş). Hiç titreme yok, hiç uyum da yok.
+* **`--median 3`**, **`--clahe 2.0`**, **`--gamma`**, **`--invert`**: hepsi
+  kapalı başlıyor. CLAHE'nin neden deployment yoluna değil A/B koluna gittiği
+  §12'de duruyor; burada da öyle. `--clahe-grid 1` çoğu termal çekirdeğin
+  AGC'si olan plato eşitlemesine denk geliyor.
+
+**Rapor.** `prep/prep.json` her karenin ham yüzdeliklerini, gerçekten hangi
+pencereden geçtiğini, sıfırlanıp sıfırlanmadığını ve ne kadarının doyduğunu
+tutuyor; parametreler de yanında, o yüzden aylar sonra `prep/`'ten okunan bir
+sayı onu üreten ham değerlere kadar izlenebiliyor. `prep/preview.png` birkaç
+karede bugünkü min/max germesini sonucun yanına koyuyor. Aynı parametrelerle
+ikinci koşu hiçbir şeyi yeniden yazmıyor (`--overwrite` ile yazıyor).
+
+**Ölçülen, varsayılmayan.** Yüzdelikler `np.percentile` değil, `cv2.calcHist`
+(16-bit'te 65 536 kutu) üzerinden: 1280x768 uint16 sentetik karede histogram
+çifti **1.9 ms**, `np.percentile` **8.9 ms**, 16-bit LUT uygulaması 3.6 ms,
+TIFF çözme 11.2 ms — bu makinede, sentetik veride. Çözme ve yazma bir iş
+parçacığı havuzunda örtüşüyor (cv2 GIL'i bırakıyor), 40 karelik sentetik
+kayıt kare başına ≈18 ms.
+
+Bu çevrimdışı bir hazırlık; `src/pipeline.py`'nin `to_rgb8` yolu değişmedi.
+Aynı checkpoint üzerinde `vis/`'e karşı `prep/` koşulmadan hangisinin daha iyi
+izlendiği bir iddia değil, bir ölçüm konusu — `run_records.py`'ye
+`--pattern '*.png'` ile `prep/` klasörü verilerek yapılır.
+
+Test: `pytest tests/test_prep_thermal.py -q` — 26 test; pencere kenarları,
+EMA/slack/reset, global pencere, dump okuma, `etiketlenecek/`→`prep/`
+yerleşimi (ham klasör doğrudan verildiğinde de), rapor.
