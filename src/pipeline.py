@@ -15,6 +15,7 @@ from .io_utils import (
     extract_frames,
     frames_metadata,
     list_frame_files,
+    odd_sized_frames,
     decode_frame,
     load_frame_rgb8,
     open_video_writer,
@@ -347,6 +348,36 @@ def _split_frame(total_s, preprocess_s, post_s, read_s, pre_ms, infer_ms, post_m
     post_ms.append(post)
     infer_ms.append(max(budget - pre - post, 0.0))
     return budget / 1000.0
+
+
+def _require_one_frame_size(files, meta) -> None:
+    """Refuse a directory whose frames are not all one size, and say which.
+
+    Everything after this point is fixed to frame 0's geometry -- the centre
+    crop window, the JPG cache, the mask resize, the mp4's frame size -- so a
+    sequence of mixed sizes cannot produce a coherent run whatever it does.
+    Left to itself it does not fail here: `rgb[y0:y0 + ch, x0:x0 + cw]` clips
+    silently, so an odd frame reaches `overlay_masks` as an array of a
+    different shape and NumPy raises `boolean index did not match indexed
+    array` minutes later, naming two integers and no file.
+
+    Checked from the headers (`io_utils.frame_size`), so the whole sequence
+    costs a stat each rather than a decode, and the run stops before the model
+    is built.
+    """
+    odd = odd_sized_frames(files, meta.width, meta.height)
+    if not odd:
+        return
+    named = "\n  ".join(f"{path.name}  {w}x{h}" for path, (w, h) in odd)
+    raise ValueError(
+        f"the frames are not all one size. {files[0].name} is "
+        f"{meta.width}x{meta.height} and these are not:\n  {named}\n"
+        f"(the first {len(odd)} found; there may be more.)\n\n"
+        f"A sequence has to be one size: the crop window, the frame cache and "
+        f"every mask are all built from the first frame's geometry. Point "
+        f"--frames-dir at a directory holding only the camera's frames, or "
+        f"narrow --frame-pattern so the odd ones are not matched."
+    )
 
 
 def _center_crop_window(width: int, height: int, size: int):
@@ -1076,6 +1107,7 @@ def _run_frames(tracker, prompts, cfg, frames_dir):
     """
     frame_files = list_frame_files(frames_dir, cfg.frame_pattern)
     meta = frames_metadata(frames_dir, cfg.frame_pattern, fps=cfg.fps)
+    _require_one_frame_size(frame_files, meta)
     # Two lists from here on, and the difference is the feature: `tracked` is
     # what the model is given -- the JPG cache is transcoded from it, so it is
     # also what `init_state` counts and what the lazy loader decodes -- while

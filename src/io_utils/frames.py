@@ -76,8 +76,55 @@ def frames_metadata(
     frames_dir: str | Path, pattern: str = "*.tif*", fps: float = 30.0
 ) -> VideoMetadata:
     """Build VideoMetadata for a frame sequence. fps is supplied by the caller
-    since an image sequence carries no inherent frame rate."""
+    since an image sequence carries no inherent frame rate.
+
+    Read off frame 0 alone, which is why `odd_sized_frames` exists: everything
+    downstream is fixed to this one frame's geometry.
+    """
     files = list_frame_files(frames_dir, pattern)
     first = load_frame_rgb8(files[0])
     h, w = first.shape[:2]
     return VideoMetadata(width=int(w), height=int(h), fps=float(fps), frame_count=len(files))
+
+
+def frame_size(path: str | Path) -> tuple[int, int] | None:
+    """`(width, height)` from the file's header, or None if it cannot be read.
+
+    Pillow parses the header and stops, so this costs a stat and a few hundred
+    bytes per file rather than a full decode -- which is what makes checking
+    every frame before a run affordable. None is not "no frame": an unreadable
+    file is `decode_frame`'s error to raise, with its own message, and guessing
+    here would replace it with a worse one.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(str(path)) as img:
+            return int(img.width), int(img.height)
+    except Exception:
+        return None
+
+
+def odd_sized_frames(files, width: int, height: int, limit: int = 5):
+    """The frames that are not `width`x`height`, as `(path, (w, h))` pairs.
+
+    A frame sequence has to be one size, and nothing in the pipeline says so
+    until it is far too late. `frames_metadata` reads frame 0; the centre crop
+    is computed from it once; the JPG cache is written through that one slice;
+    the model returns every mask at that one geometry. A frame of another size
+    then meets the overlay as a NumPy slice of a different shape -- and because
+    `rgb[y0:y0 + ch, x0:x0 + cw]` clips silently rather than raising, a smaller
+    frame arrives as a smaller array instead of an error. What surfaces is
+    `IndexError: boolean index did not match indexed array`, minutes in, from
+    `visualize.overlay_masks`, naming two numbers and no file.
+
+    `limit` caps how many are named in the message; the count is always exact.
+    """
+    odd = []
+    for path in files:
+        size = frame_size(path)
+        if size is not None and size != (width, height):
+            odd.append((path, size))
+            if len(odd) >= limit:
+                break
+    return odd
