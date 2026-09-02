@@ -112,5 +112,39 @@ class BandHeight(unittest.TestCase):
         self.assertGreaterEqual(band_height(10), 22)
 
 
+class Fit(unittest.TestCase):
+    """Padding a pane, which is the only honest way to tile two framings.
+
+    `--fit` exists so `crop768` can sit beside `full768` -- 768x768 against
+    1280x768. Stretching either to the other's shape would hide exactly what
+    the picture is for, so what is pinned is that the aspect survives and the
+    content is centred, with black where the field of view is not.
+    """
+
+    def fit(self, w, h, pane_w, pane_h):
+        import cv2
+        import numpy as np
+
+        from tools.compare_videos import _fit
+
+        frame = np.full((h, w, 3), 200, np.uint8)
+        return _fit(frame, pane_w, pane_h, cv2, np)
+
+    def test_the_pane_is_always_the_asked_for_size(self):
+        self.assertEqual(self.fit(1280, 768, 960, 960).shape, (960, 960, 3))
+        self.assertEqual(self.fit(768, 768, 960, 960).shape, (960, 960, 3))
+
+    def test_a_wide_frame_is_padded_above_and_below_not_stretched(self):
+        pane = self.fit(1280, 768, 960, 960)
+        filled = (pane > 0).any(axis=(1, 2))
+        self.assertEqual(filled.sum(), 576, "1280x768 width-fit to 960 is 576 tall")
+        self.assertTrue(filled[480], "the content sits in the middle")
+        self.assertFalse(filled[0] or filled[-1], "and the bars are at the edges")
+
+    def test_a_square_frame_fills_a_square_pane_with_no_bars(self):
+        pane = self.fit(768, 768, 960, 960)
+        self.assertTrue((pane > 0).all())
+
+
 if __name__ == "__main__":
     unittest.main()

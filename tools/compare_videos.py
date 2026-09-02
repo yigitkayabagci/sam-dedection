@@ -100,6 +100,25 @@ def _label(pane, text: str, cv2, np):
     return out
 
 
+def _fit(frame, pane_w: int, pane_h: int, cv2, np):
+    """`frame` scaled to fit `pane_w`x`pane_h` and centred, never stretched.
+
+    Aspect is preserved because the whole point of putting a crop beside a full
+    frame is the field of view, and stretching one to the other's shape is
+    exactly the thing that would hide it.
+    """
+    h, w = frame.shape[:2]
+    scale = min(pane_w / w, pane_h / h)
+    new_w, new_h = max(2, int(w * scale)), max(2, int(h * scale))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    if (new_w, new_h) == (pane_w, pane_h):
+        return resized
+    out = np.zeros((pane_h, pane_w, 3), dtype=frame.dtype)
+    y0, x0 = (pane_h - new_h) // 2, (pane_w - new_w) // 2
+    out[y0:y0 + new_h, x0:x0 + new_w] = resized
+    return out
+
+
 def _tile(panes, rows: int, cols: int, np):
     """Panes (already labelled and equal-sized) into one image, row by row."""
     h, w = panes[0].shape[:2]
@@ -142,6 +161,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="Width of the finished grid, panes scaled to fit "
                         "(default 1920). Four 1280x768 panes untouched are "
                         "2560 across, which no slide wants.")
+    p.add_argument("--fit", action="store_true",
+                   help="Pad arms of different frame sizes into a common pane "
+                        "instead of refusing them. Off by default because the "
+                        "usual reason two arms differ is that they are two modes, "
+                        "and tiling a crop beside a resize invites reading the "
+                        "framing as a result. Turn it on when the framing IS the "
+                        "result -- 'this is what the 768 crop sees, this is what "
+                        "the whole frame squeezed into 768 sees'. Each pane keeps "
+                        "its own aspect ratio and is centred on black; nothing is "
+                        "stretched, so what the bars show is field of view.")
     p.add_argument("--fps", type=float, default=None,
                    help="Override the fps read from the first arm's mp4.")
     p.add_argument("--stills", type=int, default=0,
@@ -168,7 +197,13 @@ def main(argv: list[str] | None = None) -> int:
             f"pane rather than leave one blank.")
     videos = []
     for arm in arms:
-        path = record / folder_for(args.mode, arm) / "tracked.mp4"
+        # A directory that exists under --record is taken as given. That is what
+        # lets a grid cross modes (`--arms full768,crop768`), which the mode rule
+        # below could not express: it would read `crop768` as a weights name and
+        # look for `full768_crop768/`.
+        named = record / arm
+        folder = arm if named.is_dir() else folder_for(args.mode, arm)
+        path = record / folder / "tracked.mp4"
         if not path.is_file():
             have = sorted(d.name for d in record.iterdir()
                           if d.is_dir() and (d / "tracked.mp4").is_file())
@@ -183,12 +218,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sizes = {(int(c.get(cv2.CAP_PROP_FRAME_WIDTH)),
                   int(c.get(cv2.CAP_PROP_FRAME_HEIGHT))) for c in caps}
-        if len(sizes) > 1:
+        if len(sizes) > 1 and not args.fit:
             raise SystemExit(
                 f"the arms are not one frame size ({sorted(sizes)}), so they are "
                 f"not one mode. Compare within a mode: a crop and a resize are "
                 f"different pictures of the same clip and tiling them would "
-                f"invite reading the difference between them as a result.")
+                f"invite reading the difference between them as a result.\n"
+                f"Pass --fit when that difference is the point -- it pads each "
+                f"pane rather than stretching it, so the bars show field of view.")
         counts = [int(c.get(cv2.CAP_PROP_FRAME_COUNT)) for c in caps]
         frames = min(counts)
         if len(set(counts)) > 1:
@@ -198,9 +235,13 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("the arms hold no frames.")
 
         rows, cols = grid_shape(len(caps), args.cols)
-        src_w, src_h = sizes.pop()
+        each = [(int(c.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                 int(c.get(cv2.CAP_PROP_FRAME_HEIGHT))) for c in caps]
         pane_w = max(2, (args.width // cols) // 2 * 2)
-        pane_h = max(2, int(src_h * pane_w / src_w) // 2 * 2)
+        # Width-fit every arm, then take the tallest result as the common pane:
+        # a shorter one is padded rather than stretched, so a 16:9 arm beside a
+        # square one loses no pixels and gains no aspect it did not have.
+        pane_h = max(2, max(int(h * pane_w / w) for w, h in each) // 2 * 2)
         band = band_height(pane_h)
         sheet_size = (cols * pane_w, rows * (pane_h + band))
         fps = args.fps or (caps[0].get(cv2.CAP_PROP_FPS) or 30.0)
@@ -217,13 +258,12 @@ def main(argv: list[str] | None = None) -> int:
         with open_video_writer(out_path, fps, sheet_size) as write:
             for idx in range(frames):
                 panes = []
-                for cap, caption in zip(caps, captions):
+                for cap, caption, (sw, sh) in zip(caps, captions, each):
                     ok, bgr = cap.read()
                     if not ok:
-                        bgr = np.zeros((src_h, src_w, 3), dtype=np.uint8)
-                    pane = cv2.resize(bgr, (pane_w, pane_h),
-                                      interpolation=cv2.INTER_AREA)
-                    panes.append(_label(pane, caption, cv2, np))
+                        bgr = np.zeros((sh, sw, 3), dtype=np.uint8)
+                    panes.append(_label(_fit(bgr, pane_w, pane_h, cv2, np),
+                                        caption, cv2, np))
                 while len(panes) < rows * cols:   # a ragged last row stays black
                     panes.append(np.zeros_like(panes[0]))
                 sheet = _tile(panes, rows, cols, np)
