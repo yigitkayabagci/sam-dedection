@@ -112,6 +112,45 @@ class BandHeight(unittest.TestCase):
         self.assertGreaterEqual(band_height(10), 22)
 
 
+class TrimSpan(unittest.TestCase):
+    """`--start` / `--seconds`, which is arithmetic that fails quietly.
+
+    A start past the end writes an empty video; a duration longer than what is
+    left means "the rest" and should say so rather than pretend. Both are
+    decided before an arm is opened, which is why this is a function and not a
+    few lines in the read loop.
+    """
+
+    def span(self, frames, fps=30.0, start=0.0, seconds=None):
+        from tools.compare_videos import trim_span
+
+        return trim_span(frames, fps, start, seconds)
+
+    def test_no_flags_keeps_the_whole_clip(self):
+        self.assertEqual(self.span(300), (0, 300))
+
+    def test_seconds_counts_in_frames_at_the_clip_s_own_fps(self):
+        self.assertEqual(self.span(300, seconds=3), (0, 90))
+        self.assertEqual(self.span(300, fps=25.0, seconds=3), (0, 75))
+
+    def test_start_offsets_and_shortens_what_is_left(self):
+        self.assertEqual(self.span(300, start=5), (150, 150))
+        self.assertEqual(self.span(300, start=5, seconds=2), (150, 60))
+
+    def test_asking_for_more_than_is_left_gives_what_is_left(self):
+        self.assertEqual(self.span(300, start=9, seconds=60), (270, 30))
+
+    def test_a_start_past_the_end_is_refused_not_an_empty_video(self):
+        with self.assertRaises(SystemExit) as raised:
+            self.span(300, start=99)
+        self.assertIn("300 frames", str(raised.exception))
+
+    def test_a_duration_below_one_frame_still_yields_a_frame(self):
+        """Zero frames is a file no player will open; one is a still that
+        happens to be an mp4, which at least says what was asked for."""
+        self.assertEqual(self.span(300, seconds=0.001)[1], 1)
+
+
 class Captions(unittest.TestCase):
     """`--no-captions` removes the band, and with it the band's height.
 

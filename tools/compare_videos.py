@@ -80,6 +80,26 @@ def grid_shape(count: int, cols: int | None = None) -> tuple[int, int]:
     return 2, math.ceil(count / 2)
 
 
+def trim_span(frames: int, fps: float, start: float,
+              seconds: float | None) -> tuple[int, int]:
+    """`(first frame, how many)` for `--start` / `--seconds`, in frames.
+
+    Separated from the reading loop because the arithmetic is where a trim goes
+    wrong quietly: a `--start` past the end would otherwise write an empty
+    video, and a `--seconds` longer than what is left would silently mean "the
+    rest" without saying so. Both are decided here, before an arm is opened.
+    """
+    first = max(0, round(start * fps))
+    if first >= frames:
+        raise SystemExit(
+            f"--start {start:g}s is {first} frames into a clip that is "
+            f"{frames} frames ({frames / fps:.1f}s) long.")
+    keep = frames - first
+    if seconds is not None:
+        keep = min(keep, max(1, round(seconds * fps)))
+    return first, keep
+
+
 def band_height(pane_h: int) -> int:
     """The caption band above one pane. Named so the sheet size is known before
     a frame is read -- the writer needs it up front."""
@@ -179,6 +199,18 @@ def main(argv: list[str] | None = None) -> int:
                         "the whole frame squeezed into 768 sees'. Each pane keeps "
                         "its own aspect ratio and is centred on black; nothing is "
                         "stretched, so what the bars show is field of view.")
+    p.add_argument("--start", type=float, default=0.0,
+                   help="Skip this many seconds of every arm before tiling. The "
+                        "arms are seeked together, so they stay frame-aligned -- "
+                        "which is the only thing that makes the picture a "
+                        "comparison rather than two clips playing near each "
+                        "other.")
+    p.add_argument("--seconds", type=float, default=None,
+                   help="Length to keep, in seconds (default: to the end). A "
+                        "slide gets thirty seconds of attention, not four "
+                        "minutes. Stills are still named by their frame number "
+                        "in the original clip, so a trimmed grid can be traced "
+                        "back to the run it came from.")
     p.add_argument("--fps", type=float, default=None,
                    help="Override the fps read from the first arm's mp4.")
     p.add_argument("--stills", type=int, default=0,
@@ -254,17 +286,31 @@ def main(argv: list[str] | None = None) -> int:
         sheet_size = (cols * pane_w, rows * (pane_h + band))
         fps = args.fps or (caps[0].get(cv2.CAP_PROP_FPS) or 30.0)
 
+        # Trimmed after the arms agree on a length, so `--start` past the end
+        # of the shortest arm is caught here rather than as an empty video.
+        first, keep = trim_span(frames, fps, args.start, args.seconds)
+        if first or keep != frames:
+            print(f">> trimmed to {keep} frames ({keep / fps:.1f}s) from frame "
+                  f"{first} ({first / fps:.1f}s)")
+
         out_path = Path(args.out) if args.out else record / f"compare_{args.mode}.mp4"
-        still_at = {round((i + 1) * frames / (args.stills + 1))
+        still_at = {round((i + 1) * keep / (args.stills + 1))
                     for i in range(max(args.stills, 0))}
 
-        print(f">> {len(caps)} arms, {frames} frames, {rows}x{cols} grid, "
+        print(f">> {len(caps)} arms, {keep} frames, {rows}x{cols} grid, "
               f"{sheet_size[0]}x{sheet_size[1]}, {fps:g} fps")
         for caption, video in zip(captions, videos):
             print(f"   {caption:<32} {video.parent.name}/")
 
+        # Read and discard rather than seek: mp4 seeking lands on a keyframe,
+        # and an arm that started one frame off the others would be a
+        # comparison of two different moments.
+        for _ in range(first):
+            for cap in caps:
+                cap.read()
+
         with open_video_writer(out_path, fps, sheet_size) as write:
-            for idx in range(frames):
+            for idx in range(keep):
                 panes = []
                 for cap, caption, (sw, sh) in zip(caps, captions, each):
                     ok, bgr = cap.read()
@@ -278,7 +324,10 @@ def main(argv: list[str] | None = None) -> int:
                 sheet = _tile(panes, rows, cols, np)
                 write(cv2.cvtColor(sheet, cv2.COLOR_BGR2RGB))
                 if idx in still_at:
-                    still = out_path.with_name(f"{out_path.stem}_f{idx:05d}.png")
+                    # Numbered in the original clip, not in the trim, so a still
+                    # can be found again in the run it came from.
+                    still = out_path.with_name(
+                        f"{out_path.stem}_f{first + idx:05d}.png")
                     cv2.imwrite(str(still), sheet)
                     print(f"   still: {still.name}")
     finally:
