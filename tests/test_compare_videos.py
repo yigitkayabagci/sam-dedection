@@ -112,6 +112,29 @@ class BandHeight(unittest.TestCase):
         self.assertGreaterEqual(band_height(10), 22)
 
 
+class Captions(unittest.TestCase):
+    """`--no-captions` removes the band, and with it the band's height.
+
+    A slide that carries its own labels underneath does not want a second set
+    burnt into the pixels. What has to follow is that the sheet loses exactly
+    the band -- a video sized for a band it no longer draws would letterbox
+    every pane against black for no reason.
+    """
+
+    def sheet_height(self, rows: int, pane_h: int, captions_on: bool) -> int:
+        from tools.compare_videos import band_height
+
+        band = band_height(pane_h) if captions_on else 0
+        return rows * (pane_h + band)
+
+    def test_the_band_is_gone_not_blank(self):
+        self.assertEqual(self.sheet_height(1, 960, False), 960)
+        self.assertGreater(self.sheet_height(1, 960, True), 960)
+
+    def test_every_row_loses_its_band(self):
+        self.assertEqual(self.sheet_height(2, 576, False), 1152)
+
+
 class Fit(unittest.TestCase):
     """Padding a pane, which is the only honest way to tile two framings.
 

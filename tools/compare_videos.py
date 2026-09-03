@@ -161,6 +161,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="Width of the finished grid, panes scaled to fit "
                         "(default 1920). Four 1280x768 panes untouched are "
                         "2560 across, which no slide wants.")
+    p.add_argument("--no-captions", dest="captions_on", action="store_false",
+                   help="Tile the panes bare, with no caption band. For a slide "
+                        "that carries its own labels underneath: a caption burnt "
+                        "into the frame cannot be restyled, translated or moved, "
+                        "and two of them saying the same thing is worse than "
+                        "none. The order of --arms is still the order of the "
+                        "panes, and the tool prints which folder each one came "
+                        "from, so the mapping is recoverable from the terminal.")
     p.add_argument("--fit", action="store_true",
                    help="Pad arms of different frame sizes into a common pane "
                         "instead of refusing them. Off by default because the "
@@ -242,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         # a shorter one is padded rather than stretched, so a 16:9 arm beside a
         # square one loses no pixels and gains no aspect it did not have.
         pane_h = max(2, max(int(h * pane_w / w) for w, h in each) // 2 * 2)
-        band = band_height(pane_h)
+        band = band_height(pane_h) if args.captions_on else 0
         sheet_size = (cols * pane_w, rows * (pane_h + band))
         fps = args.fps or (caps[0].get(cv2.CAP_PROP_FPS) or 30.0)
 
@@ -262,8 +270,9 @@ def main(argv: list[str] | None = None) -> int:
                     ok, bgr = cap.read()
                     if not ok:
                         bgr = np.zeros((sh, sw, 3), dtype=np.uint8)
-                    panes.append(_label(_fit(bgr, pane_w, pane_h, cv2, np),
-                                        caption, cv2, np))
+                    pane = _fit(bgr, pane_w, pane_h, cv2, np)
+                    panes.append(_label(pane, caption, cv2, np)
+                                 if args.captions_on else pane)
                 while len(panes) < rows * cols:   # a ragged last row stays black
                     panes.append(np.zeros_like(panes[0]))
                 sheet = _tile(panes, rows, cols, np)
